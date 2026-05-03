@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__web-search__bing_search",
+      "mcp__zai-mcp-server__image_analysis",
+      "mcp__zai-mcp-server__video_analysis",
+      "mcp__zai-mcp-server__ui_to_artifact",
+      "mcp__zai-mcp-server__extract_text_from_screenshot",
+      "mcp__zai-mcp-server__diagnose_error_screenshot",
+      "mcp__zai-mcp-server__understand_technical_diagram",
+      "mcp__zai-mcp-server__analyze_data_visualization",
+      "mcp__zai-mcp-server__ui_diff_check",
+      "WebSearch",
+      "Read(//Users/trace/**)",
+      "Read(//Users/trace/.claude/**)",
+      "WebFetch(domain:zhipu-32152247.mintlify.app)",
+      "WebFetch(domain:registry.npmjs.org)",
+      "WebFetch(domain:open.bigmodel.cn)",
+      "WebFetch(domain:docs.z.ai)",
+      "Bash(echo \"---EXIT:$?\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('mcpServers',{}\\), indent=2\\)\\)\")",
+      "Bash(npm view *)",
+      "Bash(npx --version)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('README:', d.get\\('readme',''\\)[:3000] if d.get\\('readme'\\) else 'none'\\)\")",
+      "Bash(npm pack *)",
+      "Read(//private/tmp/**)",
+      "Bash(npx -y \"@z_ai/mcp-server\" --help)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(claude mcp *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 *)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:claude.com)",
+      "Bash(xargs grep *)"
+    ]
+  }
+}
