@@ -1,4 +1,4 @@
-# 股票趋势判断 Skill — 功能规格说明 v1
+# 股票趋势判断 Skill — 功能规格说明 v2
 
 ## 1. 概览
 
@@ -23,6 +23,7 @@ options:
   --focus <维度>    侧重维度: technical | capital_flow | fundamental | sentiment
   --horizon <周期>   判断周期: intraday | daily | weekly (默认 daily)
   --compact         精简模式，只输出结论
+  --no-data         不获取K线数据，仅基于已有信息分析
 ```
 
 ### 输入验证规则
@@ -31,6 +32,7 @@ options:
 2. 代码格式不匹配任何市场规则时，报错并给出示例
 3. `--focus` 可叠加使用，如 `--focus technical --focus capital_flow`
 4. `--horizon` 仅接受 `intraday | daily | weekly`，其他值报错
+5. `--no-data` 跳过 Tushare K线数据获取，技术面维度按0分处理并标注"无数据源"
 
 ## 3. 市场与标的识别
 
@@ -44,6 +46,19 @@ options:
 | `15xxxx` | 深交所 ETF | 159919 沪深300ETF |
 | `0xxxx` / `0xxxx.HK` | 港股 | 00700 腾讯控股 |
 | `0xxxx.HK` | 港股 ETF | 02800 盈富基金 |
+
+### Tushare 代码转换规则
+
+| 代码模式 | Tushare ts_code | asset 参数 |
+|---|---|---|
+| `6xxxxx` | {code}.SH | E |
+| `0xxxxx` / `3xxxxx` | {code}.SZ | E |
+| `688xxx` | {code}.SH | E |
+| `5xxxxx` | {code}.SH | FD |
+| `15xxxx` | {code}.SZ | FD |
+| `0xxxx` (5位) | {code}.HK | E |
+
+带后缀的代码直接使用后缀格式（如 `600519.SH` 直接使用）。
 
 ### 标的类型附加标记
 
@@ -63,6 +78,88 @@ options:
 | KDJ | K/D/J 三线 | 低位金叉 | 高位死叉 |
 | 布林带 | 上轨/中轨/下轨 | 突破上轨+放量 | 跌破下轨 |
 | 成交量 | 量价配合 | 放量上涨确认 | 缩量下跌 |
+| K线形态 | 锤子/十字星/吞没/早晨之星等 | 看多反转形态 | 看空反转形态 |
+| K线数据 | OHLCV + 均线数据验证 | 数据验证技术指标 | 数据与指标背离 |
+
+### 4.1.1 K线数据源
+
+数据获取优先级：**Tushare（主）→ 东方财富（降级）→ 无数据模式**
+
+#### 数据源一：Tushare Pro API
+
+| 项目 | 说明 |
+|---|---|
+| 认证 | TUSHARE_TOKEN 环境变量 或 `.claude/tushare-config.json` |
+| 主接口 | `pro_bar`（通用行情接口） |
+| A股日线 | `pro_bar(ts_code, asset='E', freq='D', adj='qfq')` |
+| A股周线 | `pro_bar(ts_code, asset='E', freq='W', adj='qfq')` |
+| 港股日线 | `pro_bar(ts_code, asset='E', freq='D')` |
+| ETF日线 | `pro_bar(ts_code, asset='FD', freq='D', adj='qfq')` |
+| 日线回溯 | 120 个交易日（约6个月） |
+| 周线回溯 | 52 个交易周（约1年） |
+| 复权方式 | 前复权 (`adj='qfq'`) |
+| 均线返回 | `ma=[5,10,20,60]` 由 Tushare 直接计算返回 |
+
+#### 数据源二：东方财富 API（降级）
+
+| 项目 | 说明 |
+|---|---|
+| 认证 | 无需 Token |
+| A股日线 | `secid=1.{code}`(上交所) / `secid=0.{code}`(深交所)，`klt=101` |
+| A股周线 | `klt=102` |
+| ETF日线 | 同A股，按交易所区分 secid 前缀 |
+| 日线回溯 | 250 个交易日 |
+| 复权方式 | 前复权 (`fqt=1`) |
+| 港股 | **不支持**，港股仍依赖 Tushare |
+| 均线返回 | 不返回均线数据，由 `analyze_technical.py` 自行计算 |
+
+**东方财富 secid 映射规则**：
+
+| 代码模式 | 交易所后缀 | secid | 示例 |
+|---|---|---|---|
+| `6xxxxx` | .SH | `1.{code}` | 600519 → `1.600519` |
+| `0xxxxx` / `3xxxxx` | .SZ | `0.{code}` | 000001 → `0.000001` |
+| `688xxx` | .SH | `1.{code}` | 688981 → `1.688981` |
+| `5xxxxx` | .SH | `1.{code}` | 513180 → `1.513180` |
+| `15xxxx` | .SZ | `0.{code}` | 159919 → `0.159919` |
+| `0xxxx` (港股) | .HK | 不支持 | — |
+
+**执行方式**：
+
+通过独立脚本获取数据，按以下顺序执行：
+
+1. **Tushare 数据获取脚本**：`python3 .claude/skills/stock-trend/scripts/fetch_kline.py <ts_code> [options]`
+   - 脚本内部优先使用 tushare SDK (`ts.pro_bar()`)，失败时自动降级到 HTTP API
+   - Token 解析：`--token` 参数 > `TUSHARE_TOKEN` 环境变量 > `.claude/tushare-config.json`
+   - 请求失败时重试1次（间隔2秒），仍失败则输出 `meta.data_source: "error"`
+2. **东方财富降级脚本**：若 Tushare 返回 `meta.data_source: "error"`，执行降级脚本
+   - `python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py <ts_code> [options]`
+   - 无需 Token，免费调用
+   - 不支持港股（.HK），港股仍需 Tushare
+   - 请求失败时重试1次（间隔2秒），仍失败则输出 `meta.data_source: "error"`
+3. **技术分析脚本**：`python3 .claude/skills/stock-trend/scripts/analyze_technical.py <input_file> [options]`
+   - 接收任一脚本的 JSON 输出，计算技术指标和K线形态
+   - 输出结构化分析结果（MA/MACD/RSI/KDJ/布林带/成交量/形态）
+4. **无数据模式**：两个数据源均不可用时，技术面维度按0分处理并标注"无数据源"
+
+### 4.1.2 K线形态识别
+
+| 形态 | 条件 | 信号 | 得分范围 |
+|---|---|---|---|
+| 早晨之星 | 大阴+十字星+大阳 | 看多反转 | +2 ~ +3 |
+| 黄昏之星 | 大阳+十字星+大阴 | 看空反转 | -2 ~ -3 |
+| 看涨吞没 | 前阴后阳，阳线包含阴线 | 看多反转 | +2 |
+| 看跌吞没 | 前阳后阴，阴线包含阳线 | 看空反转 | -2 |
+| 锤子线 | 小实体+长下影线(下跌末期) | 看多反转 | +1 ~ +2 |
+| 上吊线 | 小实体+长下影线(上涨末期) | 看空反转 | -1 ~ -2 |
+| 射击之星 | 小实体+长上影线(上涨末期) | 看空反转 | -1 ~ -2 |
+| 三白兵 | 连续三阳线递升 | 看多 | +2 ~ +3 |
+| 三只乌鸦 | 连续三阴线递降 | 看空 | -2 ~ -3 |
+| 十字星 | 开盘≈收盘(趋势末端) | 可能反转 | 0 (方向视位置) |
+| 跳空向上 | 当日最低>前日最高 | 看多突破 | +1 ~ +2 |
+| 跳空向下 | 当日最高<前日最低 | 看空破位 | -1 ~ -2 |
+
+形态得分纳入技术面维度评分，与均线/MACD/RSI等指标综合计算。详细识别标准见 `references/kline-patterns.md`。
 
 ### 4.2 资金面 (Capital Flow)
 
@@ -199,6 +296,14 @@ options:
 | 标的已停牌 | 输出停牌提示，不生成趋势报告 |
 | 数据不足 | 标注数据缺失维度，已有维度照常评分 |
 | 多市场歧义 | 要求用户使用带后缀的代码明确指定 |
+| Tushare Token 缺失 | 输出 `meta.data_source: "error"` | 自动降级到东方财富脚本获取数据 |
+| Tushare API 限频 | 重试1次(间隔2秒) | 仍失败则降级到东方财富 |
+| Tushare API 网络错误 | 重试1次 | 仍失败则降级到东方财富 |
+| Tushare 积分不足 | 输出 `meta.data_source: "error"` | 自动降级到东方财富脚本获取数据 |
+| 东方财富不支持港股 | 输出 `meta.data_source: "error"` | 港股标的仅依赖 Tushare |
+| 东方财富网络错误 | 重试1次 | 仍失败则降级为无数据模式 |
+| 两个数据源均不可用 | — | 技术面维度按0分处理，标注"无数据源" |
+| 数据不足(停牌/新股) | 输出数据 + `meta.warnings` | 标注数据缺失对评分的影响 |
 
 ## 10. 示例
 
@@ -260,3 +365,49 @@ options:
 **结论**: ◆ 震荡 (综合评分: +0.6, 置信度: 低)
 ...
 ```
+
+## 11. 数据源配置
+
+### 11.1 Tushare Pro API（主数据源）
+
+本技能使用 Tushare Pro API 作为主K线行情数据源。
+
+**Token 配置方式（优先级从高到低）：**
+
+1. 环境变量：`export TUSHARE_TOKEN=your_token`
+2. 配置文件：`.claude/tushare-config.json`，内容为 `{"token": "your_token"}`
+3. 未配置时：自动降级到东方财富数据源
+
+**获取 Token：** 注册 https://tushare.pro 并完善个人信息获取基础积分(120+)，即可调用日线行情接口。
+
+**积分要求：**
+- 日线/周线行情：120 积分起（注册+完善信息即可获得）
+- ETF日线（fund_daily）：需要更高积分
+- 每分钟请求限制：500次（基础积分）
+- 每次返回数据上限：6000条
+
+### 11.2 东方财富 API（降级数据源）
+
+当 Tushare 不可用（Token 缺失、积分不足、接口权限受限）时，自动降级到东方财富API获取K线数据。
+
+**特点：**
+- 无需 Token，免费调用
+- 支持上交所和深交所的A股及ETF
+- 不支持港股（港股仍需 Tushare）
+- 不返回均线数据，由技术分析脚本自行计算
+- 返回数据量：最多250条
+
+**降级流程：**
+1. 先执行 `fetch_kline.py`（Tushare）
+2. 若返回 `meta.data_source: "error"`，执行 `fetch_kline_eastmoney.py`（东方财富）
+3. 若东方财富也失败，技术面维度按0分处理
+
+---
+
+## 变更日志
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v3 | 2026-05-03 | 新增东方财富API作为降级数据源，Tushare失败时自动降级 |
+| v2 | 2026-05-03 | 新增 Tushare K线数据源配置、K线形态识别、代码转换规则、Tushare 错误处理 |
+| v1 | 2026-05-03 | 初始版本 |
