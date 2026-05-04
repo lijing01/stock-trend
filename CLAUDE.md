@@ -28,9 +28,12 @@ Stock Trend Skill — Claude Code 的 A股/港股/ETF 日趋势判断技能插�
 │       ├── scripts/
 │       │   ├── fetch_kline.py             # K线数据获取
 │       │   ├── fetch_kline_eastmoney.py   # 东方财富数据源
-│       │   └── analyze_technical.py       # 技术分析脚本
+│       │   ├── analyze_technical.py       # 技术分析脚本
+│       │   └── generate_chart_html.py     # K线图表生成
 │       └── assets/
-│           └── report-template.md         # 输出报告模板
+│           ├── report-template.md         # Markdown报告模板
+│           └── report-template.html       # HTML报告模板
 └── specs/
     └── stock-trend-skill.md              # 功能规格说明
+reports/                                    # 生成的报告（已 gitignore）
 ```

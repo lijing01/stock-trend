@@ -6,9 +6,11 @@ triggers:
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--compact] [--no-data]"
 allowed-tools:
   - Read
+  - Write
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/generate_chart_html.py *)
   - WebSearch
   - WebFetch
 ---
@@ -206,9 +208,9 @@ allowed-tools:
 | ETF | 增加 IOPV 折溢价、跟踪误差、申赎清单、成交额分析 |
 | 可转债 | 增加转股溢价率、纯债价值、强赎风险 |
 
-### Step 8: 生成报告
+### Step 8: 生成报告并保存
 
-**默认模式**：使用 **assets/report-template.md** 生成完整报告
+**默认模式**：使用 **assets/report-template.md** 和 **assets/report-template.html** 生成完整报告
 
 **精简模式** (`--compact`)：
 
@@ -219,6 +221,32 @@ allowed-tools:
 ```
 
 示例：`腾讯控股(00700.HK) ▼看空 | 评分-2.3 | 技术-2 资金-2 基本0 情绪-1 宏观-1`
+
+**生成 HTML 报告中的 K 线图表**：
+
+若 Step 3 成功获取 K 线数据，执行图表生成脚本：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.json --technical /tmp/technical.json -o /tmp/chart_fragment.html
+```
+
+- 读取生成的 `/tmp/chart_fragment.html`，将其内容插入 HTML 模板的 `{{chart_fragment}}` 占位处
+- 若图表生成失败（数据源错误、脚本异常），HTML 报告跳过图表区段，设置 `has_chart` 为 false
+- `--no-data` 模式下跳过图表生成
+
+**保存报告**：生成报告后，将报告内容保存到项目目录：
+
+| 格式 | 保存路径 |
+|---|---|
+| Markdown | `reports/{股票代码}/{YYYYMMDD-HHmm}.md` |
+| HTML | `reports/{股票代码}/{YYYYMMDD-HHmm}.html` |
+
+- `{股票代码}`：使用 Step 2 识别的 Tushare 代码格式（如 `600519.SH`、`00700.HK`、`510050`）
+- `{YYYYMMDD-HHmm}`：当前执行时刻（如 `20260504-1430`）
+- 使用 Write 工具写入文件（自动创建目录）
+- 默认模式同时生成 MD 和 HTML 两种格式
+- 精简模式仅输出文本到对话，不保存 HTML 报告
+- MD 报告中包含 HTML 报告链接：`> K线图表见: {YYYYMMDD-HHmm}.html`
 
 ### Step 9: 附加免责声明
 
@@ -262,8 +290,10 @@ allowed-tools:
 
 - 维度检查标准: [references/trend-dimensions.md](references/trend-dimensions.md)
 - K线形态参考: [references/kline-patterns.md](references/kline-patterns.md)
-- 报告模板: [assets/report-template.md](assets/report-template.md)
+- 报告模板(MD): [assets/report-template.md](assets/report-template.md)
+- 报告模板(HTML): [assets/report-template.html](assets/report-template.html)
 - 功能规格说明: [../../specs/stock-trend-skill.md](../../specs/stock-trend-skill.md)
 - Tushare 数据获取脚本: [scripts/fetch_kline.py](scripts/fetch_kline.py)
 - 东方财富数据获取脚本: [scripts/fetch_kline_eastmoney.py](scripts/fetch_kline_eastmoney.py)
 - 技术分析脚本: [scripts/analyze_technical.py](scripts/analyze_technical.py)
+- 图表生成脚本: [scripts/generate_chart_html.py](scripts/generate_chart_html.py)
