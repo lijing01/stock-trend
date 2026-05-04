@@ -279,10 +279,10 @@ options:
 
 | 项目 | 说明 |
 |---|---|
-| MD 保存路径 | `reports/{股票代码}/{YYYYMMDD-HHmm}.md` |
-| HTML 保存路径 | `reports/{股票代码}/{YYYYMMDD-HHmm}.html` |
-| 股票代码 | 使用 Step 2 识别的 Tushare 代码格式 |
-| 日期时间 | 执行时刻，格式 `YYYYMMDD-HHmm` |
+| MD 保存路径 | `reports/{ts_code}/{yyyyMMdd-hhmm}.md` |
+| HTML 保存路径 | `reports/{ts_code}/{yyyyMMdd-hhmm}.html` |
+| ts_code | 使用 Step 2 识别的 Tushare 代码格式（含市场后缀） |
+| 日期时间 | 执行时刻，格式 `yyyyMMdd-hhmm` |
 | 文件内容 | 完整版报告（含免责声明），与对话输出一致 |
 | 目录自动创建 | Write 工具自动创建父目录 |
 
@@ -291,8 +291,8 @@ options:
 - `reports/600519.SH/20260504-1430.html`
 - `reports/00700.HK/20260504-0930.md`
 - `reports/00700.HK/20260504-0930.html`
-- `reports/510050/20260504-1430.md`
-- `reports/510050/20260504-1430.html`
+- `reports/510050.SH/20260504-1430.md`
+- `reports/510050.SH/20260504-1430.html`
 
 ## 7. 特殊标的处理
 
