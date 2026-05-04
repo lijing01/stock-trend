@@ -8,55 +8,65 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
-  background: #0d1117;
-  color: #c9d1d9;
+  background: #ffffff;
+  color: #333333;
   line-height: 1.6;
   padding: 20px;
 }
-.container { max-width: 960px; margin: 0 auto; }
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  padding: 32px 36px;
+}
 header {
-  border-bottom: 2px solid #21262d;
+  border-bottom: 2px solid #e5e7eb;
   padding-bottom: 16px;
   margin-bottom: 20px;
 }
-.date { color: #8b949e; font-size: 14px; margin-bottom: 8px; }
-h1 { font-size: 24px; color: #e6edf3; margin-bottom: 8px; }
-.meta { color: #8b949e; font-size: 14px; }
+h1 { font-size: 24px; color: #1a1a1a; margin-bottom: 4px; }
+.date { color: #6b7280; font-size: 14px; margin-bottom: 8px; }
+.meta { color: #6b7280; font-size: 14px; }
 .conclusion { font-size: 18px; margin-top: 12px; padding: 10px 16px; border-radius: 6px; }
-.conclusion.bullish { background: rgba(239,83,80,0.12); color: #ef5350; border-left: 4px solid #ef5350; }
-.conclusion.bearish { background: rgba(38,166,154,0.12); color: #26a69a; border-left: 4px solid #26a69a; }
-.conclusion.neutral { background: rgba(139,148,158,0.12); color: #8b949e; border-left: 4px solid #8b949e; }
-h2 { font-size: 18px; color: #e6edf3; margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #21262d; }
+.conclusion.bullish { background: rgba(239,83,80,0.08); color: #dc2626; border-left: 4px solid #dc2626; }
+.conclusion.bearish { background: rgba(22,163,74,0.08); color: #16a34a; border-left: 4px solid #16a34a; }
+.conclusion.neutral { background: rgba(107,114,128,0.08); color: #6b7280; border-left: 4px solid #6b7280; }
+
+h2 { font-size: 18px; margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #e5e7eb; color: #2563eb; }
+
 table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
-th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; }
-th { background: #161b22; color: #8b949e; font-weight: 600; font-size: 13px; text-transform: uppercase; }
+th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+th { background: #2563eb; color: #ffffff; font-weight: 600; font-size: 13px; text-transform: uppercase; }
+tr:nth-child(even) td { background: #f9fafb; }
 td { font-size: 14px; }
-.score-pos { color: #ef5350; }
-.score-neg { color: #26a69a; }
-.score-zero { color: #8b949e; }
+.score-pos { color: #dc2626; font-weight: 600; }
+.score-neg { color: #16a34a; font-weight: 600; }
+.score-zero { color: #6b7280; }
 .risks { list-style: none; }
 .risks li { padding: 6px 0; padding-left: 16px; position: relative; }
-.risks li::before { content: "•"; color: #f0883e; position: absolute; left: 0; }
-.levels-table td:first-child { width: 80px; color: #8b949e; }
-.chart-section { margin: 20px 0; background: #161b22; border-radius: 8px; padding: 12px; border: 1px solid #21262d; }
-footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #21262d; }
-.datasource { color: #8b949e; font-size: 12px; margin-bottom: 8px; }
-.disclaimer { color: #6e7681; font-size: 12px; font-style: italic; }
-.special-section { background: #161b22; border-radius: 6px; padding: 14px 18px; margin: 12px 0; border: 1px solid #21262d; }
+.risks li::before { content: "•"; color: #dc2626; position: absolute; left: 0; }
+.levels-table td:first-child { width: 80px; color: #6b7280; font-weight: 600; }
+footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #e5e7eb; }
+.datasource { color: #6b7280; font-size: 12px; margin-bottom: 8px; }
+.disclaimer { color: #9ca3af; font-size: 12px; font-style: italic; }
+.special-section { background: #f9fafb; border-radius: 6px; padding: 14px 18px; margin: 12px 0; border: 1px solid #e5e7eb; }
 </style>
 </head>
 <body>
 <div class="container">
 
 <header>
-  <p class="date">分析日期: {{日期}}</p>
   <h1>{{股票名称}} ({{代码}}) 趋势报告</h1>
+  <p class="date">分析日期: {{日期}}</p>
   <p class="meta">周期: {{周期}}</p>
   {{#侧重}}<p class="meta">侧重: {{侧重}}</p>{{/侧重}}
   <p class="conclusion {{趋势CSS}}">{{趋势符号}} {{趋势方向}} (综合评分: {{综合评分}}, 置信度: {{置信度}})</p>
 </header>
 
-<h2>关键信号</h2>
+<h2 class="section-1">一、关键信号</h2>
 <table>
   <thead><tr><th>维度</th><th>得分</th><th>信号摘要</th></tr></thead>
   <tbody>
@@ -68,28 +78,22 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #21262d; }
   </tbody>
 </table>
 
-<h2>风险提示</h2>
+<h2 class="section-2">二、风险提示</h2>
 <ul class="risks">
 {{#风险列表}}
   <li>{{风险项}}</li>
 {{/风险列表}}
 </ul>
 
-<h2>操作建议区间</h2>
+<h2 class="section-3">三、操作建议区间</h2>
 <table class="levels-table">
   <tr><td>支撑位</td><td>{{支撑位}}</td></tr>
   <tr><td>压力位</td><td>{{压力位}}</td></tr>
 </table>
 
-{{#has_chart}}
-<h2>K线图表</h2>
-<div class="chart-section">
-  {{chart_fragment}}
-</div>
-{{/has_chart}}
 
 {{#kline_data_source}}
-<h2>K线形态</h2>
+<h2 class="section-4">四、K线形态</h2>
 <table>
   <thead><tr><th>形态</th><th>方向</th><th>位置</th><th>得分</th></tr></thead>
   <tbody>
@@ -98,11 +102,11 @@ footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #21262d; }
   {{/kline_pattern_list}}
   </tbody>
 </table>
-<p style="color:#8b949e;font-size:12px;">K线数据: {{kline_data_range}} ({{kline_data_count}}条)</p>
+<p style="color:#6b7280;font-size:12px;">K线数据: {{kline_data_range}} ({{kline_data_count}}条)</p>
 {{/kline_data_source}}
 
 {{#特殊标记}}
-<h2>{{特殊标记标题}}</h2>
+<h2 class="section-5">五、{{特殊标记标题}}</h2>
 <div class="special-section">{{特殊标记内容}}</div>
 {{/特殊标记}}
 

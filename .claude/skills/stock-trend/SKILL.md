@@ -10,7 +10,6 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
-  - Bash(python3 .claude/skills/stock-trend/scripts/generate_chart_html.py *)
   - WebSearch
   - WebFetch
 ---
@@ -222,18 +221,6 @@ allowed-tools:
 
 示例：`腾讯控股(00700.HK) ▼看空 | 评分-2.3 | 技术-2 资金-2 基本0 情绪-1 宏观-1`
 
-**生成 HTML 报告中的 K 线图表**：
-
-若 Step 3 成功获取 K 线数据，执行图表生成脚本：
-
-```bash
-python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.json --technical /tmp/technical.json -o /tmp/chart_fragment.html
-```
-
-- 读取生成的 `/tmp/chart_fragment.html`，将其内容插入 HTML 模板的 `{{chart_fragment}}` 占位处
-- 若图表生成失败（数据源错误、脚本异常），HTML 报告跳过图表区段，设置 `has_chart` 为 false
-- `--no-data` 模式下跳过图表生成
-
 **保存报告**：生成报告后，将报告内容保存到项目目录：
 
 | 格式 | 保存路径 |
@@ -246,7 +233,6 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 - 使用 Write 工具写入文件（自动创建目录）
 - 默认模式同时生成 MD 和 HTML 两种格式
 - 精简模式仅输出文本到对话，不保存 HTML 报告
-- MD 报告中包含 HTML 报告链接：`> K线图表见: {YYYYMMDD-HHmm}.html`
 
 ### Step 9: 附加免责声明
 
@@ -296,4 +282,3 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 - Tushare 数据获取脚本: [scripts/fetch_kline.py](scripts/fetch_kline.py)
 - 东方财富数据获取脚本: [scripts/fetch_kline_eastmoney.py](scripts/fetch_kline_eastmoney.py)
 - 技术分析脚本: [scripts/analyze_technical.py](scripts/analyze_technical.py)
-- 图表生成脚本: [scripts/generate_chart_html.py](scripts/generate_chart_html.py)
