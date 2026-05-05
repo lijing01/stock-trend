@@ -69,7 +69,22 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb}
 <table class="lv">
   <tr><td>支撑位</td><td>{{支撑位}}</td></tr>
   <tr><td>压力位</td><td>{{压力位}}</td></tr>
+  <tr><td>建议止损</td><td class="sp">{{止损位}}</td></tr>
+  <tr><td>目标价位</td><td class="sn">{{目标位}}</td></tr>
 </table>
+<p class="meta" style="margin:8px 0">风险收益比: <strong>{{风险收益比}}</strong> | 仓位建议: <strong>{{仓位建议}}</strong> | 区间最大回撤: <strong>{{最大回撤}}</strong></p>
+
+{{#监控信号}}
+<h2>四、持仓监控信号</h2>
+<table>
+<thead><tr><th>条件</th><th>触发动作</th></tr></thead>
+<tbody>
+  <tr><td>{{监控条件1}}</td><td>{{监控动作1}}</td></tr>
+  <tr><td>{{监控条件2}}</td><td>{{监控动作2}}</td></tr>
+  <tr><td>{{监控条件3}}</td><td>{{监控动作3}}</td></tr>
+</tbody>
+</table>
+{{/监控信号}}
 
 {{#kline_data_source}}
 <h2>四、K线形态</h2>

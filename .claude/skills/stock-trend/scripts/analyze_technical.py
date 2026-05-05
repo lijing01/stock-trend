@@ -138,19 +138,15 @@ def calc_macd(df, fast=12, slow=26, signal=9):
         else:
             desc_parts.append("绿柱缩窄")
 
-    # Divergence detection (simplified: compare last 20 bars)
-    if len(df) >= 20:
-        recent_close = df["close"].iloc[-20:]
-        recent_dif = dif.iloc[-20:]
-        close_trend = recent_close.iloc[-1] - recent_close.iloc[0]
-        dif_trend = recent_dif.iloc[-1] - recent_dif.iloc[0]
-
-        if close_trend > 0 and dif_trend < 0:
+    # Divergence detection using peak/valley matching
+    if len(df) >= 30:
+        div_type, div_score = _detect_divergence(df["close"], dif, lookback=60, min_distance=5)
+        if div_type == "bearish":
             desc_parts.append("顶背离")
-            score -= 2
-        elif close_trend < 0 and dif_trend > 0:
+            score += div_score
+        elif div_type == "bullish":
             desc_parts.append("底背离")
-            score += 2
+            score += div_score
 
     score = max(-3, min(3, score))
     if not desc_parts:
@@ -200,16 +196,15 @@ def calc_rsi(df, period=14):
     else:
         desc = f"RSI={curr_rsi:.1f}，中性区间"
 
-    # Divergence
-    if len(df) >= 20 and not pd.isna(rsi.iloc[-20]):
-        close_trend = df["close"].iloc[-1] - df["close"].iloc[-20]
-        rsi_trend = rsi.iloc[-1] - rsi.iloc[-20]
-        if close_trend > 0 and rsi_trend < 0:
+    # Divergence using peak/valley matching
+    if len(df) >= 30:
+        div_type, div_score = _detect_divergence(df["close"], rsi, lookback=40, min_distance=5)
+        if div_type == "bearish":
             desc += "；顶背离"
-            score -= 2
-        elif close_trend < 0 and rsi_trend > 0:
+            score += div_score
+        elif div_type == "bullish":
             desc += "；底背离"
-            score += 2
+            score += div_score
 
     score = max(-3, min(3, score))
 
@@ -288,6 +283,184 @@ def calc_kdj(df, n=9, m1=3, m2=3):
     }
 
 
+# --- Peak/Valley detection for divergence ---
+
+
+def _find_peaks(series, min_distance=5):
+    """Find local peaks in a series. Returns list of (index, value) tuples."""
+    peaks = []
+    for i in range(min_distance, len(series) - min_distance):
+        window = series.iloc[i - min_distance:i + min_distance + 1]
+        if series.iloc[i] == window.max() and series.iloc[i] > series.iloc[i - 1]:
+            peaks.append((i, series.iloc[i]))
+    return peaks
+
+
+def _find_valleys(series, min_distance=5):
+    """Find local valleys in a series. Returns list of (index, value) tuples."""
+    valleys = []
+    for i in range(min_distance, len(series) - min_distance):
+        window = series.iloc[i - min_distance:i + min_distance + 1]
+        if series.iloc[i] == window.min() and series.iloc[i] < series.iloc[i - 1]:
+            valleys.append((i, series.iloc[i]))
+    return valleys
+
+
+def _detect_divergence(price_series, indicator_series, lookback=60, min_distance=5):
+    """Detect divergence between price and indicator using peak/valley matching.
+
+    Returns: (divergence_type, score) or (None, 0)
+    - "bullish" = price making lower lows while indicator making higher lows
+    - "bearish" = price making higher highs while indicator making lower highs
+    """
+    if len(price_series) < lookback:
+        return None, 0
+
+    price_recent = price_series.iloc[-lookback:]
+    ind_recent = indicator_series.iloc[-lookback:]
+
+    # Bearish divergence: price higher highs + indicator lower highs
+    price_peaks = _find_peaks(price_recent, min_distance)
+    ind_peaks = _find_peaks(ind_recent, min_distance)
+
+    if len(price_peaks) >= 2 and len(ind_peaks) >= 2:
+        last_two_pp = price_peaks[-2:]
+        last_two_ip = ind_peaks[-2:]
+        if last_two_pp[1][1] > last_two_pp[0][1] and last_two_ip[1][1] < last_two_ip[0][1]:
+            return "bearish", -2
+
+    # Bullish divergence: price lower lows + indicator higher lows
+    price_valleys = _find_valleys(price_recent, min_distance)
+    ind_valleys = _find_valleys(ind_recent, min_distance)
+
+    if len(price_valleys) >= 2 and len(ind_valleys) >= 2:
+        last_two_pv = price_valleys[-2:]
+        last_two_iv = ind_valleys[-2:]
+        if last_two_pv[1][1] < last_two_pv[0][1] and last_two_iv[1][1] > last_two_iv[0][1]:
+            return "bullish", 2
+
+    return None, 0
+
+
+# --- ADX ---
+
+
+def calc_adx(df, period=14):
+    """Compute ADX (Average Directional Index) for trend strength assessment."""
+    if len(df) < period * 2:
+        return {"adx": None, "plus_di": None, "minus_di": None, "signal": {"type": "insufficient_data", "description": "ADX数据不足", "score": 0}}
+
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    # True Range
+    prev_close = close.shift(1)
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+
+    # Directional Movement
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
+
+    # Smoothed averages
+    atr = tr.rolling(period).mean()
+    plus_di = 100 * (plus_dm.rolling(period).mean() / atr.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.rolling(period).mean() / atr.replace(0, np.nan))
+
+    dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+    adx = dx.rolling(period).mean()
+
+    curr_adx = adx.iloc[-1]
+    curr_plus_di = plus_di.iloc[-1]
+    curr_minus_di = minus_di.iloc[-1]
+
+    if pd.isna(curr_adx):
+        return {"adx": None, "plus_di": None, "minus_di": None, "signal": {"type": "insufficient_data", "description": "ADX数据不足", "score": 0}}
+
+    score = 0
+    desc = ""
+
+    # Trend strength classification
+    if curr_adx > 40:
+        desc = f"ADX={curr_adx:.1f}，强趋势"
+    elif curr_adx > 25:
+        desc = f"ADX={curr_adx:.1f}，趋势有效"
+    elif curr_adx > 20:
+        desc = f"ADX={curr_adx:.1f}，趋势弱"
+    else:
+        desc = f"ADX={curr_adx:.1f}，震荡市"
+        score = 0  # Neutral - no trend to follow
+
+    # DI direction for trend direction confirmation
+    if not pd.isna(curr_plus_di) and not pd.isna(curr_minus_di):
+        if curr_plus_di > curr_minus_di and curr_adx > 25:
+            score = 1  # Confirms bullish trend
+            desc += "；+DI>-DI确认多头"
+        elif curr_minus_di > curr_plus_di and curr_adx > 25:
+            score = -1  # Confirms bearish trend
+            desc += "；-DI>+DI确认空头"
+
+    return {
+        "adx": round(curr_adx, 2),
+        "plus_di": round(curr_plus_di, 2) if not pd.isna(curr_plus_di) else None,
+        "minus_di": round(curr_minus_di, 2) if not pd.isna(curr_minus_di) else None,
+        "signal": {"type": "trend_strength", "description": desc, "score": score},
+    }
+
+
+# --- OBV ---
+
+
+def calc_obv(df):
+    """Compute On Balance Volume to detect volume-based money flow trends."""
+    if "vol" not in df.columns or len(df) < 20:
+        return {"obv": None, "signal": {"type": "insufficient_data", "description": "OBV数据不足", "score": 0}}
+
+    close = df["close"]
+    vol = df["vol"]
+
+    direction = (close > close.shift(1)).astype(float) - (close < close.shift(1)).astype(float)
+    obv = (vol * direction).cumsum()
+
+    curr_obv = obv.iloc[-1]
+    if pd.isna(curr_obv):
+        return {"obv": None, "signal": {"type": "insufficient_data", "description": "OBV数据不足", "score": 0}}
+
+    # OBV trend: compare 20-period MA
+    obv_ma20 = obv.rolling(20).mean()
+    score = 0
+    desc_parts = []
+
+    if not pd.isna(obv_ma20.iloc[-1]):
+        if curr_obv > obv_ma20.iloc[-1]:
+            score = 1
+            desc_parts.append("OBV在20日均线上方，资金净流入")
+        else:
+            score = -1
+            desc_parts.append("OBV在20日均线下方，资金净流出")
+
+    # OBV divergence with price
+    div_type, div_score = _detect_divergence(close, obv, lookback=40, min_distance=5)
+    if div_type == "bullish":
+        desc_parts.append("OBV底背离（量先价行，可能反转向上）")
+        score += 1
+    elif div_type == "bearish":
+        desc_parts.append("OBV顶背离（量先价行，可能反转向下）")
+        score -= 1
+
+    score = max(-3, min(3, score))
+    if not desc_parts:
+        desc_parts.append("OBV中性")
+
+    return {
+        "obv": round(curr_obv, 0),
+        "signal": {"type": "money_flow", "description": "；".join(desc_parts), "score": score},
+    }
+
+
 # --- Bollinger Bands ---
 
 
@@ -331,14 +504,18 @@ def calc_bollinger(df, period=20, std_dev=2):
     else:
         desc_parts.append("中轨下方运行")
 
-    # Squeeze detection
+    # Squeeze detection using bandwidth percentile
     if len(df) >= period * 2:
+        all_widths = ((upper - lower) / middle).dropna()
         band_width = (curr_upper - curr_lower) / curr_middle if curr_middle > 0 else 0
-        prev_width = (upper.iloc[-period] - lower.iloc[-period]) / middle.iloc[-period] if middle.iloc[-period] > 0 else 0
-        if not (pd.isna(band_width) or pd.isna(prev_width)):
-            if band_width < prev_width * 0.7:
-                desc_parts.append("布林带收口")
+        if len(all_widths) >= 20 and not pd.isna(band_width):
+            bandwidth_percentile = (all_widths < band_width).sum() / len(all_widths) * 100
+            if bandwidth_percentile < 20:
+                desc_parts.append(f"布林带极度收口({bandwidth_percentile:.0f}%分位，即将变盘)")
                 score = 0  # Squeeze = neutral, watch for direction
+            elif bandwidth_percentile < 40:
+                desc_parts.append(f"布林带收口({bandwidth_percentile:.0f}%分位)")
+                score = 0
 
     score = max(-3, min(3, score))
 
@@ -620,7 +797,7 @@ def scan_patterns(df, lookback=10):
 
 
 def calc_support_resistance(df, ma_result, bollinger_result):
-    """Calculate key support and resistance levels."""
+    """Calculate key support and resistance levels with strength ranking."""
     close = df["close"]
     curr_close = close.iloc[-1]
     levels = {"support": [], "resistance": []}
@@ -629,10 +806,11 @@ def calc_support_resistance(df, ma_result, bollinger_result):
     ma_vals = ma_result.get("values", {})
     for key, val in ma_vals.items():
         if val is not None and not pd.isna(val):
+            strength = "high" if "ma60" in key else ("medium" if "ma20" in key else "low")
             if val < curr_close:
-                levels["support"].append({"price": round(val, 4), "source": key})
+                levels["support"].append({"price": round(val, 4), "source": key, "strength": strength})
             elif val > curr_close:
-                levels["resistance"].append({"price": round(val, 4), "source": key})
+                levels["resistance"].append({"price": round(val, 4), "source": key, "strength": strength})
 
     # From Bollinger Bands
     boll = bollinger_result
@@ -640,9 +818,9 @@ def calc_support_resistance(df, ma_result, bollinger_result):
         val = boll.get(key)
         if val is not None and not pd.isna(val):
             if val < curr_close:
-                levels["support"].append({"price": round(val, 4), "source": f"boll_{key}"})
+                levels["support"].append({"price": round(val, 4), "source": f"boll_{key}", "strength": "medium"})
             elif val > curr_close:
-                levels["resistance"].append({"price": round(val, 4), "source": f"boll_{key}"})
+                levels["resistance"].append({"price": round(val, 4), "source": f"boll_{key}", "strength": "medium"})
 
     # From recent price action (local min/max in last 20 bars)
     if len(df) >= 5:
@@ -650,34 +828,246 @@ def calc_support_resistance(df, ma_result, bollinger_result):
         for _, row in recent.iterrows():
             low, high = row["low"], row["high"]
             if low < curr_close:
-                levels["support"].append({"price": round(low, 4), "source": "recent_low"})
+                levels["support"].append({"price": round(low, 4), "source": "recent_low", "strength": "low"})
             if high > curr_close:
-                levels["resistance"].append({"price": round(high, 4), "source": "recent_high"})
+                levels["resistance"].append({"price": round(high, 4), "source": "recent_high", "strength": "low"})
 
-    # Deduplicate and sort
+    # From structural highs/lows (previous swing points)
+    if len(df) >= 20:
+        swing_lookback = min(60, len(df))
+        swing_df = df.tail(swing_lookback)
+        # Find swing highs (local max with 3 bars on each side)
+        for i in range(3, len(swing_df) - 3):
+            if swing_df["high"].iloc[i] == swing_df["high"].iloc[i - 3:i + 4].max():
+                val = round(swing_df["high"].iloc[i], 4)
+                if val > curr_close:
+                    levels["resistance"].append({"price": val, "source": "swing_high", "strength": "high"})
+            if swing_df["low"].iloc[i] == swing_df["low"].iloc[i - 3:i + 4].min():
+                val = round(swing_df["low"].iloc[i], 4)
+                if val < curr_close:
+                    levels["support"].append({"price": val, "source": "swing_low", "strength": "high"})
+
+    # Fibonacci retracement levels
+    if len(df) >= 30:
+        lookback = min(120, len(df))
+        recent_data = df.tail(lookback)
+        high_price = recent_data["high"].max()
+        low_price = recent_data["low"].min()
+
+        fib_ratios = {"0.382": 0.382, "0.5": 0.5, "0.618": 0.618}
+        for name, ratio in fib_ratios.items():
+            fib_level = high_price - (high_price - low_price) * ratio
+            fib_rounded = round(fib_level, 4)
+            if fib_level > curr_close:
+                levels["resistance"].append({"price": fib_rounded, "source": f"fib_{name}", "strength": "high"})
+            elif fib_level < curr_close:
+                levels["support"].append({"price": fib_rounded, "source": f"fib_{name}", "strength": "high"})
+
+    # Round number levels (psychological levels)
+    if curr_close > 0:
+        magnitude = 10 ** max(0, int(np.log10(curr_close)) - 1)
+        for mult in range(1, 20):
+            round_level = magnitude * mult
+            if round_level > curr_close * 1.5:
+                break
+            if round_level > curr_close:
+                levels["resistance"].append({"price": round_level, "source": "round_number", "strength": "low"})
+            elif round_level < curr_close:
+                levels["support"].append({"price": round_level, "source": "round_number", "strength": "low"})
+
+    # Cluster nearby levels and sort by strength
     for direction in ["support", "resistance"]:
-        prices = {}
-        for item in levels[direction]:
-            p = item["price"]
-            if p not in prices:
-                prices[p] = item
-        sorted_items = sorted(prices.values(), key=lambda x: x["price"], reverse=(direction == "support"))
-        levels[direction] = sorted_items[:3]  # Top 3 per side
+        if not levels[direction]:
+            continue
+        # Cluster levels within 0.5% of each other
+        sorted_items = sorted(levels[direction], key=lambda x: x["price"], reverse=(direction == "support"))
+        clustered = []
+        for item in sorted_items:
+            merged = False
+            for cluster in clustered:
+                if abs(item["price"] - cluster["price"]) / cluster["price"] < 0.005:
+                    # Merge: keep stronger strength, combine sources
+                    strength_rank = {"high": 3, "medium": 2, "low": 1}
+                    if strength_rank.get(item.get("strength", "low"), 0) > strength_rank.get(cluster.get("strength", "low"), 0):
+                        cluster["strength"] = item["strength"]
+                    cluster["sources"] = cluster.get("sources", [cluster["source"]]) + [item["source"]]
+                    cluster["test_count"] = cluster.get("test_count", 1) + 1
+                    merged = True
+                    break
+            if not merged:
+                clustered.append({**item, "sources": [item["source"]], "test_count": 1})
+
+        # Upgrade strength based on test count (multiple sources = stronger)
+        strength_rank = {"high": 3, "medium": 2, "low": 1}
+        for item in clustered:
+            if item.get("test_count", 1) >= 3 and strength_rank.get(item.get("strength", "low"), 0) < 3:
+                item["strength"] = "high"
+            elif item.get("test_count", 1) >= 2 and strength_rank.get(item.get("strength", "low"), 0) < 2:
+                item["strength"] = "medium"
+
+        # Sort: closest to current price first, then by strength
+        clustered.sort(key=lambda x: (abs(x["price"] - curr_close), -strength_rank.get(x.get("strength", "low"), 0)))
+        levels[direction] = clustered[:5]  # Top 5 per side
 
     return levels
+
+
+# --- ATR ---
+
+
+def calc_atr(df, period=14):
+    """Compute Average True Range for stop-loss and volatility assessment."""
+    if len(df) < period + 1:
+        return {"atr": None, "atr_pct": None, "signal": {"type": "insufficient_data", "description": "ATR数据不足", "score": 0}}
+
+    high = df["high"]
+    low = df["low"]
+    prev_close = df["close"].shift(1)
+
+    tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    curr_atr = atr.iloc[-1]
+
+    if pd.isna(curr_atr):
+        return {"atr": None, "atr_pct": None, "signal": {"type": "insufficient_data", "description": "ATR数据不足", "score": 0}}
+
+    curr_close = df["close"].iloc[-1]
+    atr_pct = (curr_atr / curr_close * 100) if curr_close > 0 else 0
+
+    # Volatility assessment for position sizing
+    if atr_pct > 4:
+        vol_level = "extreme"
+        desc = f"ATR={curr_atr:.2f}({atr_pct:.1f}%)，极端波动"
+    elif atr_pct > 2.5:
+        vol_level = "high"
+        desc = f"ATR={curr_atr:.2f}({atr_pct:.1f}%)，高波动"
+    elif atr_pct > 1.5:
+        vol_level = "normal"
+        desc = f"ATR={curr_atr:.2f}({atr_pct:.1f}%)，正常波动"
+    else:
+        vol_level = "low"
+        desc = f"ATR={curr_atr:.2f}({atr_pct:.1f}%)，低波动"
+
+    return {
+        "atr": round(curr_atr, 4),
+        "atr_pct": round(atr_pct, 2),
+        "volatility_level": vol_level,
+        "signal": {"type": "volatility", "description": desc, "score": 0},
+    }
+
+
+# --- Max Drawdown ---
+
+
+def calc_max_drawdown(df):
+    """Calculate maximum drawdown over the data period."""
+    if len(df) < 2:
+        return {"max_drawdown_pct": None, "drawdown_days": None}
+
+    close = df["close"]
+    cummax = close.cummax()
+    drawdown = (close - cummax) / cummax
+    max_dd = drawdown.min()
+
+    if pd.isna(max_dd):
+        return {"max_drawdown_pct": None, "drawdown_days": None}
+
+    # Find duration of max drawdown
+    dd_end = drawdown.idxmin()
+    dd_start = close.loc[:dd_end].idxmax()
+    dd_days = (dd_end - dd_start) if dd_end > dd_start else None
+
+    return {
+        "max_drawdown_pct": round(max_dd * 100, 2),
+        "drawdown_days": int(dd_days) if dd_days is not None and not pd.isna(dd_days) else None,
+    }
+
+
+# --- Stop-loss and Risk:Reward ---
+
+
+def calc_risk_reward(df, atr_result, levels):
+    """Calculate stop-loss price and risk:reward ratio."""
+    curr_close = df["close"].iloc[-1]
+    atr = atr_result.get("atr")
+
+    # Determine stop-loss: use nearest support - 1*ATR, or 2*ATR below current price
+    support_prices = [item["price"] for item in levels.get("support", []) if item["price"]]
+    if support_prices:
+        nearest_support = max(support_prices)
+        stop_loss = round(nearest_support - (atr if atr else 0), 2)
+    elif atr:
+        stop_loss = round(curr_close - 2 * atr, 2)
+    else:
+        stop_loss = None
+
+    # Determine target: use nearest resistance, or 2*ATR above current price
+    resistance_prices = [item["price"] for item in levels.get("resistance", []) if item["price"]]
+    if resistance_prices:
+        nearest_resistance = min(resistance_prices)
+        target = round(nearest_resistance, 2)
+    elif atr:
+        target = round(curr_close + 2 * atr, 2)
+    else:
+        target = None
+
+    # Calculate R:R ratio
+    risk = (curr_close - stop_loss) if stop_loss else None
+    reward = (target - curr_close) if target else None
+
+    rr_ratio = None
+    if risk and reward and risk > 0:
+        rr_ratio = round(reward / risk, 2)
+
+    # Position sizing based on volatility
+    atr_pct = atr_result.get("atr_pct", 0)
+    if atr_pct > 4:
+        position = "轻仓(20-30%)"
+    elif atr_pct > 2.5:
+        position = "半仓(40-50%)"
+    elif atr_pct > 1.5:
+        position = "标准仓位(50-70%)"
+    else:
+        position = "可重仓(70-80%)"
+
+    return {
+        "stop_loss": stop_loss,
+        "target": target,
+        "risk_reward_ratio": rr_ratio,
+        "risk": round(risk, 2) if risk else None,
+        "reward": round(reward, 2) if reward else None,
+        "position_sizing": position,
+    }
 
 
 # --- Aggregate summary ---
 
 
 def build_summary(indicator_results, patterns):
-    """Build overall technical summary."""
+    """Build overall technical summary with weighted scores and consistency factor."""
+    # Sub-weights: trend indicators (MA+MACD) heavier, oscillators (RSI+KDJ) lighter
+    SUB_WEIGHTS = {
+        "ma": 1.5,
+        "macd": 1.5,
+        "rsi": 0.8,
+        "kdj": 0.8,
+        "bollinger": 1.0,
+        "volume": 1.0,
+        "adx": 1.2,
+        "obv": 1.0,
+    }
+
+    weighted_sum = 0
+    weight_total = 0
     scores = []
     key_signals = []
 
     for name, result in indicator_results.items():
         signal = result.get("signal", {})
         s = signal.get("score", 0)
+        w = SUB_WEIGHTS.get(name, 1.0)
+        weighted_sum += s * w
+        weight_total += w
         scores.append(s)
         desc = signal.get("description", "")
         if desc:
@@ -686,14 +1076,22 @@ def build_summary(indicator_results, patterns):
     # Pattern scores (aggregate, cap at ±3)
     pattern_score = sum(p["score"] for p in patterns) if patterns else 0
     pattern_score = max(-3, min(3, pattern_score))
-    scores.append(pattern_score * 0.5)  # Weight patterns at 50% since indicators already include some
+    weighted_sum += pattern_score * 0.5  # Weight patterns at 50%
+    weight_total += 0.5
 
     for p in patterns:
         if p["score"] != 0:
             key_signals.append(f"K线形态: {p['name']}({p['direction']})")
 
-    total = sum(scores)
+    # Weighted average, then scale back to [-3, +3]
+    total = weighted_sum / weight_total if weight_total > 0 else 0
     total = max(-3, min(3, round(total)))
+
+    # Consistency factor: same-direction indicators increase confidence
+    bull_count = sum(1 for s in scores if s > 0)
+    bear_count = sum(1 for s in scores if s < 0)
+    total_count = len(scores) if scores else 1
+    consistency = max(bull_count, bear_count) / total_count
 
     if total >= 2:
         direction = "bullish"
@@ -703,10 +1101,13 @@ def build_summary(indicator_results, patterns):
         direction = "neutral"
 
     abs_total = abs(total)
-    if abs_total >= 2.5:
+    # Consistency boosts confidence
+    if abs_total >= 2.5 and consistency >= 0.7:
         confidence = "high"
-    elif abs_total >= 2.0:
+    elif abs_total >= 2.0 and consistency >= 0.5:
         confidence = "medium"
+    elif abs_total >= 2.5 and consistency < 0.5:
+        confidence = "medium"  # High score but low consistency → downgrade
     else:
         confidence = "low"
 
@@ -714,6 +1115,7 @@ def build_summary(indicator_results, patterns):
         "total_score": total,
         "direction": direction,
         "confidence": confidence,
+        "consistency": round(consistency, 2),
         "key_signals": key_signals[:8],
     }
 
@@ -724,7 +1126,7 @@ def build_summary(indicator_results, patterns):
 def main():
     parser = argparse.ArgumentParser(description="Technical analysis for stock-trend skill")
     parser.add_argument("input_file", nargs="?", help="K-line JSON file from fetch_kline.py (reads stdin if omitted)")
-    parser.add_argument("--indicators", default="ma,macd,rsi,kdj,bollinger,volume,patterns",
+    parser.add_argument("--indicators", default="ma,macd,rsi,kdj,bollinger,volume,adx,obv,patterns",
                         help="Comma-separated indicators to compute (default: all)")
     parser.add_argument("--ma-periods", default="5,10,20,60", help="MA periods (default: 5,10,20,60)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
@@ -800,9 +1202,19 @@ def main():
         indicator_results["bollinger"] = calc_bollinger(df)
     if "volume" in indicators:
         indicator_results["volume"] = analyze_volume(df)
+    if "adx" in indicators:
+        indicator_results["adx"] = calc_adx(df)
+    if "obv" in indicators:
+        indicator_results["obv"] = calc_obv(df)
 
     # Pattern recognition
     patterns = scan_patterns(df) if "patterns" in indicators else []
+
+    # ATR
+    atr_result = calc_atr(df)
+
+    # Max drawdown
+    drawdown_result = calc_max_drawdown(df)
 
     # Support/Resistance
     levels = calc_support_resistance(
@@ -811,10 +1223,18 @@ def main():
         indicator_results.get("bollinger", {}),
     )
 
+    # Risk:Reward and stop-loss
+    risk_reward = calc_risk_reward(df, atr_result, levels)
+
     # Summary
     summary = build_summary(indicator_results, patterns)
     summary["support_levels"] = [item["price"] for item in levels["support"]]
     summary["resistance_levels"] = [item["price"] for item in levels["resistance"]]
+    summary["stop_loss"] = risk_reward.get("stop_loss")
+    summary["target"] = risk_reward.get("target")
+    summary["risk_reward_ratio"] = risk_reward.get("risk_reward_ratio")
+    summary["position_sizing"] = risk_reward.get("position_sizing")
+    summary["max_drawdown_pct"] = drawdown_result.get("max_drawdown_pct")
 
     # Latest data point
     last = df.iloc[-1]
@@ -824,6 +1244,8 @@ def main():
     }
     for name, result in indicator_results.items():
         latest[name] = result
+    latest["atr"] = atr_result
+    latest["max_drawdown"] = drawdown_result
 
     result = {
         "meta": {

@@ -137,10 +137,11 @@ def fetch_eastmoney(secid, freq, lmt=250):
             amount = float(parts[6])
             pct_chg = float(parts[8])
             change = float(parts[9])
+            turnover_rate = float(parts[10]) if len(parts) > 10 and parts[10] else None
 
             pre_close = round(close_p - change, 4) if change != 0 else close_p
 
-            records.append({
+            record = {
                 "trade_date": trade_date,
                 "open": open_p,
                 "close": close_p,
@@ -151,7 +152,11 @@ def fetch_eastmoney(secid, freq, lmt=250):
                 "pct_chg": pct_chg,
                 "vol": vol,
                 "amount": amount,
-            })
+            }
+            if turnover_rate is not None:
+                record["turnover_rate"] = turnover_rate
+
+            records.append(record)
         except (ValueError, IndexError):
             continue
 

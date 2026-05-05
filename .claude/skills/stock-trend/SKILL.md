@@ -3,7 +3,7 @@ name: stock-trend
 description: 对 A股、港股、ETF 执行日趋势判断，输出结构化报告
 triggers:
   - /stock-trend
-argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--compact] [--no-data]"
+argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
   - Write
@@ -20,12 +20,13 @@ allowed-tools:
 ## Step 1: 解析输入
 
 ```
-/stock-trend <code> [--focus <维度>] [--horizon <周期>] [--compact] [--no-data]
+/stock-trend <code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]
 ```
 
 - `code`（必填）：股票/ETF 代码。缺失时提示用法
 - `--focus`（可选，可叠加）：`technical | capital_flow | fundamental | sentiment`
 - `--horizon`（可选，默认 `daily`）：`intraday | daily | weekly`
+- `--multi-timeframe`：多周期共振模式，同时获取日/周K线并计算周期共振得分
 - `--compact`：精简输出模式
 - `--no-data`：跳过K线数据获取
 
@@ -60,17 +61,29 @@ python3 .claude/skills/stock-trend/scripts/analyze_technical.py /tmp/kline.json 
 
 使用 `--no-data` 时跳过本步骤。
 
+**多周期共振模式** (`--multi-timeframe`)：
+除获取日线数据外，额外获取周线数据（`--freq W`），输出到 `/tmp/kline_weekly.json` 和 `/tmp/technical_weekly.json`。在 Step 5 中对比日线与周线趋势方向，计算周期共振得分。
+
 Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKEN` > `.claude/tushare-config.json`。未配置时自动降级东方财富。
 
 ## Step 4: 五维分析
 
 每个维度评分范围 **-3 ~ +3**，详细评分标准见 **references/trend-dimensions.md**。
 
-1. **技术面** — 使用 `analyze_technical.py` 输出：`latest.*.signal` 判断各指标信号，`patterns` 判断K线形态（详见 **references/kline-patterns.md**），`summary.total_score` 作为基础得分
+1. **技术面** — 使用 `analyze_technical.py` 输出：`latest.*.signal` 判断各指标信号（含MA/MACD/RSI/KDJ/布林带/ADX/OBV），`patterns` 判断K线形态（详见 **references/kline-patterns.md**），`summary.total_score` 作为基础得分
 2. **资金面** — 主力流入/北向资金/融资融券/龙虎榜
 3. **基本面** — PE-PB/业绩增速/行业景气/股息率
 4. **情绪面** — 涨跌停/换手率/板块联动/舆情
 5. **宏观面** — 货币政策/行业政策/外盘/汇率
+
+**技术面内部子权重**（由 `analyze_technical.py` 的 `build_summary` 自动应用）：
+- 趋势指标（MA、MACD）：×1.5
+- 趋势强度（ADX）：×1.2
+- 震荡指标（RSI、KDJ）：×0.8
+- 其他（布林带、成交量、OBV）：×1.0
+- K线形态：×0.5
+
+**一致性因子**：同向指标数/总指标数影响置信度，5指标全偏多比3偏多2偏空置信度更高。
 
 ## Step 5: 计算综合评分
 
@@ -99,14 +112,40 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 | ≤ -2.0 | ▼ 看空 (Bearish) | 2.0~2.5 | 中 |
 | 其他 | ◆ 震荡 (Neutral) | < 2.0 | 低 |
 
-## Step 7: 特殊标的处理
+**多周期共振调整**（`--multi-timeframe` 时适用）：
+- 日线与周线同向 → 置信度提升一级（低→中，中→高）
+- 日线与周线反向 → 置信度降低一级（高→中，中→低），并在报告中标注"周线趋势相反，注意风险"
+- 日线看多+周线看空 = 抢反弹策略，标注"短线操作"
+- 日线看空+周线看多 = 回调买入机会，标注"回调关注"
+
+## Step 7: 风险管理与监控信号
+
+基于 `analyze_technical.py` 的 `summary` 输出生成：
+
+**止损位**：`summary.stop_loss`（支撑位 - 1×ATR，或当前价 - 2×ATR）
+**目标价位**：`summary.target`（最近压力位）
+**风险收益比**：`summary.risk_reward_ratio`（R:R ≥ 2:1 值得入场）
+**仓位建议**：`summary.position_sizing`（基于 ATR% 波动率）
+**最大回撤**：`summary.max_drawdown_pct`（历史区间最大回撤）
+
+**持仓监控信号**（根据趋势方向和关键价位生成）：
+
+| 趋势方向 | 监控条件 | 触发动作 |
+|---|---|---|
+| 看多 | 跌破止损位 | 立即止损离场 |
+| 看多 | 跌破最强支撑位 | 减半仓位，重新评估 |
+| 看多 | 突破目标价 | 可分批止盈 |
+| 看空 | 突破止损位（空仓反向） | 立即离场 |
+| 震荡 | 突破压力/跌破支撑 | 突破方向追入，需量价确认 |
+
+## Step 9: 特殊标的处理
 
 - **ST/*ST**：基本面强制 -1；标题行标注退市风险
 - **港股**：增恒指联动、卖空占比、南向资金、AH溢价；标注无涨跌停
 - **ETF**：增 IOPV 折溢价、跟踪误差、申赎、成交额分析
 - **可转债**：增转股溢价率、纯债价值、强赎风险
 
-## Step 8: 生成报告
+## Step 10: 生成报告
 
 **默认模式**：使用 **assets/report-template.md** 和 **assets/report-template.html** 生成完整报告
 
@@ -129,7 +168,7 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 
 精简模式仅输出文本，不保存 HTML。
 
-## Step 9: 自动打开 HTML 报告
+## Step 11: 自动打开 HTML 报告
 
 **默认模式**下，生成报告后自动在浏览器中打开 HTML 文件：
 
@@ -141,7 +180,7 @@ open reports/{ts_code}/{YYYYMMDD-HHmm}.html
 
 `open` 命令使用系统默认浏览器打开 HTML 文件。路径与 Step 8 保存路径一致。
 
-## Step 10: 免责声明
+## Step 12: 免责声明
 
 所有输出必须附带：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。
 
