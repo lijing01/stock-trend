@@ -12,6 +12,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
   - WebSearch
   - WebFetch
+  - Bash(open *)
 ---
 
 # 股票趋势判断 Skill
@@ -128,7 +129,19 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 
 精简模式仅输出文本，不保存 HTML。
 
-## Step 9: 免责声明
+## Step 9: 自动打开 HTML 报告
+
+**默认模式**下，生成报告后自动在浏览器中打开 HTML 文件：
+
+```bash
+open reports/{ts_code}/{YYYYMMDD-HHmm}.html
+```
+
+**精简模式** (`--compact`) 跳过本步骤（无 HTML 文件生成）。
+
+`open` 命令使用系统默认浏览器打开 HTML 文件。路径与 Step 8 保存路径一致。
+
+## Step 10: 免责声明
 
 所有输出必须附带：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。
 
