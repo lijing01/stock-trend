@@ -45,7 +45,15 @@
       "Bash(open *)",
       "Bash(cat /tmp/*)",
       "Bash(date *)",
-      "Bash(mkdir -p *)"
+      "Bash(mkdir -p *)",
+      "Bash(python *)",
+      "WebFetch(domain:www.163.com)",
+      "WebFetch(domain:finance.sina.com.cn)",
+      "WebFetch(domain:www.jiemian.com)",
+      "Bash(unalias python *)",
+      "Bash(pyenv versions *)",
+      "Bash(~/.pyenv/shims/python3 -c \"print\\('hello'\\)\")",
+      "Bash(curl *)"
     ]
   }
 }

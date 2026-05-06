@@ -52,12 +52,16 @@ allowed-tools:
 # 1. 先尝试 Tushare
 python3 .claude/skills/stock-trend/scripts/fetch_kline.py <ts_code> --asset <E|FD> --freq <D|W> --adj <qfq|none> -o /tmp/kline.json
 # 2. Tushare 失败时降级东方财富（不支持港股）
+#    脚本内部自动轮换节点：push2his → 38.push2his → 48.push2his
+#    东方财富全节点失败时自动降级 BaoStock
 python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py <ts_code> --asset <E|FD> --freq <D|W> -o /tmp/kline.json
 # 3. 技术分析
 python3 .claude/skills/stock-trend/scripts/analyze_technical.py /tmp/kline.json -o /tmp/technical.json
 ```
 
-判断 Tushare 是否失败：检查 JSON 的 `meta.data_source`，为 `error` 则降级。两个数据源均失败时，技术面按 0 分处理并标注"无数据源"。数据不足 60 条时标注。
+**数据源降级链**：Tushare → 东方财富(增强头+节点轮换) → BaoStock → 无数据模式
+
+判断 Tushare 是否失败：检查 JSON 的 `meta.data_source`，为 `error` 则降级。三个数据源均失败时，技术面按 0 分处理并标注"无数据源"。数据不足 60 条时标注。
 
 使用 `--no-data` 时跳过本步骤。
 

@@ -20,6 +20,22 @@ import urllib.request
 from datetime import datetime, timedelta
 
 
+# --- EastMoney API node rotation ---
+
+EM_API_HOSTS = [
+    "push2his.eastmoney.com",
+    "38.push2his.eastmoney.com",
+    "48.push2his.eastmoney.com",
+]
+
+EM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://quote.eastmoney.com/",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+
+
 # --- secid mapping ---
 
 # Market prefix: .SH -> 1 (Shanghai), .SZ -> 0 (Shenzhen)
@@ -77,7 +93,7 @@ def calc_beg_date(freq):
     return start.strftime("%Y%m%d")
 
 
-def fetch_eastmoney(secid, freq, lmt=250):
+def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
     """Fetch K-line data from East Money API.
 
     Returns a list of parsed records or raises on error.
@@ -90,7 +106,7 @@ def fetch_eastmoney(secid, freq, lmt=250):
     fields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
 
     url = (
-        f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
+        f"https://{host}/api/qt/stock/kline/get"
         f"?secid={secid}"
         f"&fields1={fields1}"
         f"&fields2={fields2}"
@@ -101,12 +117,12 @@ def fetch_eastmoney(secid, freq, lmt=250):
         f"&lmt={lmt}"
     )
 
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib.request.Request(url, headers=EM_HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        raise RuntimeError(f"东方财富API请求失败: {e}")
+        raise RuntimeError(f"东方财富API请求失败({host}): {e}")
 
     if not result or result.get("rc") != 0 or not result.get("data"):
         error_msg = result.get("message", "未知错误") if result else "无响应"
@@ -198,20 +214,29 @@ def main():
     asset = args.asset or detect_asset(args.ts_code)
     adj = args.adj or detect_adj(args.ts_code)
 
-    # Fetch data with one retry
+    # Fetch data with host rotation
     records = None
     name = ""
     error_msg = None
+    used_host = None
 
-    for attempt in range(2):
+    for host in EM_API_HOSTS:
         try:
-            records, name = fetch_eastmoney(secid, args.freq, args.lmt)
+            records, name = fetch_eastmoney(secid, args.freq, args.lmt, host=host)
+            used_host = host
             break
         except Exception as e:
             error_msg = str(e)
-            if attempt == 0:
-                import time
-                time.sleep(2)
+            import time
+            time.sleep(1)
+
+    # Fallback to BaoStock if all EastMoney hosts failed
+    if records is None and not args.ts_code.endswith(".HK"):
+        try:
+            records, name = fetch_baostock(args.ts_code, args.freq)
+            used_host = "baostock"
+        except Exception as e:
+            error_msg = f"东方财富全节点失败 + BaoStock降级失败: {error_msg}; {e}"
 
     if records is None:
         result = {
@@ -226,6 +251,8 @@ def main():
         }
         _output(result, args.output)
         return
+
+    data_source = "eastmoney" if used_host in EM_API_HOSTS else "baostock"
 
     record_count = len(records)
     warnings = []
@@ -245,13 +272,97 @@ def main():
             "adj": adj,
             "record_count": record_count,
             "data_points": record_count,
-            "data_source": "eastmoney",
+            "data_source": data_source,
+            "em_host": used_host if used_host in EM_API_HOSTS else None,
             "warnings": warnings,
         },
         "data": records,
     }
 
     _output(result, args.output)
+
+
+def fetch_baostock(ts_code, freq):
+    """Fetch K-line data from BaoStock as a Level-3 fallback.
+
+    BaoStock is an independent data source (not EastMoney) that covers
+    A-shares (including STAR board) and ETFs. It does NOT support HK stocks.
+
+    Args:
+        ts_code: Tushare-style code, e.g. 600519.SH, 159919.SZ
+        freq: 'D' for daily, 'W' for weekly
+
+    Returns:
+        Tuple of (records_list, name_string)
+
+    Raises:
+        RuntimeError: If BaoStock fails to return data
+        ImportError: If baostock package is not installed
+    """
+    import baostock as bs
+
+    # Convert ts_code to BaoStock code format
+    # 600519.SH -> sh.600519, 000001.SZ -> sz.000001
+    code, suffix = ts_code.rsplit(".", 1)
+    if suffix == "SH":
+        bs_code = f"sh.{code}"
+    elif suffix == "SZ":
+        bs_code = f"sz.{code}"
+    else:
+        raise RuntimeError(f"BaoStock不支持港股代码: {ts_code}")
+
+    frequency = "d" if freq == "D" else "w"
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+
+    lg = bs.login()
+    if lg.error_code != "0":
+        raise RuntimeError(f"BaoStock登录失败: {lg.error_msg}")
+
+    try:
+        # adjustflag: 2=前复权(qfq)
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume,amount,pctChg,preclose",
+            start_date=start_date,
+            end_date=end_date,
+            frequency=frequency,
+            adjustflag="2",
+        )
+
+        if rs.error_code != "0":
+            raise RuntimeError(f"BaoStock查询失败: {rs.error_msg}")
+
+        records = []
+        while rs.error_code == "0" and rs.next():
+            row = rs.get_row_data()
+            try:
+                record = {
+                    "trade_date": row[0].replace("-", ""),
+                    "open": float(row[1]) if row[1] else None,
+                    "high": float(row[2]) if row[2] else None,
+                    "low": float(row[3]) if row[3] else None,
+                    "close": float(row[4]) if row[4] else None,
+                    "pre_close": float(row[8]) if len(row) > 8 and row[8] else None,
+                    "pct_chg": float(row[7]) if row[7] else None,
+                    "vol": float(row[5]) if row[5] else None,
+                    "amount": float(row[6]) if row[6] else None,
+                }
+                # Skip records with None close price
+                if record["close"] is not None:
+                    records.append(record)
+            except (ValueError, IndexError):
+                continue
+
+        if not records:
+            raise RuntimeError(f"BaoStock未返回数据: {bs_code}")
+
+        # BaoStock doesn't return stock name, use ts_code as placeholder
+        name = ts_code
+        return records, name
+
+    finally:
+        bs.logout()
 
 
 def _output(result, output_path=None):

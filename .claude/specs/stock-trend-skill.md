@@ -136,11 +136,17 @@ options:
    - `python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py <ts_code> [options]`
    - 无需 Token，免费调用
    - 不支持港股（.HK），港股仍需 Tushare
-   - 请求失败时重试1次（间隔2秒），仍失败则输出 `meta.data_source: "error"`
-3. **技术分析脚本**：`python3 .claude/skills/stock-trend/scripts/analyze_technical.py <input_file> [options]`
+   - 脚本内部自动轮换 API 节点（`push2his` → `38.push2his` → `48.push2his`），每个节点重试1次
+   - 使用完整浏览器请求头（Referer + 完整 UA），增强反爬虫兼容性
+   - 东方财富全节点失败时，自动降级到 BaoStock
+3. **BaoStock 降级（二级降级）**：东方财富全节点不可用时，由同一脚本内部自动调用
+   - 独立数据源，与东方财富无关，免费无需注册
+   - 支持 A 股（含科创板）和 ETF，不支持港股
+   - 日线数据当日晚间更新，无实时数据
+4. **技术分析脚本**：`python3 .claude/skills/stock-trend/scripts/analyze_technical.py <input_file> [options]`
    - 接收任一脚本的 JSON 输出，计算技术指标和K线形态
    - 输出结构化分析结果（MA/MACD/RSI/KDJ/布林带/成交量/形态）
-4. **无数据模式**：两个数据源均不可用时，技术面维度按0分处理并标注"无数据源"
+5. **无数据模式**：三个数据源均不可用时，技术面维度按0分处理并标注"无数据源"
 
 ### 4.1.2 K线形态识别
 
@@ -324,8 +330,11 @@ options:
 | Tushare API 网络错误 | 重试1次 | 仍失败则降级到东方财富 |
 | Tushare 积分不足 | 输出 `meta.data_source: "error"` | 自动降级到东方财富脚本获取数据 |
 | 东方财富不支持港股 | 输出 `meta.data_source: "error"` | 港股标的仅依赖 Tushare |
-| 东方财富网络错误 | 重试1次 | 仍失败则降级为无数据模式 |
-| 两个数据源均不可用 | — | 技术面维度按0分处理，标注"无数据源" |
+| 东方财富网络错误 | 轮换 API 节点（3节点） | 全节点失败则降级 BaoStock |
+| 东方财富全节点失败 | 自动降级 BaoStock | BaoStock 也失败则无数据模式 |
+| BaoStock 登录失败 | 输出 `meta.data_source: "error"` | 技术面维度按0分处理 |
+| BaoStock 无数据 | 输出 `meta.data_source: "error"` | 可能代码无效或停牌 |
+| 三个数据源均不可用 | — | 技术面维度按0分处理，标注"无数据源" |
 | 数据不足(停牌/新股) | 输出数据 + `meta.warnings` | 标注数据缺失对评分的影响 |
 
 ## 10. 示例
@@ -441,6 +450,7 @@ options:
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v4 | 2026-05-07 | 东方财富脚本增加 API 节点轮换（3节点）、完整浏览器请求头、BaoStock 爬虫降级 |
 | v3 | 2026-05-03 | 新增东方财富API作为降级数据源，Tushare失败时自动降级 |
 | v2 | 2026-05-03 | 新增 Tushare K线数据源配置、K线形态识别、代码转换规则、Tushare 错误处理 |
 | v1 | 2026-05-03 | 初始版本 |
