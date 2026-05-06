@@ -316,6 +316,7 @@ def main():
             "end_date": end_date,
             "ma_periods": ma_periods,
             "record_count": record_count,
+            "data_points": record_count,
             "data_source": source_or_error if isinstance(source_or_error, str) and source_or_error.startswith("tushare") else "tushare_sdk",
             "warnings": warnings,
         },

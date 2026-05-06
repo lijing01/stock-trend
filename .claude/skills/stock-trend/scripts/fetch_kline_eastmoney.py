@@ -244,6 +244,7 @@ def main():
             "freq": args.freq,
             "adj": adj,
             "record_count": record_count,
+            "data_points": record_count,
             "data_source": "eastmoney",
             "warnings": warnings,
         },
