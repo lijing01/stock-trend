@@ -53,7 +53,8 @@
       "Bash(unalias python *)",
       "Bash(pyenv versions *)",
       "Bash(~/.pyenv/shims/python3 -c \"print\\('hello'\\)\")",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "WebFetch(domain:quote.eastmoney.com)"
     ]
   }
 }
