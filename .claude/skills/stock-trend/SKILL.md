@@ -12,6 +12,8 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
   - WebSearch
   - WebFetch
+  - mcp__web-search__bing_search
+  - mcp__web-search__crawl_webpage
   - Bash(open *)
 ---
 
@@ -79,6 +81,28 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 3. **基本面** — PE-PB/业绩增速/行业景气/股息率
 4. **情绪面** — 涨跌停/换手率/板块联动/舆情
 5. **宏观面** — 货币政策/行业政策/外盘/汇率
+
+### 非技术面数据获取方式
+
+技术面数据由脚本自动获取。非技术面（资金面/基本面/情绪面/宏观面）数据需从外部来源获取，按以下优先级：
+
+1. **`mcp__web-search__bing_search` + `mcp__web-search__crawl_webpage`**：首选方式，可抓取中文财经网站内容
+2. **`WebSearch`**：用于搜索宏观政策、行业新闻等公开信息
+3. **`Bash(curl)`**：用于东方财富API等需要自定义Header的场景，示例：
+   ```bash
+   # ETF基金信息（净值、IOPV折溢价等）
+   curl -s "http://fund.eastmoney.com/pingzhongdata/{code}.js" -H "Referer: http://fund.eastmoney.com/" | head -50
+   # 资金流向
+   curl -s "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?secid=0.{code}&fields1=f1,f2,f3,f7&klt=101&lmt=5" -H "Referer: https://quote.eastmoney.com/"
+   ```
+
+**禁止使用 `WebFetch` 访问以下域名**（域名安全验证会失败）：
+- `*.eastmoney.com`（东方财富系列）
+- `cn.investing.com`
+- `xueqiu.com`（雪球）
+- `10jqka.com.cn`（同花顺）
+
+如需获取上述站点数据，请使用 `mcp__web-search__crawl_webpage` 或 `Bash(curl)` 替代。
 
 **技术面内部子权重**（由 `analyze_technical.py` 的 `build_summary` 自动应用）：
 - 趋势指标（MA、MACD）：×1.5

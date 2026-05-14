@@ -54,7 +54,13 @@
       "Bash(pyenv versions *)",
       "Bash(~/.pyenv/shims/python3 -c \"print\\('hello'\\)\")",
       "Bash(curl *)",
-      "WebFetch(domain:quote.eastmoney.com)"
+      "WebFetch(domain:quote.eastmoney.com)",
+      "WebFetch(domain:fund.eastmoney.com)",
+      "Bash(curl -s \"http://fund.eastmoney.com/pingzhongdata/*\" *)",
+      "Bash(curl -s \"https://push2.eastmoney.com/*\" *)",
+      "WebFetch(domain:github.com)",
+      "Bash(gh api *)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
