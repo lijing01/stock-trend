@@ -1,0 +1,26 @@
+# Generated reports - skip unless user explicitly asks
+reports/
+
+# Cache directory
+tmp/stock-trend-cache/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS junk
+.DS_Store
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node (if any)
+node_modules/
+
+# Large data / logs
+*.log
+*.csv
