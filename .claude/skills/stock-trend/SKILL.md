@@ -138,6 +138,14 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 
 如需获取上述站点数据，请使用 `mcp__web-search__crawl_webpage` 或 `Bash(curl)` 替代。
 
+**维度摘要撰写**：完成各维度 WebSearch 后，为每个非技术面维度撰写一段**简明摘要**（1-2句话），含关键数据和判断依据，将在报告"关键信号"表中展示。摘要需要包含具体数据（金额、百分比等），例如：
+- 资金面：`ETF近20日净申购+1.75亿元，但主力交易资金近2日净流出1.59亿元`
+- 基本面：`恒生科技PE 22.9倍处历史32%分位偏低；腾讯Q1净利润+11%`
+- 情绪面：`AI+半导体领涨；指数近1月反弹+4.31%但缩量调整中`
+- 宏观面：`中美关税缓和；美元偏弱离岸人民币升破6.8；CPI 3.8%降息推迟`
+
+这些摘要通过 Step 4 的 `--*-summary` 参数传入。同时撰写**综合研判**分析，包含核心矛盾、关键时间窗口和操作建议，通过 Step 4 的 `--analysis` 参数传入，将在报告"七、综合研判"展示。
+
 **技术面内部子权重**（由 `analyze_technical.py` 的 `build_summary` 自动应用）：
 - 趋势指标（MA、MACD）：×1.5
 - 趋势强度（ADX）：×1.2
@@ -162,6 +170,11 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
   [--asset-type etf|hk|st|stock] \
   [--etf-data /tmp/etf_data.json] \
   [--risks '["风险1","风险2"]'] \
+  [--capital-summary "ETF近20日净申购+1.75亿元..."] \
+  [--fundamental-summary "恒生科技PE 22.9倍..."] \
+  [--sentiment-summary "AI+半导体领涨..."] \
+  [--macro-summary "中美关税缓和..."] \
+  [--analysis '{"core_conflict":"核心矛盾...","events":[{"date":"5月15日","event":"事件","impact":"影响"}],"advice":["建议1","建议2"]}'] \
   -o /tmp/scores.json
 ```
 
@@ -173,10 +186,12 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
 - 数据质量自动调整权重：insufficient→技术17.5%, limited→技术25%
 - 趋势判定：≥ +2.0 看多，≤ -2.0 看空，其他震荡
 - 置信度：评分绝对值 ≥ 2.5 且一致性 ≥ 0.7 → 高；≥ 2.0 且一致性 ≥ 0.5 → 中；其他 → 低
-- 风险项自动从 `key_signals` 提取
+- 风险项自动从 `key_signals` 提取（自动去重同主题风险）
 - ETF/HK/ST 特殊标记自动生成
+- **维度摘要**（`--*-summary`）：每个非技术面维度的1-2句分析摘要，展示在报告"关键信号"表。摘要来自 Step 3 WebSearch 结果
+- **综合研判**（`--analysis`）：结构化 JSON，包含 `core_conflict`（核心矛盾）、`events`（关键事件数组）、`advice`（操作建议数组），展示在报告"七、综合研判"
 
-输出 `/tmp/scores.json` 包含综合评分、方向、置信度、风险项、报告参数等全部字段。
+输出 `/tmp/scores.json` 包含综合评分、方向、置信度、风险项、维度摘要、综合研判、报告参数等全部字段。
 
 ## Step 5: 判定趋势与置信度
 
@@ -239,7 +254,7 @@ python3 .claude/skills/stock-trend/scripts/generate_report.py \
 ```
 
 `--pipeline` 自动填充 `--kline`、`--technical`、`--etf-data`、`--capital-flow` 参数；
-`--scores-file` 自动填充 `--scores`、`--direction`、`--score`、`--confidence`、`--risks`、`--special` 参数。
+`--scores-file` 自动填充 `--scores`、`--direction`、`--score`、`--confidence`、`--risks`、`--special`、维度摘要（`--*-summary`）、综合研判（`--analysis`）参数。
 
 **方式二（手动传参，兼容旧方式）**：
 ```bash

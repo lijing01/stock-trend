@@ -6,33 +6,40 @@
 <title>{{股票名称}} ({{代码}}) 趋势报告</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#fff;color:#333;line-height:1.6;padding:20px}
-.c{max-width:960px;margin:0 auto;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:32px 36px}
-header{border-bottom:2px solid #e5e7eb;padding-bottom:16px;margin-bottom:20px}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f5f7;color:#1d1d1f;line-height:1.6;padding:20px}
+.c{max-width:960px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:36px 40px}
+header{border-bottom:2px solid #f0f0f0;padding-bottom:16px;margin-bottom:24px}
 h1{font-size:24px;color:#1a1a1a;margin-bottom:4px}
-.dt{color:#6b7280;font-size:14px;margin-bottom:8px}
-.meta{color:#6b7280;font-size:14px}
-.con{font-size:18px;margin-top:12px;padding:10px 16px;border-radius:6px}
+.dt{color:#86868b;font-size:14px;margin-bottom:8px}
+.meta{color:#86868b;font-size:14px}
+.con{font-size:18px;margin-top:12px;padding:12px 18px;border-radius:8px;font-weight:500}
 .bull{background:rgba(239,83,80,.08);color:#dc2626;border-left:4px solid #dc2626}
 .bear{background:rgba(22,163,74,.08);color:#16a34a;border-left:4px solid #16a34a}
 .neut{background:rgba(107,114,128,.08);color:#6b7280;border-left:4px solid #6b7280}
-h2{font-size:18px;margin:24px 0 12px;padding-bottom:6px;border-bottom:1px solid #e5e7eb;color:#2563eb}
-table{width:100%;border-collapse:collapse;margin-bottom:16px}
-th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #e5e7eb}
-th{background:#2563eb;color:#fff;font-weight:600;font-size:13px}
+h2{font-size:18px;margin:28px 0 14px;padding-bottom:6px;border-bottom:1px solid #f0f0f0;color:#1d4ed8}
+h3{font-size:16px;margin:20px 0 10px;color:#374151}
+table{width:100%;border-collapse:collapse;margin-bottom:16px;border-radius:8px;overflow:hidden}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #f0f0f0}
+th{background:#1d4ed8;color:#fff;font-weight:600;font-size:13px}
 tr:nth-child(even) td{background:#f9fafb}
 td{font-size:14px}
 .sp{color:#dc2626;font-weight:600}
 .sn{color:#16a34a;font-weight:600}
 .sz{color:#6b7280}
-ul.risks{list-style:none}
-ul.risks li{padding:6px 0 6px 16px;position:relative}
-ul.risks li::before{content:"•";color:#dc2626;position:absolute;left:0}
-.lv td:first-child{width:80px;color:#6b7280;font-weight:600}
-footer{margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb}
-.ds{color:#6b7280;font-size:12px;margin-bottom:8px}
-.disc{color:#9ca3af;font-size:12px;font-style:italic}
-.spec{background:#f9fafb;border-radius:6px;padding:14px 18px;margin:12px 0;border:1px solid #e5e7eb}
+ul.risks{list-style:none;margin-bottom:16px}
+ul.risks li{padding:8px 0 8px 20px;position:relative;border-bottom:1px solid #f5f5f5;font-size:14px}
+ul.risks li::before{content:"⚠";color:#dc2626;position:absolute;left:0;font-size:13px}
+.lv td:first-child{width:100px;color:#6b7280;font-weight:600;background:#f9fafb}
+footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
+.ds{color:#86868b;font-size:12px;margin-bottom:8px}
+.disc{color:#a1a1a6;font-size:12px;font-style:italic}
+.spec{background:#f3f4f6;border-radius:8px;padding:16px 20px;margin:12px 0;border:1px solid #e5e7eb;font-size:14px;line-height:1.8}
+.analysis{background:#fafafa;border-radius:8px;padding:16px 20px;margin:12px 0;border:1px solid #e5e7eb;font-size:14px;line-height:1.8}
+.analysis p{margin-bottom:10px}
+.events-table{margin-top:12px}
+.advice-list{list-style:none;counter-reset:advice;margin:12px 0}
+.advice-list li{counter-increment:advice;padding:8px 0 8px 32px;position:relative;border-bottom:1px solid #f5f5f5;font-size:14px}
+.advice-list li::before{content:counter(advice) ".";color:#1d4ed8;font-weight:600;position:absolute;left:0}
 </style>
 </head>
 <body>
@@ -87,7 +94,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb}
 {{/监控信号}}
 
 {{#kline_data_source}}
-<h2>四、K线形态</h2>
+<h2>五、K线形态</h2>
 <table>
 <thead><tr><th>形态</th><th>方向</th><th>位置</th><th>得分</th></tr></thead>
 <tbody>
@@ -96,13 +103,39 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb}
 {{/kline_pattern_list}}
 </tbody>
 </table>
-<p style="color:#6b7280;font-size:12px">K线数据: {{kline_data_range}} ({{kline_data_count}}条)</p>
+<p style="color:#86868b;font-size:12px">K线数据: {{kline_data_range}} ({{kline_data_count}}条)</p>
 {{/kline_data_source}}
 
 {{#特殊标记}}
-<h2>五、{{特殊标记标题}}</h2>
+<h2>六、{{特殊标记标题}}</h2>
 <div class="spec">{{特殊标记内容}}</div>
 {{/特殊标记}}
+
+{{#综合研判}}
+<h2>七、综合研判</h2>
+
+<h3>核心矛盾</h3>
+<div class="analysis">{{核心矛盾}}</div>
+
+{{#关键事件}}
+<h3>关键时间窗口</h3>
+<table class="events-table">
+<thead><tr><th>日期</th><th>事件</th><th>影响</th></tr></thead>
+<tbody>
+{{#事件列表}}
+  <tr><td>{{日期}}</td><td>{{事件}}</td><td>{{影响}}</td></tr>
+{{/事件列表}}
+</tbody>
+</table>
+{{/关键事件}}
+
+<h3>操作建议</h3>
+<ul class="advice-list">
+{{#操作建议列表}}
+  <li>{{内容}}</li>
+{{/操作建议列表}}
+</ul>
+{{/综合研判}}
 
 <footer>
 {{#kline_data_source}}

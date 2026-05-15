@@ -228,7 +228,19 @@ def build_context(args):
     data_points = kline_meta.get("record_count") or kline_meta.get("data_points") or meta.get("data_points", 0)
     kline_start = kline_meta.get("start_date", "")
     kline_end = kline_meta.get("end_date", "")
-    kline_range = f"{kline_start}~{kline_end}" if kline_start and kline_end else ""
+    # If meta doesn't have date range, compute from data array
+    if not kline_start or not kline_end:
+        kline_data_array = kline.get("data", [])
+        if kline_data_array:
+            dates = []
+            for r in kline_data_array:
+                d = r.get("date") or r.get("trade_date") or r.get("datetime", "")
+                if d:
+                    dates.append(str(d))
+            if dates:
+                kline_start = min(dates)
+                kline_end = max(dates)
+    kline_range = f"{kline_start}~{kline_end}" if kline_start and kline_end else f"{data_points}条"
 
     # Risk/reward display
     rr_display = str(rr_ratio)
@@ -237,21 +249,26 @@ def build_context(args):
     elif favorable_rr is False:
         rr_display += " ✗"
 
-    # Monitor signals
+    # Monitor signals (use partial matching to handle "震荡偏多", "震荡偏空" etc.)
     monitor_signals = []
-    if direction in ("bullish", "看多") and support_levels:
+    dir_lower = direction.lower()
+    is_bullish = any(kw in dir_lower for kw in ("看多", "bullish")) and not any(kw in dir_lower for kw in ("看空", "bearish"))
+    is_bearish = any(kw in dir_lower for kw in ("看空", "bearish"))
+    is_neutral = any(kw in dir_lower for kw in ("震荡", "neutral", "sideways")) or (not is_bullish and not is_bearish)
+
+    if is_bullish and support_levels:
         monitor_signals = [
             ("跌破止损位", "立即止损离场"),
             (f"跌破支撑位{support_levels[0]}", "减半仓位，重新评估"),
             (f"突破目标价{target_moderate}", "可分批止盈"),
         ]
-    elif direction in ("bearish", "看空") and resistance_levels:
+    elif is_bearish and resistance_levels:
         monitor_signals = [
             ("突破止损位", "立即离场"),
             (f"突破压力位{resistance_levels[0]}", "重新评估方向"),
             ("继续下跌创新低", "持有观望"),
         ]
-    elif direction in ("neutral", "震荡"):
+    elif is_neutral:
         monitor_signals = [
             (f"突破压力位{resistance_levels[0] if resistance_levels else '—'}", "突破方向追入，需量价确认"),
             (f"跌破支撑位{support_levels[0] if support_levels else '—'}", "减仓观望"),
@@ -265,15 +282,67 @@ def build_context(args):
     elif etf_data:
         nav_info = etf_data.get("nav", {})
         iopv_premium = nav_info.get("iopv_premium_pct")
-        iopv_str = f"IOPV折溢价率: {iopv_premium:+.2f}%" if iopv_premium is not None else "IOPV数据暂无"
+        content_parts = []
+
+        # Fund name
+        fund_name = etf_data.get("fund_name", "")
+        if fund_name:
+            content_parts.append(f"基金名称: {fund_name}")
+
+        # IOPV premium/discount
+        if iopv_premium is not None:
+            direction = "溢价" if iopv_premium > 0 else "折价"
+            content_parts.append(f"IOPV折溢价率: {iopv_premium:+.2f}%（{direction}）")
+
+        # Latest NAV
+        nav_val = nav_info.get("nav")
+        if nav_val:
+            content_parts.append(f"最新净值: {nav_val}")
+
+        # Fund size
+        fund_size = etf_data.get("fund_size", {})
+        shares = fund_size.get("shares_billion")
+        net_asset = fund_size.get("net_asset_billion")
+        if shares is not None or net_asset is not None:
+            size_parts = []
+            if shares is not None:
+                size_parts.append(f"{shares:.2f}亿份")
+            if net_asset is not None:
+                size_parts.append(f"{net_asset:.2f}亿元")
+            if size_parts:
+                content_parts.append(f"基金规模: {'/'.join(size_parts)}")
+
+        # Returns track record
+        returns = etf_data.get("returns", {})
+        if returns:
+            ret_parts = []
+            period_labels = {"1m": "近1月", "3m": "近3月", "6m": "近6月", "1y": "近1年"}
+            for key, label in period_labels.items():
+                val = returns.get(key)
+                if val is not None:
+                    ret_parts.append(f"{label}: {val:+.2f}%")
+            if ret_parts:
+                content_parts.append("收益率: " + " | ".join(ret_parts))
+
+        # Top holdings
         holdings = etf_data.get("top_holdings", [])
-        holdings_str = ""
         if holdings:
-            holdings_str = "前十大持仓: " + "、".join(f"{h['name']}({h.get('weight', '?')}%)" for h in holdings[:5])
+            holding_strs = [f"{h['name']}({h.get('weight', '?')}%)" for h in holdings[:5]]
+            content_parts.append("前十大持仓: " + "、".join(holding_strs))
+
+        # Subscription/redemption flows
+        recent_flows = etf_data.get("recent_flows", [])
+        if recent_flows:
+            first_shares = recent_flows[0].get("shares_billion", 0)
+            last_shares = recent_flows[-1].get("shares_billion", 0)
+            if first_shares and last_shares:
+                change = last_shares - first_shares
+                content_parts.append(f"近{len(recent_flows)}日申赎: 份额变动{change:+.2f}亿份")
+
         special_section = {
             "type": "etf",
             "title": "ETF 特殊分析",
-            "content": f"{iopv_str}\n{holdings_str}" if holdings_str else iopv_str,
+            "content": "\n\n".join(content_parts) if content_parts else "ETF数据暂无",
         }
 
     context = {
@@ -338,6 +407,32 @@ def build_context(args):
         "数据质量警告": summary.get("risk_reward_warning") or ("⚠️ 数据不足，分析可靠性有限" if meta.get("data_points", 999) < 60 else ""),
     }
 
+    # Comprehensive analysis (综合研判 section) from args.analysis JSON
+    analysis_data = None
+    if args.analysis:
+        try:
+            analysis_data = json.loads(args.analysis)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if analysis_data:
+        events = analysis_data.get("events", [])
+        advice = analysis_data.get("advice", [])
+        context["综合研判"] = True
+        context["核心矛盾"] = analysis_data.get("core_conflict", "")
+        context["关键事件"] = len(events) > 0
+        context["事件列表"] = [
+            {"日期": e.get("date", ""), "事件": e.get("event", ""), "影响": e.get("impact", "")}
+            for e in events
+        ]
+        context["操作建议列表"] = [{"内容": a} for a in advice if a]
+    else:
+        context["综合研判"] = False
+        context["核心矛盾"] = ""
+        context["关键事件"] = False
+        context["事件列表"] = []
+        context["操作建议列表"] = []
+
     return context
 
 
@@ -365,6 +460,8 @@ def main():
     parser.add_argument("--fundamental-summary", help="Fundamental dimension summary")
     parser.add_argument("--sentiment-summary", help="Sentiment dimension summary")
     parser.add_argument("--macro-summary", help="Macro dimension summary")
+    # Comprehensive analysis for 综合研判 section
+    parser.add_argument("--analysis", help="JSON object with core_conflict, events, advice for 综合研判 section")
     # Output paths
     parser.add_argument("--output-md", help="Output Markdown file path")
     parser.add_argument("--output-html", help="Output HTML file path")
@@ -414,6 +511,21 @@ def main():
                 special = scores_data.get("special")
                 if special:
                     args.special = json.dumps(special, ensure_ascii=False)
+            # Read dimension summaries from scores.json
+            dim_summaries = scores_data.get("dimension_summaries", {})
+            if not args.capital_summary and dim_summaries.get("capital"):
+                args.capital_summary = dim_summaries["capital"]
+            if not args.fundamental_summary and dim_summaries.get("fundamental"):
+                args.fundamental_summary = dim_summaries["fundamental"]
+            if not args.sentiment_summary and dim_summaries.get("sentiment"):
+                args.sentiment_summary = dim_summaries["sentiment"]
+            if not args.macro_summary and dim_summaries.get("macro"):
+                args.macro_summary = dim_summaries["macro"]
+            # Read comprehensive analysis for 综合研判 section
+            if not args.analysis:
+                analysis = scores_data.get("analysis")
+                if analysis:
+                    args.analysis = json.dumps(analysis, ensure_ascii=False)
         except (OSError, json.JSONDecodeError):
             pass
 

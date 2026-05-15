@@ -107,28 +107,59 @@ def determine_confidence(abs_score, consistency):
 
 
 def extract_risks(technical_data, score_data):
-    """Extract risk items from technical analysis key_signals."""
+    """Extract risk items from technical analysis key_signals.
+
+    Selects only risk-relevant signals and deduplicates by extracting
+    distinct risk topics across compound signals.
+    """
     risks = []
 
-    # From technical analysis
     summary = technical_data.get("summary", {})
     key_signals = summary.get("key_signals", [])
 
-    # Classify signals as risks
-    risk_keywords = ["背离", "死叉", "极度收口", "超买", "压力", "空头", "下跌", "减仓", "止损"]
+    # Risk keywords for signal classification
+    risk_keywords = ["背离", "死叉", "极度收口", "超买", "压力", "空头", "下跌", "减仓", "止损",
+                     "净流出", "净流出"]
+
+    # Track extracted risk topics to avoid redundancy
+    # e.g. "RSI顶背离" and "RSI=46.3...顶背离" both talk about RSI divergence
+    extracted_topics = set()
+
     for signal in key_signals:
         is_risk = any(kw in signal for kw in risk_keywords)
-        # Include all signals as risks context, but prioritize risk ones
-        if is_risk:
+        if not is_risk:
+            continue
+
+        # Determine the primary risk topic from this signal
+        topic = None
+        for kw in ["极度收口", "顶背离", "底背离", "死叉", "背离", "超买", "超卖", "净流出"]:
+            if kw in signal:
+                # Extract indicator name before the keyword
+                idx = signal.find(kw)
+                # Find which indicator this signal is about
+                for ind in ["RSI", "KDJ", "MACD", "布林带", "OBV", "ADX", "均线", "量价"]:
+                    if ind in signal:
+                        topic = f"{ind}:{kw}"
+                        break
+                if not topic:
+                    topic = kw
+                break
+
+        # Normalize: "RSI=46.3，中性区间；顶背离" → topic "RSI:背离"
+        # "RSI顶背离" → topic "RSI:背离"
+        # "中轨下方运行；布林带极度收口(3%分位，即将变盘)" → topic "布林带:极度收口"
+
+        if topic and topic not in extracted_topics:
+            risks.append(signal)
+            extracted_topics.add(topic)
+        elif not topic:
+            # Signals without a clear topic (e.g. generic warnings)
             risks.append(signal)
 
     # Add risk_reward_warning if present
     rr_warning = summary.get("risk_reward_warning")
     if rr_warning:
         risks.append(rr_warning)
-
-    # From non-technical signals if provided
-    # (agent will add these via --risks or post-processing)
 
     return risks
 
@@ -194,6 +225,18 @@ def main():
                         default="stock", help="Asset type for special sections")
     parser.add_argument("--etf-data", help="Path to ETF data JSON")
     parser.add_argument("--capital-flow-data", help="Path to capital flow JSON")
+    # Dimension summaries (rich text from agent's research, passed to report)
+    parser.add_argument("--capital-summary", default="",
+                        help="Capital flow dimension summary text")
+    parser.add_argument("--fundamental-summary", default="",
+                        help="Fundamental dimension summary text")
+    parser.add_argument("--sentiment-summary", default="",
+                        help="Sentiment dimension summary text")
+    parser.add_argument("--macro-summary", default="",
+                        help="Macro dimension summary text")
+    # Comprehensive analysis for 综合研判 section
+    parser.add_argument("--analysis", default=None,
+                        help="JSON object with core_conflict, events (array of {date,event,impact}), advice (array of strings)")
     parser.add_argument("--risks", help="JSON array of additional risk strings")
     parser.add_argument("-o", "--output", default="/tmp/scores.json",
                         help="Output JSON file path")
@@ -254,13 +297,30 @@ def main():
         except json.JSONDecodeError:
             pass
 
-    # Deduplicate risks while preserving order
-    seen = set()
+    # Deduplicate risks while preserving order (by exact string AND topic)
+    seen_text = set()
+    seen_topics = set()
     unique_risks = []
     for r in risks:
-        if r not in seen:
-            seen.add(r)
-            unique_risks.append(r)
+        if r in seen_text:
+            continue
+        # Extract risk topic for semantic dedup
+        topic = None
+        for kw in ["极度收口", "顶背离", "底背离", "死叉", "背离", "超买", "超卖", "净流出", "净流入"]:
+            if kw in r:
+                for ind in ["RSI", "KDJ", "MACD", "布林带", "OBV", "ADX", "均线", "量价", "资金"]:
+                    if ind in r:
+                        topic = f"{ind}:{kw}"
+                        break
+                if not topic:
+                    topic = kw
+                break
+        if topic and topic in seen_topics:
+            continue
+        seen_text.add(r)
+        if topic:
+            seen_topics.add(topic)
+        unique_risks.append(r)
 
     # Build special section
     etf_data = None
@@ -286,6 +346,15 @@ def main():
         "risks": unique_risks,
         "special": special,
         "data_quality": data_quality,
+        # Dimension summaries (rich text from agent research, passed through to report)
+        "dimension_summaries": {
+            "capital": args.capital_summary,
+            "fundamental": args.fundamental_summary,
+            "sentiment": args.sentiment_summary,
+            "macro": args.macro_summary,
+        },
+        # Comprehensive analysis for 综合研判 section in report
+        "analysis": json.loads(args.analysis) if args.analysis else None,
         # Convenience fields for report generation
         "report_params": {
             "direction": full_direction,

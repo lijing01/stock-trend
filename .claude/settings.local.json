@@ -65,7 +65,9 @@
       "Bash(cp /tmp/superpowers-install/hooks/session-start ~/.claude/superpowers-hooks/)",
       "Bash(cp /tmp/superpowers-install/hooks/run-hook.cmd ~/.claude/superpowers-hooks/)",
       "Bash(chmod +x ~/.claude/superpowers-hooks/session-start ~/.claude/superpowers-hooks/run-hook.cmd)",
-      "Bash(bash ~/.claude/superpowers-hooks/session-start)"
+      "Bash(bash ~/.claude/superpowers-hooks/session-start)",
+      "Bash(brew config *)",
+      "Bash(bash)"
     ]
   }
 }
