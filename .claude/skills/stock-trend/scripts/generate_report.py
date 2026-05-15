@@ -459,6 +459,18 @@ def build_context(args):
         context["事件列表"] = []
         context["操作建议列表"] = []
 
+    # Validation warnings from scores file
+    validation_warnings = []
+    if args.scores_file:
+        try:
+            with open(args.scores_file, "r", encoding="utf-8") as f:
+                sf = json.load(f)
+            validation_warnings = sf.get("validation_warnings", [])
+        except Exception:
+            pass
+    context["校验警告"] = len(validation_warnings) > 0
+    context["校验警告列表"] = [{"警告项": w} for w in validation_warnings] if validation_warnings else []
+
     return context
 
 
