@@ -507,8 +507,31 @@ def main():
     # Output paths
     parser.add_argument("--output-md", help="Output Markdown file path")
     parser.add_argument("--output-html", help="Output HTML file path")
+    parser.add_argument("--code", help="Stock/ETF code to locate data directory")
+    parser.add_argument("--data-dir", help="Data directory path (default: .cache/stock-trend/{code}/)")
 
     args = parser.parse_args()
+
+    # Resolve data directory from --code
+    if args.code:
+        from cache_utils import CACHE_DIR
+        data_dir = Path(args.data_dir) if args.data_dir else Path(CACHE_DIR) / args.code
+
+        # Auto-fill paths from data directory
+        if not args.pipeline:
+            pipeline_path = data_dir / "pipeline_output.json"
+            if pipeline_path.exists():
+                args.pipeline = str(pipeline_path)
+
+        if not args.scores_file:
+            scores_path = data_dir / "scores.json"
+            if scores_path.exists():
+                args.scores_file = str(scores_path)
+
+        if not args.chart:
+            chart_path = data_dir / "chart_fragment.html"
+            if chart_path.exists():
+                args.chart = str(chart_path)
 
     if not args.output_md and not args.output_html:
         print("Error: at least one of --output-md or --output-html is required", file=sys.stderr)
