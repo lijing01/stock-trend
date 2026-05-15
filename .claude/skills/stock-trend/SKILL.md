@@ -55,49 +55,53 @@ python3 .claude/skills/stock-trend/scripts/resolve_code.py <name_or_code> -o /tm
 
 输出包含 `ts_code`、`asset`、`adj`、`market`、`name`，后续步骤直接使用输出值。
 
-## Step 2: 数据管线一键执行（与 Step 3 并发运行）
+## Step 2: 数据管线 + 四维搜索（并发执行）
 
-> **关键说明**：本步骤与 Step 3 **同时执行**。启动管线后，立即进入 Step 3 开始搜索，无需等待管线完成。管线数据（technical.json）在 Step 4 之前就绪即可。
+> **关键说明**：本步骤包含两步并发操作：(A) 数据管线一键执行 与 (B) 四维并行搜索。两者同时启动，无交叉依赖。
 
-使用 `run_pipeline.py` 自动完成数据获取和技术分析：
+### A. 数据管线一键执行
+
+使用 `--code` 模式一键完成全部数据获取和技术分析：
 
 ```bash
-python3 .claude/skills/stock-trend/scripts/run_pipeline.py <ts_code> --asset <E|FD> --adj <qfq|none> [-o /tmp] [--no-cache]
+python3 .claude/skills/stock-trend/scripts/run_pipeline.py --code <code>
 ```
 
-**缓存机制**：各数据脚本自动缓存结果到 `/tmp/stock-trend-cache/`。盘中 TTL 5分钟，盘后 TTL 16小时（宏观数据盘中4h/盘后12h，基本面盘中30min/盘后16h）。同一标的同日重复分析命中缓存可跳过 API 调用。`--no-cache` 强制刷新。
-
-脚本自动执行：
-1. 诊断数据源可用性（检查缓存）
+内部自动执行：
+1. 自动解析标的代码（resolve_code.py）
 2. 获取K线数据（Tushare → 东方财富自动降级）
 3. 技术分析（analyze_technical.py）
 4. ETF数据获取（标的为ETF时）
-5. 资金流向获取（含北向/融资融券/龙虎榜数据）
-6. 基本面数据获取（通过 AKShare，ETF 标的跳过）
-7. 宏观数据快照获取（汇率/利率/PMI/CPI/M2，独立进程）
+5. 资金流向获取（含北向/融资融券/龙虎榜）
+6. 基本面数据获取（AKShare，ETF跳过）
+7. 宏观数据快照（汇率/利率/PMI/CPI/M2）
 
-输出文件：
-- `/tmp/pipeline_output.json` — 管线汇总（包含数据源、记录数、耗时等元信息）
-- `/tmp/kline.json` — K线数据
-- `/tmp/technical.json` — 技术分析结果
-- `/tmp/etf_data.json` — ETF数据（仅ETF标的）
-- `/tmp/capital_flow.json` — 资金流向（含 data_extended 增强数据）
-- `/tmp/fundamental.json` — 基本面数据（AKShare，非ETF）
-- `/tmp/macro_snapshot.json` — 宏观快照（AKShare）
+输出到 `.cache/stock-trend/{code}/` 目录：
+- `pipeline_output.json` — 管线汇总（包含数据源、记录数、耗时等元信息）
+- `kline.json` — K线数据
+- `technical.json` — 技术分析结果
+- `etf_data.json` — ETF数据（仅ETF标的）
+- `capital_flow.json` — 资金流向（含 data_extended 增强数据）
+- `fundamental.json` — 基本面数据（AKShare，非ETF）
+- `macro_snapshot.json` — 宏观快照（AKShare）
 
-**管线完成后**（可选）生成K线图用于报告嵌入：
+**缓存机制**：各数据自动缓存到 `.cache/stock-trend/`。盘中TTL 5分钟，盘后TTL 16小时（宏观数据盘中4h/盘后12h，基本面盘中30min/盘后16h）。同一标的同日重复分析命中缓存可跳过 API 调用。`--no-cache` 强制刷新。
+
+**超时处理**：每步骤超时30s，超时维度标记为timeout，其余继续执行。
+
+管线完成后可选生成K线图用于报告嵌入：
 
 ```bash
-python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.json --technical /tmp/technical.json -o /tmp/chart_fragment.html
+python3 .claude/skills/stock-trend/scripts/generate_chart_html.py .cache/stock-trend/{code}/kline.json --technical .cache/stock-trend/{code}/technical.json -o .cache/stock-trend/{code}/chart_fragment.html
 ```
 
 使用 `--no-data` 时跳过本步骤。管线失败或需要手动降级时，参考 [references/troubleshooting.md](references/troubleshooting.md)。
 
-## Step 3: 四维并行搜索（与 Step 2 同时执行）
+### B. 四维并行搜索
 
-> **关键说明**：启动 Step 2 管线后，**立即**按以下四个维度**并行**搜索（使用同时调用的工具），无需等待管线完成。
+启动上文 A 数据管线后，**立即**按以下四个维度**并行**搜索（使用同时调用的工具），无需等待管线完成。
 
-### 并行搜索指令
+#### 并行搜索指令
 
 使用**一次调用多个搜索工具**同时搜索四个维度：
 
@@ -112,17 +116,17 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 
 **四个搜索并行执行，无交叉依赖**。
 
-### 自动化数据基线
+#### 自动化数据基线
 
 部分维度的自动化数据已在管线中获取（通过 AKShare），Agent 的使用方式：
 
-- **基本面**：读取 `fundamental.json` 获取 PE/PB 百分位、营收/利润增速、ROE。Agent 可据此直接撰写摘要，无需重复搜索基础数据。数据质量 `good`/`partial` 时可用。
-- **资金面**：`capital_flow.json` 的 `data_extended` 包含北向资金持仓变动和融资融券数据
-- **宏观面**：`macro_snapshot.json` 提供汇率、PMI、CPI、利率等快照
+- **基本面**：读取 `.cache/stock-trend/{code}/fundamental.json` 获取 PE/PB 百分位、营收/利润增速、ROE。Agent 可据此直接撰写摘要，无需重复搜索基础数据。数据质量 `good`/`partial` 时可用。
+- **资金面**：`.cache/stock-trend/{code}/capital_flow.json` 的 `data_extended` 包含北向资金持仓变动和融资融券数据
+- **宏观面**：`.cache/stock-trend/{code}/macro_snapshot.json` 提供汇率、PMI、CPI、利率等快照
 
 **Agent 评分始终覆盖自动化评分** — 以 Agent 判断为准。
 
-### 维度摘要与综合研判
+#### 维度摘要与综合研判
 
 为每个非技术面维度撰写**简明摘要**（1-2句话），含利多利空标记和关键数据，例如：
 - 资金面：`利多：ETF近20日净申购+1.75亿元；利空：主力交易资金近2日净流出1.59亿元`
@@ -133,19 +137,19 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 **正反强制**：每个维度必须同时包含利多和利空。只有单向信号时标注"未找到反向信号，可能存在确认偏差"。
 摘要格式：`利多：xxx；利空：xxx`（分号分隔，便于程序解析）。
 
-摘要通过 Step 4 的 `--*-summary` 传入。同时撰写**综合研判**（核心矛盾、关键事件、操作建议），通过 `--analysis` 传入。
+摘要通过 Step 3 的 `--*-summary` 传入。同时撰写**综合研判**（核心矛盾、关键事件、操作建议），通过 `--analysis` 传入。
 
-### 数据质量检查
+### C. 数据质量检查
 
-检查 `technical.json` 的 `summary.data_quality`：
+检查 `.cache/stock-trend/{code}/technical.json` 的 `summary.data_quality`：
 - `"insufficient"`（数据<30条）：技术面权重降至17.5%
 - `"limited"`（数据30-59条）：技术面权重降至25%
 
-### 等待汇合
+### D. 等待汇合
 
-等待管线完成且所有搜索结果收集完毕，进入 Step 4。
-- 管线超时（60s）时技术面按 0 分处理，标注"管线超时"
-- 管线和搜索完成即进入 Step 4
+等待管线完成且所有搜索结果收集完毕，进入 Step 3。
+- 管线超时（单步30s，见A节超时处理）时对应维度按 0 分处理，标注"管线超时"
+- 管线和搜索完成即进入 Step 3
 
 **搜索工具选择**：
 1. **`WebSearch`**：首选，用于宏观政策、行业新闻等
@@ -156,7 +160,7 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 
 **技术面内部子权重**（脚本自动应用）：趋势指标(MA/MACD)×1.5、趋势强度(ADX)×1.2、震荡指标(RSI/KDJ)×0.8、通道/量能(布林带/成交量/OBV)×1.0、K线形态×0.5。一致性因子：同向指标数/总指标数影响置信度。详细评分标准参考 [references/trend-dimensions.md](references/trend-dimensions.md)。
 
-## Step 3.5: 逆向校验
+### E. 逆向校验
 
 > 对每个非技术维度做逆向审视，防止确认偏差导致评分偏颇。
 
@@ -174,7 +178,7 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 - 超封顶 → 自动修正得分至封顶值
 - 逆向审视调整得分 → 向0靠近0.5-1.0
 
-**自检结果传入 Step 4**：通过 `--self-check` 参数传入，格式：
+**自检结果传入 Step 3**：通过 `--self-check` 参数传入，格式：
 ```json
 {
   "capital_flow": {"counter_found": true, "adjusted": false, "covered_items": 3},
@@ -184,33 +188,25 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 }
 ```
 
-## Step 4: 计算综合评分
+## Step 3: 计算综合评分
 
-使用 `compute_scores.py` 自动计算：
+使用 `--code` 模式简化调用：
 
 ```bash
-python3 .claude/skills/stock-trend/scripts/compute_scores.py \
-  --technical /tmp/technical.json \
+python3 .claude/skills/stock-trend/scripts/compute_scores.py --code <code> \
   --capital-flow-score <资金面得分> \
   --fundamental-score <基本面得分> \
   --sentiment-score <情绪面得分> \
   --macro-score <宏观面得分> \
   [--focus <维度>] \
   [--asset-type etf|hk|st|stock] \
-  [--etf-data /tmp/etf_data.json] \
-  [--capital-flow-data /tmp/capital_flow.json] \
-  [--fundamental-data /tmp/fundamental.json] \
-  [--macro-data /tmp/macro_snapshot.json] \
-  [--self-check '{"capital_flow":{"counter_found":true,"adjusted":false,"covered_items":3},...}'] \
-  [--signals-info '{"capital_flow":{"count":3,"has_counter":true},...}'] \
-  [--risks '["风险1","风险2"]'] \
-  [--capital-summary "利多：ETF近20日净申购+1.75亿；利空：主力净流出1.54亿"] \
-  [--fundamental-summary "利多：PE 22.9倍偏低；利空：盈利增速3-4%偏弱"] \
-  [--sentiment-summary "利多：AI领涨；利空：冲高回落"] \
-  [--macro-summary "利多：中美缓和；利空：美联储鹰派"] \
-  [--analysis '{"core_conflict":"核心矛盾...","events":[{"date":"5月15日","event":"事件","impact":"影响"}],"advice":["建议1","建议2"]}'] \
-  -o /tmp/scores.json
+  [--self-check '...'] [--signals-info '...'] [--risks '...'] \
+  [--capital-summary "..."] [--fundamental-summary "..."] \
+  [--sentiment-summary "..."] [--macro-summary "..."] \
+  [--analysis '...']
 ```
+
+评分脚本自动从 `.cache/stock-trend/{code}/` 读取 `technical.json` 和各维度数据文件。`--*-score` 仍为手动传入。
 
 **计算规则**（脚本自动处理）：
 - 技术面得分：从 `technical.json` 的 `summary.total_score` 自动提取
@@ -226,12 +222,12 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
 - 置信度：评分绝对值 ≥ 2.5 且一致性 ≥ 0.7 → 高；≥ 2.0 且一致性 ≥ 0.5 → 中；其他 → 低
 - 风险项自动从 `key_signals` 提取（自动去重同主题风险）
 - ETF/HK/ST 特殊标记自动生成
-- **维度摘要**（`--*-summary`）：每个非技术面维度的1-2句分析摘要，展示在报告"关键信号"表。摘要来自 Step 3 WebSearch 结果
+- **维度摘要**（`--*-summary`）：每个非技术面维度的1-2句分析摘要，展示在报告"关键信号"表。摘要来自 Step 2 WebSearch 结果
 - **综合研判**（`--analysis`）：结构化 JSON，包含 `core_conflict`（核心矛盾）、`events`（关键事件数组）、`advice`（操作建议数组），展示在报告"七、综合研判"
 
-输出 `/tmp/scores.json` 包含综合评分、方向、置信度、风险项、维度摘要、综合研判、报告参数等全部字段。
+输出 `.cache/stock-trend/{code}/scores.json` 包含综合评分、方向、置信度、风险项、维度摘要、综合研判、报告参数等全部字段。
 
-## Step 5: 判定趋势与置信度
+### 判定趋势与置信度
 
 | 综合评分 | 趋势 | 评分绝对值 | 置信度 |
 |---|---|---|---|
@@ -245,7 +241,9 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
 - 日线看多+周线看空 = 抢反弹策略，标注"短线操作"
 - 日线看空+周线看多 = 回调买入机会，标注"回调关注"
 
-## Step 6: 风险管理与监控信号
+## Step 4: 风险管理 + 生成报告
+
+### 风险管理与监控信号
 
 基于 `analyze_technical.py` 的 `summary` 输出生成：
 
@@ -270,32 +268,27 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
 | 看空 | 突破止损位（空仓反向） | 立即离场 |
 | 震荡 | 突破压力/跌破支撑 | 突破方向追入，需量价确认 |
 
-## Step 7: 特殊标的的处理
+### 特殊标的的处理
 
 - **ST/*ST**：基本面强制 -1；标题行标注退市风险
 - **港股**：增恒指联动、卖空占比、南向资金、AH溢价；标注无涨跌停
 - **ETF**：增 IOPV 折溢价、跟踪误差、申赎、成交额分析
 - **可转债**：增转股溢价率、纯债价值、强赎风险
 
-## Step 8: 生成报告
+### 生成报告
 
-**默认模式**：使用 `generate_report.py` 脚本生成报告
+推荐使用 `--code` 模式：
 
-**方式一（推荐，使用管线+评分文件）**：
 ```bash
-python3 .claude/skills/stock-trend/scripts/generate_report.py \
-  --pipeline /tmp/pipeline_output.json \
-  --scores-file /tmp/scores.json \
-  --chart /tmp/chart_fragment.html \
-  --ts-code 159740.SZ --stock-name '恒生科技ETF大成' \
-  --output-md reports/159740.SZ/20260514-2200.md \
-  --output-html reports/159740.SZ/20260514-2200.html
+python3 .claude/skills/stock-trend/scripts/generate_report.py --code <code> \
+  --ts-code <ts_code> --stock-name '<名称>' \
+  --output-md reports/<ts_code>/<YYYYMMDD-HHmm>.md \
+  --output-html reports/<ts_code>/<YYYYMMDD-HHmm>.html
 ```
 
-`--pipeline` 自动填充 `--kline`、`--technical`、`--etf-data`、`--capital-flow` 参数；
-`--scores-file` 自动填充 `--scores`、`--direction`、`--score`、`--confidence`、`--risks`、`--special`、维度摘要（`--*-summary`）、综合研判（`--analysis`）参数。
+`--code` 自动从 `.cache/stock-trend/{code}/` 读取管线数据和评分结果。
 
-**方式二（手动传参）**：参考 [references/troubleshooting.md](references/troubleshooting.md) 的第 4 节。
+手动传参方式参考 [references/troubleshooting.md](references/troubleshooting.md) 的第 4 节。
 
 **精简模式** (`--compact`)：
 
@@ -316,7 +309,7 @@ python3 .claude/skills/stock-trend/scripts/generate_report.py \
 
 精简模式仅输出文本，不保存 HTML。
 
-## Step 9: 自动打开 HTML 报告
+### 自动打开 HTML 报告
 
 **默认模式**下，生成报告后自动在浏览器中打开 HTML 文件：
 
@@ -326,7 +319,7 @@ open reports/{ts_code}/{YYYYMMDD-HHmm}.html
 
 **精简模式** (`--compact`) 跳过本步骤（无 HTML 文件生成）。
 
-## Step 10: 免责声明
+## 免责声明
 
 所有输出必须附带：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。
 
