@@ -39,17 +39,24 @@ Stock Trend Skill — Claude Code 的 A股/港股/ETF 日趋势判断技能插�
 │       ├── SKILL.md                      # Skill 定义入口
 │       ├── references/
 │       │   ├── trend-dimensions.md        # 趋势维度详细说明
-│       │   └── kline-patterns.md          # K线形态参考
+│       │   ├── kline-patterns.md          # K线形态参考
+│       │   └── troubleshooting.md         # 故障排除与高级用法
 │       ├── scripts/
-│       │   ├── fetch_kline.py             # K线数据获取
-│       │   ├── fetch_kline_eastmoney.py   # 东方财富数据源
-│       │   └── analyze_technical.py       # 技术分析脚本
+│       │   ├── cache_utils.py            # 共享缓存模块
+│       │   ├── fetch_kline.py             # K线数据获取（含缓存）
+│       │   ├── fetch_kline_eastmoney.py   # 东方财富数据源（含缓存）
+│       │   ├── fetch_capital_flow.py      # 资金流向（含缓存）
+│       │   ├── fetch_fundamental.py       # 基本面数据（含缓存）
+│       │   ├── fetch_macro_snapshot.py    # 宏观快照（含缓存）
+│       │   ├── analyze_technical.py       # 技术分析脚本
+│       │   └── ...                        # 其他脚本
 │       └── assets/
 │           ├── report-template.md         # Markdown报告模板
 │           └── report-template.html       # HTML报告模板
 └── specs/
     └── stock-trend-skill.md              # 功能规格说明
 reports/                                    # 生成的报告（已 gitignore）
+/tmp/stock-trend-cache/                    # 数据缓存（系统重启自动清理）
 ```
 
 ## Token 优化

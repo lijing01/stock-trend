@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import urllib.request
+from cache_utils import load_cache, save_cache, get_market_day_ttl
 from datetime import datetime, timedelta
 
 
@@ -300,8 +301,18 @@ def main():
     parser.add_argument("--adj", choices=["qfq", "hfq", "none"], help="Adjustment type (auto-detected if omitted)")
     parser.add_argument("--lmt", type=int, default=250, help="Number of records to fetch (default: 250)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
+    parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
 
     args = parser.parse_args()
+
+    # Check cache (shared key with fetch_kline.py)
+    adj = args.adj or detect_adj(args.ts_code)
+    cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
+    if not args.no_cache:
+        cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
+        if cached:
+            _output(cached, args.output)
+            return
 
     # Check if market is supported by EastMoney
     secid = resolve_secid(args.ts_code)
@@ -435,6 +446,10 @@ def main():
         },
         "data": records,
     }
+
+    # Cache successful result
+    if result.get("meta", {}).get("data_source") not in ("error", None):
+        save_cache(cache_key, result)
 
     _output(result, args.output)
 

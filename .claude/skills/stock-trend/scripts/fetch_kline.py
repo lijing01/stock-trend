@@ -17,6 +17,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from cache_utils import load_cache, save_cache, get_market_day_ttl
 
 # --- Token resolution ---
 
@@ -259,8 +260,18 @@ def main():
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--compact", action="store_true", help="Compact output with fewer columns")
     parser.add_argument("--token", help="Tushare token (overrides env var and config file)")
+    parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
 
     args = parser.parse_args()
+
+    # Check cache before fetching
+    adj = args.adj or ("none" if args.ts_code.endswith(".HK") else "qfq")
+    cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
+    if not args.no_cache:
+        cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
+        if cached:
+            _output(cached, args.output)
+            return
 
     # Resolve token
     token = resolve_token(args.token)
@@ -343,6 +354,10 @@ def main():
     # Fix data_source for HTTP fallback
     if isinstance(source_or_error, str) and source_or_error == "tushare_http":
         result["meta"]["data_source"] = "tushare_http"
+
+    # Cache successful result (only if data_source is not error)
+    if result.get("meta", {}).get("data_source") != "error":
+        save_cache(cache_key, result)
 
     _output(result, args.output)
 

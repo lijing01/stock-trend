@@ -18,6 +18,7 @@ import os
 import sys
 import urllib.request
 import logging
+from cache_utils import load_cache, save_cache, get_market_day_ttl
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
@@ -237,7 +238,23 @@ def main():
     parser.add_argument("ts_code", help="Tushare-style code, e.g. 600519.SH, 159740.SZ")
     parser.add_argument("--asset", choices=["E", "FD"], help="Asset type (auto-detected if omitted)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
+    parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
     args = parser.parse_args()
+
+    # Check cache
+    cache_key = f"capital_flow_{args.ts_code}"
+    if not args.no_cache:
+        cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
+        if cached:
+            text = json.dumps(cached, ensure_ascii=False, indent=2)
+            if args.output:
+                os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
+                with open(args.output, "w", encoding="utf-8") as f:
+                    f.write(text)
+                print(f"Capital flow data (cached) written to {args.output}", file=sys.stderr)
+            else:
+                print(text)
+            return
 
     code = args.ts_code.split(".")[0]
     suffix = "." + args.ts_code.split(".")[1] if "." in args.ts_code else ""
@@ -322,6 +339,10 @@ def main():
 
     if errors:
         result["warnings"] = errors
+
+    # Cache successful result
+    if result.get("meta", {}).get("data_source") not in ("error", None):
+        save_cache(cache_key, result)
 
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:

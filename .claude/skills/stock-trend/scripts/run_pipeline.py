@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--no-capital", action="store_true", help="Skip capital flow fetch")
     parser.add_argument("--no-fundamental", action="store_true", help="Skip fundamental data fetch")
     parser.add_argument("--no-macro", action="store_true", help="Skip macro snapshot fetch")
+    parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore all cache")
     parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp)")
     args = parser.parse_args()
 
@@ -124,14 +125,14 @@ def main():
     kline_path = str(output_dir / "kline.json")
 
     # Try Tushare first
-    kline_result = run_script(
-        [
-            sys.executable, str(SCRIPT_DIR / "fetch_kline.py"),
-            ts_code, "--asset", asset, "--freq", args.freq,
-            "--adj", adj, "-o", kline_path,
-        ],
-        label="fetch_kline_tushare",
-    )
+    kline_cmd = [
+        sys.executable, str(SCRIPT_DIR / "fetch_kline.py"),
+        ts_code, "--asset", asset, "--freq", args.freq,
+        "--adj", adj, "-o", kline_path,
+    ]
+    if args.no_cache:
+        kline_cmd.append("--no-cache")
+    kline_result = run_script(kline_cmd, label="fetch_kline_tushare")
 
     kline_data = read_json(kline_path)
     need_fallback = False
@@ -149,14 +150,14 @@ def main():
 
     if need_fallback:
         print(f"  Falling back to East Money...")
-        fallback_result = run_script(
-            [
+        fallback_cmd = [
                 sys.executable, str(SCRIPT_DIR / "fetch_kline_eastmoney.py"),
                 ts_code, "--asset", asset, "--freq", args.freq,
                 "-o", kline_path,
-            ],
-            label="fetch_kline_eastmoney",
-        )
+            ]
+        if args.no_cache:
+            fallback_cmd.append("--no-cache")
+        fallback_result = run_script(fallback_cmd, label="fetch_kline_eastmoney")
         if not fallback_result["success"]:
             errors.append(f"K-line fetch failed: {fallback_result['stderr']}")
         kline_data = read_json(kline_path)
@@ -222,11 +223,14 @@ def main():
     # Capital flow
     if not args.no_capital:
         capital_path = str(output_dir / "capital_flow.json")
-        parallel_tasks.append((
-            [
+        capital_cmd = [
                 sys.executable, str(SCRIPT_DIR / "fetch_capital_flow.py"),
                 ts_code, "--asset", asset, "-o", capital_path,
-            ],
+            ]
+        if args.no_cache:
+            capital_cmd.append("--no-cache")
+        parallel_tasks.append((
+            capital_cmd,
             "fetch_capital_flow",
             capital_path,
         ))
@@ -234,11 +238,14 @@ def main():
     # Fundamental data (skip for ETFs)
     if not args.no_fundamental and asset != "FD":
         fundamental_path = str(output_dir / "fundamental.json")
-        parallel_tasks.append((
-            [
+        fundamental_cmd = [
                 sys.executable, str(SCRIPT_DIR / "fetch_fundamental.py"),
                 ts_code, "--asset", asset, "-o", fundamental_path,
-            ],
+            ]
+        if args.no_cache:
+            fundamental_cmd.append("--no-cache")
+        parallel_tasks.append((
+            fundamental_cmd,
             "fetch_fundamental",
             fundamental_path,
         ))
@@ -246,11 +253,14 @@ def main():
     # Macro snapshot (market-level, always)
     if not args.no_macro:
         macro_path = str(output_dir / "macro_snapshot.json")
-        parallel_tasks.append((
-            [
+        macro_cmd = [
                 sys.executable, str(SCRIPT_DIR / "fetch_macro_snapshot.py"),
                 "-o", macro_path,
-            ],
+            ]
+        if args.no_cache:
+            macro_cmd.append("--no-cache")
+        parallel_tasks.append((
+            macro_cmd,
             "fetch_macro_snapshot",
             macro_path,
         ))

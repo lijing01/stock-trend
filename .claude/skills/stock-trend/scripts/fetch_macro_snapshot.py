@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import logging
+from cache_utils import load_cache, save_cache, get_market_day_ttl
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
@@ -200,7 +201,22 @@ def main():
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--focus", nargs="*", choices=["rate", "forex", "index", "policy"],
                         help="Focus areas to fetch (default: all)")
+    parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
     args = parser.parse_args()
+
+    # Check cache (macro snapshot is market-wide, long TTL)
+    if not args.no_cache:
+        cached = load_cache("macro_snapshot", ttl_seconds=get_market_day_ttl(trading_ttl=14400, after_hours_ttl=43200))
+        if cached:
+            text = json.dumps(cached, ensure_ascii=False, indent=2)
+            if args.output:
+                os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
+                with open(args.output, "w", encoding="utf-8") as f:
+                    f.write(text)
+                print(f"Macro snapshot (cached) written to {args.output}", file=sys.stderr)
+            else:
+                print(text)
+            return
 
     summary = {}
     errors = []
@@ -236,6 +252,9 @@ def main():
         "data": summary,
         "errors": errors,
     }
+
+    # Save to cache
+    save_cache("macro_snapshot", result)
 
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:
