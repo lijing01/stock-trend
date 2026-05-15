@@ -28,7 +28,11 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-CACHE_DIR = os.environ.get("STOCK_TREND_CACHE_DIR", "/tmp/stock-trend-cache")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR))))
+# .claude/skills/stock-trend/scripts/ -> project root (4 levels up)
+_DEFAULT_CACHE_DIR = os.path.join(_PROJECT_ROOT, ".cache", "stock-trend")
+CACHE_DIR = os.environ.get("STOCK_TREND_CACHE_DIR", _DEFAULT_CACHE_DIR)
 
 
 def get_cache_path(cache_key: str) -> str:
@@ -105,6 +109,55 @@ def clear_cache(cache_key: str = None) -> None:
                         pass
         except OSError:
             pass
+
+
+def clean_cache(max_size_mb=200):
+    """Remove oldest cache files when total size exceeds max_size_mb.
+
+    Uses LRU eviction based on cache_timestamp metadata.
+    Called at pipeline start to prevent unbounded cache growth.
+    """
+    if not os.path.exists(CACHE_DIR):
+        return 0
+
+    max_size_bytes = max_size_mb * 1024 * 1024
+    files = []
+    total_size = 0
+
+    for f in os.listdir(CACHE_DIR):
+        if not f.endswith(".json"):
+            continue
+        fp = os.path.join(CACHE_DIR, f)
+        try:
+            size = os.path.getsize(fp)
+            with open(fp, "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+            ts = d.get("cache_timestamp", 0)
+            files.append((fp, size, ts))
+            total_size += size
+        except (json.JSONDecodeError, OSError):
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+
+    if total_size <= max_size_bytes:
+        return 0
+
+    # Sort oldest first for eviction
+    files.sort(key=lambda x: x[2])
+    removed = 0
+    for fp, size, ts in files:
+        try:
+            os.remove(fp)
+            total_size -= size
+            removed += 1
+            if total_size <= max_size_bytes * 0.8:  # Evict to 80% threshold
+                break
+        except OSError:
+            pass
+
+    return removed
 
 
 def is_trading_hours() -> bool:
