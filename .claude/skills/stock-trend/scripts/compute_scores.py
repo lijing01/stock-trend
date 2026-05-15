@@ -304,12 +304,24 @@ def build_special_section(asset_type, technical_data, etf_data=None, capital_flo
     return None
 
 
+def find_data_file(data_dir, filename):
+    """Find a data file in the data directory, return (parsed_json, path) or (None, path)."""
+    path = Path(data_dir) / filename
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f), str(path)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None, str(path)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compute composite scores for stock-trend analysis"
     )
     parser.add_argument(
-        "--technical", required=True,
+        "--technical",
         help="Path to technical analysis JSON"
     )
     parser.add_argument("--capital-flow-score", type=float, default=None,
@@ -345,13 +357,32 @@ def main():
                         help="JSON with self-check results per dimension: {dim: {counter_found, adjusted, covered_items, original, revised}}")
     parser.add_argument("--signals-info", default=None,
                         help="JSON with signal counts per dimension: {dim: {count, has_counter}}")
+    parser.add_argument("--code", help="Stock/ETF code to locate data directory")
+    parser.add_argument("--data-dir", help="Data directory path (default: .cache/stock-trend/{code}/)")
     parser.add_argument("-o", "--output", default="/tmp/scores.json",
                         help="Output JSON file path")
     args = parser.parse_args()
 
+    # Resolve data directory from --code
+    data_dir = None
+    if args.code:
+        from cache_utils import CACHE_DIR
+        data_dir = Path(args.data_dir) if args.data_dir else Path(CACHE_DIR) / args.code
+        if not data_dir.exists():
+            print(f"Error: data directory not found: {data_dir}", file=sys.stderr)
+            sys.exit(1)
+
     # Read technical analysis
-    with open(args.technical, "r", encoding="utf-8") as f:
-        technical_data = json.load(f)
+    if data_dir:
+        technical_data, tech_path = find_data_file(data_dir, "technical.json")
+        if technical_data is None:
+            print(f"Error: technical.json not found in {data_dir}", file=sys.stderr)
+            sys.exit(1)
+    elif args.technical:
+        with open(args.technical, "r", encoding="utf-8") as f:
+            technical_data = json.load(f)
+    else:
+        parser.error("--technical or --code required")
 
     summary = technical_data.get("summary", {})
 
@@ -368,6 +399,17 @@ def main():
         "sentiment": round(args.sentiment_score, 2) if args.sentiment_score is not None else 0,
         "macro": round(args.macro_score, 2) if args.macro_score is not None else 0,
     }
+
+    # Populate dimension data args from data directory when --code is used
+    if data_dir:
+        if not args.fundamental_data:
+            _, args.fundamental_data = find_data_file(data_dir, "fundamental.json")
+        if not args.macro_data:
+            _, args.macro_data = find_data_file(data_dir, "macro_snapshot.json")
+        if not args.capital_flow_data:
+            _, args.capital_flow_data = find_data_file(data_dir, "capital_flow.json")
+        if not args.etf_data:
+            _, args.etf_data = find_data_file(data_dir, "etf_data.json")
 
     automated_sources = {}
 
@@ -558,7 +600,10 @@ def main():
 
     # Build special section
     etf_data = None
-    if args.etf_data and Path(args.etf_data).exists():
+    etf_source = None
+    if data_dir:
+        etf_data, etf_source = find_data_file(data_dir, "etf_data.json")
+    elif args.etf_data and Path(args.etf_data).exists():
         with open(args.etf_data, "r", encoding="utf-8") as f:
             etf_data = json.load(f)
 
@@ -614,7 +659,10 @@ def main():
     }
 
     # Write output
-    output_path = Path(args.output)
+    if data_dir:
+        output_path = data_dir / "scores.json"
+    else:
+        output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
