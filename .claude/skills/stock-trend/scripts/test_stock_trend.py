@@ -689,3 +689,57 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --- Pipeline refactor tests ---
+
+def test_eastmoney_utils():
+    """Test eastmoney_utils shared module."""
+    from eastmoney_utils import EM_HEADERS, build_secid, EM_API_HOSTS
+    assert EM_HEADERS["User-Agent"]
+    assert len(EM_API_HOSTS) == 3
+    assert build_secid("600519.SH") == "1.600519"
+    assert build_secid("000001.SZ") == "0.000001"
+    assert build_secid("00700.HK") is None
+    assert build_secid("159740.SZ") == "0.159740"
+    print("  eastmoney_utils: OK")
+
+
+def test_base_fetcher_subclass():
+    """Test BaseFetcher subclass contract."""
+    from base_fetcher import BaseFetcher
+    class TestFetcher(BaseFetcher):
+        def fetch(self):
+            return {"meta": {"data_source": "test"}, "data": []}
+    f = TestFetcher()
+    assert f.cache_key_suffix == ""
+    assert f.cache_ttl_seconds is None
+    print("  base_fetcher subclass: OK")
+
+
+def test_cache_dir_is_project_relative():
+    """Test cache dir migrated from /tmp to project .cache/."""
+    from cache_utils import CACHE_DIR
+    assert "/tmp/stock-trend-cache" not in CACHE_DIR
+    assert ".cache" in CACHE_DIR
+    print("  cache dir project-relative: OK")
+
+
+def test_clean_cache():
+    """Test clean_cache() handles empty/non-existent dir."""
+    from cache_utils import clean_cache
+    import tempfile
+    import os
+    # Should not raise on non-existent dir
+    old_dir = os.environ.get("STOCK_TREND_CACHE_DIR")
+    os.environ["STOCK_TREND_CACHE_DIR"] = "/tmp/__test_cache_nonexistent__"
+    import importlib
+    import cache_utils
+    importlib.reload(cache_utils)
+    result = cache_utils.clean_cache(max_size_mb=1)
+    assert result == 0
+    if old_dir:
+        os.environ["STOCK_TREND_CACHE_DIR"] = old_dir
+    else:
+        del os.environ["STOCK_TREND_CACHE_DIR"]
+    print("  clean_cache empty: OK")
