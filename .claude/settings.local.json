@@ -72,7 +72,8 @@
       "Bash(bash *)",
       "Bash(echo \"EXIT_CODE=$?\")",
       "Bash(echo \"def bad_syntax\\(: x\")",
-      "Bash(cp /tmp/test_syntax_error.py .claude/skills/stock-trend/scripts/test_syntax_error.py)"
+      "Bash(cp /tmp/test_syntax_error.py .claude/skills/stock-trend/scripts/test_syntax_error.py)",
+      "Skill(brainstorming)"
     ]
   }
 }

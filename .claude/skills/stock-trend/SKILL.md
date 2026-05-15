@@ -15,6 +15,9 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_etf_data.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_capital_flow.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetch_fundamental.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetch_macro_snapshot.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/generate_chart_html.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/generate_report.py *)
   - WebSearch
   - WebFetch
@@ -52,7 +55,9 @@ python3 .claude/skills/stock-trend/scripts/resolve_code.py <name_or_code> -o /tm
 
 输出包含 `ts_code`、`asset`、`adj`、`market`、`name`，后续步骤直接使用输出值。
 
-## Step 2: 数据管线一键执行
+## Step 2: 数据管线一键执行（与 Step 3 并发运行）
+
+> **关键说明**：本步骤与 Step 3 **同时执行**。启动管线后，立即进入 Step 3 开始搜索，无需等待管线完成。管线数据（technical.json）在 Step 4 之前就绪即可。
 
 使用 `run_pipeline.py` 自动完成数据获取和技术分析：
 
@@ -65,14 +70,24 @@ python3 .claude/skills/stock-trend/scripts/run_pipeline.py <ts_code> --asset <E|
 2. 获取K线数据（Tushare → 东方财富自动降级）
 3. 技术分析（analyze_technical.py）
 4. ETF数据获取（标的为ETF时）
-5. 资金流向获取
+5. 资金流向获取（含北向/融资融券/龙虎榜数据）
+6. 基本面数据获取（通过 AKShare，ETF 标的跳过）
+7. 宏观数据快照获取（汇率/利率/PMI/CPI/M2，独立进程）
 
 输出文件：
 - `/tmp/pipeline_output.json` — 管线汇总（包含数据源、记录数、耗时等元信息）
 - `/tmp/kline.json` — K线数据
 - `/tmp/technical.json` — 技术分析结果
 - `/tmp/etf_data.json` — ETF数据（仅ETF标的）
-- `/tmp/capital_flow.json` — 资金流向
+- `/tmp/capital_flow.json` — 资金流向（含 data_extended 增强数据）
+- `/tmp/fundamental.json` — 基本面数据（AKShare，非ETF）
+- `/tmp/macro_snapshot.json` — 宏观快照（AKShare）
+
+**管线完成后**（可选）生成K线图用于报告嵌入：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.json --technical /tmp/technical.json -o /tmp/chart_fragment.html
+```
 
 **管线失败时的手动降级**：如果管线整体失败，可按以下步骤手动执行：
 
@@ -102,58 +117,70 @@ python3 .claude/skills/stock-trend/scripts/fetch_capital_flow.py <ts_code> --ass
 
 Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKEN` > `.claude/tushare-config.json`。未配置时自动降级东方财富。
 
-## Step 3: 五维分析
+## Step 3: 四维并行搜索（与 Step 2 同时执行）
 
-**数据质量检查**：检查 `technical.json` 的 `summary.data_quality`：
-- `"insufficient"`（数据<30条）：技术面权重降至17.5%，其余维度按比例分配
-- `"limited"`（数据30-59条）：技术面权重降至25%，在报告中标注数据质量警告
-- 数据不足时，`key_signals` 中会自动包含警告信息
+> **关键说明**：启动 Step 2 管线后，**立即**按以下四个维度**并行**搜索（使用同时调用的工具），无需等待管线完成。
 
-每个维度评分范围 **-3 ~ +3**，详细评分标准见 **references/trend-dimensions.md**。
+### 并行搜索指令
 
-1. **技术面** — 使用 `analyze_technical.py` 输出：`latest.*.signal` 判断各指标信号（含MA/MACD/RSI/KDJ/布林带/ADX/OBV），`patterns` 判断K线形态（详见 **references/kline-patterns.md**），`summary.total_score` 作为基础得分
-2. **资金面** — 主力流入/北向资金/融资融券/龙虎榜
-3. **基本面** — PE-PB/业绩增速/行业景气/股息率
-4. **情绪面** — 涨跌停/换手率/板块联动/舆情
-5. **宏观面** — 货币政策/行业政策/外盘/汇率
+使用**一次调用多个搜索工具**同时搜索四个维度：
 
-### 非技术面数据获取方式
+| 维度 | 权重 | 自动化基线 | 搜索关键词 |
+|------|------|-----------|-----------|
+| 资金面 | 25% | `data_extended.northbound/margin`（管线已获取） | `"{stock_name} {ts_code} 资金流向 北向资金"` |
+| 基本面 | 15% | `fundamental.json`（PE/PB/ROE/财务数据已获取） | `"{stock_name} {ts_code} 估值 业绩"` |
+| 情绪面 | 15% | 无自动化 | `"{stock_name} 涨跌停 换手率 板块"` |
+| 宏观面 | 10% | `macro_snapshot.json`（汇率/利率/PMI已获取） | `"今日宏观 政策 利率 汇率 外盘"` |
 
-技术面数据由管线自动获取。非技术面（资金面/基本面/情绪面/宏观面）数据需从外部来源获取，按以下优先级：
+**四个搜索并行执行，无交叉依赖**。
 
-1. **`WebSearch`**：首选搜索方式，用于宏观政策、行业新闻等公开信息搜索
-2. **`mcp__web-search__bing_search` + `mcp__web-search__crawl_webpage`**：中文财经网站内容抓取
-3. **`Bash(curl)`**：用于东方财富API等需要自定义Header的场景
+### 自动化数据基线
 
-**搜索关键词模板**（帮助高效构造搜索）：
-- `"{stock_name} {ts_code} 资金流向 南向资金"` — 资金面
-- `"{stock_name} {ts_code} 行情分析 估值"` — 基本面
-- `"{index_name} 宏观政策 中美关系"` — 宏观面
+部分维度的自动化数据已在管线中获取（通过 AKShare），Agent 的使用方式：
 
-**禁止使用 `WebFetch` 访问以下域名**（域名安全验证会失败）：
-- `*.eastmoney.com`（东方财富系列）
-- `cn.investing.com`
-- `xueqiu.com`（雪球）
-- `10jqka.com.cn`（同花顺）
+- **基本面**：读取 `fundamental.json` 获取 PE/PB 百分位、营收/利润增速、ROE。Agent 可据此直接撰写摘要，无需重复搜索基础数据。数据质量 `good`/`partial` 时可用。
+- **资金面**：`capital_flow.json` 的 `data_extended` 包含北向资金持仓变动和融资融券数据
+- **宏观面**：`macro_snapshot.json` 提供汇率、PMI、CPI、利率等快照
 
-如需获取上述站点数据，请使用 `mcp__web-search__crawl_webpage` 或 `Bash(curl)` 替代。
+**Agent 评分始终覆盖自动化评分** — 以 Agent 判断为准。
 
-**维度摘要撰写**：完成各维度 WebSearch 后，为每个非技术面维度撰写一段**简明摘要**（1-2句话），含关键数据和判断依据，将在报告"关键信号"表中展示。摘要需要包含具体数据（金额、百分比等），例如：
+### 维度摘要与综合研判
+
+为每个非技术面维度撰写**简明摘要**（1-2句话），含关键数据和判断依据，例如：
 - 资金面：`ETF近20日净申购+1.75亿元，但主力交易资金近2日净流出1.59亿元`
 - 基本面：`恒生科技PE 22.9倍处历史32%分位偏低；腾讯Q1净利润+11%`
 - 情绪面：`AI+半导体领涨；指数近1月反弹+4.31%但缩量调整中`
 - 宏观面：`中美关税缓和；美元偏弱离岸人民币升破6.8；CPI 3.8%降息推迟`
 
-这些摘要通过 Step 4 的 `--*-summary` 参数传入。同时撰写**综合研判**分析，包含核心矛盾、关键时间窗口和操作建议，通过 Step 4 的 `--analysis` 参数传入，将在报告"七、综合研判"展示。
+摘要通过 Step 4 的 `--*-summary` 传入。同时撰写**综合研判**（核心矛盾、关键事件、操作建议），通过 `--analysis` 传入。
 
-**技术面内部子权重**（由 `analyze_technical.py` 的 `build_summary` 自动应用）：
+### 数据质量检查
+
+检查 `technical.json` 的 `summary.data_quality`：
+- `"insufficient"`（数据<30条）：技术面权重降至17.5%
+- `"limited"`（数据30-59条）：技术面权重降至25%
+
+### 等待汇合
+
+等待管线完成且所有搜索结果收集完毕，进入 Step 4。
+- 管线超时（60s）时技术面按 0 分处理，标注"管线超时"
+- 管线和搜索完成即进入 Step 4
+
+**搜索工具选择**：
+1. **`WebSearch`**：首选，用于宏观政策、行业新闻等
+2. **`mcp__web-search__bing_search` + `mcp__web-search__crawl_webpage`**：中文财经内容
+3. **`Bash(curl)`**：东方财富API等需自定义Header的场景
+
+**禁止使用 `WebFetch`** 访问：`*.eastmoney.com`、`cn.investing.com`、`xueqiu.com`、`10jqka.com.cn`
+
+### 技术面内部子权重（自动应用）
 - 趋势指标（MA、MACD）：×1.5
 - 趋势强度（ADX）：×1.2
 - 震荡指标（RSI、KDJ）：×0.8
 - 其他（布林带、成交量、OBV）：×1.0
 - K线形态：×0.5
 
-**一致性因子**：同向指标数/总指标数影响置信度，5指标全偏多比3偏多2偏空置信度更高。
+**一致性因子**：同向指标数/总指标数影响置信度。
 
 ## Step 4: 计算综合评分
 
@@ -169,6 +196,9 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
   [--focus <维度>] \
   [--asset-type etf|hk|st|stock] \
   [--etf-data /tmp/etf_data.json] \
+  [--capital-flow-data /tmp/capital_flow.json] \
+  [--fundamental-data /tmp/fundamental.json] \
+  [--macro-data /tmp/macro_snapshot.json] \
   [--risks '["风险1","风险2"]'] \
   [--capital-summary "ETF近20日净申购+1.75亿元..."] \
   [--fundamental-summary "恒生科技PE 22.9倍..."] \
@@ -180,7 +210,11 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
 
 **计算规则**（脚本自动处理）：
 - 技术面得分：从 `technical.json` 的 `summary.total_score` 自动提取
-- 非技术面得分：通过命令行参数传入（agent 根据 WebSearch 结果判定）
+- **自动基线评分**：当 Agent 未显式传递 `--*-score` 时，脚本从管线数据文件判断：
+  - `--fundamental-data`：PE/PB 百分位 <30 → 看多 +1，>70 → 看空 -1；利润增速 >10% → +1；ROE >15% → +1
+  - `--macro-data`：HS300 涨幅 >1% → +1，< -1% → -1；PMI ≥50 → +1；人民币升值 → +1
+  - `--capital-flow-data`：北向持仓增加 → +1
+- **Agent 显式传递的 `--*-score` 始终覆盖自动基线评分**
 - 权重计算：默认 技术面35% / 资金面25% / 基本面15% / 情绪面15% / 宏观面10%
 - `--focus` 调整权重：`technical`→技术55%, `capital_flow`→资金50%, `fundamental`→基本45%, `sentiment`→情绪45%
 - 数据质量自动调整权重：insufficient→技术17.5%, limited→技术25%
@@ -248,6 +282,7 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
 python3 .claude/skills/stock-trend/scripts/generate_report.py \
   --pipeline /tmp/pipeline_output.json \
   --scores-file /tmp/scores.json \
+  --chart /tmp/chart_fragment.html \
   --ts-code 159740.SZ --stock-name '恒生科技ETF大成' \
   --output-md reports/159740.SZ/20260514-2200.md \
   --output-html reports/159740.SZ/20260514-2200.html

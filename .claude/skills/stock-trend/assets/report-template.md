@@ -54,6 +54,10 @@
 *K线数据: {{kline_data_range}} ({{kline_data_count}}条)*
 {{/kline_data_source}}
 
+{{#has_chart}}
+*K线走势图: 详见 HTML 版本报告*
+{{/has_chart}}
+
 {{#特殊标记}}
 ## 六、{{特殊标记标题}}
 
@@ -92,5 +96,6 @@
 {{^kline_data_source}}
 *技术面数据源未配置，技术指标基于已有信息判断*
 {{/kline_data_source}}
+*自动化数据: 技术面={{tech_data_source}} {{#has_fundamental_data}}| 基本面=AKShare {{/has_fundamental_data}}{{#has_macro_data}}| 宏观=AKShare {{/has_macro_data}}| 资金面={{capital_data_source}}*
 
-*免责声明：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。*
+*免责声明：本报告仅供学习分享参考，不构成任何投资建议。股市有风险，投资需谨慎。*

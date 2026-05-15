@@ -405,7 +405,33 @@ def build_context(args):
         "特殊标记内容": special_section.get("content", "") if special_section else "",
         # Data quality warning
         "数据质量警告": summary.get("risk_reward_warning") or ("⚠️ 数据不足，分析可靠性有限" if meta.get("data_points", 999) < 60 else ""),
+        # Chart and data source annotations
+        "has_chart": args.chart is not None and os.path.exists(args.chart),
+        "tech_data_source": data_source if data_source else "Tushare/东方财富",
+        "capital_data_source": capital_flow.get("meta", {}).get("data_source", "东方财富"),
     }
+
+    # Load fundamental data flag
+    has_fund = False
+    if args.fundamental_data:
+        try:
+            with open(args.fundamental_data, "r", encoding="utf-8") as f:
+                fd = json.load(f)
+            has_fund = fd.get("summary", {}).get("data_quality") in ("good", "partial")
+        except Exception:
+            pass
+    context["has_fundamental_data"] = has_fund
+
+    # Load macro data flag
+    has_macro = False
+    if args.macro_data:
+        try:
+            with open(args.macro_data, "r", encoding="utf-8") as f:
+                md = json.load(f)
+            has_macro = md.get("summary", {}).get("data_quality") in ("good", "partial")
+        except Exception:
+            pass
+    context["has_macro_data"] = has_macro
 
     # Comprehensive analysis (综合研判 section) from args.analysis JSON
     analysis_data = None
@@ -462,6 +488,10 @@ def main():
     parser.add_argument("--macro-summary", help="Macro dimension summary")
     # Comprehensive analysis for 综合研判 section
     parser.add_argument("--analysis", help="JSON object with core_conflict, events, advice for 综合研判 section")
+    # Chart and new data files
+    parser.add_argument("--chart", help="Path to chart HTML fragment to embed")
+    parser.add_argument("--fundamental-data", help="Path to fundamental data JSON")
+    parser.add_argument("--macro-data", help="Path to macro snapshot JSON")
     # Output paths
     parser.add_argument("--output-md", help="Output Markdown file path")
     parser.add_argument("--output-html", help="Output HTML file path")
@@ -486,6 +516,10 @@ def main():
                 args.etf_data = output_files["etf_data"]
             if not args.capital_flow and output_files.get("capital_flow"):
                 args.capital_flow = output_files["capital_flow"]
+            if not args.fundamental_data and output_files.get("fundamental"):
+                args.fundamental_data = output_files["fundamental"]
+            if not args.macro_data and output_files.get("macro_snapshot"):
+                args.macro_data = output_files["macro_snapshot"]
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -550,6 +584,14 @@ def main():
         if html_template_path.exists():
             template = html_template_path.read_text(encoding="utf-8")
             report = render_template(template, context)
+            # Embed chart fragment (post-render to avoid template syntax conflicts)
+            if context.get("has_chart") and args.chart:
+                try:
+                    with open(args.chart, "r", encoding="utf-8") as f:
+                        chart_html = f.read()
+                    report = report.replace("__CHART_HTML__", chart_html)
+                except Exception:
+                    report = report.replace("__CHART_HTML__", "<!-- Chart unavailable -->")
             os.makedirs(os.path.dirname(args.output_html) if os.path.dirname(args.output_html) else ".", exist_ok=True)
             with open(args.output_html, "w", encoding="utf-8") as f:
                 f.write(report)

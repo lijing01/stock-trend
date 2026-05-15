@@ -225,6 +225,8 @@ def main():
                         default="stock", help="Asset type for special sections")
     parser.add_argument("--etf-data", help="Path to ETF data JSON")
     parser.add_argument("--capital-flow-data", help="Path to capital flow JSON")
+    parser.add_argument("--fundamental-data", help="Path to fundamental data JSON (automated scoring)")
+    parser.add_argument("--macro-data", help="Path to macro snapshot JSON (automated scoring)")
     # Dimension summaries (rich text from agent's research, passed to report)
     parser.add_argument("--capital-summary", default="",
                         help="Capital flow dimension summary text")
@@ -252,7 +254,8 @@ def main():
     tech_score = summary.get("total_score", 0)
     data_quality = summary.get("data_quality")
 
-    # Non-technical scores: use provided values or default to 0
+    # Non-technical scores: use provided values or derive from automated data
+    # Agent-provided scores always take precedence
     scores = {
         "technical": round(tech_score, 2),
         "capital_flow": round(args.capital_flow_score, 2) if args.capital_flow_score is not None else 0,
@@ -260,6 +263,102 @@ def main():
         "sentiment": round(args.sentiment_score, 2) if args.sentiment_score is not None else 0,
         "macro": round(args.macro_score, 2) if args.macro_score is not None else 0,
     }
+
+    automated_sources = {}
+
+    # Automated fundamental scoring (only when agent doesn't provide explicit score)
+    if args.fundamental_data and args.fundamental_score is None:
+        try:
+            with open(args.fundamental_data, "r", encoding="utf-8") as f:
+                fund_data = json.load(f)
+            fund_summary = fund_data.get("summary", {})
+            fund_score = 0
+            dq = fund_summary.get("data_quality")
+            if dq in ("good", "partial"):
+                pe_pct = fund_summary.get("pe_percentile_3y")
+                rev_growth = fund_summary.get("revenue_growth_pct")
+                profit_growth = fund_summary.get("profit_growth_pct")
+                roe = fund_summary.get("roe")
+                if pe_pct is not None:
+                    if pe_pct < 30:
+                        fund_score += 1
+                    elif pe_pct > 70:
+                        fund_score -= 1
+                if rev_growth is not None and profit_growth is not None:
+                    if rev_growth > 10 and profit_growth > 10:
+                        fund_score += 1
+                    elif rev_growth < -5 and profit_growth < -5:
+                        fund_score -= 1
+                if roe is not None and roe > 15:
+                    fund_score += 1
+                fund_score = max(-3, min(3, fund_score))
+            scores["fundamental"] = fund_score
+            automated_sources["fundamental"] = dq
+        except Exception:
+            pass
+
+    # Automated macro scoring (only when agent doesn't provide explicit score)
+    if args.macro_data and args.macro_score is None:
+        try:
+            with open(args.macro_data, "r", encoding="utf-8") as f:
+                macro_data = json.load(f)
+            ms = macro_data.get("summary", {})
+            macro_score = 0
+            dq = ms.get("data_quality")
+            if dq in ("good", "partial"):
+                hs300 = ms.get("hs300", {})
+                if isinstance(hs300, dict):
+                    hs300_chg = hs300.get("change_pct")
+                    if hs300_chg is not None:
+                        if hs300_chg > 1:
+                            macro_score += 1
+                        elif hs300_chg < -1:
+                            macro_score -= 1
+                usd_cny = ms.get("usd_cny", {})
+                if isinstance(usd_cny, dict):
+                    cny_chg = usd_cny.get("change_pct")
+                    if cny_chg is not None and cny_chg < 0:
+                        macro_score += 1  # CNY strengthening
+                pmi = ms.get("pmi")
+                if pmi is not None:
+                    if pmi >= 50:
+                        macro_score += 1
+                    elif pmi < 48:
+                        macro_score -= 1
+                macro_score = max(-3, min(3, macro_score))
+            scores["macro"] = macro_score
+            automated_sources["macro"] = dq
+        except Exception:
+            pass
+
+    # Automated capital flow scoring (when agent doesn't provide explicit score)
+    # The enhanced capital flow script now provides northbound/margin data
+    if args.capital_flow_data and args.capital_flow_score is None:
+        try:
+            with open(args.capital_flow_data, "r", encoding="utf-8") as f:
+                cap_data = json.load(f)
+            ext = cap_data.get("data_extended", {})
+            cap_score = 0
+            nb = ext.get("northbound_individual", {})
+            if nb and isinstance(nb, dict):
+                chg = nb.get("change_shares")
+                if chg is not None:
+                    if chg > 0:
+                        cap_score += 1
+                    elif chg < 0:
+                        cap_score -= 1
+            margin = ext.get("margin", {})
+            if margin and isinstance(margin, dict):
+                mb = margin.get("margin_balance_billion")
+                if mb is not None and mb > 100:
+                    cap_score += 1
+            cap_score = max(-3, min(3, cap_score))
+            if cap_score != 0:
+                scores["capital_flow"] = scores.get("capital_flow", 0) + cap_score
+                scores["capital_flow"] = max(-3, min(3, scores["capital_flow"]))
+                automated_sources["capital_flow"] = "enhanced"
+        except Exception:
+            pass
 
     # Compute weights
     if args.focus:
@@ -346,6 +445,8 @@ def main():
         "risks": unique_risks,
         "special": special,
         "data_quality": data_quality,
+        # Automated data sources used for scoring
+        "automated_sources": automated_sources,
         # Dimension summaries (rich text from agent research, passed through to report)
         "dimension_summaries": {
             "capital": args.capital_summary,

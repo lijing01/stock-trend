@@ -79,6 +79,8 @@ def main():
     parser.add_argument("--freq", choices=["D", "W"], default="D", help="K-line frequency (default: D)")
     parser.add_argument("--no-etf", action="store_true", help="Skip ETF data fetch")
     parser.add_argument("--no-capital", action="store_true", help="Skip capital flow fetch")
+    parser.add_argument("--no-fundamental", action="store_true", help="Skip fundamental data fetch")
+    parser.add_argument("--no-macro", action="store_true", help="Skip macro snapshot fetch")
     parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp)")
     args = parser.parse_args()
 
@@ -229,8 +231,32 @@ def main():
             capital_path,
         ))
 
+    # Fundamental data (skip for ETFs)
+    if not args.no_fundamental and asset != "FD":
+        fundamental_path = str(output_dir / "fundamental.json")
+        parallel_tasks.append((
+            [
+                sys.executable, str(SCRIPT_DIR / "fetch_fundamental.py"),
+                ts_code, "--asset", asset, "-o", fundamental_path,
+            ],
+            "fetch_fundamental",
+            fundamental_path,
+        ))
+
+    # Macro snapshot (market-level, always)
+    if not args.no_macro:
+        macro_path = str(output_dir / "macro_snapshot.json")
+        parallel_tasks.append((
+            [
+                sys.executable, str(SCRIPT_DIR / "fetch_macro_snapshot.py"),
+                "-o", macro_path,
+            ],
+            "fetch_macro_snapshot",
+            macro_path,
+        ))
+
     if parallel_tasks:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
                 executor.submit(run_script, cmd, label): (label, path)
                 for cmd, label, path in parallel_tasks
@@ -257,6 +283,15 @@ def main():
                     count = data.get("meta", {}).get("record_count", 0)
                     results["capital_flow"] = {"record_count": count}
                     print(f"  Capital flow: {count} records")
+                elif label == "fetch_fundamental" and data:
+                    dq = data.get("summary", {}).get("data_quality", "error")
+                    has_pe = data.get("summary", {}).get("pe_ttm")
+                    results["fundamental"] = {"data_quality": dq, "has_pe": has_pe is not None}
+                    print(f"  Fundamental: {dq}{' (PE=' + str(has_pe) + ')' if has_pe else ''}")
+                elif label == "fetch_macro_snapshot" and data:
+                    dq = data.get("summary", {}).get("data_quality", "error")
+                    results["macro_snapshot"] = {"data_quality": dq}
+                    print(f"  Macro snapshot: {dq}")
 
     # --- Step 5: Write pipeline summary ---
     print(f"[5/5] Writing pipeline output...")
@@ -281,6 +316,8 @@ def main():
             "technical": technical_path if kline_data else None,
             "etf_data": str(output_dir / "etf_data.json") if is_etf and not args.no_etf else None,
             "capital_flow": str(output_dir / "capital_flow.json") if not args.no_capital else None,
+            "fundamental": str(output_dir / "fundamental.json") if not args.no_fundamental and asset != "FD" else None,
+            "macro_snapshot": str(output_dir / "macro_snapshot.json") if not args.no_macro else None,
         },
     }
 

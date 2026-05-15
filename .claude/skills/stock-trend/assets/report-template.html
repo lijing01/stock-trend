@@ -106,8 +106,13 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 <p style="color:#86868b;font-size:12px">K线数据: {{kline_data_range}} ({{kline_data_count}}条)</p>
 {{/kline_data_source}}
 
+{{#has_chart}}
+<h2>六、K线走势图</h2>
+<div id="kline-chart">__CHART_HTML__</div>
+{{/has_chart}}
+
 {{#特殊标记}}
-<h2>六、{{特殊标记标题}}</h2>
+<h2>七、{{特殊标记标题}}</h2>
 <div class="spec">{{特殊标记内容}}</div>
 {{/特殊标记}}
 
@@ -144,6 +149,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 {{^kline_data_source}}
 <p class="ds">技术面数据源未配置，技术指标基于已有信息判断</p>
 {{/kline_data_source}}
+<p class="ds">自动化数据: 技术面={{tech_data_source}} | {{#has_fundamental_data}}基本面=AKShare | {{/has_fundamental_data}}{{#has_macro_data}}宏观=AKShare | {{/has_macro_data}}资金面={{capital_data_source}}</p>
 <p class="disc">免责声明：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</p>
 </footer>
 
