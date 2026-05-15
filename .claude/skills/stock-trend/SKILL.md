@@ -101,12 +101,12 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 
 使用**一次调用多个搜索工具**同时搜索四个维度：
 
-| 维度 | 权重 | 自动化基线 | 搜索关键词 |
-|------|------|-----------|-----------|
-| 资金面 | 25% | `data_extended.northbound/margin`（管线已获取） | `"{stock_name} {ts_code} 资金流向 北向资金 {YYYY}年{M}月"` |
-| 基本面 | 15% | `fundamental.json`（PE/PB/ROE/财务数据已获取） | `"{stock_name} {ts_code} 估值 业绩 {YYYY}年{M}月"` |
-| 情绪面 | 15% | 无自动化 | `"{stock_name} 涨跌停 换手率 板块 {YYYY}年{M}月"` |
-| 宏观面 | 10% | `macro_snapshot.json`（汇率/利率/PMI已获取） | `"今日宏观 政策 利率 汇率 外盘 {YYYY}年{M}月"` |
+| 维度 | 权重 | 自动化基线 | 搜索关键词 | 反向验证词 |
+|------|------|-----------|-----------|-----------|
+| 资金面 | 25% | `data_extended.northbound/margin`（管线已获取） | `"{stock_name} {ts_code} 资金流向 北向资金 {YYYY}年{M}月"` | `"流出 危机 减持"` |
+| 基本面 | 15% | `fundamental.json`（PE/PB/ROE/财务数据已获取） | `"{stock_name} {ts_code} 估值 业绩 {YYYY}年{M}月"` | `"风险 下滑 亏损"` |
+| 情绪面 | 15% | 无自动化 | `"{stock_name} 涨跌停 换手率 板块 {YYYY}年{M}月"` | `"下跌 跌停 恐慌"` |
+| 宏观面 | 10% | `macro_snapshot.json`（汇率/利率/PMI已获取） | `"今日宏观 政策 利率 汇率 外盘 {YYYY}年{M}月"` | `"鹰派 衰退 收紧"` |
 
 > **年份替换**：`{YYYY}` 和 `{M}` 取自系统当前日期（见 CLAUDE.md `# currentDate`），严禁使用训练截止年份或上一年度。例如当前2026年5月则填"2026年5月"，勿写"2025年5月"。
 
@@ -124,11 +124,14 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 
 ### 维度摘要与综合研判
 
-为每个非技术面维度撰写**简明摘要**（1-2句话），含关键数据和判断依据，例如：
-- 资金面：`ETF近20日净申购+1.75亿元，但主力交易资金近2日净流出1.59亿元`
-- 基本面：`恒生科技PE 22.9倍处历史32%分位偏低；腾讯Q1净利润+11%`
-- 情绪面：`AI+半导体领涨；指数近1月反弹+4.31%但缩量调整中`
-- 宏观面：`中美关税缓和；美元偏弱离岸人民币升破6.8；CPI 3.8%降息推迟`
+为每个非技术面维度撰写**简明摘要**（1-2句话），含利多利空标记和关键数据，例如：
+- 资金面：`利多：ETF近20日净申购+1.75亿元；利空：主力交易资金近2日净流出1.59亿元`
+- 基本面：`利多：恒生科技PE 22.9倍处历史32%分位偏低；利空：盈利增速仅3-4%偏弱`
+- 情绪面：`利多：AI+半导体领涨；利空：指数冲高回落，缩量调整中`
+- 宏观面：`利多：中美关税缓和；利空：美联储鹰派维持高利率`
+
+**正反强制**：每个维度必须同时包含利多和利空。只有单向信号时标注"未找到反向信号，可能存在确认偏差"。
+摘要格式：`利多：xxx；利空：xxx`（分号分隔，便于程序解析）。
 
 摘要通过 Step 4 的 `--*-summary` 传入。同时撰写**综合研判**（核心矛盾、关键事件、操作建议），通过 `--analysis` 传入。
 
@@ -153,6 +156,34 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 
 **技术面内部子权重**（脚本自动应用）：趋势指标(MA/MACD)×1.5、趋势强度(ADX)×1.2、震荡指标(RSI/KDJ)×0.8、通道/量能(布林带/成交量/OBV)×1.0、K线形态×0.5。一致性因子：同向指标数/总指标数影响置信度。详细评分标准参考 [references/trend-dimensions.md](references/trend-dimensions.md)。
 
+## Step 3.5: 逆向校验
+
+> 对每个非技术维度做逆向审视，防止确认偏差导致评分偏颇。
+
+对每个非技术维度（资金面/基本面/情绪面/宏观面）执行：
+
+1. [ ] 该维度是否覆盖≥2个必检项？（必检项清单见 [trend-dimensions.md](references/trend-dimensions.md)）
+2. [ ] 该维度是否同时包含利好和利空信号？
+3. [ ] 单一事件贡献是否超过封顶值？（宏观1.5，其他1.0）
+4. [ ] 逆向审视：假设当前打分方向错误，最强的反向论据是什么？
+5. [ ] 反向论据是否已在摘要中体现？
+
+**未通过项的处理**：
+- 缺必检项 → 覆盖折减：维度得分×0.5
+- 缺反向信号 → 一致性因子×0.6
+- 超封顶 → 自动修正得分至封顶值
+- 逆向审视调整得分 → 向0靠近0.5-1.0
+
+**自检结果传入 Step 4**：通过 `--self-check` 参数传入，格式：
+```json
+{
+  "capital_flow": {"counter_found": true, "adjusted": false, "covered_items": 3},
+  "fundamental":  {"counter_found": true, "adjusted": false, "covered_items": 2},
+  "sentiment":    {"counter_found": false, "adjusted": true, "original": 1.0, "revised": 0.5, "covered_items": 2},
+  "macro":        {"counter_found": true, "adjusted": false, "covered_items": 3}
+}
+```
+
 ## Step 4: 计算综合评分
 
 使用 `compute_scores.py` 自动计算：
@@ -170,11 +201,13 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py \
   [--capital-flow-data /tmp/capital_flow.json] \
   [--fundamental-data /tmp/fundamental.json] \
   [--macro-data /tmp/macro_snapshot.json] \
+  [--self-check '{"capital_flow":{"counter_found":true,"adjusted":false,"covered_items":3},...}'] \
+  [--signals-info '{"capital_flow":{"count":3,"has_counter":true},...}'] \
   [--risks '["风险1","风险2"]'] \
-  [--capital-summary "ETF近20日净申购+1.75亿元..."] \
-  [--fundamental-summary "恒生科技PE 22.9倍..."] \
-  [--sentiment-summary "AI+半导体领涨..."] \
-  [--macro-summary "中美关税缓和..."] \
+  [--capital-summary "利多：ETF近20日净申购+1.75亿；利空：主力净流出1.54亿"] \
+  [--fundamental-summary "利多：PE 22.9倍偏低；利空：盈利增速3-4%偏弱"] \
+  [--sentiment-summary "利多：AI领涨；利空：冲高回落"] \
+  [--macro-summary "利多：中美缓和；利空：美联储鹰派"] \
   [--analysis '{"core_conflict":"核心矛盾...","events":[{"date":"5月15日","event":"事件","impact":"影响"}],"advice":["建议1","建议2"]}'] \
   -o /tmp/scores.json
 ```
