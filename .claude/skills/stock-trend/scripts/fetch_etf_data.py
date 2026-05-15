@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""ETF data fetcher from East Money (东方财富).
+
+Fetches fund-specific data: NAV, IOPV premium, returns, top holdings,
+stock position, fund size, and recent subscription/redemption flows.
+
+Usage:
+    python3 fetch_etf_data.py <fund_code> [-o output.json]
+
+Examples:
+    python3 fetch_etf_data.py 159740
+    python3 fetch_etf_data.py 513180 -o /tmp/etf_data.json
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+
+
+EM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "http://fund.eastmoney.com/",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+}
+
+
+def _fetch_url(url, timeout=15):
+    """Fetch URL content with error handling."""
+    req = urllib.request.Request(url, headers=EM_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _parse_js_vars(content):
+    """Extract JavaScript variable assignments from eastmoney JS content.
+
+    Returns dict mapping var names to their raw string values.
+    """
+    result = {}
+    for m in re.finditer(r'var\s+(\w+)\s*=\s*(.+?);', content):
+        name = m.group(1)
+        value = m.group(2).strip()
+        # Try to parse as JSON-like value
+        if value.startswith('"') or value.startswith("'"):
+            result[name] = value.strip('"').strip("'")
+        elif value.startswith("[") or value.startswith("{"):
+            try:
+                result[name] = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                result[name] = value
+        else:
+            result[name] = value
+    return result
+
+
+def fetch_etf_data(fund_code):
+    """Fetch comprehensive ETF data from East Money.
+
+    Returns dict with fund info, NAV, IOPV, returns, holdings, etc.
+    """
+    result = {
+        "fund_code": fund_code,
+        "data_source": "eastmoney",
+    }
+    errors = []
+
+    # 1. Fetch pingzhongdata (fund overview + returns + holdings)
+    pingzhong_url = f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
+    try:
+        pingzhong_content = _fetch_url(pingzhong_url)
+        vars_dict = _parse_js_vars(pingzhong_content)
+
+        # Fund name
+        result["fund_name"] = vars_dict.get("fS_name", "")
+
+        # Returns: Data_NetPerfMonitor [period, return_rate]
+        returns = {}
+        if "Data_NetPerfMonitor" in vars_dict and isinstance(vars_dict["Data_NetPerfMonitor"], list):
+            for item in vars_dict["Data_NetPerfMonitor"]:
+                if isinstance(item, list) and len(item) >= 2:
+                    period = str(item[0])
+                    rate = item[1]
+                    if "近1月" in period or period == "0":
+                        returns["1m"] = _safe_float(rate)
+                    elif "近3月" in period or period == "1":
+                        returns["3m"] = _safe_float(rate)
+                    elif "近6月" in period or period == "2":
+                        returns["6m"] = _safe_float(rate)
+                    elif "近1年" in period or period == "3":
+                        returns["1y"] = _safe_float(rate)
+        result["returns"] = returns
+
+        # Stock position ratio
+        result["stock_position"] = _safe_float(vars_dict.get("Data_currentFundPosition", None))
+
+        # Top 10 holdings: Data_holderStructure or stockCodesNew
+        holdings = []
+        if "Data_holderStructure" in vars_dict:
+            try:
+                holder_data = vars_dict["Data_holderStructure"]
+                if isinstance(holder_data, list):
+                    for h in holder_data[:10]:
+                        if isinstance(h, (list, tuple)) and len(h) >= 3:
+                            holdings.append({
+                                "name": str(h[0]),
+                                "code": str(h[1]) if len(h) > 1 else "",
+                                "weight": _safe_float(h[2]) if len(h) > 2 else None,
+                            })
+            except (TypeError, IndexError):
+                pass
+
+        # Alternative: stockCodesNew for stock holdings
+        if not holdings and "stockCodesNew" in vars_dict:
+            try:
+                stock_data = vars_dict["stockCodesNew"]
+                if isinstance(stock_data, list):
+                    for s in stock_data[:10]:
+                        if isinstance(s, (list, tuple)) and len(s) >= 3:
+                            holdings.append({
+                                "name": str(s[1]),
+                                "code": str(s[0]),
+                                "weight": _safe_float(s[2]),
+                            })
+            except (TypeError, IndexError):
+                pass
+
+        result["top_holdings"] = holdings
+
+        # Fund size: Data_flvol (share) and Data_endNav (net asset)
+        fund_size = {}
+        if "Data_flvol" in vars_dict and isinstance(vars_dict["Data_flvol"], list) and vars_dict["Data_flvol"]:
+            last = vars_dict["Data_flvol"][-1]
+            if isinstance(last, list) and len(last) >= 2:
+                fund_size["shares_billion"] = _safe_float(last[1])
+        if "Data_endNav" in vars_dict and isinstance(vars_dict["Data_endNav"], list) and vars_dict["Data_endNav"]:
+            last = vars_dict["Data_endNav"][-1]
+            if isinstance(last, list) and len(last) >= 2:
+                fund_size["net_asset_billion"] = _safe_float(last[1])
+        result["fund_size"] = fund_size
+
+        # Tracking index
+        result["tracking_index"] = vars_dict.get("fS_code", "")
+
+        # Fund type
+        result["fund_type"] = vars_dict.get("fS_fundtype", "ETF")
+
+    except Exception as e:
+        errors.append(f"pingzhongdata: {e}")
+
+    # 2. Fetch js/{code}.js for latest NAV and IOPV data
+    js_url = f"http://fund.eastmoney.com/js/{fund_code}.js"
+    try:
+        js_content = _fetch_url(js_url)
+        # Parse: var jsonOpenOrCloseData = {...}
+        nav_match = re.search(r'var\s+\w+\s*=\s*(\{.+?\});', js_content, re.DOTALL)
+        if nav_match:
+            try:
+                nav_data = json.loads(nav_match.group(1))
+                result["fund_name"] = result.get("fund_name") or nav_data.get("name", "")
+                result["fund_type_name"] = nav_data.get("fundtype", "")
+            except (json.JSONDecodeError, ValueError):
+                pass
+    except Exception:
+        pass
+
+    # 3. Fetch latest NAV from API
+    nav_url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js"
+    try:
+        nav_content = _fetch_url(nav_url)
+        # Format: jsonpgz({...})
+        m = re.search(r'jsonpgz\((.+?)\)', nav_content)
+        if m:
+            nav_data = json.loads(m.group(1))
+            result["nav"] = {
+                "nav": _safe_float(nav_data.get("dwjz")),
+                "nav_date": nav_data.get("jzrq", ""),
+                "iopv": _safe_float(nav_data.get("gsz")),
+                "iopv_time": nav_data.get("gztime", ""),
+                "iopv_chg_pct": _safe_float(nav_data.get("gszzl")),
+            }
+            # Calculate IOPV premium/discount
+            iopv = _safe_float(nav_data.get("gsz"))
+            nav = _safe_float(nav_data.get("dwjz"))
+            if iopv and nav and nav > 0:
+                result["nav"]["iopv_premium_pct"] = round((iopv - nav) / nav * 100, 4)
+    except Exception as e:
+        errors.append(f"nav_api: {e}")
+
+    # 4. Fetch recent subscription/redemption flows from pingzhongdata
+    try:
+        if "Data_flvol" in vars_dict and isinstance(vars_dict["Data_flvol"], list):
+            # Last 5 entries for recent flow
+            recent_flows = []
+            for item in vars_dict["Data_flvol"][-5:]:
+                if isinstance(item, list) and len(item) >= 2:
+                    recent_flows.append({
+                        "date": str(item[0]),
+                        "shares_billion": _safe_float(item[1]),
+                    })
+            result["recent_flows"] = recent_flows
+    except Exception:
+        pass
+
+    result["errors"] = errors if errors else None
+    return result
+
+
+def _safe_float(val):
+    """Safely convert value to float, returning None on failure."""
+    if val is None or val == "" or val == "-":
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch ETF data from East Money")
+    parser.add_argument("fund_code", help="Fund code, e.g. 159740, 513180")
+    parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
+
+    args = parser.parse_args()
+
+    result = fetch_etf_data(args.fund_code)
+
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.output:
+        os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"ETF data written to {args.output}", file=sys.stderr)
+    else:
+        print(text)
+
+
+if __name__ == "__main__":
+    main()

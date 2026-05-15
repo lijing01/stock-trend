@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""Stock Trend Skill test suite.
+
+Runs automated tests covering data fetching, technical analysis,
+data quality checks, and edge cases.
+
+Usage:
+    python3 test_stock_trend.py              # Run all tests
+    python3 test_stock_trend.py -v            # Verbose output
+    python3 test_stock_trend.py --fetch-only  # Only run fetch tests
+    python3 test_stock_trend.py --analyze-only # Only run analysis tests
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+
+# Test result tracking
+PASSED = 0
+FAILED = 0
+SKIPPED = 0
+RESULTS = []
+
+
+def run_script(script_name, *args, timeout=30):
+    """Run a script and return (exit_code, stdout, stderr)."""
+    script_path = SCRIPT_DIR / script_name
+    cmd = [sys.executable, str(script_path)] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return result.returncode, result.stdout, result.stderr
+
+
+def load_json_output(path):
+    """Load JSON from a file path."""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test(name, condition, detail="", category="general"):
+    """Record a test result."""
+    global PASSED, FAILED, SKIPPED
+    if condition:
+        PASSED += 1
+        status = "PASS"
+    else:
+        FAILED += 1
+        status = "FAIL"
+    RESULTS.append({"name": name, "status": status, "detail": detail, "category": category})
+    print(f"  [{status}] {name}" + (f" — {detail}" if detail else ""))
+
+
+def skip(name, reason=""):
+    """Record a skipped test."""
+    global SKIPPED
+    SKIPPED += 1
+    RESULTS.append({"name": name, "status": "SKIP", "detail": reason, "category": "skip"})
+    print(f"  [SKIP] {name}" + (f" — {reason}" if reason else ""))
+
+
+# ========================
+# Fetch Tests (TF-*)
+# ========================
+
+def run_fetch_tests():
+    """Test data fetching scripts."""
+    print("\n📦 数据获取测试 (Fetch)")
+    print("=" * 50)
+
+    tmpdir = tempfile.mkdtemp()
+
+    # TF-01: 上交所股票 (茅台)
+    path = os.path.join(tmpdir, "tf01.json")
+    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", path)
+    if rc == 0:
+        data = load_json_output(path)
+        ds = data.get("meta", {}).get("data_source", "")
+        count = data.get("meta", {}).get("record_count", 0)
+        test("TF-01: 上交所股票(茅台)", ds != "error" and count > 0,
+             f"source={ds}, records={count}", "fetch")
+        test("TF-01a: 数据量≥60", count >= 60,
+             f"records={count}", "fetch")
+    else:
+        test("TF-01: 上交所股票(茅台)", False, f"exit_code={rc}", "fetch")
+
+    # TF-02: 深交所股票 (平安银行)
+    path = os.path.join(tmpdir, "tf02.json")
+    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "000001.SZ", "-o", path)
+    if rc == 0:
+        data = load_json_output(path)
+        ds = data.get("meta", {}).get("data_source", "")
+        count = data.get("meta", {}).get("record_count", 0)
+        test("TF-02: 深交所股票(平安银行)", ds != "error" and count > 0,
+             f"source={ds}, records={count}", "fetch")
+    else:
+        test("TF-02: 深交所股票(平安银行)", False, f"exit_code={rc}", "fetch")
+
+    # TF-05: 上交所ETF
+    path = os.path.join(tmpdir, "tf05.json")
+    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "513180.SH", "--asset", "FD", "-o", path)
+    if rc == 0:
+        data = load_json_output(path)
+        ds = data.get("meta", {}).get("data_source", "")
+        count = data.get("meta", {}).get("record_count", 0)
+        test("TF-05: 上交所ETF(513180)", ds != "error" and count > 0,
+             f"source={ds}, records={count}", "fetch")
+    else:
+        test("TF-05: 上交所ETF(513180)", False, f"exit_code={rc}", "fetch")
+
+    # TF-07: 港股 (腾讯) - 关键测试：Fix 1
+    path = os.path.join(tmpdir, "tf07.json")
+    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", path)
+    if rc == 0:
+        data = load_json_output(path)
+        ds = data.get("meta", {}).get("data_source", "")
+        count = data.get("meta", {}).get("record_count", 0)
+        test("TF-07: 港股(腾讯00700)", ds != "error" and count > 0,
+             f"source={ds}, records={count}", "fetch")
+        if ds != "error" and count > 0:
+            # Verify HK data fields
+            first = data["data"][0] if data["data"] else {}
+            has_ohlcv = all(k in first for k in ["trade_date", "open", "close", "high", "low"])
+            test("TF-07a: 港股数据字段完整性", has_ohlcv,
+                 f"fields={list(first.keys())}", "fetch")
+    else:
+        test("TF-07: 港股(腾讯00700)", False, f"exit_code={rc}", "fetch")
+
+    # TF-08: 无效代码
+    path = os.path.join(tmpdir, "tf08.json")
+    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "999999.SH", "-o", path)
+    if rc == 0:
+        data = load_json_output(path)
+        ds = data.get("meta", {}).get("data_source", "")
+        has_error = ds == "error"
+        test("TF-08: 无效代码返回error", has_error,
+             f"data_source={ds}", "fetch")
+    else:
+        test("TF-08: 无效代码返回error", False, f"exit_code={rc}", "fetch")
+
+    # TF-09: 周线数据 (关键测试：Fix 2)
+    path = os.path.join(tmpdir, "tf09.json")
+    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", path)
+    if rc == 0:
+        data = load_json_output(path)
+        ds = data.get("meta", {}).get("data_source", "")
+        count = data.get("meta", {}).get("record_count", 0)
+        test("TF-09: 周线数据获取", ds != "error" and count > 0,
+             f"source={ds}, records={count}", "fetch")
+    else:
+        test("TF-09: 周线数据获取", False, f"exit_code={rc}", "fetch")
+
+    # TF-11: 数据字段完整性
+    path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(path):
+        data = load_json_output(path)
+        if data.get("data"):
+            first = data["data"][0]
+            required = ["trade_date", "open", "close", "high", "low", "vol"]
+            has_all = all(k in first for k in required)
+            test("TF-11: 数据字段完整性", has_all,
+                 f"missing={[k for k in required if k not in first]}", "fetch")
+
+    return tmpdir
+
+
+# ========================
+# Analysis Tests (TA-*)
+# ========================
+
+def run_analyze_tests(tmpdir):
+    """Test technical analysis script."""
+    print("\n📊 技术分析测试 (Analyze)")
+    print("=" * 50)
+
+    # TA-01: 正常数据(200+条)
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        tech_path = os.path.join(tmpdir, "ta01.json")
+        rc, stdout, stderr = run_script("analyze_technical.py", kline_path, "-o", tech_path)
+        if rc == 0:
+            data = load_json_output(tech_path)
+            summary = data.get("summary", {})
+            latest = data.get("latest", {})
+
+            test("TA-01: 正常数据分析完成", "total_score" in summary, "fetch")
+            test("TA-01a: summary有direction", "direction" in summary,
+                 f"direction={summary.get('direction')}", "analyze")
+            test("TA-01b: summary有confidence", "confidence" in summary,
+                 f"confidence={summary.get('confidence')}", "analyze")
+            test("TA-01c: summary有stop_loss", "stop_loss" in summary,
+                 f"stop_loss={summary.get('stop_loss')}", "analyze")
+
+            # TA-05: score范围检查
+            indicators = ["ma", "macd", "rsi", "kdj", "bollinger", "volume", "adx", "obv"]
+            all_scores_valid = True
+            for ind in indicators:
+                sig = latest.get(ind, {}).get("signal", {})
+                score = sig.get("score", 0)
+                if not (-3 <= score <= 3):
+                    all_scores_valid = False
+            test("TA-05: score范围[-3,+3]", all_scores_valid, "analyze")
+
+            # TA-08: pattern去重
+            patterns = data.get("patterns", [])
+            names = [p["name"] for p in patterns]
+            test("TA-08: pattern无重名", len(names) == len(set(names)),
+                 f"patterns={names}", "analyze")
+
+            # TA-06: summary字段完整性
+            required_fields = ["total_score", "direction", "confidence", "consistency",
+                              "support_levels", "resistance_levels", "stop_loss", "target"]
+            missing = [f for f in required_fields if f not in summary]
+            test("TA-06: summary字段完整", len(missing) == 0,
+                 f"missing={missing}", "analyze")
+        else:
+            test("TA-01: 正常数据分析完成", False, f"exit_code={rc}", "analyze")
+
+    # TA-02: 小数据量测试 (Fix 3 - data_quality标记)
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        # Create small data file
+        data = load_json_output(kline_path)
+        small_data = {"meta": data["meta"], "data": data["data"][:15]}
+        small_path = os.path.join(tmpdir, "small_data.json")
+        with open(small_path, "w") as f:
+            json.dump(small_data, f)
+
+        tech_path = os.path.join(tmpdir, "ta02.json")
+        rc, stdout, stderr = run_script("analyze_technical.py", small_path, "-o", tech_path)
+        if rc == 0:
+            result = load_json_output(tech_path)
+            summary = result.get("summary", {})
+            dq = summary.get("data_quality")
+            signals = summary.get("key_signals", [])
+
+            test("TA-02: 小数据量(15条)有data_quality", dq == "insufficient",
+                 f"data_quality={dq}", "analyze")
+            test("TA-02a: key_signals含数据量警告",
+                 any("数据仅" in s for s in signals),
+                 f"signals={signals[:2]}", "analyze")
+        else:
+            test("TA-02: 小数据分析", False, f"exit_code={rc}", "analyze")
+
+    # TA-04: 空数据/error输入
+    error_data = {"meta": {"ts_code": "999999.SH", "data_source": "error", "error": "test error"}, "data": []}
+    error_path = os.path.join(tmpdir, "error_data.json")
+    with open(error_path, "w") as f:
+        json.dump(error_data, f)
+
+    tech_path = os.path.join(tmpdir, "ta04.json")
+    rc, stdout, stderr = run_script("analyze_technical.py", error_path, "-o", tech_path)
+    if rc == 0:
+        result = load_json_output(tech_path)
+        summary = result.get("summary", {})
+        test("TA-04: 空数据分析", summary.get("total_score") == 0,
+             f"total_score={summary.get('total_score')}", "analyze")
+        test("TA-04a: 空数据direction=neutral", summary.get("direction") == "neutral",
+             f"direction={summary.get('direction')}", "analyze")
+    else:
+        test("TA-04: 空数据分析", False, f"exit_code={rc}", "analyze")
+
+    # TA-03: 50条数据 (limited data quality)
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        data = load_json_output(kline_path)
+        limited_data = {"meta": data["meta"], "data": data["data"][:50]}
+        limited_path = os.path.join(tmpdir, "limited_data.json")
+        with open(limited_path, "w") as f:
+            json.dump(limited_data, f)
+
+        tech_path = os.path.join(tmpdir, "ta03.json")
+        rc, stdout, stderr = run_script("analyze_technical.py", limited_path, "-o", tech_path)
+        if rc == 0:
+            result = load_json_output(tech_path)
+            summary = result.get("summary", {})
+            dq = summary.get("data_quality")
+            test("TA-03: 50条数据data_quality=limited", dq == "limited",
+                 f"data_quality={dq}", "analyze")
+        else:
+            test("TA-03: 50条数据分析", False, f"exit_code={rc}", "analyze")
+
+    # TA-stdin: 测试stdin输入支持 (Fix 4)
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        # Test piping via stdin using "-" argument
+        with open(kline_path, "r") as f:
+            kline_data = f.read()
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "analyze_technical.py"), "-", "-o", os.path.join(tmpdir, "ta_stdin.json")],
+            input=kline_data, capture_output=True, text=True, timeout=30
+        )
+        test("TA-stdin: 支持'-'作为stdin输入", result.returncode == 0,
+             f"exit_code={result.returncode}", "analyze")
+
+    # TA-10: 三级目标体系输出
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        tech_path = os.path.join(tmpdir, "ta01.json")
+        if os.path.exists(tech_path):
+            data = load_json_output(tech_path)
+            summary = data.get("summary", {})
+            test("TA-10: 三级目标体系(target_conservative)", "target_conservative" in summary,
+                 f"target_conservative={summary.get('target_conservative')}", "analyze")
+            test("TA-10: 三级目标体系(target_moderate)", "target_moderate" in summary,
+                 f"target_moderate={summary.get('target_moderate')}", "analyze")
+            test("TA-10: 三级目标体系(target_aggressive)", "target_aggressive" in summary,
+                 f"target_aggressive={summary.get('target_aggressive')}", "analyze")
+
+    # TA-11: 动态聚类阈值(ATR-based)
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        tech_path = os.path.join(tmpdir, "ta01.json")
+        if os.path.exists(tech_path):
+            data = load_json_output(tech_path)
+            summary = data.get("summary", {})
+            # Dynamic threshold should produce fewer or equal levels vs old 0.5% fixed threshold
+            support_levels = summary.get("support_levels", [])
+            resistance_levels = summary.get("resistance_levels", [])
+            test("TA-11: 动态聚类阈值(支撑位≤5)", len(support_levels) <= 5,
+                 f"support_count={len(support_levels)}", "analyze")
+            test("TA-11: 动态聚类阈值(压力位≤5)", len(resistance_levels) <= 5,
+                 f"resistance_count={len(resistance_levels)}", "analyze")
+
+    # TA-12: 止损max逻辑
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_path):
+        tech_path = os.path.join(tmpdir, "ta01.json")
+        if os.path.exists(tech_path):
+            data = load_json_output(tech_path)
+            summary = data.get("summary", {})
+            stop_loss = summary.get("stop_loss")
+            latest = data.get("latest", {})
+            atr = latest.get("atr", {}).get("atr")
+            close = latest.get("close")
+            if stop_loss and atr and close:
+                # stop_loss should be max(support - ATR, close - 2*ATR)
+                min_stop = close - 2 * atr
+                test("TA-12: 止损不低于close-2*ATR", stop_loss >= min_stop - 0.01,
+                     f"stop_loss={stop_loss}, close-2*ATR={min_stop:.2f}", "analyze")
+
+
+# ========================
+# New Script Tests (TF-ETF, TF-CF, TF-RPT)
+# ========================
+
+def run_new_script_tests(tmpdir):
+    """Test new data scripts: fetch_etf_data, fetch_capital_flow, generate_report."""
+    print("\n📦 新脚本测试 (New Scripts)")
+    print("=" * 50)
+
+    # TF-ETF-01: fetch_etf_data.py 基本功能测试
+    etf_path = os.path.join(tmpdir, "tf_etf01.json")
+    rc, stdout, stderr = run_script("fetch_etf_data.py", "513180", "-o", etf_path, timeout=15)
+    if rc == 0 and os.path.exists(etf_path):
+        try:
+            data = load_json_output(etf_path)
+            ds = data.get("data_source", "")
+            test("TF-ETF-01: ETF数据获取(513180)", ds == "eastmoney",
+                 f"source={ds}", "fetch")
+            test("TF-ETF-01a: 含fund_code", "fund_code" in data,
+                 f"fund_code={data.get('fund_code')}", "fetch")
+        except (json.JSONDecodeError, OSError):
+            test("TF-ETF-01: ETF数据获取(513180)", False, "JSON解析失败", "fetch")
+    else:
+        test("TF-ETF-01: ETF数据获取(513180)", False, f"exit_code={rc}", "fetch")
+
+    # TF-CF-01: fetch_capital_flow.py 股票资金流向测试
+    cf_path = os.path.join(tmpdir, "tf_cf01.json")
+    rc, stdout, stderr = run_script("fetch_capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=15)
+    if rc == 0 and os.path.exists(cf_path):
+        try:
+            data = load_json_output(cf_path)
+            ds = data.get("meta", {}).get("data_source", "")
+            count = data.get("meta", {}).get("record_count", 0)
+            test("TF-CF-01: 股票资金流向(600519)", ds != "error",
+                 f"source={ds}, records={count}", "fetch")
+        except (json.JSONDecodeError, OSError):
+            test("TF-CF-01: 股票资金流向(600519)", False, "JSON解析失败", "fetch")
+    else:
+        test("TF-CF-01: 股票资金流向(600519)", False, f"exit_code={rc}", "fetch")
+
+    # TF-RPT-01: generate_report.py 模板渲染测试
+    tech_path = os.path.join(tmpdir, "ta01.json")
+    kline_path = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(tech_path) and os.path.exists(kline_path):
+        md_path = os.path.join(tmpdir, "test_report.md")
+        html_path = os.path.join(tmpdir, "test_report.html")
+        rc, stdout, stderr = run_script(
+            "generate_report.py",
+            "--technical", tech_path,
+            "--kline", kline_path,
+            "--scores", '{"technical":1,"capital_flow":0.5,"fundamental":-1,"sentiment":0,"macro":0}',
+            "--direction", "震荡",
+            "--score", "-0.08",
+            "--confidence", "低",
+            "--risks", '["布林带极度收口"]',
+            "--output-md", md_path,
+            "--output-html", html_path,
+            timeout=15,
+        )
+        test("TF-RPT-01: 报告生成(exit_code)", rc == 0, f"exit_code={rc}", "report")
+        if rc == 0:
+            md_exists = os.path.exists(md_path)
+            test("TF-RPT-01a: Markdown报告存在", md_exists, f"path={md_path}", "report")
+            html_exists = os.path.exists(html_path)
+            test("TF-RPT-01b: HTML报告存在", html_exists, f"path={html_path}", "report")
+            if md_exists:
+                with open(md_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                test("TF-RPT-01c: MD含标题", "趋势报告" in content,
+                     f"len={len(content)}", "report")
+    else:
+        skip("TF-RPT-01: 报告生成", "缺少前置数据")
+
+
+# ========================
+# Diagnostic Tests (TD-*)
+# ========================
+
+def run_diagnostic_tests():
+    """Test the diagnostic script."""
+    print("\n🔍 诊断脚本测试 (Diagnostic)")
+    print("=" * 50)
+
+    tmpdir = tempfile.mkdtemp()
+
+    # Quick diagnostic
+    path = os.path.join(tmpdir, "diag_quick.json")
+    rc, stdout, stderr = run_script("diagnose.py", "--quick", "-o", path)
+    if rc == 0 and os.path.exists(path):
+        data = load_json_output(path)
+        test("TD-quick: 快速诊断运行", "checks" in data,
+             f"mode={data.get('mode')}", "diagnostic")
+        test("TD-quick: Python依赖检查", "python_deps" in data.get("checks", {}),
+             "diagnostic")
+    else:
+        test("TD-quick: 快速诊断运行", False, f"exit_code={rc}", "diagnostic")
+
+
+# ========================
+# Pipeline & Automation Tests (TP-*)
+# ========================
+
+def run_pipeline_tests(tmpdir):
+    """Test resolve_code, run_pipeline, and compute_scores scripts."""
+    print("\n🔧 管线与自动化测试 (Pipeline)")
+    print("=" * 50)
+
+    # TP-RC-01: resolve_code.py - 代码输入
+    rc, stdout, stderr = run_script("resolve_code.py", "513180")
+    if rc == 0:
+        try:
+            data = json.loads(stdout)
+            test("TP-RC-01: 代码解析(513180)",
+                 data.get("ts_code") == "513180.SH",
+                 f"ts_code={data.get('ts_code')}", "resolve")
+            test("TP-RC-01a: asset=FD",
+                 data.get("asset") == "FD",
+                 f"asset={data.get('asset')}", "resolve")
+            test("TP-RC-01b: adj=qfq",
+                 data.get("adj") == "qfq",
+                 f"adj={data.get('adj')}", "resolve")
+        except json.JSONDecodeError:
+            test("TP-RC-01: 代码解析(513180)", False, "JSON解析失败", "resolve")
+    else:
+        test("TP-RC-01: 代码解析(513180)", False, f"exit_code={rc}", "resolve")
+
+    # TP-RC-02: resolve_code.py - 名称输入
+    rc, stdout, stderr = run_script("resolve_code.py", "恒生科技ETF大成")
+    if rc == 0:
+        try:
+            data = json.loads(stdout)
+            test("TP-RC-02: 名称解析(恒生科技ETF大成)",
+                 data.get("ts_code") == "159740.SZ",
+                 f"ts_code={data.get('ts_code')}", "resolve")
+        except json.JSONDecodeError:
+            test("TP-RC-02: 名称解析(恒生科技ETF大成)", False, "JSON解析失败", "resolve")
+    else:
+        test("TP-RC-02: 名称解析(恒生科技ETF大成)", False, f"exit_code={rc}", "resolve")
+
+    # TP-RC-03: resolve_code.py - 港股代码
+    rc, stdout, stderr = run_script("resolve_code.py", "00700.HK")
+    if rc == 0:
+        try:
+            data = json.loads(stdout)
+            test("TP-RC-03: 港股代码解析",
+                 data.get("ts_code") == "00700.HK" and data.get("asset") == "E",
+                 f"ts_code={data.get('ts_code')}, asset={data.get('asset')}", "resolve")
+        except json.JSONDecodeError:
+            test("TP-RC-03: 港股代码解析", False, "JSON解析失败", "resolve")
+    else:
+        test("TP-RC-03: 港股代码解析", False, f"exit_code={rc}", "resolve")
+
+    # TP-RC-04: resolve_code.py - 输出到文件
+    out_path = os.path.join(tmpdir, "resolve_out.json")
+    rc, stdout, stderr = run_script("resolve_code.py", "600519", "-o", out_path)
+    if rc == 0:
+        data = load_json_output(out_path)
+        test("TP-RC-04: 文件输出",
+             data.get("ts_code") == "600519.SH",
+             f"ts_code={data.get('ts_code')}", "resolve")
+    else:
+        test("TP-RC-04: 文件输出", False, f"exit_code={rc}", "resolve")
+
+    # TP-CS-01: compute_scores.py - 基本评分计算
+    tech_path = os.path.join(tmpdir, "ta01.json")
+    if os.path.exists(tech_path):
+        scores_path = os.path.join(tmpdir, "scores01.json")
+        rc, stdout, stderr = run_script(
+            "compute_scores.py",
+            "--technical", tech_path,
+            "--capital-flow-score", "0.5",
+            "--fundamental-score", "1",
+            "--sentiment-score", "1",
+            "--macro-score", "0.5",
+            "--asset-type", "stock",
+            "-o", scores_path,
+        )
+        if rc == 0 and os.path.exists(scores_path):
+            data = load_json_output(scores_path)
+            test("TP-CS-01: 评分计算",
+                 "composite_score" in data and "direction" in data,
+                 f"score={data.get('composite_score')}, dir={data.get('direction')}", "scores")
+            test("TP-CS-01a: 包含权重",
+                 "weights" in data and len(data.get("weights", {})) == 5,
+                 f"weights={data.get('weights')}", "scores")
+            test("TP-CS-01b: 包含风险列表",
+                 "risks" in data and isinstance(data.get("risks"), list),
+                 f"risks_count={len(data.get('risks', []))}", "scores")
+        else:
+            test("TP-CS-01: 评分计算", False, f"exit_code={rc}", "scores")
+    else:
+        skip("TP-CS-01: 评分计算", "缺少技术分析数据")
+
+    # TP-CS-02: compute_scores.py - ETF类型自动生成special
+    tech_path = os.path.join(tmpdir, "ta01.json")
+    etf_path = os.path.join(tmpdir, "tf_etf01.json")
+    if os.path.exists(tech_path) and os.path.exists(etf_path):
+        scores_path = os.path.join(tmpdir, "scores02.json")
+        rc, stdout, stderr = run_script(
+            "compute_scores.py",
+            "--technical", tech_path,
+            "--asset-type", "etf",
+            "--etf-data", etf_path,
+            "-o", scores_path,
+        )
+        if rc == 0 and os.path.exists(scores_path):
+            data = load_json_output(scores_path)
+            special = data.get("special")
+            test("TP-CS-02: ETF特殊标记",
+                 special is not None and special.get("type") == "etf",
+                 f"type={special.get('type') if special else None}", "scores")
+        else:
+            test("TP-CS-02: ETF特殊标记", False, f"exit_code={rc}", "scores")
+    else:
+        skip("TP-CS-02: ETF特殊标记", "缺少前置数据")
+
+    # TP-CS-03: compute_scores.py - focus权重调整
+    tech_path = os.path.join(tmpdir, "ta01.json")
+    if os.path.exists(tech_path):
+        scores_path = os.path.join(tmpdir, "scores03.json")
+        rc, stdout, stderr = run_script(
+            "compute_scores.py",
+            "--technical", tech_path,
+            "--focus", "technical",
+            "-o", scores_path,
+        )
+        if rc == 0 and os.path.exists(scores_path):
+            data = load_json_output(scores_path)
+            weights = data.get("weights", {})
+            test("TP-CS-03: focus权重调整(技术55%)",
+                 abs(weights.get("technical", 0) - 0.55) < 0.01,
+                 f"technical_weight={weights.get('technical')}", "scores")
+        else:
+            test("TP-CS-03: focus权重调整", False, f"exit_code={rc}", "scores")
+    else:
+        skip("TP-CS-03: focus权重调整", "缺少技术分析数据")
+
+    # TP-PL-01: run_pipeline.py - ETF标的
+    pipeline_path = os.path.join(tmpdir, "pipeline01.json")
+    rc, stdout, stderr = run_script(
+        "run_pipeline.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
+        "-o", tmpdir, timeout=180,
+    )
+    if rc == 0:
+        # Check pipeline output
+        pp = os.path.join(tmpdir, "pipeline_output.json")
+        if os.path.exists(pp):
+            data = load_json_output(pp)
+            test("TP-PL-01: 管线执行(ETF)",
+                 "meta" in data and "results" in data,
+                 f"ts_code={data.get('meta', {}).get('ts_code')}", "pipeline")
+            kline_result = data.get("results", {}).get("kline", {})
+            test("TP-PL-01a: K线数据获取",
+                 kline_result.get("record_count", 0) > 0,
+                 f"records={kline_result.get('record_count')}", "pipeline")
+        else:
+            test("TP-PL-01: 管线执行(ETF)", False, "pipeline_output.json不存在", "pipeline")
+    else:
+        test("TP-PL-01: 管线执行(ETF)", False, f"exit_code={rc}, stderr={stderr[:200]}", "pipeline")
+
+    # TP-PL-02: run_pipeline.py - 股票标的
+    pipeline_path = os.path.join(tmpdir, "pipeline02.json")
+    rc, stdout, stderr = run_script(
+        "run_pipeline.py", "600519.SH", "--asset", "E", "--adj", "qfq",
+        "-o", tmpdir, timeout=180,
+    )
+    if rc == 0:
+        pp = os.path.join(tmpdir, "pipeline_output.json")
+        if os.path.exists(pp):
+            data = load_json_output(pp)
+            meta = data.get("meta", {})
+            test("TP-PL-02: 管线执行(股票)",
+                 meta.get("ts_code") == "600519.SH" and meta.get("asset") == "E",
+                 f"ts_code={meta.get('ts_code')}", "pipeline")
+        else:
+            test("TP-PL-02: 管线执行(股票)", False, "pipeline_output.json不存在", "pipeline")
+    else:
+        test("TP-PL-02: 管线执行(股票)", False, f"exit_code={rc}", "pipeline")
+
+
+# ========================
+# Main
+# ========================
+
+def main():
+    parser = argparse.ArgumentParser(description="Stock Trend Skill test suite")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--fetch-only", action="store_true", help="Only run fetch tests")
+    parser.add_argument("--analyze-only", action="store_true", help="Only run analysis tests")
+    args = parser.parse_args()
+
+    print("=" * 50)
+    print("🧪 Stock Trend Skill 测试套件")
+    print("=" * 50)
+
+    tmpdir = None
+
+    if not args.analyze_only:
+        tmpdir = run_fetch_tests()
+
+    if not args.fetch_only:
+        if tmpdir is None:
+            # Need to fetch data first for analyze tests
+            tmpdir = run_fetch_tests()
+        run_analyze_tests(tmpdir)
+
+    # New script tests (ETF, capital flow, report generation)
+    if not args.fetch_only and not args.analyze_only:
+        if tmpdir is None:
+            tmpdir = run_fetch_tests()
+        run_new_script_tests(tmpdir)
+
+    if not args.fetch_only and not args.analyze_only:
+        run_diagnostic_tests()
+
+    # Pipeline & automation tests
+    if not args.fetch_only and not args.analyze_only:
+        if tmpdir is None:
+            tmpdir = run_fetch_tests()
+        run_pipeline_tests(tmpdir)
+
+    # Summary
+    total = PASSED + FAILED + SKIPPED
+    print("\n" + "=" * 50)
+    print(f"📋 测试结果汇总: {PASSED} passed, {FAILED} failed, {SKIPPED} skipped (total: {total})")
+    print("=" * 50)
+
+    if FAILED > 0:
+        print("\n❌ 失败的测试:")
+        for r in RESULTS:
+            if r["status"] == "FAIL":
+                print(f"  - {r['name']}: {r['detail']}")
+
+    # Save results
+    results_path = "/tmp/stock-trend-test-results.json"
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump({"summary": {"passed": PASSED, "failed": FAILED, "skipped": SKIPPED, "total": total},
+                    "results": RESULTS}, f, ensure_ascii=False, indent=2)
+    print(f"\n详细结果已保存到: {results_path}")
+
+    return 0 if FAILED == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

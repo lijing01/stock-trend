@@ -7,9 +7,15 @@ argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timefram
 allowed-tools:
   - Read
   - Write
+  - Bash(python3 .claude/skills/stock-trend/scripts/resolve_code.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/run_pipeline.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/compute_scores.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetch_etf_data.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetch_capital_flow.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/generate_report.py *)
   - WebSearch
   - WebFetch
   - mcp__web-search__bing_search
@@ -25,45 +31,69 @@ allowed-tools:
 /stock-trend <code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]
 ```
 
-- `code`（必填）：股票/ETF 代码。缺失时提示用法
+- `code`（必填）：股票/ETF 代码或名称。缺失时提示用法
 - `--focus`（可选，可叠加）：`technical | capital_flow | fundamental | sentiment`
 - `--horizon`（可选，默认 `daily`）：`intraday | daily | weekly`
 - `--multi-timeframe`：多周期共振模式，同时获取日/周K线并计算周期共振得分
 - `--compact`：精简输出模式
 - `--no-data`：跳过K线数据获取
 
-代码格式校验：6位A股(如600519)、5位港股(如00700)、带后缀(如600519.SH)。不匹配时报错。
-
-## Step 2: 识别市场与标的
-
-| 代码模式 | 市场 | Tushare ts_code | asset | 复权 |
-|---|---|---|---|---|
-| `6xxxxx` / `6xxxxx.SH` | 上交所 A股 | {code}.SH | E | qfq |
-| `0xxxxx` / `0xxxxx.SZ` | 深交所 A股 | {code}.SZ | E | qfq |
-| `3xxxxx` / `3xxxxx.SZ` | 创业板 | {code}.SZ | E | qfq |
-| `688xxx` / `688xxx.SH` | 科创板 | {code}.SH | E | qfq |
-| `5xxxxx` | 上交所 ETF | {code}.SH | FD | qfq |
-| `15xxxx` | 深交所 ETF | {code}.SZ | FD | qfq |
-| `0xxxx` (5位) / `0xxxx.HK` | 港股 | {code}.HK | E | none |
-
-特殊标记：ST/*ST → 退市风险警示；港股 → 无涨跌停；ETF → IOPV 折溢价
-
-## Step 3: 获取K线数据
+**自动解析标的代码**：使用 `resolve_code.py` 自动识别代码或名称：
 
 ```bash
-# 1. 先尝试 Tushare
-python3 .claude/skills/stock-trend/scripts/fetch_kline.py <ts_code> --asset <E|FD> --freq <D|W> --adj <qfq|none> -o /tmp/kline.json
-# 2. Tushare 失败时降级东方财富（不支持港股）
-#    脚本内部自动轮换节点：push2his → 38.push2his → 48.push2his
-#    东方财富全节点失败时自动降级 BaoStock
-python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py <ts_code> --asset <E|FD> --freq <D|W> -o /tmp/kline.json
-# 3. 技术分析
-python3 .claude/skills/stock-trend/scripts/analyze_technical.py /tmp/kline.json -o /tmp/technical.json
+python3 .claude/skills/stock-trend/scripts/resolve_code.py <name_or_code> -o /tmp/resolve.json
 ```
 
-**数据源降级链**：Tushare → 东方财富(增强头+节点轮换) → BaoStock → 无数据模式
+支持输入格式：
+- 6位A股代码：`600519`、`513180`
+- 5位港股代码：`00700`
+- 带后缀代码：`600519.SH`、`159740.SZ`、`00700.HK`
+- 中文名称：`恒生科技ETF大成`、`贵州茅台`、`茅台`
 
-判断 Tushare 是否失败：检查 JSON 的 `meta.data_source`，为 `error` 则降级。三个数据源均失败时，技术面按 0 分处理并标注"无数据源"。数据不足 60 条时标注。
+输出包含 `ts_code`、`asset`、`adj`、`market`、`name`，后续步骤直接使用输出值。
+
+## Step 2: 数据管线一键执行
+
+使用 `run_pipeline.py` 自动完成数据获取和技术分析：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/run_pipeline.py <ts_code> --asset <E|FD> --adj <qfq|none> [-o /tmp]
+```
+
+脚本自动执行：
+1. 诊断数据源可用性（检查缓存）
+2. 获取K线数据（Tushare → 东方财富自动降级）
+3. 技术分析（analyze_technical.py）
+4. ETF数据获取（标的为ETF时）
+5. 资金流向获取
+
+输出文件：
+- `/tmp/pipeline_output.json` — 管线汇总（包含数据源、记录数、耗时等元信息）
+- `/tmp/kline.json` — K线数据
+- `/tmp/technical.json` — 技术分析结果
+- `/tmp/etf_data.json` — ETF数据（仅ETF标的）
+- `/tmp/capital_flow.json` — 资金流向
+
+**管线失败时的手动降级**：如果管线整体失败，可按以下步骤手动执行：
+
+```bash
+# K线数据获取（Tushare）
+python3 .claude/skills/stock-trend/scripts/fetch_kline.py <ts_code> --asset <E|FD> --freq <D|W> --adj <qfq|none> -o /tmp/kline.json
+# Tushare失败时降级东方财富
+python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py <ts_code> --asset <E|FD> --freq <D|W> -o /tmp/kline.json
+# 技术分析
+python3 .claude/skills/stock-trend/scripts/analyze_technical.py /tmp/kline.json -o /tmp/technical.json
+# ETF数据（仅ETF标的）
+python3 .claude/skills/stock-trend/scripts/fetch_etf_data.py <fund_code> -o /tmp/etf_data.json
+# 资金流向
+python3 .claude/skills/stock-trend/scripts/fetch_capital_flow.py <ts_code> --asset <E|FD> -o /tmp/capital_flow.json
+```
+
+**数据源降级链**：
+- A股/ETF：Tushare → 东方财富(增强头+节点轮换) → BaoStock → 无数据模式
+- 港股(.HK)：Tushare → 腾讯财经港股API → 无数据模式
+
+判断 Tushare 是否失败：检查 JSON 的 `meta.data_source`，为 `error` 则降级。`meta.error_type: "permission"` 表示权限不足，直接降级不需要重试。所有数据源均失败时，技术面按 0 分处理并标注"无数据源"。数据不足 60 条时标注。
 
 使用 `--no-data` 时跳过本步骤。
 
@@ -72,7 +102,12 @@ python3 .claude/skills/stock-trend/scripts/analyze_technical.py /tmp/kline.json 
 
 Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKEN` > `.claude/tushare-config.json`。未配置时自动降级东方财富。
 
-## Step 4: 五维分析
+## Step 3: 五维分析
+
+**数据质量检查**：检查 `technical.json` 的 `summary.data_quality`：
+- `"insufficient"`（数据<30条）：技术面权重降至17.5%，其余维度按比例分配
+- `"limited"`（数据30-59条）：技术面权重降至25%，在报告中标注数据质量警告
+- 数据不足时，`key_signals` 中会自动包含警告信息
 
 每个维度评分范围 **-3 ~ +3**，详细评分标准见 **references/trend-dimensions.md**。
 
@@ -84,17 +119,16 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 
 ### 非技术面数据获取方式
 
-技术面数据由脚本自动获取。非技术面（资金面/基本面/情绪面/宏观面）数据需从外部来源获取，按以下优先级：
+技术面数据由管线自动获取。非技术面（资金面/基本面/情绪面/宏观面）数据需从外部来源获取，按以下优先级：
 
-1. **`mcp__web-search__bing_search` + `mcp__web-search__crawl_webpage`**：首选方式，可抓取中文财经网站内容
-2. **`WebSearch`**：用于搜索宏观政策、行业新闻等公开信息
-3. **`Bash(curl)`**：用于东方财富API等需要自定义Header的场景，示例：
-   ```bash
-   # ETF基金信息（净值、IOPV折溢价等）
-   curl -s "http://fund.eastmoney.com/pingzhongdata/{code}.js" -H "Referer: http://fund.eastmoney.com/" | head -50
-   # 资金流向
-   curl -s "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?secid=0.{code}&fields1=f1,f2,f3,f7&klt=101&lmt=5" -H "Referer: https://quote.eastmoney.com/"
-   ```
+1. **`WebSearch`**：首选搜索方式，用于宏观政策、行业新闻等公开信息搜索
+2. **`mcp__web-search__bing_search` + `mcp__web-search__crawl_webpage`**：中文财经网站内容抓取
+3. **`Bash(curl)`**：用于东方财富API等需要自定义Header的场景
+
+**搜索关键词模板**（帮助高效构造搜索）：
+- `"{stock_name} {ts_code} 资金流向 南向资金"` — 资金面
+- `"{stock_name} {ts_code} 行情分析 估值"` — 基本面
+- `"{index_name} 宏观政策 中美关系"` — 宏观面
 
 **禁止使用 `WebFetch` 访问以下域名**（域名安全验证会失败）：
 - `*.eastmoney.com`（东方财富系列）
@@ -113,26 +147,38 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 
 **一致性因子**：同向指标数/总指标数影响置信度，5指标全偏多比3偏多2偏空置信度更高。
 
-## Step 5: 计算综合评分
+## Step 4: 计算综合评分
 
+使用 `compute_scores.py` 自动计算：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/compute_scores.py \
+  --technical /tmp/technical.json \
+  --capital-flow-score <资金面得分> \
+  --fundamental-score <基本面得分> \
+  --sentiment-score <情绪面得分> \
+  --macro-score <宏观面得分> \
+  [--focus <维度>] \
+  [--asset-type etf|hk|st|stock] \
+  [--etf-data /tmp/etf_data.json] \
+  [--risks '["风险1","风险2"]'] \
+  -o /tmp/scores.json
 ```
-综合评分 = Σ(维度得分 × 维度权重)
-```
 
-**默认权重**：技术面 35%、资金面 25%、基本面 15%、情绪面 15%、宏观面 10%
+**计算规则**（脚本自动处理）：
+- 技术面得分：从 `technical.json` 的 `summary.total_score` 自动提取
+- 非技术面得分：通过命令行参数传入（agent 根据 WebSearch 结果判定）
+- 权重计算：默认 技术面35% / 资金面25% / 基本面15% / 情绪面15% / 宏观面10%
+- `--focus` 调整权重：`technical`→技术55%, `capital_flow`→资金50%, `fundamental`→基本45%, `sentiment`→情绪45%
+- 数据质量自动调整权重：insufficient→技术17.5%, limited→技术25%
+- 趋势判定：≥ +2.0 看多，≤ -2.0 看空，其他震荡
+- 置信度：评分绝对值 ≥ 2.5 且一致性 ≥ 0.7 → 高；≥ 2.0 且一致性 ≥ 0.5 → 中；其他 → 低
+- 风险项自动从 `key_signals` 提取
+- ETF/HK/ST 特殊标记自动生成
 
-**`--focus` 权重调整**：
+输出 `/tmp/scores.json` 包含综合评分、方向、置信度、风险项、报告参数等全部字段。
 
-| focus | 调整后权重 |
-|---|---|
-| `technical` | 技术 55%, 资金 20%, 其他均分 |
-| `capital_flow` | 资金 50%, 技术 20%, 其他均分 |
-| `fundamental` | 基本 45%, 宏观 20%, 其他均分 |
-| `sentiment` | 情绪 45%, 技术 25%, 其他均分 |
-
-多 focus 叠加时权重平均合并。
-
-## Step 6: 判定趋势与置信度
+## Step 5: 判定趋势与置信度
 
 | 综合评分 | 趋势 | 评分绝对值 | 置信度 |
 |---|---|---|---|
@@ -146,13 +192,18 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 - 日线看多+周线看空 = 抢反弹策略，标注"短线操作"
 - 日线看空+周线看多 = 回调买入机会，标注"回调关注"
 
-## Step 7: 风险管理与监控信号
+## Step 6: 风险管理与监控信号
 
 基于 `analyze_technical.py` 的 `summary` 输出生成：
 
-**止损位**：`summary.stop_loss`（支撑位 - 1×ATR，或当前价 - 2×ATR）
-**目标价位**：`summary.target`（最近压力位）
-**风险收益比**：`summary.risk_reward_ratio`（R:R ≥ 2:1 值得入场）
+**止损位**：`summary.stop_loss`（max(支撑位 - 1×ATR, 当前价 - 2×ATR)）
+**目标价位**：三级目标体系
+- `summary.target_conservative`：最近压力位（保守目标）
+- `summary.target_moderate`：第一个R:R ≥ 1.5的压力位（主目标）
+- `summary.target_aggressive`：主目标之后的下一个压力位（激进目标）
+**风险收益比**：`summary.risk_reward_ratio`（基于主目标，R:R ≥ 1.5 值得入场）
+**R:R质量**：`summary.favorable_rr`（true/false，R:R ≥ 1.5为有利）
+**R:R警告**：`summary.risk_reward_warning`（当支撑/压力位过近时自动标注）
 **仓位建议**：`summary.position_sizing`（基于 ATR% 波动率）
 **最大回撤**：`summary.max_drawdown_pct`（历史区间最大回撤）
 
@@ -166,16 +217,45 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 | 看空 | 突破止损位（空仓反向） | 立即离场 |
 | 震荡 | 突破压力/跌破支撑 | 突破方向追入，需量价确认 |
 
-## Step 9: 特殊标的处理
+## Step 7: 特殊标的的处理
 
 - **ST/*ST**：基本面强制 -1；标题行标注退市风险
 - **港股**：增恒指联动、卖空占比、南向资金、AH溢价；标注无涨跌停
 - **ETF**：增 IOPV 折溢价、跟踪误差、申赎、成交额分析
 - **可转债**：增转股溢价率、纯债价值、强赎风险
 
-## Step 10: 生成报告
+## Step 8: 生成报告
 
-**默认模式**：使用 **assets/report-template.md** 和 **assets/report-template.html** 生成完整报告
+**默认模式**：使用 `generate_report.py` 脚本生成报告
+
+**方式一（推荐，使用管线+评分文件）**：
+```bash
+python3 .claude/skills/stock-trend/scripts/generate_report.py \
+  --pipeline /tmp/pipeline_output.json \
+  --scores-file /tmp/scores.json \
+  --ts-code 159740.SZ --stock-name '恒生科技ETF大成' \
+  --output-md reports/159740.SZ/20260514-2200.md \
+  --output-html reports/159740.SZ/20260514-2200.html
+```
+
+`--pipeline` 自动填充 `--kline`、`--technical`、`--etf-data`、`--capital-flow` 参数；
+`--scores-file` 自动填充 `--scores`、`--direction`、`--score`、`--confidence`、`--risks`、`--special` 参数。
+
+**方式二（手动传参，兼容旧方式）**：
+```bash
+python3 .claude/skills/stock-trend/scripts/generate_report.py \
+  --technical /tmp/technical.json \
+  --kline /tmp/kline.json \
+  --etf-data /tmp/etf_data.json \
+  --capital-flow /tmp/capital_flow.json \
+  --scores '{"technical":1,"capital_flow":0.5,"fundamental":-1,"sentiment":0,"macro":0}' \
+  --direction '看多' --score 1.2 --confidence '中' \
+  --risks '["布林带极度收口","RSI顶背离"]' \
+  --special '{"type":"etf","title":"ETF 特殊分析","content":"IOPV折溢价率: +0.15%"}' \
+  --ts-code 159740.SZ --stock-name '恒生科技ETF大成' \
+  --output-md reports/159740.SZ/20260514-2200.md \
+  --output-html reports/159740.SZ/20260514-2200.html
+```
 
 **精简模式** (`--compact`)：
 
@@ -192,11 +272,11 @@ Tushare Token 配置优先级：命令行 `--token` > 环境变量 `TUSHARE_TOKE
 | Markdown | `reports/{ts_code}/{YYYYMMDD-HHmm}.md` |
 | HTML | `reports/{ts_code}/{YYYYMMDD-HHmm}.html` |
 
-`ts_code` 使用 Step 2 识别的 Tushare 代码格式（含市场后缀，如 159740.SZ、600519.SH、00700.HK）
+`ts_code` 使用 Step 1 解析的 Tushare 代码格式（含市场后缀，如 159740.SZ、600519.SH、00700.HK）
 
 精简模式仅输出文本，不保存 HTML。
 
-## Step 11: 自动打开 HTML 报告
+## Step 9: 自动打开 HTML 报告
 
 **默认模式**下，生成报告后自动在浏览器中打开 HTML 文件：
 
@@ -206,9 +286,7 @@ open reports/{ts_code}/{YYYYMMDD-HHmm}.html
 
 **精简模式** (`--compact`) 跳过本步骤（无 HTML 文件生成）。
 
-`open` 命令使用系统默认浏览器打开 HTML 文件。路径与 Step 8 保存路径一致。
-
-## Step 12: 免责声明
+## Step 10: 免责声明
 
 所有输出必须附带：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。
 

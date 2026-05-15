@@ -13,6 +13,7 @@ Examples:
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 
@@ -796,8 +797,16 @@ def scan_patterns(df, lookback=10):
 # --- Support/Resistance levels ---
 
 
-def calc_support_resistance(df, ma_result, bollinger_result):
-    """Calculate key support and resistance levels with strength ranking."""
+def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None):
+    """Calculate key support and resistance levels with strength ranking.
+
+    Args:
+        df: DataFrame with OHLCV data
+        ma_result: Result from calc_ma_signals()
+        bollinger_result: Result from calc_bollinger()
+        atr_pct: ATR as percentage of price (for dynamic clustering threshold).
+                 If None, falls back to 0.5% fixed threshold.
+    """
     close = df["close"]
     curr_close = close.iloc[-1]
     levels = {"support": [], "resistance": []}
@@ -879,13 +888,15 @@ def calc_support_resistance(df, ma_result, bollinger_result):
     for direction in ["support", "resistance"]:
         if not levels[direction]:
             continue
-        # Cluster levels within 0.5% of each other
+        # Dynamic clustering threshold: max(0.5%, 1.5 * ATR%)
+        # For low-priced ETFs, ATR-based threshold avoids over-clustering
+        cluster_threshold = max(0.005, 1.5 * (atr_pct or 0) / 100) if atr_pct else 0.005
         sorted_items = sorted(levels[direction], key=lambda x: x["price"], reverse=(direction == "support"))
         clustered = []
         for item in sorted_items:
             merged = False
             for cluster in clustered:
-                if abs(item["price"] - cluster["price"]) / cluster["price"] < 0.005:
+                if abs(item["price"] - cluster["price"]) / cluster["price"] < cluster_threshold:
                     # Merge: keep stronger strength, combine sources
                     strength_rank = {"high": 3, "medium": 2, "low": 1}
                     if strength_rank.get(item.get("strength", "low"), 0) > strength_rank.get(cluster.get("strength", "low"), 0):
@@ -987,37 +998,85 @@ def calc_max_drawdown(df):
 
 
 def calc_risk_reward(df, atr_result, levels):
-    """Calculate stop-loss price and risk:reward ratio."""
+    """Calculate stop-loss price and risk:reward ratio with three-tier targets."""
     curr_close = df["close"].iloc[-1]
     atr = atr_result.get("atr")
 
-    # Determine stop-loss: use nearest support - 1*ATR, or 2*ATR below current price
+    # Stop-loss: max(nearest_support - 1*ATR, current - 2*ATR)
     support_prices = [item["price"] for item in levels.get("support", []) if item["price"]]
-    if support_prices:
+    if support_prices and atr:
         nearest_support = max(support_prices)
-        stop_loss = round(nearest_support - (atr if atr else 0), 2)
+        stop_loss = round(max(nearest_support - atr, curr_close - 2 * atr), 2)
+    elif support_prices:
+        nearest_support = max(support_prices)
+        stop_loss = round(nearest_support, 2)
     elif atr:
         stop_loss = round(curr_close - 2 * atr, 2)
     else:
         stop_loss = None
 
-    # Determine target: use nearest resistance, or 2*ATR above current price
-    resistance_prices = [item["price"] for item in levels.get("resistance", []) if item["price"]]
-    if resistance_prices:
-        nearest_resistance = min(resistance_prices)
-        target = round(nearest_resistance, 2)
-    elif atr:
-        target = round(curr_close + 2 * atr, 2)
-    else:
-        target = None
+    # Three-tier target system
+    resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
 
-    # Calculate R:R ratio
+    target_conservative = None
+    target_moderate = None
+    target_aggressive = None
+    warning = None
+
     risk = (curr_close - stop_loss) if stop_loss else None
+
+    if resistance_prices:
+        # Conservative: nearest resistance (original behavior)
+        target_conservative = round(resistance_prices[0], 2)
+
+        if risk and risk > 0:
+            # Moderate: first resistance where R:R >= 1.5
+            for rp in resistance_prices:
+                if (rp - curr_close) / risk >= 1.5:
+                    target_moderate = round(rp, 2)
+                    break
+            if target_moderate is None and atr:
+                target_moderate = round(curr_close + 2 * atr, 2)
+            elif target_moderate is None:
+                target_moderate = target_conservative
+
+            # Aggressive: next resistance after moderate
+            moderate_idx = None
+            for i, rp in enumerate(resistance_prices):
+                if round(rp, 2) == target_moderate:
+                    moderate_idx = i
+                    break
+            if moderate_idx is not None and moderate_idx + 1 < len(resistance_prices):
+                target_aggressive = round(resistance_prices[moderate_idx + 1], 2)
+            elif atr:
+                target_aggressive = round(curr_close + 3 * atr, 2)
+            else:
+                target_aggressive = target_moderate
+        else:
+            target_moderate = target_conservative
+            target_aggressive = target_conservative
+    elif atr:
+        target_conservative = round(curr_close + 1 * atr, 2)
+        target_moderate = round(curr_close + 2 * atr, 2)
+        target_aggressive = round(curr_close + 3 * atr, 2)
+        warning = "支撑/压力位数据不足，止损/目标价仅供参考"
+    else:
+        warning = "ATR数据不足，无法计算止损/目标价"
+
+    # Primary target = moderate
+    target = target_moderate
+
+    # R:R ratio based on moderate target
     reward = (target - curr_close) if target else None
 
     rr_ratio = None
+    favorable_rr = None
     if risk and reward and risk > 0:
         rr_ratio = round(reward / risk, 2)
+        favorable_rr = rr_ratio >= 1.5
+
+    if rr_ratio is not None and rr_ratio < 0.5 and not warning:
+        warning = f"风险收益比过低(R:R={rr_ratio})，支撑/压力位过近，参考价值有限"
 
     # Position sizing based on volatility
     atr_pct = atr_result.get("atr_pct", 0)
@@ -1032,18 +1091,23 @@ def calc_risk_reward(df, atr_result, levels):
 
     return {
         "stop_loss": stop_loss,
+        "target_conservative": target_conservative,
+        "target_moderate": target_moderate,
+        "target_aggressive": target_aggressive,
         "target": target,
         "risk_reward_ratio": rr_ratio,
-        "risk": round(risk, 2) if risk else None,
-        "reward": round(reward, 2) if reward else None,
+        "favorable_rr": favorable_rr,
+        "risk": round(risk, 2) if risk else 0,
+        "reward": round(reward, 2) if reward else 0,
         "position_sizing": position,
+        "warning": warning,
     }
 
 
 # --- Aggregate summary ---
 
 
-def build_summary(indicator_results, patterns):
+def build_summary(indicator_results, patterns, data_points=None):
     """Build overall technical summary with weighted scores and consistency factor."""
     # Sub-weights: trend indicators (MA+MACD) heavier, oscillators (RSI+KDJ) lighter
     SUB_WEIGHTS = {
@@ -1060,6 +1124,7 @@ def build_summary(indicator_results, patterns):
     weighted_sum = 0
     weight_total = 0
     scores = []
+    valid_scores = []  # Only non-insufficient_data scores for consistency
     key_signals = []
 
     for name, result in indicator_results.items():
@@ -1069,6 +1134,9 @@ def build_summary(indicator_results, patterns):
         weighted_sum += s * w
         weight_total += w
         scores.append(s)
+        # Track only indicators with actual data for consistency calculation
+        if signal.get("type") != "insufficient_data":
+            valid_scores.append(s)
         desc = signal.get("description", "")
         if desc:
             key_signals.append(desc)
@@ -1088,9 +1156,10 @@ def build_summary(indicator_results, patterns):
     total = max(-3, min(3, round(total)))
 
     # Consistency factor: same-direction indicators increase confidence
-    bull_count = sum(1 for s in scores if s > 0)
-    bear_count = sum(1 for s in scores if s < 0)
-    total_count = len(scores) if scores else 1
+    # Use only valid (non-insufficient_data) scores for consistency
+    bull_count = sum(1 for s in valid_scores if s > 0)
+    bear_count = sum(1 for s in valid_scores if s < 0)
+    total_count = len(valid_scores) if valid_scores else 1
     consistency = max(bull_count, bear_count) / total_count
 
     if total >= 2:
@@ -1111,13 +1180,23 @@ def build_summary(indicator_results, patterns):
     else:
         confidence = "low"
 
-    return {
+    result = {
         "total_score": total,
         "direction": direction,
         "confidence": confidence,
         "consistency": round(consistency, 2),
         "key_signals": key_signals[:8],
     }
+
+    # Data quality assessment
+    if data_points is not None and data_points < 30:
+        result["data_quality"] = "insufficient"
+        result["key_signals"].insert(0, f"⚠️ 数据仅{data_points}条，分析结果可靠性极低")
+    elif data_points is not None and data_points < 60:
+        result["data_quality"] = "limited"
+        result["key_signals"].insert(0, f"⚠️ 数据仅{data_points}条，部分指标可能不准确")
+
+    return result
 
 
 # --- Main ---
@@ -1135,7 +1214,7 @@ def main():
     args = parser.parse_args()
 
     # Read input
-    if args.input_file:
+    if args.input_file and args.input_file != "-":
         with open(args.input_file, "r", encoding="utf-8") as f:
             input_data = json.load(f)
     else:
@@ -1221,19 +1300,25 @@ def main():
         df,
         indicator_results.get("ma", {}),
         indicator_results.get("bollinger", {}),
+        atr_pct=atr_result.get("atr_pct"),
     )
 
     # Risk:Reward and stop-loss
     risk_reward = calc_risk_reward(df, atr_result, levels)
 
     # Summary
-    summary = build_summary(indicator_results, patterns)
+    summary = build_summary(indicator_results, patterns, data_points=len(df))
     summary["support_levels"] = [item["price"] for item in levels["support"]]
     summary["resistance_levels"] = [item["price"] for item in levels["resistance"]]
     summary["stop_loss"] = risk_reward.get("stop_loss")
+    summary["target_conservative"] = risk_reward.get("target_conservative")
+    summary["target_moderate"] = risk_reward.get("target_moderate")
+    summary["target_aggressive"] = risk_reward.get("target_aggressive")
     summary["target"] = risk_reward.get("target")
     summary["risk_reward_ratio"] = risk_reward.get("risk_reward_ratio")
+    summary["favorable_rr"] = risk_reward.get("favorable_rr")
     summary["position_sizing"] = risk_reward.get("position_sizing")
+    summary["risk_reward_warning"] = risk_reward.get("warning")
     summary["max_drawdown_pct"] = drawdown_result.get("max_drawdown_pct")
 
     # Latest data point
@@ -1268,6 +1353,8 @@ def _convert_numpy(obj):
         return {k: _convert_numpy(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_convert_numpy(v) for v in obj]
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating,)):
@@ -1289,6 +1376,7 @@ def _output(result, output_path=None, compact=False):
     output = _convert_numpy(output)
     text = json.dumps(output, ensure_ascii=False, indent=2 if not compact else None)
     if output_path:
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(text)
         print(f"Analysis written to {output_path}", file=sys.stderr)

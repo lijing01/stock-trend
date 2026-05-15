@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""Compute composite scores for stock-trend analysis.
+
+Reads technical analysis output and optional dimension scores,
+computes weighted composite score, trend direction, confidence,
+and risk items.
+
+Usage:
+    python3 compute_scores.py --technical /tmp/technical.json [options]
+    python3 compute_scores.py --technical /tmp/technical.json \
+        --capital-flow-score 0.5 --fundamental-score 1 \
+        --sentiment-score 1 --macro-score 0.5 --asset-type etf
+
+Output JSON includes: scores, weights, composite_score, direction,
+confidence, risks, special section, and all parameters for report generation.
+"""
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+
+
+# --- Default weights ---
+
+DEFAULT_WEIGHTS = {
+    "technical": 0.35,
+    "capital_flow": 0.25,
+    "fundamental": 0.15,
+    "sentiment": 0.15,
+    "macro": 0.10,
+}
+
+FOCUS_WEIGHTS = {
+    "technical": {
+        "technical": 0.55, "capital_flow": 0.20,
+        "fundamental": 0.083, "sentiment": 0.083, "macro": 0.084,
+    },
+    "capital_flow": {
+        "capital_flow": 0.50, "technical": 0.20,
+        "fundamental": 0.10, "sentiment": 0.10, "macro": 0.10,
+    },
+    "fundamental": {
+        "fundamental": 0.45, "macro": 0.20,
+        "technical": 0.117, "capital_flow": 0.117, "sentiment": 0.116,
+    },
+    "sentiment": {
+        "sentiment": 0.45, "technical": 0.25,
+        "capital_flow": 0.10, "fundamental": 0.10, "macro": 0.10,
+    },
+}
+
+# Data quality weight adjustments
+DATA_QUALITY_WEIGHTS = {
+    "insufficient": {"technical": 0.175},  # 17.5% for tech, rest redistributed
+    "limited": {"technical": 0.25},         # 25% for tech, rest redistributed
+}
+
+
+def redistribute_weights(base_weights, tech_weight_override):
+    """Redistribute weights when technical weight changes due to data quality."""
+    weights = dict(base_weights)
+    old_tech = weights["technical"]
+    new_tech = tech_weight_override
+    # Scale other weights proportionally to fill the gap
+    diff = old_tech - new_tech
+    other_keys = [k for k in weights if k != "technical"]
+    other_total = sum(weights[k] for k in other_keys)
+    for k in other_keys:
+        weights[k] = weights[k] + diff * (weights[k] / other_total) if other_total > 0 else weights[k]
+    weights["technical"] = new_tech
+    # Normalize to sum=1
+    total = sum(weights.values())
+    for k in weights:
+        weights[k] = round(weights[k] / total, 4)
+    return weights
+
+
+def determine_direction(score):
+    """Determine trend direction from composite score."""
+    if score >= 2.0:
+        return "看多"
+    elif score <= -2.0:
+        return "看空"
+    else:
+        return "震荡"
+
+
+def determine_direction_modifier(score):
+    """Determine direction modifier (偏多/偏空)."""
+    if 0 < score < 2.0:
+        return "偏多"
+    elif -2.0 < score < 0:
+        return "偏空"
+    return ""
+
+
+def determine_confidence(abs_score, consistency):
+    """Determine confidence level based on score magnitude and consistency."""
+    if abs_score >= 2.5 and consistency >= 0.7:
+        return "高"
+    elif abs_score >= 2.0 and consistency >= 0.5:
+        return "中"
+    else:
+        return "低"
+
+
+def extract_risks(technical_data, score_data):
+    """Extract risk items from technical analysis key_signals."""
+    risks = []
+
+    # From technical analysis
+    summary = technical_data.get("summary", {})
+    key_signals = summary.get("key_signals", [])
+
+    # Classify signals as risks
+    risk_keywords = ["背离", "死叉", "极度收口", "超买", "压力", "空头", "下跌", "减仓", "止损"]
+    for signal in key_signals:
+        is_risk = any(kw in signal for kw in risk_keywords)
+        # Include all signals as risks context, but prioritize risk ones
+        if is_risk:
+            risks.append(signal)
+
+    # Add risk_reward_warning if present
+    rr_warning = summary.get("risk_reward_warning")
+    if rr_warning:
+        risks.append(rr_warning)
+
+    # From non-technical signals if provided
+    # (agent will add these via --risks or post-processing)
+
+    return risks
+
+
+def build_special_section(asset_type, technical_data, etf_data=None, capital_flow_data=None):
+    """Build special section for ETF/HK/ST assets."""
+    if asset_type == "etf" and etf_data:
+        nav = etf_data.get("nav", {})
+        content_parts = []
+        iopv_premium = nav.get("iopv_premium_pct")
+        if iopv_premium is not None:
+            direction = "溢价" if iopv_premium > 0 else "折价"
+            content_parts.append(f"IOPV折溢价率: {iopv_premium:+.2f}%（{direction}）")
+        nav_val = nav.get("nav")
+        if nav_val:
+            content_parts.append(f"最新净值: {nav_val}")
+        fund_name = etf_data.get("fund_name", "")
+        if fund_name:
+            content_parts.insert(0, f"基金名称: {fund_name}")
+
+        return {
+            "type": "etf",
+            "title": "ETF 特殊分析",
+            "content": "；".join(content_parts) if content_parts else "",
+        }
+
+    elif asset_type == "hk":
+        return {
+            "type": "hk",
+            "title": "港股特殊分析",
+            "content": "需补充恒指联动、卖空占比、南向资金、AH溢价数据",
+        }
+
+    elif asset_type == "st":
+        return {
+            "type": "st",
+            "title": "退市风险警示",
+            "content": "ST/*ST标的，基本面强制-1分，注意退市风险",
+        }
+
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Compute composite scores for stock-trend analysis"
+    )
+    parser.add_argument(
+        "--technical", required=True,
+        help="Path to technical analysis JSON"
+    )
+    parser.add_argument("--capital-flow-score", type=float, default=None,
+                        help="Capital flow dimension score (-3 to +3)")
+    parser.add_argument("--fundamental-score", type=float, default=None,
+                        help="Fundamental dimension score (-3 to +3)")
+    parser.add_argument("--sentiment-score", type=float, default=None,
+                        help="Sentiment dimension score (-3 to +3)")
+    parser.add_argument("--macro-score", type=float, default=None,
+                        help="Macro dimension score (-3 to +3)")
+    parser.add_argument("--focus", choices=["technical", "capital_flow", "fundamental", "sentiment"],
+                        help="Focus dimension for weight adjustment")
+    parser.add_argument("--asset-type", choices=["etf", "hk", "st", "stock"],
+                        default="stock", help="Asset type for special sections")
+    parser.add_argument("--etf-data", help="Path to ETF data JSON")
+    parser.add_argument("--capital-flow-data", help="Path to capital flow JSON")
+    parser.add_argument("--risks", help="JSON array of additional risk strings")
+    parser.add_argument("-o", "--output", default="/tmp/scores.json",
+                        help="Output JSON file path")
+    args = parser.parse_args()
+
+    # Read technical analysis
+    with open(args.technical, "r", encoding="utf-8") as f:
+        technical_data = json.load(f)
+
+    summary = technical_data.get("summary", {})
+
+    # Extract technical score from summary
+    tech_score = summary.get("total_score", 0)
+    data_quality = summary.get("data_quality")
+
+    # Non-technical scores: use provided values or default to 0
+    scores = {
+        "technical": round(tech_score, 2),
+        "capital_flow": round(args.capital_flow_score, 2) if args.capital_flow_score is not None else 0,
+        "fundamental": round(args.fundamental_score, 2) if args.fundamental_score is not None else 0,
+        "sentiment": round(args.sentiment_score, 2) if args.sentiment_score is not None else 0,
+        "macro": round(args.macro_score, 2) if args.macro_score is not None else 0,
+    }
+
+    # Compute weights
+    if args.focus:
+        weights = dict(FOCUS_WEIGHTS[args.focus])
+    else:
+        weights = dict(DEFAULT_WEIGHTS)
+
+    # Adjust for data quality
+    if data_quality in DATA_QUALITY_WEIGHTS:
+        tech_override = DATA_QUALITY_WEIGHTS[data_quality]["technical"]
+        weights = redistribute_weights(weights, tech_override)
+
+    # Compute composite score
+    composite = sum(scores[k] * weights[k] for k in scores)
+    composite = round(composite, 3)
+
+    # Determine direction and confidence
+    direction = determine_direction(composite)
+    direction_modifier = determine_direction_modifier(composite)
+    consistency = summary.get("consistency", 0)
+    confidence = determine_confidence(abs(composite), consistency)
+
+    # Full direction string
+    if direction_modifier:
+        full_direction = f"{direction}{direction_modifier}"
+    else:
+        full_direction = direction
+
+    # Extract risks
+    risks = extract_risks(technical_data, scores)
+    if args.risks:
+        try:
+            extra_risks = json.loads(args.risks)
+            risks.extend(extra_risks)
+        except json.JSONDecodeError:
+            pass
+
+    # Deduplicate risks while preserving order
+    seen = set()
+    unique_risks = []
+    for r in risks:
+        if r not in seen:
+            seen.add(r)
+            unique_risks.append(r)
+
+    # Build special section
+    etf_data = None
+    if args.etf_data and Path(args.etf_data).exists():
+        with open(args.etf_data, "r", encoding="utf-8") as f:
+            etf_data = json.load(f)
+
+    special = build_special_section(
+        args.asset_type, technical_data,
+        etf_data=etf_data,
+    )
+
+    # Build output
+    output = {
+        "scores": scores,
+        "weights": {k: round(v, 4) for k, v in weights.items()},
+        "composite_score": composite,
+        "direction": full_direction,
+        "direction_detail": direction,
+        "direction_modifier": direction_modifier,
+        "confidence": confidence,
+        "consistency": consistency,
+        "risks": unique_risks,
+        "special": special,
+        "data_quality": data_quality,
+        # Convenience fields for report generation
+        "report_params": {
+            "direction": full_direction,
+            "score": composite,
+            "confidence": confidence,
+            "ts_code": technical_data.get("meta", {}).get("ts_code", ""),
+            "stop_loss": summary.get("stop_loss"),
+            "target_conservative": summary.get("target_conservative"),
+            "target_moderate": summary.get("target_moderate"),
+            "target_aggressive": summary.get("target_aggressive"),
+            "risk_reward_ratio": summary.get("risk_reward_ratio"),
+            "favorable_rr": summary.get("favorable_rr"),
+            "position_sizing": summary.get("position_sizing"),
+            "max_drawdown_pct": summary.get("max_drawdown_pct"),
+            "support_levels": summary.get("support_levels", []),
+            "resistance_levels": summary.get("resistance_levels", []),
+        },
+    }
+
+    # Write output
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    # Print summary
+    print(f"Composite score: {composite} | Direction: {full_direction} | Confidence: {confidence}")
+    print(f"Scores: tech={scores['technical']} cap={scores['capital_flow']} "
+          f"fund={scores['fundamental']} sent={scores['sentiment']} macro={scores['macro']}")
+    print(f"Weights: " + " ".join(f"{k}={v:.2f}" for k, v in weights.items()))
+    print(f"Risks: {unique_risks}")
+    print(f"Output: {output_path}")
+
+
+if __name__ == "__main__":
+    main()

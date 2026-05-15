@@ -132,6 +132,10 @@ def fetch_via_http(token, ts_code, asset, freq, start_date, end_date):
 
     if result.get("code") != 0 or not result.get("data"):
         error_msg = result.get("msg", "Unknown HTTP API error")
+        # Detect permission-related errors for auto-fallback
+        permission_keywords = ["权限", "没有权限", "permission", "每分钟", "访问频次", "积分不足", "不够权限"]
+        if any(kw in error_msg for kw in permission_keywords):
+            raise PermissionError(f"Tushare权限不足: {error_msg}")
         raise RuntimeError(f"Tushare HTTP API error: {error_msg}")
 
     fields = result["data"]["fields"]
@@ -154,17 +158,25 @@ def fetch_kline(token, ts_code, asset, freq, adj, start_date, end_date, ma):
     """Fetch K-line data with SDK -> HTTP fallback and retry logic."""
     source = "tushare_sdk"
     df = None
+    error_type = None
 
     # Try SDK first
     try:
         df = fetch_via_sdk(token, ts_code, asset, freq, adj, start_date, end_date, ma)
     except ImportError:
         source = "tushare_http"
+    except PermissionError as e:
+        # Permission error: skip retry, go directly to fallback
+        source = "tushare_http"
+        error_type = "permission"
     except Exception:
         # Retry once after 2s
         time.sleep(2)
         try:
             df = fetch_via_sdk(token, ts_code, asset, freq, adj, start_date, end_date, ma)
+        except PermissionError:
+            source = "tushare_http"
+            error_type = "permission"
         except Exception:
             source = "tushare_http"
 
@@ -172,11 +184,16 @@ def fetch_kline(token, ts_code, asset, freq, adj, start_date, end_date, ma):
     if df is None and source == "tushare_http":
         try:
             df = fetch_via_http(token, ts_code, asset, freq, start_date, end_date)
+        except PermissionError:
+            # Permission error on HTTP too: skip retry
+            return None, "permission"
         except Exception:
             # Retry once after 2s
             time.sleep(2)
             try:
                 df = fetch_via_http(token, ts_code, asset, freq, start_date, end_date)
+            except PermissionError:
+                return None, "permission"
             except Exception as e:
                 return None, f"SDK和HTTP API均请求失败: {e}"
 
@@ -284,6 +301,7 @@ def main():
                 "freq": args.freq,
                 "data_source": "error",
                 "error": source_or_error,
+                "error_type": "permission" if source_or_error == "permission" else None,
             },
             "data": [],
         }
@@ -333,6 +351,7 @@ def _output(result, output_path=None):
     """Write JSON result to file or stdout."""
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if output_path:
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(text)
         print(f"Data written to {output_path}", file=sys.stderr)
