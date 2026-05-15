@@ -103,10 +103,12 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py /tmp/kline.jso
 
 | 维度 | 权重 | 自动化基线 | 搜索关键词 |
 |------|------|-----------|-----------|
-| 资金面 | 25% | `data_extended.northbound/margin`（管线已获取） | `"{stock_name} {ts_code} 资金流向 北向资金"` |
-| 基本面 | 15% | `fundamental.json`（PE/PB/ROE/财务数据已获取） | `"{stock_name} {ts_code} 估值 业绩"` |
-| 情绪面 | 15% | 无自动化 | `"{stock_name} 涨跌停 换手率 板块"` |
-| 宏观面 | 10% | `macro_snapshot.json`（汇率/利率/PMI已获取） | `"今日宏观 政策 利率 汇率 外盘"` |
+| 资金面 | 25% | `data_extended.northbound/margin`（管线已获取） | `"{stock_name} {ts_code} 资金流向 北向资金 {YYYY}年{M}月"` |
+| 基本面 | 15% | `fundamental.json`（PE/PB/ROE/财务数据已获取） | `"{stock_name} {ts_code} 估值 业绩 {YYYY}年{M}月"` |
+| 情绪面 | 15% | 无自动化 | `"{stock_name} 涨跌停 换手率 板块 {YYYY}年{M}月"` |
+| 宏观面 | 10% | `macro_snapshot.json`（汇率/利率/PMI已获取） | `"今日宏观 政策 利率 汇率 外盘 {YYYY}年{M}月"` |
+
+> **年份替换**：`{YYYY}` 和 `{M}` 取自系统当前日期（见 CLAUDE.md `# currentDate`），严禁使用训练截止年份或上一年度。例如当前2026年5月则填"2026年5月"，勿写"2025年5月"。
 
 **四个搜索并行执行，无交叉依赖**。
 
