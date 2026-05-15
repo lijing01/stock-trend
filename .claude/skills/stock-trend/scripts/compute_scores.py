@@ -174,15 +174,15 @@ def validate_dimension_scores(scores, signals_info, self_check):
         has_counter = info.get("has_counter", False)
         check = self_check.get(dim, {})
 
-        # 1. Coverage penalty
+        # 1. Event cap (on raw score first)
+        score, ws = validate_event_cap(dim, score, signal_count)
+        warnings.extend(ws)
+
+        # 2. Coverage penalty (on event-capped score)
         covered_items = check.get("covered_items", signal_count)
         score, w = apply_coverage_penalty(dim, covered_items, score)
         if w:
             warnings.append(w)
-
-        # 2. Event cap
-        score, ws = validate_event_cap(dim, score, signal_count)
-        warnings.extend(ws)
 
         # 3. Bullish/bearish balance: missing counter-signal reduces consistency
         if not has_counter:
