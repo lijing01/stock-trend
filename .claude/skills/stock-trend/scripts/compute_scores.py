@@ -57,6 +57,22 @@ DATA_QUALITY_WEIGHTS = {
     "limited": {"technical": 0.25},         # 25% for tech, rest redistributed
 }
 
+# --- Dimension validation rules ---
+
+COVERAGE_RULES = {
+    "capital_flow": {"min_items": 2, "penalty_factor": 0.5},
+    "fundamental":  {"min_items": 2, "penalty_factor": 0.5},
+    "sentiment":    {"min_items": 2, "penalty_factor": 0.5},
+    "macro":        {"min_items": 2, "penalty_factor": 0.5},
+}
+
+EVENT_CAPS = {
+    "macro":       {"single_event_max": 1.5, "high_score_min_signals": 2},
+    "capital_flow":{"single_event_max": 1.0, "high_score_min_signals": 2},
+    "fundamental": {"single_event_max": 1.0, "high_score_min_signals": 2},
+    "sentiment":   {"single_event_max": 1.0, "high_score_min_signals": 2},
+}
+
 
 def redistribute_weights(base_weights, tech_weight_override):
     """Redistribute weights when technical weight changes due to data quality."""
@@ -104,6 +120,91 @@ def determine_confidence(abs_score, consistency):
         return "中"
     else:
         return "低"
+
+
+def apply_coverage_penalty(dim, covered_items, raw_score):
+    """Apply score penalty when dimension has insufficient mandatory item coverage."""
+    rule = COVERAGE_RULES.get(dim)
+    if not rule:
+        return raw_score, None
+    if covered_items < rule["min_items"]:
+        adjusted = raw_score * rule["penalty_factor"]
+        warning = f"{dim}仅覆盖{covered_items}项，低于最低{rule['min_items']}项，得分×0.5"
+        return round(adjusted, 2), warning
+    return raw_score, None
+
+
+def validate_event_cap(dim, score, signal_count):
+    """Cap dimension score when backed by insufficient independent signals."""
+    cap = EVENT_CAPS.get(dim)
+    if not cap:
+        return score, []
+    adjusted = score
+    warnings = []
+    if signal_count < cap["high_score_min_signals"] and abs(score) > cap["single_event_max"]:
+        direction = 1 if score > 0 else -1
+        adjusted = round(direction * cap["single_event_max"], 2)
+        warnings.append(
+            f"{dim}得分{score}超出单事件封顶{cap['single_event_max']}且仅{signal_count}条信号，已修正为{adjusted}"
+        )
+    return adjusted, warnings
+
+
+def validate_dimension_scores(scores, signals_info, self_check):
+    """Validate all non-technical dimension scores for reasonableness.
+
+    Args:
+        scores: dict of {dim: score}
+        signals_info: dict of {dim: {"count": int, "has_counter": bool}}
+        self_check: dict of {dim: {"counter_found": bool, "adjusted": bool, "covered_items": int, ...}}
+
+    Returns:
+        adjusted_scores: dict of {dim: adjusted_score}
+        warnings: list of warning strings
+        confidence_penalty: float (0.0-1.0, multiplier for confidence)
+    """
+    adjusted = {}
+    warnings = []
+    penalty_factors = []
+
+    for dim in ["capital_flow", "fundamental", "sentiment", "macro"]:
+        score = scores.get(dim, 0)
+        info = signals_info.get(dim, {})
+        signal_count = info.get("count", 1)
+        has_counter = info.get("has_counter", False)
+        check = self_check.get(dim, {})
+
+        # 1. Coverage penalty
+        covered_items = check.get("covered_items", signal_count)
+        score, w = apply_coverage_penalty(dim, covered_items, score)
+        if w:
+            warnings.append(w)
+
+        # 2. Event cap
+        score, ws = validate_event_cap(dim, score, signal_count)
+        warnings.extend(ws)
+
+        # 3. Bullish/bearish balance: missing counter-signal reduces consistency
+        if not has_counter:
+            penalty_factors.append(0.6)
+            warnings.append(f"{dim}缺少反向信号，一致性因子×0.6")
+
+        # 4. Self-check adjustments
+        if check.get("adjusted") and check.get("revised") is not None:
+            score = round(check["revised"], 2)
+            warnings.append(f"{dim}经逆向校验调整得分至{score}")
+
+        adjusted[dim] = score
+
+    # Technical dimension: no validation (script-computed)
+    adjusted["technical"] = scores.get("technical", 0)
+
+    # Overall confidence penalty
+    overall_penalty = 1.0
+    if penalty_factors:
+        overall_penalty = min(penalty_factors)
+
+    return adjusted, warnings, overall_penalty
 
 
 def extract_risks(technical_data, score_data):
@@ -240,6 +341,10 @@ def main():
     parser.add_argument("--analysis", default=None,
                         help="JSON object with core_conflict, events (array of {date,event,impact}), advice (array of strings)")
     parser.add_argument("--risks", help="JSON array of additional risk strings")
+    parser.add_argument("--self-check", default=None,
+                        help="JSON with self-check results per dimension: {dim: {counter_found, adjusted, covered_items, original, revised}}")
+    parser.add_argument("--signals-info", default=None,
+                        help="JSON with signal counts per dimension: {dim: {count, has_counter}}")
     parser.add_argument("-o", "--output", default="/tmp/scores.json",
                         help="Output JSON file path")
     args = parser.parse_args()
@@ -360,6 +465,28 @@ def main():
         except Exception:
             pass
 
+    # Parse self-check and signals-info
+    self_check = {}
+    if args.self_check:
+        try:
+            self_check = json.loads(args.self_check)
+        except json.JSONDecodeError:
+            pass
+    signals_info = {}
+    if args.signals_info:
+        try:
+            signals_info = json.loads(args.signals_info)
+        except json.JSONDecodeError:
+            pass
+
+    # Validate dimension scores
+    validation_warnings = []
+    confidence_penalty = 1.0
+    if self_check or signals_info:
+        scores, validation_warnings, confidence_penalty = validate_dimension_scores(
+            scores, signals_info, self_check
+        )
+
     # Compute weights
     if args.focus:
         weights = dict(FOCUS_WEIGHTS[args.focus])
@@ -379,7 +506,15 @@ def main():
     direction = determine_direction(composite)
     direction_modifier = determine_direction_modifier(composite)
     consistency = summary.get("consistency", 0)
-    confidence = determine_confidence(abs(composite), consistency)
+    # Apply validation penalty to consistency before confidence determination
+    adjusted_consistency = consistency * confidence_penalty if confidence_penalty < 1.0 else consistency
+    confidence = determine_confidence(abs(composite), adjusted_consistency)
+
+    # If self-check resulted in score adjustments, downgrade confidence one level
+    any_adjusted = any(v.get("adjusted") for v in self_check.values()) if self_check else False
+    if any_adjusted:
+        confidence_map = {"高": "中", "中": "低", "低": "低"}
+        confidence = confidence_map.get(confidence, confidence)
 
     # Full direction string
     if direction_modifier:
@@ -447,6 +582,9 @@ def main():
         "data_quality": data_quality,
         # Automated data sources used for scoring
         "automated_sources": automated_sources,
+        # Validation results
+        "validation_warnings": validation_warnings,
+        "confidence_penalty": confidence_penalty,
         # Dimension summaries (rich text from agent research, passed through to report)
         "dimension_summaries": {
             "capital": args.capital_summary,
@@ -488,6 +626,10 @@ def main():
     print(f"Weights: " + " ".join(f"{k}={v:.2f}" for k, v in weights.items()))
     print(f"Risks: {unique_risks}")
     print(f"Output: {output_path}")
+    if validation_warnings:
+        print(f"Validation warnings: {validation_warnings}")
+    if confidence_penalty < 1.0:
+        print(f"Confidence penalty: {confidence_penalty}")
 
 
 if __name__ == "__main__":
