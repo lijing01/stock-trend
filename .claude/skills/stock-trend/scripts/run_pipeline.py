@@ -6,8 +6,10 @@ Tushare fallback and parallel execution where possible.
 
 Usage:
     python3 run_pipeline.py <ts_code> [options]
+    python3 run_pipeline.py --code <code> [options]  (one-command entry, auto-resolve)
 
 Examples:
+    python3 run_pipeline.py --code 513180
     python3 run_pipeline.py 159740.SZ --asset FD --adj qfq -o /tmp
     python3 run_pipeline.py 600519.SH -o /tmp
     python3 run_pipeline.py 00700.HK -o /tmp
@@ -22,18 +24,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+from cache_utils import clean_cache
+
 SCRIPT_DIR = Path(__file__).parent
 
 
-def run_script(cmd, label=""):
-    """Run a Python script and return (success, output_path, stdout, stderr)."""
+def get_data_dir(code):
+    """Return data directory path for a given code."""
+    from cache_utils import CACHE_DIR
+    d = Path(CACHE_DIR) / code
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def run_script(cmd, label="", timeout=30):
+    """Run a Python script with timeout. Returns result dict.
+
+    Args:
+        cmd: list of command + args
+        label: human-readable step name
+        timeout: seconds before TimeoutExpired (default 30)
+    """
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         success = result.returncode == 0
         return {
             "success": success,
@@ -47,8 +60,9 @@ def run_script(cmd, label=""):
             "success": False,
             "label": label,
             "returncode": -1,
+            "timeout": True,
             "stdout": "",
-            "stderr": "Timeout (120s)",
+            "stderr": f"Timeout ({timeout}s)",
         }
     except Exception as e:
         return {
@@ -73,7 +87,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run full stock-trend data pipeline"
     )
-    parser.add_argument("ts_code", help="Tushare-format code (e.g. 600519.SH, 159740.SZ)")
+    # --code mode: one-command entry, auto-resolves and writes to data dir
+    parser.add_argument("--code", help="Stock/ETF code (e.g. 513180). Auto-resolves and runs full pipeline.")
+    parser.add_argument("ts_code", nargs="?", help="Tushare-format code (e.g. 600519.SH, 159740.SZ). Not needed with --code.")
     parser.add_argument("--asset", choices=["E", "FD"], help="Asset type (auto-detected if omitted)")
     parser.add_argument("--adj", choices=["qfq", "hfq", "none"], help="Adjustment type (auto-detected if omitted)")
     parser.add_argument("--freq", choices=["D", "W"], default="D", help="K-line frequency (default: D)")
@@ -82,14 +98,55 @@ def main():
     parser.add_argument("--no-fundamental", action="store_true", help="Skip fundamental data fetch")
     parser.add_argument("--no-macro", action="store_true", help="Skip macro snapshot fetch")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore all cache")
-    parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp)")
+    parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp). Ignored when --code is used.")
     args = parser.parse_args()
 
-    ts_code = args.ts_code
-    code = ts_code.split(".")[0]
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Clean cache on pipeline start
+    removed = clean_cache()
+    if removed:
+        print(f"Cache cleanup: removed {removed} stale files")
 
+    # --code mode: auto-resolve
+    if args.code and not args.ts_code:
+        resolve_path = get_data_dir(args.code) / "resolve.json"
+        resolve_result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "resolve_code.py"), args.code, "-o", str(resolve_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        if resolve_result.returncode != 0:
+            print(f"Error: could not resolve code {args.code}: {resolve_result.stderr}", file=sys.stderr)
+            sys.exit(1)
+        resolve_data = read_json(resolve_path)
+        if not resolve_data or not resolve_data.get("ts_code"):
+            print(f"Error: could not resolve code {args.code}", file=sys.stderr)
+            sys.exit(1)
+        ts_code = resolve_data["ts_code"]
+        code = ts_code.split(".")[0]
+        asset = resolve_data.get("asset")
+        adj = resolve_data.get("adj")
+        output_dir = get_data_dir(args.code)
+    elif args.ts_code:
+        ts_code = args.ts_code
+        code = ts_code.split(".")[0]
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        parser.error("Provide either ts_code (positional) or --code")
+
+    # Auto-detect asset and adj if not specified (for non --code mode)
+    asset = args.asset or asset if args.code else args.asset
+    if not asset:
+        if code.startswith(("5", "15")):
+            asset = "FD"
+        else:
+            asset = "E"
+
+    adj = args.adj or adj if args.code else args.adj
+    if not adj:
+        if ts_code.endswith(".HK"):
+            adj = "none"
+        else:
+            adj = "qfq"
     # Auto-detect asset and adj if not specified
     asset = args.asset
     if not asset:
@@ -110,6 +167,7 @@ def main():
 
     pipeline_start = time.time()
     errors = []
+    timeouts = []
     results = {}
 
     # --- Step 1: Quick diagnostic ---
@@ -118,6 +176,8 @@ def main():
         [sys.executable, str(SCRIPT_DIR / "diagnose.py"), "--quick"],
         label="diagnostic",
     )
+    if diag_result.get("timeout"):
+        timeouts.append("diagnostic")
     tushare_available = True  # Assume available, will check via kline fetch
 
     # --- Step 2: Fetch K-line data ---
@@ -133,6 +193,8 @@ def main():
     if args.no_cache:
         kline_cmd.append("--no-cache")
     kline_result = run_script(kline_cmd, label="fetch_kline_tushare")
+    if kline_result.get("timeout"):
+        timeouts.append("fetch_kline_tushare")
 
     kline_data = read_json(kline_path)
     need_fallback = False
@@ -158,6 +220,8 @@ def main():
         if args.no_cache:
             fallback_cmd.append("--no-cache")
         fallback_result = run_script(fallback_cmd, label="fetch_kline_eastmoney")
+        if fallback_result.get("timeout"):
+            timeouts.append("fetch_kline_eastmoney")
         if not fallback_result["success"]:
             errors.append(f"K-line fetch failed: {fallback_result['stderr']}")
         kline_data = read_json(kline_path)
@@ -185,6 +249,8 @@ def main():
             ],
             label="analyze_technical",
         )
+        if tech_result.get("timeout"):
+            timeouts.append("analyze_technical")
         if not tech_result["success"]:
             errors.append(f"Technical analysis failed: {tech_result['stderr']}")
 
@@ -274,6 +340,8 @@ def main():
             for future in as_completed(futures):
                 label, path = futures[future]
                 task_result = future.result()
+                if task_result.get("timeout"):
+                    timeouts.append(label)
                 if not task_result["success"]:
                     errors.append(f"{label} failed: {task_result['stderr']}")
                     continue
@@ -321,6 +389,7 @@ def main():
         },
         "results": results,
         "errors": errors,
+        "timeouts": timeouts,
         "output_files": {
             "kline": kline_path,
             "technical": technical_path if kline_data else None,
@@ -343,6 +412,8 @@ def main():
             print(f"  - {err}")
     else:
         print("No errors")
+    if timeouts:
+        print(f"Timeouts: {len(timeouts)} ({', '.join(timeouts)})")
 
 
 if __name__ == "__main__":
