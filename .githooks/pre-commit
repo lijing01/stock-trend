@@ -1,0 +1,203 @@
+#!/bin/bash
+# pre-commit hook for stock-trend skill
+# Checks Python syntax, template variables, and SKILL.md integrity
+# Pass --no-verify to bypass (emergencies only)
+
+set -o nounset
+set -o pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SKILL_DIR="$SCRIPT_DIR/.claude/skills/stock-trend"
+
+has_errors=0
+has_warnings=0
+
+# Collect staged files (exclude deleted ones)
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+PY_STAGED=$(echo "$STAGED" | grep -E '^\.claude/skills/stock-trend/scripts/[^/]+\.py$' || true)
+TEMPLATE_STAGED=$(echo "$STAGED" | grep -E '^\.claude/skills/stock-trend/assets/report-template\.(md|html)$' || true)
+REPORT_SCRIPT_STAGED=$(echo "$STAGED" | grep -E '^\.claude/skills/stock-trend/scripts/generate_report\.py$' || true)
+SKILL_STAGED=$(echo "$STAGED" | grep -E '^\.claude/skills/stock-trend/SKILL\.md$' || true)
+ANY_SCRIPT_STAGED=$(echo "$STAGED" | grep -E '^\.claude/skills/stock-trend/scripts/.*\.py$' || true)
+
+msg_pass()   { echo -e "  ${GREEN}✓${NC} $1"; }
+msg_fail()   { echo -e "  ${RED}✗${NC} $1"; }
+msg_warn()   { echo -e "  ${YELLOW}⚠${NC} $1"; }
+
+# ──────────────────────────────────────────────
+# Check 1: Python syntax check
+# ──────────────────────────────────────────────
+if [ -n "$PY_STAGED" ]; then
+    echo ""
+    echo "🔍 Python 语法检查..."
+
+    has_syntax_error=0
+    while IFS= read -r -d '' f; do
+        rel="${f#$SCRIPT_DIR/}"
+        full="$f"
+        # Skip __pycache__ files
+        if [[ "$rel" == *__pycache__* ]]; then
+            continue
+        fi
+        if python3 -m py_compile "$full" 2>/dev/null; then
+            msg_pass "$rel"
+        else
+            err=$(python3 -m py_compile "$full" 2>&1 || true)
+            msg_fail "$rel"
+            echo "       $err" | head -3
+            has_syntax_error=1
+        fi
+    done < <(echo "$PY_STAGED" | while IFS= read -r line; do [ -f "$SCRIPT_DIR/$line" ] && printf '%s\0' "$SCRIPT_DIR/$line"; done)
+
+    if [ "$has_syntax_error" -eq 1 ]; then
+        has_errors=1
+    fi
+fi
+
+# ──────────────────────────────────────────────
+# Check 2: Report template variable consistency
+# ──────────────────────────────────────────────
+if [ -n "$TEMPLATE_STAGED" ] || [ -n "$REPORT_SCRIPT_STAGED" ]; then
+    echo ""
+    echo "🔍 报告模板变量一致性检查..."
+
+    template_file="$SKILL_DIR/assets/report-template.md"
+    if [ -f "$template_file" ]; then
+        # Extract template variables (excluding # and ^ prefix for section blocks)
+        template_vars=$(grep -oP '\{\{(\w+)\}\}' "$template_file" | sed 's/{{//;s/}}//' | sort -u || true)
+
+        # Known context keys from generate_report.py build_context()
+        # We derive them by extracting dict keys from the build_context function
+        report_script="$SKILL_DIR/scripts/generate_report.py"
+        if [ -f "$report_script" ]; then
+            # Extract quoted keys from context dict assignments
+            context_keys=$(grep -oP '"[^"]+"(?=\s*:)' "$report_script" | tr -d '"' | sort -u || true)
+
+            missing_from_context=""
+            while IFS= read -r var; do
+                [ -z "$var" ] && continue
+                # Skip section control vars (#section, ^section) — these are in template but
+                # handled by the {{#section}}...{{/section}} syntax, which maps to var existence
+                if echo "$context_keys" | grep -qx "$var"; then
+                    continue
+                fi
+                # Special: "风险项" comes from iterating "风险列表" list items — it's an implicit var
+                if [ "$var" = "风险项" ]; then continue; fi
+                # Special: "内容" comes from "操作建议列表" iteration
+                if [ "$var" = "内容" ]; then continue; fi
+                missing_from_context="$missing_from_context $var"
+            done <<< "$template_vars"
+
+            if [ -n "$missing_from_context" ]; then
+                msg_warn "模板中以下变量未在 context 中找到: $missing_from_context"
+                has_warnings=1
+            else
+                msg_pass "模板变量与 context keys 匹配"
+            fi
+        fi
+    fi
+fi
+
+# ──────────────────────────────────────────────
+# Check 3: Python import check for key scripts
+# ──────────────────────────────────────────────
+if [ -n "$ANY_SCRIPT_STAGED" ]; then
+    echo ""
+    echo "🔍 关键脚本导入检查..."
+    cd "$SKILL_DIR/scripts" || true
+    import_ok=0
+    import_fail=0
+
+    test_import() {
+        local mod_name="$1" file="$2" symbol="$3"
+        if [ ! -f "$file" ] && [ ! -f "$SKILL_DIR/scripts/$file" ]; then
+            return 0
+        fi
+        local f
+        if [ -f "$file" ]; then f="$file"; else f="$SKILL_DIR/scripts/$file"; fi
+        if python3 -c "import sys; sys.path.insert(0, '$SKILL_DIR/scripts'); from $mod_name import $symbol; print('$mod_name.$symbol OK')" >/dev/null 2>&1; then
+            import_ok=$((import_ok + 1))
+        else
+            err=$(python3 -c "import sys; sys.path.insert(0, '$SKILL_DIR/scripts'); from $mod_name import $symbol" 2>&1 || true)
+            msg_fail "$mod_name.$symbol 导入失败: ${err:0:80}"
+            import_fail=$((import_fail + 1))
+        fi
+    }
+
+    test_import "analyze_technical"   "analyze_technical.py"   "calc_support_resistance"
+    test_import "compute_scores"      "compute_scores.py"      "redistribute_weights"
+    test_import "generate_report"     "generate_report.py"     "render_template"
+
+    if [ "$import_fail" -eq 0 ] && [ "$import_ok" -gt 0 ]; then
+        msg_pass "关键脚本导入正常 ($import_ok)"
+    elif [ "$import_fail" -gt 0 ]; then
+        has_errors=1
+    fi
+fi
+
+# ──────────────────────────────────────────────
+# Check 4: SKILL.md structure integrity
+# ──────────────────────────────────────────────
+if [ -n "$SKILL_STAGED" ]; then
+    echo ""
+    echo "🔍 SKILL.md 结构完整性检查..."
+
+    skill_file="$SKILL_DIR/SKILL.md"
+    if [ -f "$skill_file" ]; then
+        # Check Step numbering is continuous
+        steps=$(grep -oP '^## Step \K\d+' "$skill_file" || true)
+        expected=1
+        step_errors=0
+        while IFS= read -r s; do
+            [ -z "$s" ] && continue
+            if [ "$s" -ne "$expected" ] 2>/dev/null; then
+                msg_fail "Step 编号不连续: 期望 Step $expected, 实际 Step $s"
+                step_errors=1
+            fi
+            expected=$((expected + 1))
+        done <<< "$steps"
+        if [ "$step_errors" -eq 0 ]; then
+            msg_pass "Step 编号连续"
+        else
+            has_errors=1
+        fi
+
+        # Check all referenced scripts exist
+        while IFS= read -r cmd; do
+            [ -z "$cmd" ] && continue
+            # Extract script name from python3 .../scripts/xxx.py
+            script_ref=$(echo "$cmd" | grep -oP 'scripts/[a-zA-Z0-9_/-]+\.py' | head -1 || true)
+            if [ -n "$script_ref" ]; then
+                script_path="$SKILL_DIR/$script_ref"
+                clean_path="${script_path%% *}"
+                if [ ! -f "$clean_path" ]; then
+                    msg_warn "SKILL.md 引用的脚本不存在: $clean_path"
+                    has_warnings=1
+                fi
+            fi
+        done < <(grep -oP 'python3 \.claude/skills/stock-trend/scripts/[a-z_/\.-]+' "$skill_file" || true)
+
+        msg_pass "脚本引用检查完成"
+    fi
+fi
+
+# ──────────────────────────────────────────────
+# Summary
+# ──────────────────────────────────────────────
+echo ""
+if [ "$has_errors" -eq 1 ]; then
+    echo -e "${RED}❌ pre-commit 检查未通过，提交已拒绝。${NC}"
+    echo -e "   ${YELLOW}提示: 紧急情况可使用 git commit --no-verify 跳过${NC}"
+    exit 1
+elif [ "$has_warnings" -eq 1 ]; then
+    echo -e "${YELLOW}⚠  pre-commit 检查通过（有警告）${NC}"
+    exit 0
+else
+    echo -e "${GREEN}✅ pre-commit 检查通过${NC}"
+    exit 0
+fi
