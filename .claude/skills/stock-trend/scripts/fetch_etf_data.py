@@ -18,19 +18,13 @@ import os
 import re
 import sys
 import urllib.request
-
-
-EM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "http://fund.eastmoney.com/",
-    "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
+from eastmoney_utils import EM_HEADERS
 
 
 def _fetch_url(url, timeout=15):
     """Fetch URL content with error handling."""
-    req = urllib.request.Request(url, headers=EM_HEADERS)
+    headers = {**EM_HEADERS, "Referer": "http://fund.eastmoney.com/"}
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 

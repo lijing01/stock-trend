@@ -20,34 +20,9 @@ import urllib.request
 import logging
 from cache_utils import load_cache, save_cache, get_market_day_ttl
 from datetime import datetime
+from eastmoney_utils import EM_HEADERS, build_secid as resolve_secid
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
-
-# Reuse secid mapping from fetch_kline_eastmoney
-MARKET_PREFIX = {
-    ".SH": "1",
-    ".SZ": "0",
-}
-
-
-def resolve_secid(ts_code):
-    """Convert ts_code to East Money secid format."""
-    if "." not in ts_code:
-        return None
-    code, suffix = ts_code.rsplit(".", 1)
-    suffix = f".{suffix}"
-    prefix = MARKET_PREFIX.get(suffix)
-    if prefix is None:
-        return None
-    return f"{prefix}.{code}"
-
-
-EM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://quote.eastmoney.com/",
-    "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
 
 
 def _safe_float(val):

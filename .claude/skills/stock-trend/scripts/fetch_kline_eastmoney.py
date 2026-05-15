@@ -20,49 +20,7 @@ import sys
 import urllib.request
 from cache_utils import load_cache, save_cache, get_market_day_ttl
 from datetime import datetime, timedelta
-
-
-# --- EastMoney API node rotation ---
-
-EM_API_HOSTS = [
-    "push2his.eastmoney.com",
-    "38.push2his.eastmoney.com",
-    "48.push2his.eastmoney.com",
-]
-
-EM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://quote.eastmoney.com/",
-    "Accept": "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
-
-
-# --- secid mapping ---
-
-# Market prefix: .SH -> 1 (Shanghai), .SZ -> 0 (Shenzhen)
-MARKET_PREFIX = {
-    ".SH": "1",
-    ".SZ": "0",
-}
-
-
-def resolve_secid(ts_code):
-    """Convert ts_code to East Money secid format.
-
-    Returns None for unsupported markets (e.g. .HK).
-    """
-    if "." not in ts_code:
-        return None
-
-    code, suffix = ts_code.rsplit(".", 1)
-    suffix = f".{suffix}"
-
-    prefix = MARKET_PREFIX.get(suffix)
-    if prefix is None:
-        return None
-
-    return f"{prefix}.{code}"
+from eastmoney_utils import EM_HEADERS, EM_API_HOSTS, build_secid
 
 
 def detect_asset(ts_code):
@@ -315,7 +273,7 @@ def main():
             return
 
     # Check if market is supported by EastMoney
-    secid = resolve_secid(args.ts_code)
+    secid = build_secid(args.ts_code)
     asset = args.asset or detect_asset(args.ts_code)
     adj = args.adj or detect_adj(args.ts_code)
 
@@ -388,15 +346,11 @@ def main():
     error_msg = None
     used_host = None
 
-    for host in EM_API_HOSTS:
-        try:
-            records, name = fetch_eastmoney(secid, args.freq, args.lmt, host=host)
-            used_host = host
-            break
-        except Exception as e:
-            error_msg = str(e)
-            import time
-            time.sleep(1)
+    from eastmoney_utils import rotate_em_host
+    try:
+        (records, name), used_host = rotate_em_host(lambda h: fetch_eastmoney(secid, args.freq, args.lmt, host=h))
+    except RuntimeError as e:
+        error_msg = str(e)
 
     # Fallback to BaoStock if all EastMoney hosts failed
     if records is None and not args.ts_code.endswith(".HK"):
