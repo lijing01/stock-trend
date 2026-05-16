@@ -53,10 +53,11 @@ allowed-tools:
 1. **运行扫描脚本**
 
 ```bash
-python3 .claude/skills/stock-trend/scripts/etf_scanner.py [--top N] [--focus <板块>] [--output compact|full]
+python3 .claude/skills/stock-trend/scripts/etf_scanner.py [--top N] [--focus <板块>] [--output compact|full] --output-md
 ```
 
 脚本输出 JSON 到 stdout，包含 `meta`、`combined_ranking`、`top_picks`、`excluded`、`sector_summary` 字段。
+使用 `--output-md` 时同时生成 Markdown 报告到 `reports/lists/YYYY-MM-DD-HH-mm.md`。
 
 2. **解析 JSON 并呈现结果**
 

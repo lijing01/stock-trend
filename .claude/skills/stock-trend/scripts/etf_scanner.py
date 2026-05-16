@@ -12,6 +12,10 @@ Options:
     --output compact|full  compact=ranked list only, full=include raw data (default: compact)
 
 Outputs JSON to stdout for Claude Code to render.
+
+Options:
+    --output-md    Write Markdown report to reports/lists/YYYY-MM-DD-HH-mm.md
+
 """
 
 import argparse
@@ -31,6 +35,121 @@ SKILL_DIR = SCRIPT_DIR
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
 DEFAULT_WATCHLIST = SKILL_DIR / "watchlist.yaml"
 CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
+REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
+ASSETS_DIR = SKILL_DIR.parent / "assets"
+
+
+# ---------------------------------------------------------------------------
+# Report generation
+# ---------------------------------------------------------------------------
+
+
+def _signal_emoji(score: float) -> str:
+    """Map combined score to signal emoji per SKILL.md spec."""
+    if score >= 80:
+        return "↑↑"
+    if score >= 65:
+        return "↑"
+    if score >= 50:
+        return "→"
+    return "↓"
+
+
+def _stars_text(stars: int) -> str:
+    """Map star count to display string."""
+    if stars >= 3:
+        return "★★★"
+    if stars == 2:
+        return "★★☆"
+    if stars == 1:
+        return "★☆☆"
+    return "☆☆☆"
+
+
+def build_report_context(output: dict) -> dict:
+    """Build template context dict from scanner JSON output."""
+    meta = output.get("meta", {})
+    combined = output.get("combined_ranking", [])
+    top_picks = output.get("top_picks", [])
+    excluded = output.get("excluded", [])
+    sector = output.get("sector_summary", {})
+
+    # Ranking rows
+    ranking_rows = []
+    for c in combined:
+        ds = c.get("deep_score")
+        ranking_rows.append({
+            "rank": c.get("rank", ""),
+            "code": c.get("code", ""),
+            "name": c.get("name", ""),
+            "quick_score": c.get("quick_score", ""),
+            "deep_score": str(ds) if ds is not None else "—",
+            "signal": _signal_emoji(c.get("combined_score", 0)),
+            "stars": _stars_text(c.get("stars", 0)),
+        })
+
+    # Top picks
+    pick_rows = []
+    for i, p in enumerate(top_picks, 1):
+        pick_rows.append({
+            "pick_rank": i,
+            "code": p.get("code", ""),
+            "name": p.get("name", ""),
+            "combined_score": p.get("combined_score", ""),
+            "logic": p.get("logic", ""),
+        })
+
+    # Excluded
+    excluded_summary = ", ".join(
+        f"{e['code']}({e.get('name', '')} {e.get('reason', '')})"
+        for e in excluded
+    ) if excluded else ""
+
+    # Sector summary
+    strong_list = sector.get("strong", [])
+    weak_list = sector.get("weak", [])
+    strong_summary = " | ".join(
+        f"{s['name']}(+{s['avg_score']}↑)" for s in strong_list
+    ) if strong_list else ""
+    weak_summary = " | ".join(
+        f"{w['name']}({w['avg_score']}↓)" for w in weak_list
+    ) if weak_list else ""
+
+    return {
+        "scan_time": meta.get("scan_time", ""),
+        "total_etfs": meta.get("total_etfs", ""),
+        "valid_etfs": meta.get("valid_etfs", ""),
+        "duration_seconds": meta.get("duration_seconds", ""),
+        "ranking_rows": ranking_rows if ranking_rows else None,
+        "top_picks": pick_rows if pick_rows else None,
+        "has_excluded": bool(excluded),
+        "excluded_summary": excluded_summary,
+        "has_sector_summary": bool(strong_list or weak_list),
+        "sector_strong_summary": strong_summary,
+        "sector_weak_summary": weak_summary,
+    }
+
+
+def generate_report(output: dict) -> Path:
+    """Render ETF scan report template and write to reports/lists/."""
+    from generate_report import render_template
+
+    template_path = ASSETS_DIR / "etf-scan-report-template.md"
+    if not template_path.exists():
+        print(f"Warning: template not found at {template_path}", file=sys.stderr)
+        return None
+
+    template = template_path.read_text(encoding="utf-8")
+    context = build_report_context(output)
+    report = render_template(template, context)
+
+    now = datetime.now(timezone(timedelta(hours=8)))
+    filename = now.strftime("%Y-%m-%d-%H-%M") + ".md"
+    output_path = REPORTS_LISTS_DIR / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report, encoding="utf-8")
+    print(f"Report written to {output_path}", file=sys.stderr)
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +853,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                         help="Custom watchlist path")
     parser.add_argument("--no-deep", action="store_true",
                         help="Skip Phase 2 deep analysis")
+    parser.add_argument("--output-md", action="store_true",
+                        help="Write Markdown report to reports/lists/")
     return parser.parse_args(argv)
 
 
@@ -766,6 +887,9 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
     print()  # trailing newline
+
+    if args.output_md:
+        generate_report(output)
 
 
 if __name__ == "__main__":
