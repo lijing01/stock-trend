@@ -182,7 +182,7 @@ def load_watchlist(path: Optional[Path] = None) -> dict:
 
 def run_script(script_name: str, args: list[str], timeout: int = 30) -> Optional[dict]:
     """Run an existing stock-trend script and return parsed JSON output."""
-    script_path = SKILL_DIR / script_name
+    script_path = SCRIPT_DIR / script_name
     cmd = [sys.executable, str(script_path)] + args
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -839,7 +839,7 @@ def run_deep_analysis(code: str, settings: dict) -> dict:
         result["pipeline_source"] = "cache"
     else:
         result["pipeline_source"] = "fresh"
-        pipeline_cmd = [sys.executable, str(SKILL_DIR / "run_pipeline.py"),
+        pipeline_cmd = [sys.executable, str(SCRIPT_DIR / "run_pipeline.py"),
                         "--code", code]
         try:
             subprocess.run(pipeline_cmd, capture_output=True, text=True,
@@ -851,7 +851,7 @@ def run_deep_analysis(code: str, settings: dict) -> dict:
     # Run scoring
     scores_result = get_cached_scores(code)
     if not scores_result:
-        scores_cmd = [sys.executable, str(SKILL_DIR / "compute_scores.py"),
+        scores_cmd = [sys.executable, str(SCRIPT_DIR / "compute_scores.py"),
                       "--code", code]
         try:
             subprocess.run(scores_cmd, capture_output=True, text=True,
