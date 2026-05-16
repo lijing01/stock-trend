@@ -26,11 +26,23 @@ td{font-size:14px}
 .signal-up{color:#dc2626;font-weight:700}
 .signal-flat{color:#6b7280;font-weight:600}
 .signal-down{color:#16a34a;font-weight:700}
+.stage-early{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;background:#dcfce7;color:#16a34a}
+.stage-mid{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;background:#dbeafe;color:#2563eb}
+.stage-late{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600;background:#fee2e2;color:#dc2626}
+.sr{color:#86868b;font-size:11px}
 .pick-item{padding:10px 0 10px 16px;border-left:3px solid #1d4ed8;margin-bottom:8px;background:#f9fafb;border-radius:0 6px 6px 0}
 .pick-item .pick-name{font-weight:600;color:#1a1a1a}
 .pick-item .pick-code{color:#86868b;font-size:13px;margin-left:6px}
 .pick-item .pick-logic{color:#4b5563;font-size:14px;margin-top:2px}
 .pick-item .pick-score{color:#1d4ed8;font-size:13px;font-weight:600}
+.plan-card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:12px 16px;margin-top:8px;font-size:13px;line-height:1.8}
+.plan-card .plan-row{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:4px}
+.plan-card .plan-label{color:#6b7280;min-width:70px}
+.plan-card .plan-value{color:#1a1a1a;font-weight:500}
+.plan-card .plan-entry{color:#16a34a;font-weight:600}
+.plan-card .plan-stop{color:#dc2626;font-weight:600}
+.plan-card .plan-target{color:#2563eb;font-weight:600}
+.plan-card .plan-timing{color:#9333ea;font-weight:500}
 .sector-row{display:flex;gap:16px;margin-bottom:12px}
 .sector-tag{display:inline-block;padding:4px 10px;border-radius:6px;font-size:13px;font-weight:500}
 .sector-strong{background:rgba(239,83,80,.08);color:#dc2626;border:1px solid rgba(239,83,80,.2)}
@@ -52,13 +64,15 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 {{#has_ranking}}
 <h2>综合排名</h2>
 <table>
-<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>速评分</th><th>深度分</th><th>信号</th><th>推荐</th></tr></thead>
+<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>阶段</th><th>板块排名</th><th>速评分</th><th>深度分</th><th>信号</th><th>推荐</th></tr></thead>
 <tbody>
 {{#ranking_rows}}
 <tr>
   <td>{{rank}}</td>
   <td>{{code}}</td>
   <td>{{name}}</td>
+  <td>{{#stage_tag}}<span class="stage-{{trend_stage}}">{{stage_tag}}</span>{{/stage_tag}}</td>
+  <td><span class="sr">{{sector_rank}}</span></td>
   <td class="sc">{{quick_score}}</td>
   <td class="sc">{{deep_score}}</td>
   <td class="signal-{{signal_dir}}">{{signal}}</td>
@@ -79,8 +93,18 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 <h2>Top 投资逻辑</h2>
 {{#top_picks}}
 <div class="pick-item">
-  <div><span class="pick-name">#{{pick_rank}} {{name}}</span><span class="pick-code">{{code}}</span><span class="pick-score"> 评分 {{combined_score}}</span></div>
+  <div><span class="pick-name">#{{pick_rank}} {{name}}</span><span class="pick-code">{{code}}</span><span class="pick-score"> 评分 {{combined_score}}</span>{{#stage_tag}} <span class="stage-{{trend_stage}}">{{stage_tag}}</span>{{/stage_tag}}</div>
   <div class="pick-logic">{{logic}}</div>
+  {{#has_trading_plan}}
+  <div class="plan-card">
+    <div class="plan-row"><span class="plan-entry plan-value">{{entry_detail}}</span></div>
+    <div class="plan-row"><span class="plan-label">入场区间</span><span class="plan-value plan-entry">{{entry_low}} ~ {{entry_high}} (当前 {{entry_current}})</span></div>
+    <div class="plan-row"><span class="plan-label">止损位</span><span class="plan-value plan-stop">{{stop_loss_price}} (风险 {{stop_loss_pct}}%)</span></div>
+    <div class="plan-row"><span class="plan-label">目标价</span><span class="plan-value plan-target">TP1 {{tp1_price}} (+{{tp1_pct}}%) | TP2 {{tp2_price}} (+{{tp2_pct}}%)</span></div>
+    <div class="plan-row"><span class="plan-label">建议仓位</span><span class="plan-value">{{position_pct}}% ({{position_reason}})</span></div>
+    <div class="plan-row"><span class="plan-timing plan-value">💡 {{timing_hint}}</span></div>
+  </div>
+  {{/has_trading_plan}}
 </div>
 {{/top_picks}}
 {{/has_top_picks}}

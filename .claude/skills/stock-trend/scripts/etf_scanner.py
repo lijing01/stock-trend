@@ -20,6 +20,7 @@ Options:
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 import time
@@ -90,6 +91,11 @@ def build_report_context(output: dict) -> dict:
     for i, c in enumerate(combined):
         ds = c.get("deep_score")
         cs = c.get("combined_score", 0)
+        ts = c.get("trend_stage", "")
+        stage_tag = {"early": "初期", "mid": "中期", "late": "末期"}.get(ts, "")
+        sr = c.get("sector_rank", "")
+        sc = c.get("sector_count", "")
+        sector_str = f"{sr}/{sc}" if sr and sc else ""
         row = {
             "rank": c.get("rank", ""),
             "code": c.get("code", ""),
@@ -100,6 +106,10 @@ def build_report_context(output: dict) -> dict:
             "signal_dir": _signal_direction(cs),
             "stars": _stars_text(c.get("stars", 0)),
             "stars_num": c.get("stars", 0),
+            "trend_stage": ts,
+            "stage_tag": stage_tag,
+            "sector_rank": sector_str,
+            "risk_adjusted_score": c.get("risk_adjusted_score", ""),
         }
         if i < TOP_N:
             ranking_rows.append(row)
@@ -109,13 +119,55 @@ def build_report_context(output: dict) -> dict:
     # Top picks
     pick_rows = []
     for i, p in enumerate(top_picks, 1):
-        pick_rows.append({
+        entry = {
             "pick_rank": i,
             "code": p.get("code", ""),
             "name": p.get("name", ""),
             "combined_score": p.get("combined_score", ""),
             "logic": p.get("logic", ""),
-        })
+            "trend_stage": p.get("trend_stage", ""),
+            "stage_tag": {"early": "初期", "mid": "中期", "late": "末期"}.get(p.get("trend_stage", ""), ""),
+            "has_trading_plan": False,
+            "entry_strategy": "",
+            "entry_detail": "",
+            "entry_low": "",
+            "entry_high": "",
+            "entry_current": "",
+            "stop_loss_price": "",
+            "stop_loss_pct": "",
+            "tp1_price": "",
+            "tp1_pct": "",
+            "tp2_price": "",
+            "tp2_pct": "",
+            "position_pct": "",
+            "timing_hint": "",
+        }
+        tp = p.get("trading_plan")
+        if tp:
+            entry["has_trading_plan"] = True
+            entry["entry_strategy"] = tp.get("entry_strategy", "")
+            entry["entry_detail"] = tp.get("entry_detail", "")
+            ez = tp.get("entry_zone", {})
+            entry["entry_low"] = ez.get("low", "")
+            entry["entry_high"] = ez.get("high", "")
+            entry["entry_current"] = ez.get("current", "")
+            sl = tp.get("stop_loss", {})
+            entry["stop_loss_price"] = sl.get("price", "")
+            entry["stop_loss_pct"] = sl.get("risk_pct", "")
+            tgs = tp.get("targets", {})
+            tp1 = tgs.get("tp1", {})
+            entry["tp1_price"] = tp1.get("price", "")
+            entry["tp1_pct"] = tp1.get("pct", "")
+            tp2 = tgs.get("tp2", {})
+            entry["tp2_price"] = tp2.get("price", "")
+            entry["tp2_pct"] = tp2.get("pct", "")
+            pos = tp.get("position", {})
+            entry["position_pct"] = pos.get("pct", "")
+            entry["position_range"] = pos.get("range", [])
+            entry["position_reason"] = pos.get("reason", "")
+            timing = tp.get("timing", {})
+            entry["timing_hint"] = timing.get("hint", "")
+        pick_rows.append(entry)
 
     # Excluded
     excluded_summary = ", ".join(
@@ -308,6 +360,273 @@ def _macd_direction(prices: list) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Trend stage detection
+# ---------------------------------------------------------------------------
+
+
+def detect_trend_stage(kline: list) -> dict:
+    """Classify trend into early/mid/late stage.
+
+    Returns dict with stage string and multiplier:
+      - early (1.0): price just broke above MA20, RSI recovering
+      - mid (1.0): MA5/20/60 aligned, RSI 55-70
+      - late (0.5-0.7): price extended, RSI >70, divergence
+    """
+    closes = [r["close"] for r in kline]
+    if len(closes) < 20:
+        return {"stage": "mid", "multiplier": 1.0}
+
+    ma5 = _ma(closes, 5)
+    ma20 = _ma(closes, 20)
+    ma60 = _ma(closes, 60) if len(closes) >= 60 else ma20
+    rsi_val = _rsi(closes, 14)
+    macd_val = _macd_direction(closes)
+    price_ext_pct = (closes[-1] - ma20) / ma20 * 100 if ma20 > 0 else 0
+
+    is_bullish = ma5 > ma20
+    is_strong_bullish = ma5 > ma20 > ma60
+    volumes = [r.get("vol", 0) or 0 for r in kline]
+    if len(volumes) >= 10:
+        avg_vol_recent = sum(volumes[-5:]) / 5
+        avg_vol_older = sum(volumes[-10:-5]) / 5
+        vol_ratio = avg_vol_recent / avg_vol_older if avg_vol_older > 0 else 1.0
+        is_volume_shrinking = vol_ratio < 0.8
+    else:
+        vol_ratio = 1.0
+        is_volume_shrinking = False
+
+    late_signals = 0
+    if rsi_val > 70:
+        late_signals += 1
+    if price_ext_pct > 5:
+        late_signals += 1
+    if is_volume_shrinking and is_bullish:
+        late_signals += 1
+    if macd_val < -0.5 and is_strong_bullish:
+        late_signals += 1
+
+    early_signals = 0
+    if is_bullish and 35 <= rsi_val <= 55:
+        early_signals += 1
+    if 0 < price_ext_pct <= 4 and is_bullish:
+        early_signals += 1
+    if not is_volume_shrinking and is_bullish:
+        early_signals += 1
+
+    if late_signals >= 2:
+        stage = "late"
+        if price_ext_pct > 8:
+            multiplier = 0.5
+        elif price_ext_pct > 5:
+            multiplier = 0.6
+        else:
+            multiplier = 0.7
+    elif early_signals >= 2 and is_bullish and rsi_val < 60:
+        stage = "early"
+        multiplier = 1.0
+    elif is_strong_bullish:
+        stage = "mid"
+        multiplier = 1.0
+    else:
+        stage = "mid"
+        multiplier = 1.0
+
+    return {"stage": stage, "multiplier": multiplier}
+
+
+# ---------------------------------------------------------------------------
+# Risk metrics
+# ---------------------------------------------------------------------------
+
+
+def compute_atr(kline: list, period: int = 14) -> float:
+    """Average True Range."""
+    if len(kline) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(1, len(kline)):
+        high = kline[i].get("high", kline[i]["close"])
+        low = kline[i].get("low", kline[i]["close"])
+        prev_close = kline[i - 1]["close"]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    if len(trs) < period:
+        return sum(trs) / len(trs) if trs else 0.0
+    return sum(trs[-period:]) / period
+
+
+def compute_volatility(kline: list, period: int = 20) -> float:
+    """Daily return volatility (std dev of returns)."""
+    closes = [r["close"] for r in kline]
+    if len(closes) < period + 1:
+        return 0.0
+    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(-period, 0)]
+    mean = sum(returns) / len(returns)
+    variance = sum((r - mean) ** 2 for r in returns) / len(returns)
+    return math.sqrt(variance)
+
+
+def compute_max_drawdown(kline: list, period: int = 20) -> float:
+    """Maximum drawdown percentage in recent period."""
+    closes = [r["close"] for r in kline]
+    if len(closes) < period:
+        return 0.0
+    recent = closes[-period:]
+    peak = recent[0]
+    max_dd = 0.0
+    for p in recent:
+        if p > peak:
+            peak = p
+        dd = (peak - p) / peak
+        max_dd = max(max_dd, dd)
+    return max_dd * 100
+
+
+def compute_risk_penalty(kline: list, risk_aversion: float = 5.0) -> dict:
+    """Compute risk penalty coefficient [0, 1] and metrics."""
+    volatility = compute_volatility(kline)
+    max_dd = compute_max_drawdown(kline)
+    atr = compute_atr(kline)
+    penalty = 1.0 / (1.0 + volatility * risk_aversion)
+    if max_dd > 15:
+        penalty *= 0.7
+    return {
+        "penalty": round(penalty, 3),
+        "atr": round(atr, 4),
+        "volatility": round(volatility, 4),
+        "max_drawdown": round(max_dd, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sector relative ranking
+# ---------------------------------------------------------------------------
+
+
+def compute_sector_ranking(scored: list[dict]) -> list[dict]:
+    """Compute within-category percentile rank for each ETF.
+
+    Adds sector_rank, sector_count, sector_percentile to scored entries.
+    """
+    from collections import defaultdict
+    groups: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for i, s in enumerate(scored):
+        cat = s.get("category", "其他")
+        qs = s.get("quick_score") or 0
+        groups[cat].append((i, qs))
+    for _cat, members in groups.items():
+        members.sort(key=lambda x: x[1], reverse=True)
+        count = len(members)
+        for rank, (idx, _qs) in enumerate(members, 1):
+            pct = (count - rank) / count * 100 if count > 1 else 100.0
+            scored[idx]["sector_rank"] = rank
+            scored[idx]["sector_count"] = count
+            scored[idx]["sector_percentile"] = round(pct, 1)
+    return scored
+
+
+# ---------------------------------------------------------------------------
+# Trading plan
+# ---------------------------------------------------------------------------
+
+
+def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
+                       combined_score: float, score_stars: int) -> dict:
+    """Build actionable trading plan: entry zone, stop loss, targets, position."""
+    closes = [r["close"] for r in kline]
+    close_price = closes[-1]
+    ma20 = _ma(closes, 20)
+    atr_val = compute_atr(kline)
+    risk = compute_risk_penalty(kline)
+    volatility = risk["volatility"]
+
+    # Support and resistance
+    lows = [r.get("low", r["close"]) for r in kline[-20:]]
+    highs = [r.get("high", r["close"]) for r in kline[-20:]]
+    low_20 = min(lows) if len(kline) >= 20 else close_price * 0.95
+    high_20 = max(highs) if len(kline) >= 20 else close_price * 1.05
+
+    # Entry zone
+    if trend_stage == "early":
+        entry_strategy = "immediate"
+        entry_low = round(max(low_20, close_price * 0.97), 3)
+        entry_high = round(min(ma20, close_price), 3)
+        entry_detail = "趋势初期，可立即入场"
+    elif trend_stage == "mid":
+        entry_strategy = "pullback"
+        entry_low = round(ma20 * 0.98, 3)
+        entry_high = round(min(ma20 * 1.02, close_price), 3)
+        entry_detail = "趋势中期，等回踩均线入场"
+    else:
+        entry_strategy = "avoid"
+        entry_low = round(low_20, 3)
+        entry_high = round(close_price * 0.98, 3)
+        entry_detail = "趋势末期，不建议新入场"
+
+    # Stop loss
+    atr_stop = close_price - 1.5 * (atr_val or close_price * 0.02)
+    ma_stop = min(ma20 * 0.98, close_price * 0.95)
+    struct_stop = low_20 * 0.995
+    stop_price = max(atr_stop, ma_stop, struct_stop)
+    risk_amount = max(close_price - stop_price, 0.01)
+    risk_pct = round(risk_amount / close_price * 100, 1)
+    stop_method = "atr" if stop_price == atr_stop else "ma" if stop_price == ma_stop else "structural"
+
+    # Targets
+    tp1 = min(close_price + 2 * risk_amount, high_20)
+    tp2 = min(close_price + 3 * risk_amount, high_20 * 1.05)
+
+    # Position sizing
+    base_pct = 20.0
+    cf = 1.2 if combined_score >= 80 else (1.0 if combined_score >= 65 else 0.8)
+    vf = 1.1 if volatility < 0.1 else (1.0 if volatility < 0.2 else 0.8)
+    position_pct = round(base_pct * cf * vf, 0)
+    position_reason = "三星+低波动" if score_stars >= 3 else (
+        "两星+中波动" if score_stars >= 2 else "一星+高波动"
+    )
+
+    # Timing hint
+    rsi_val = _rsi(closes, 14)
+    if trend_stage == "early" and rsi_val < 55:
+        timing_action = "immediate"
+        timing_hint = "可立即入场，趋势刚启动"
+    elif trend_stage == "early":
+        timing_action = "pullback"
+        timing_hint = "关注回踩MA20入场机会"
+    elif trend_stage == "mid" and rsi_val < 65:
+        timing_action = "add"
+        timing_hint = "持仓可加仓，注意仓位管理"
+    elif trend_stage == "mid":
+        timing_action = "hold"
+        timing_hint = "持仓不动，不加仓"
+    elif trend_stage == "late" and rsi_val >= 70:
+        timing_action = "reduce"
+        timing_hint = "减仓或设置跟踪止损"
+    else:
+        timing_action = "watch"
+        timing_hint = "量价背离，考虑止盈"
+
+    return {
+        "entry_zone": {
+            "low": entry_low, "high": entry_high, "current": round(close_price, 3)
+        },
+        "entry_strategy": entry_strategy,
+        "entry_detail": entry_detail,
+        "stop_loss": {"price": round(stop_price, 3), "method": stop_method, "risk_pct": risk_pct},
+        "targets": {
+            "tp1": {"price": round(tp1, 3), "method": "2R", "pct": round((tp1 - close_price) / close_price * 100, 1)},
+            "tp2": {"price": round(tp2, 3), "method": "3R", "pct": round((tp2 - close_price) / close_price * 100, 1)},
+        },
+        "position": {
+            "pct": int(position_pct),
+            "range": [int(max(10, position_pct - 4)), int(min(30, position_pct + 4))],
+            "reason": position_reason,
+        },
+        "timing": {"action": timing_action, "hint": timing_hint},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Quick scoring functions (Phase 1)
 # ---------------------------------------------------------------------------
 
@@ -464,6 +783,21 @@ def score_momentum(kline: list) -> float:
     elif trend_dir == 1:
         score += 8
 
+    # --- Price extension: penalize overextended moves ---
+    # Price far above MA20 = high risk of mean reversion /追涨陷阱
+    if ma20 > 0:
+        deviation_pct = (closes[-1] - ma20) / ma20 * 100
+        if deviation_pct > 12:
+            score -= 20
+        elif deviation_pct > 8:
+            score -= 15
+        elif deviation_pct > 5:
+            score -= 8
+        elif deviation_pct > 3:
+            score -= 3
+        elif deviation_pct < -3:
+            score -= 5
+
     return max(0.0, min(100.0, score))
 
 
@@ -607,6 +941,13 @@ CONTRADICTION_RULES = [
         ),
         "message": "放量下跌",
     },
+    {
+        "name": "price_extension",
+        "condition": lambda dims: (
+            dims.get("price_ext_pct") is not None and dims.get("price_ext_pct", 0) > 5
+        ),
+        "message": "价格偏离均线过大，追涨风险高",
+    },
 ]
 
 
@@ -719,9 +1060,17 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
     dims["capital_flow"] = score_capital_flow(cap_flow)
     dims["shares_trend"] = score_shares_trend(etf_data)
     dims["iopv"] = score_iopv(etf_data)
+    # Price extension % from MA20 for contradiction detection
+    closes = [r["close"] for r in kline]
+    ma20 = _ma(closes, 20)
+    dims["price_ext_pct"] = round((closes[-1] - ma20) / ma20 * 100, 1) if ma20 > 0 and closes else 0.0
 
     # Detect contradictions across dimensions
     warnings = detect_contradictions(dims)
+
+    # Trend stage and risk metrics
+    trend_result = detect_trend_stage(kline)
+    risk_result = compute_risk_penalty(kline)
 
     # Weighted sum: skip None dimensions, redistribute their weight
     total_weight = 0
@@ -746,6 +1095,11 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
         "quick_score": quick_score,
         "dimensions": dims,
         "warnings": warnings,
+        "trend_stage": trend_result["stage"],
+        "trend_stage_multiplier": trend_result["multiplier"],
+        "risk_penalty": risk_result["penalty"],
+        "close_price": closes[-1] if closes else 0,
+        "kline": kline,  # for trading plan in Phase 3
     }
 
 
@@ -834,6 +1188,9 @@ def run_phase1(
     # to its rank-percentile within this scan, then recompute quick_score.
     # This prevents bull-market clustering where all ETFs score 80-100.
     valid = normalize_scores_by_cohort(valid, weights)
+
+    # Sector relative ranking
+    valid = compute_sector_ranking(valid)
 
     valid.sort(key=lambda x: x["quick_score"], reverse=True)
 
@@ -961,6 +1318,9 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
             "warnings": p1.get("warnings", []),
         }
 
+        trend_mult = p1.get("trend_stage_multiplier", 1.0)
+        risk_pen = p1.get("risk_penalty", 1.0)
+
         if entry["deep_score"] is not None:
             # Normalize deep_score from [-3,+3] to [0,100] before combining
             deep_normalized = (entry["deep_score"] + 3) / 6 * 100
@@ -973,11 +1333,13 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
                 if val is not None:
                     bonus += val * w
             entry["combined_score"] = round(
-                0.3 * entry["quick_score"] + 0.7 * deep_normalized + bonus, 1
+                (0.3 * entry["quick_score"] + 0.7 * deep_normalized + bonus) * trend_mult * risk_pen, 1
             )
             entry["p1_bonus"] = round(bonus, 1)
         else:
-            entry["combined_score"] = entry["quick_score"]
+            entry["combined_score"] = round(
+                entry["quick_score"] * trend_mult * risk_pen, 1
+            ) if entry["quick_score"] is not None else None
             entry["p1_bonus"] = 0.0
         combined.append(entry)
 
@@ -985,12 +1347,41 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
     for i, c in enumerate(combined):
         c["rank"] = i + 1
         cs = c["combined_score"] or 0
-        c["stars"] = 3 if cs >= 80 else 2 if cs >= 65 else 1 if cs >= 50 else 0
+
+        # Sector-adjusted stars: only top 30% per category can get 3 stars
+        sector_pct = c.get("sector_percentile", 100)
+        if cs >= 80 and sector_pct >= 70:
+            c["stars"] = 3
+        elif cs >= 65 or (cs >= 55 and sector_pct >= 60):
+            c["stars"] = 2
+        elif cs >= 50:
+            c["stars"] = 1
+        else:
+            c["stars"] = 0
+
+        # Risk-adjusted score (raw * risk_penalty for display)
+        risk_pen = c.get("risk_penalty", 1.0)
+        c["risk_adjusted_score"] = round(cs * risk_pen, 1)
+
+        # Build trading plan from stored kline
+        kline = c.get("kline")
+        if kline and cs > 0:
+            c["trading_plan"] = build_trading_plan(
+                c["code"], c.get("name", ""), kline,
+                c.get("trend_stage", "mid"),
+                cs, c["stars"],
+            )
 
     return combined
 
 
-def build_top_picks(combined: list[dict]) -> list[dict]:
+def _cleanup_combined(combined: list[dict]) -> list[dict]:
+    """Remove internal-only fields before output."""
+    internal = {"kline", "trend_stage_multiplier", "close_price", "risk_penalty"}
+    for c in combined:
+        for key in internal:
+            c.pop(key, None)
+    return combined
     """Extract top picks with brief logic."""
     picks = combined[:5]
     result: list[dict] = []
@@ -1017,12 +1408,22 @@ def build_top_picks(combined: list[dict]) -> list[dict]:
             logic_parts.extend([f"⚠{w}" for w in warnings])
         if not logic_parts:
             logic_parts.append("综合评分居前")
-        result.append({
+            entry = {
             "code": p["code"],
             "name": p["name"],
             "combined_score": p["combined_score"],
             "logic": "，".join(logic_parts),
-        })
+        }
+        # Include trading plan and trend stage if available
+        if "trading_plan" in p:
+            entry["trading_plan"] = p["trading_plan"]
+        if "trend_stage" in p:
+            entry["trend_stage"] = p["trend_stage"]
+        if "sector_percentile" in p:
+            entry["sector_percentile"] = p["sector_percentile"]
+        if "stars" in p:
+            entry["stars"] = p["stars"]
+        result.append(entry)
     return result
 
 
@@ -1080,6 +1481,7 @@ def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dic
                  settings: dict, args: argparse.Namespace, elapsed: float) -> dict:
     """Build final JSON output."""
     combined = build_combined_ranking(phase1_ranked, phase2_results, settings)
+    combined = _cleanup_combined(combined)
 
     valid_count = len(phase1_ranked)
     total_count = sum(len(c["etfs"]) for c in watchlist["categories"])
