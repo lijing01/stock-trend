@@ -3,6 +3,7 @@ name: stock-trend
 description: 对 A股、港股、ETF 执行日趋势判断，输出结构化报告
 triggers:
   - /stock-trend
+  - /etf-scan
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
