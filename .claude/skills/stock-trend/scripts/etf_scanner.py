@@ -383,15 +383,9 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
 
     quick_score = round(weighted_score / total_weight, 1) if total_weight > 0 else None
 
-    name = ""
-    etf_data = result.get("etf_data")
-    if etf_data and isinstance(etf_data, dict):
-        name = etf_data.get("fund_name", "")
-
     return {
         "code": result["code"],
         "ts_code": result["ts_code"],
-        "name": name,
         "quick_score": quick_score,
         "dimensions": dims,
     }
@@ -589,7 +583,7 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
         entry: dict[str, Any] = {
             "code": code,
             "ts_code": p1["ts_code"],
-            "name": p1.get("name", "") or p2.get("name", ""),
+            "name": p2.get("name", ""),
             "category": p1.get("category", ""),
             "quick_score": p1["quick_score"],
             "deep_score": p2.get("deep_score"),
