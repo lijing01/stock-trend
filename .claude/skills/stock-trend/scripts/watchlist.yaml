@@ -1,0 +1,60 @@
+# A 股 ETF 精选扫描池
+# 按板块分类，支持 --focus 指定板块
+categories:
+  - name: 宽基指数
+    etfs:
+      - code: 510050    # 上证50ETF
+      - code: 510300    # 沪深300ETF
+      - code: 510500    # 中证500ETF
+      - code: 512100    # 中证1000ETF
+      - code: 588000    # 科创50ETF
+      - code: 159915    # 创业板ETF
+      - code: 159949    # 创业板50ETF
+
+  - name: 科技
+    etfs:
+      - code: 512760    # 芯片ETF
+      - code: 512480    # 半导体ETF
+      - code: 515050    # 5G ETF
+      - code: 513180    # 恒生科技ETF
+      - code: 513130    # 恒生科技ETF华泰柏瑞
+      - code: 513050    # 中概互联ETF
+      - code: 513330    # 恒生互联网ETF
+
+  - name: 金融
+    etfs:
+      - code: 512880    # 证券ETF
+      - code: 510230    # 金融ETF
+
+  - name: 消费医药
+    etfs:
+      - code: 512010    # 医药ETF
+      - code: 159928    # 消费ETF
+      - code: 515680    # 消费ETF
+
+  - name: 制造周期
+    etfs:
+      - code: 512660    # 军工ETF
+      - code: 515030    # 新能源汽车ETF
+      - code: 516160    # 新能源ETF
+      - code: 515700    # 光伏ETF
+      - code: 516970    # 基建ETF
+
+  - name: 商品跨境
+    etfs:
+      - code: 518880    # 黄金ETF
+      - code: 513100    # 纳指ETF
+      - code: 513090    # 港股通ETF
+
+settings:
+  top_n: 10               # Phase 2 深度分析数量
+  quick_kline_days: 60    # Phase 1 K 线天数
+  phase2_timeout: 45      # 单只深度分析超时秒数
+  min_volume: 10000000    # 最低成交额过滤（元）
+  min_scale: 200000000    # 最低规模过滤（元）
+  quick_score_weights:
+    momentum: 30
+    volume: 20
+    capital_flow: 20
+    shares_trend: 15
+    iopv: 15
