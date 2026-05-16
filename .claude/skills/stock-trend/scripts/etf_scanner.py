@@ -276,8 +276,34 @@ def _macd_direction(prices: list) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _trend_strength(closes: list) -> tuple[float, float]:
+    """Approximate directional movement: (trend_strength, direction_sign).
+
+    Returns ADX-like magnitude (0-100) and sign: +1=bullish, -1=bearish.
+    Uses rate of change over multiple lookbacks to gauge conviction.
+    """
+    if len(closes) < 20:
+        return 0.0, 0.0
+
+    # Rate of change over short and medium windows
+    roc5 = (closes[-1] - closes[-6]) / closes[-6] if len(closes) >= 6 else 0.0
+    roc20 = (closes[-1] - closes[-21]) / closes[-21] if len(closes) >= 21 else 0.0
+
+    # Consistency: are both windows agreeing on direction?
+    direction = 0
+    if roc5 > 0.005 and roc20 > 0:
+        direction = 1
+    elif roc5 < -0.005 and roc20 < 0:
+        direction = -1
+
+    # Strength: how large is the move
+    magnitude = min(abs(roc5) + abs(roc20), 1.0) * 100
+
+    return magnitude, direction
+
+
 def score_momentum(kline: list) -> float:
-    """Score momentum: MA trend + RSI + MACD. Returns 0-100."""
+    """Score momentum: MA trend + RSI + MACD + trend strength. Returns 0-100."""
     closes = [r["close"] for r in kline]
     if len(closes) < 20:
         return 50.0
@@ -287,6 +313,7 @@ def score_momentum(kline: list) -> float:
     ma60 = _ma(closes, 60)
     rsi_val = _rsi(closes, 14)
     macd_val = _macd_direction(closes)
+    _, trend_dir = _trend_strength(closes)
 
     score = 50.0
     # --- MA alignment (0-40 points) ---
@@ -315,32 +342,49 @@ def score_momentum(kline: list) -> float:
     else:
         score -= 5
 
+    # --- Trend strength confirmation ---
+    # Strong bearish trend confirmed by both MA alignment and price momentum
+    if trend_dir == -1:
+        score -= 10
+    elif trend_dir == 1:
+        score += 5
+
     return max(0.0, min(100.0, score))
 
 
 def score_volume(kline: list) -> float:
-    """Score volume activity dimension. Returns 0-100."""
+    """Score volume activity dimension. Returns 0-100.
+
+    High volume with rising prices is bullish; high volume with falling
+    prices (恐慌性放量下跌) is bearish and should score lower.
+    """
     if len(kline) < 10:
         return 50.0
-    # Use 'vol' field from eastmoney kline data
     volumes = [r.get("vol", 0) or 0 for r in kline]
+    closes = [r.get("close", 0) or 0 for r in kline]
     recent_avg = sum(volumes[-5:]) / 5
     long_avg = sum(volumes) / len(volumes)
     ratio = recent_avg / long_avg if long_avg > 0 else 1.0
 
+    # Determine recent price direction
+    n = min(5, len(closes))
+    recent_close_avg = sum(closes[-n:]) / n
+    older_close_avg = sum(closes[-2 * n:-n]) / n if len(closes) >= 2 * n else closes[0]
+    price_up = recent_close_avg > older_close_avg
+
     score = 50.0
     if ratio > 1.5:
-        score += 30
+        score += 30 if price_up else 5   # 放量上涨 vs 恐慌放量下跌
     elif ratio > 1.2:
-        score += 15
+        score += 15 if price_up else 0
     elif ratio < 0.6:
         score -= 20
     elif ratio < 0.8:
         score -= 10
 
-    # Bonus for high absolute turnover
+    # Bonus for high absolute turnover (only if price rising)
     amounts = [r.get("amount", 0) or 0 for r in kline[-1:]]
-    if amounts and amounts[0] > 1_000_000_000:  # > 1B yuan
+    if amounts and amounts[0] > 1_000_000_000 and price_up:
         score += 10
 
     return max(0.0, min(100.0, score))
@@ -722,8 +766,10 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
         }
 
         if entry["deep_score"] is not None:
+            # Normalize deep_score from [-3,+3] to [0,100] before combining
+            deep_normalized = (entry["deep_score"] + 3) / 6 * 100
             entry["combined_score"] = round(
-                0.3 * entry["quick_score"] + 0.7 * entry["deep_score"], 1
+                0.3 * entry["quick_score"] + 0.7 * deep_normalized, 1
             )
         else:
             entry["combined_score"] = entry["quick_score"]
