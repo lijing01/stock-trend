@@ -304,6 +304,89 @@ def _trend_strength(closes: list) -> tuple[float, float]:
     return magnitude, direction
 
 
+def _piecewise_linear(x: float, anchors: list[tuple[float, float]]) -> float:
+    """Piecewise-linear interpolation between anchor points.
+
+    Args:
+        x: Input value to map.
+        anchors: List of (input_val, output_score) tuples, sorted by input_val ascending.
+
+    Returns:
+        Interpolated output, clamped to [0, 100].
+    """
+    if len(anchors) < 2:
+        raise ValueError("Need at least 2 anchors for piecewise linear")
+
+    for i in range(len(anchors) - 1):
+        x0, y0 = anchors[i]
+        x1, y1 = anchors[i + 1]
+        if x <= x0:
+            if i == 0:
+                result = y0
+                return max(0.0, min(100.0, result))
+            continue
+        if x <= x1:
+            if x1 == x0:
+                return max(0.0, min(100.0, y0))
+            slope = (y1 - y0) / (x1 - x0)
+            result = y0 + slope * (x - x0)
+            return max(0.0, min(100.0, result))
+
+    # x > last anchor: use last segment
+    x0, y0 = anchors[-2]
+    x1, y1 = anchors[-1]
+    if x1 == x0:
+        return max(0.0, min(100.0, y1))
+    slope = (y1 - y0) / (x1 - x0)
+    result = y1 + slope * (x - x1)
+    return max(0.0, min(100.0, result))
+
+
+# --- Continuous anchor points for piecewise-linear scoring ---
+
+CAPITAL_FLOW_ANCHORS = [
+    (-1_000_000_000, 0.0),
+    (-200_000_000, 10.0),
+    (-60_000_000, 20.0),
+    (0, 40.0),
+    (60_000_000, 65.0),
+    (200_000_000, 85.0),
+    (1_000_000_000, 100.0),
+]
+
+SHARES_TREND_ANCHORS = [
+    (-20, 0.0),
+    (-10, 10.0),
+    (-3, 20.0),
+    (0, 40.0),
+    (3, 65.0),
+    (10, 85.0),
+    (30, 100.0),
+]
+
+IOPV_ANCHORS = [
+    (-2.0, 10.0),
+    (-0.5, 40.0),
+    (-0.3, 85.0),
+    (-0.05, 65.0),
+    (0.15, 30.0),
+    (0.3, 15.0),
+    (2.0, 0.0),
+]
+
+RSI_ANCHORS = [
+    (0, -10.0),
+    (20, -10.0),
+    (30, 3.0),
+    (40, 10.0),
+    (50, 10.0),
+    (60, 10.0),
+    (70, 3.0),
+    (80, -10.0),
+    (100, -10.0),
+]
+
+
 def score_momentum(kline: list) -> float:
     """Score momentum: MA trend + RSI + MACD + trend strength. Returns 0-100.
 
@@ -332,17 +415,8 @@ def score_momentum(kline: list) -> float:
     elif ma5 < ma20:
         score -= 5
 
-    # --- RSI: symmetric scoring ---
-    if 40 <= rsi_val <= 60:
-        score += 10
-    elif 30 <= rsi_val < 40:
-        score += 3
-    elif 60 < rsi_val <= 70:
-        score += 3
-    elif rsi_val > 80:
-        score -= 10
-    elif rsi_val < 20:
-        score -= 10
+    # --- RSI: continuous symmetric scoring ---
+    score += _piecewise_linear(rsi_val, RSI_ANCHORS)
 
     # --- MACD direction: symmetric ±8 ---
     if macd_val > 0:
@@ -398,11 +472,9 @@ def score_volume(kline: list) -> float:
 
 
 def score_capital_flow(flow_data: Optional[dict]) -> Optional[float]:
-    """Score capital flow from main force net flow. Returns 0-100 or None if no data.
+    """Score capital flow using continuous piecewise-linear mapping.
 
-    Reads 'main_net_inflow' (yuan) from E-type capital flow data.
-    For FD-type ETFs the field is not present and the function returns
-    None to signal missing data so it can be excluded from weighting.
+    Returns 0-100 or None if no data.
     """
     if not flow_data:
         return None
@@ -421,20 +493,14 @@ def score_capital_flow(flow_data: Optional[dict]) -> Optional[float]:
         return None
 
     avg_net = sum(net_flows) / len(net_flows)
-
-    if avg_net > 100_000_000:   # > 1亿 — strong inflow
-        return 85.0
-    elif avg_net > 20_000_000:  # > 2000万 — moderate inflow
-        return 65.0
-    elif avg_net > -20_000_000: # near neutral
-        return 40.0
-    elif avg_net > -100_000_000:# > -1亿 — moderate outflow
-        return 20.0
-    return 10.0                 # strong outflow
+    return round(_piecewise_linear(avg_net, CAPITAL_FLOW_ANCHORS), 1)
 
 
 def score_shares_trend(etf_data: Optional[dict]) -> Optional[float]:
-    """Score shares outstanding trend from recent flows. Returns 0-100 or None if no data."""
+    """Score shares outstanding trend using continuous piecewise-linear mapping.
+
+    Returns 0-100 or None if no data.
+    """
     if not etf_data:
         return None
     recent_flows = etf_data.get("recent_flows")
@@ -451,24 +517,14 @@ def score_shares_trend(etf_data: Optional[dict]) -> Optional[float]:
         return None
 
     change_pct = (last - first) / abs(first) * 100
-
-    if change_pct > 5:
-        return 85.0
-    elif change_pct > 1:
-        return 65.0
-    elif change_pct > -1:
-        return 40.0
-    elif change_pct > -5:
-        return 20.0
-    return 10.0
+    return round(_piecewise_linear(change_pct, SHARES_TREND_ANCHORS), 1)
 
 
 def score_iopv(etf_data: Optional[dict]) -> Optional[float]:
-    """Score IOPV discount/premium. Returns 0-100 or None if no data.
+    """Score IOPV discount/premium using continuous piecewise-linear mapping.
 
-    A slight discount (-0.5% ~ -0.1%) is the best signal — it means the ETF
-    trades below NAV, offering an entry at a small arbitrage discount.
-    Deep discounts or premiums are scored lower.
+    Slight discount (-0.5% ~ -0.1%) is best signal.
+    Returns 0-100 or None if no data.
     """
     if not etf_data:
         return None
@@ -479,16 +535,61 @@ def score_iopv(etf_data: Optional[dict]) -> Optional[float]:
     if premium is None:
         return None
 
-    premium = float(premium)
-    if -0.5 < premium <= -0.1:
-        return 85.0
-    elif -0.1 < premium <= 0:
-        return 65.0
-    elif premium <= -0.5:
-        return 40.0
-    elif 0 < premium <= 0.3:
-        return 30.0
-    return 10.0  # premium > 0.3%
+    return round(_piecewise_linear(float(premium), IOPV_ANCHORS), 1)
+
+
+# --- Contradiction detection ---
+
+CONTRADICTION_RULES = [
+    {
+        "name": "shrink_up",
+        "condition": lambda dims: (
+            dims.get("momentum") is not None and dims.get("momentum") >= 70 and
+            dims.get("volume") is not None and dims.get("volume") < 40
+        ),
+        "message": "缩量上涨，动能不可靠",
+    },
+    {
+        "name": "momentum_flow_mismatch",
+        "condition": lambda dims: (
+            dims.get("momentum") is not None and dims.get("momentum") >= 70 and
+            dims.get("capital_flow") is not None and dims.get("capital_flow") < 30
+        ),
+        "message": "动量与资金流向矛盾",
+    },
+    {
+        "name": "flow_premium",
+        "condition": lambda dims: (
+            dims.get("capital_flow") is not None and dims.get("capital_flow") >= 70 and
+            dims.get("iopv") is not None and dims.get("iopv") < 30
+        ),
+        "message": "资金流入但溢价偏高",
+    },
+    {
+        "name": "dump",
+        "condition": lambda dims: (
+            dims.get("volume") is not None and dims.get("volume") >= 70 and
+            dims.get("momentum") is not None and dims.get("momentum") < 30
+        ),
+        "message": "放量下跌",
+    },
+]
+
+
+def detect_contradictions(dimensions: dict) -> list[str]:
+    """Detect contradictory signals across scoring dimensions.
+
+    Args:
+        dimensions: Dict of dimension_name -> score (0-100 scale, or None).
+
+    Returns:
+        List of warning message strings for detected contradictions.
+    """
+    warnings = []
+    for rule in CONTRADICTION_RULES:
+        if rule["condition"](dimensions):
+            warnings.append(rule["message"])
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +686,9 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
     dims["shares_trend"] = score_shares_trend(etf_data)
     dims["iopv"] = score_iopv(etf_data)
 
+    # Detect contradictions across dimensions
+    warnings = detect_contradictions(dims)
+
     # Weighted sum: skip None dimensions, redistribute their weight
     total_weight = 0
     weighted_score = 0.0
@@ -607,6 +711,7 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
         "name": name,
         "quick_score": quick_score,
         "dimensions": dims,
+        "warnings": warnings,
     }
 
 
@@ -819,16 +924,27 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
             "risks": p2.get("risks", []),
             "stop_loss": p2.get("stop_loss"),
             "targets": p2.get("targets", {}),
+            "warnings": p1.get("warnings", []),
         }
 
         if entry["deep_score"] is not None:
             # Normalize deep_score from [-3,+3] to [0,100] before combining
             deep_normalized = (entry["deep_score"] + 3) / 6 * 100
+            # Phase 1 exclusive dimension bonus (shares_trend, iopv)
+            p1_exclusive_weights = settings.get("p1_exclusive_bonus", {})
+            bonus = 0.0
+            p1_dims = entry.get("dimensions", {})
+            for dim, w in p1_exclusive_weights.items():
+                val = p1_dims.get(dim)
+                if val is not None:
+                    bonus += val * w
             entry["combined_score"] = round(
-                0.3 * entry["quick_score"] + 0.7 * deep_normalized, 1
+                0.3 * entry["quick_score"] + 0.7 * deep_normalized + bonus, 1
             )
+            entry["p1_bonus"] = round(bonus, 1)
         else:
             entry["combined_score"] = entry["quick_score"]
+            entry["p1_bonus"] = 0.0
         combined.append(entry)
 
     combined.sort(key=lambda x: x["combined_score"] or 0, reverse=True)
@@ -861,6 +977,10 @@ def build_top_picks(combined: list[dict]) -> list[dict]:
         iv = dims.get("iopv")
         if iv is not None and iv >= 65:
             logic_parts.append("折价安全边际")
+        # Append contradiction warnings
+        warnings = p.get("warnings", [])
+        if warnings:
+            logic_parts.extend([f"⚠{w}" for w in warnings])
         if not logic_parts:
             logic_parts.append("综合评分居前")
         result.append({
@@ -887,6 +1007,10 @@ def build_excluded(scored_all: list[dict]) -> list[dict]:
                 reasons.append("份额缩水")
             if (dims.get("volume") or 50) < 30:
                 reasons.append("量能不足")
+            # Append contradiction warnings
+            warnings = s.get("warnings", [])
+            if warnings:
+                reasons.extend([f"⚠{w}" for w in warnings])
             excluded.append({
                 "code": s["code"],
                 "name": s.get("name", ""),

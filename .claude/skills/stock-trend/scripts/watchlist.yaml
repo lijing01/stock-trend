@@ -59,3 +59,6 @@ settings:
     capital_flow: 20
     shares_trend: 15
     iopv: 15
+  p1_exclusive_bonus:
+    shares_trend: 0.05
+    iopv: 0.05

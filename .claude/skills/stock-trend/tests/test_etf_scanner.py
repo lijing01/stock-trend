@@ -11,6 +11,7 @@ from etf_scanner import (
     score_capital_flow, score_shares_trend, score_iopv,
     compute_quick_score, build_combined_ranking,
     normalize_scores_by_cohort,
+    _piecewise_linear, detect_contradictions,
 )
 
 
@@ -90,12 +91,12 @@ def test_score_volume_high():
 
 
 def test_score_capital_flow_positive():
-    """Positive main force net flow should score > 50"""
+    """Positive main force net flow should score above 50"""
     data = {"data": [{"main_net_inflow": 50000000},
                      {"main_net_inflow": 30000000},
                      {"main_net_inflow": 40000000}]}
     s = score_capital_flow(data)
-    assert s > 60, f"Expected >60, got {s}"
+    assert s > 50, f"Expected >50, got {s}"
 
 
 def test_score_capital_flow_none():
@@ -214,7 +215,21 @@ def test_build_combined_ranking():
     assert combined[0]["code"] == "A"
     # 0.3*80 + 0.7*((2.0+3)/6*100) = 24 + 0.7*83.333 = 24 + 58.333 = 82.3
     assert combined[0]["combined_score"] == 82.3
+    assert combined[0]["p1_bonus"] == 0.0  # no bonus dims in test data
     assert combined[1]["code"] == "B"
+
+
+def test_build_combined_ranking_with_bonus():
+    """Combined ranking includes p1_exclusive_bonus from shares_trend + iopv."""
+    p1 = [{"code": "A", "ts_code": "A.SH", "quick_score": 80,
+            "dimensions": {"shares_trend": 70, "iopv": 60}, "category": "科技"}]
+    p2 = {"A": {"deep_score": 2.0, "verdict": "up", "confidence": "high",
+                 "name": "ETF_A", "risks": []}}
+    settings = {"p1_exclusive_bonus": {"shares_trend": 0.05, "iopv": 0.05}}
+    combined = build_combined_ranking(p1, p2, settings)
+    # 0.3*80 + 0.7*83.33 + (70*0.05 + 60*0.05) = 24 + 58.33 + 6.5 = 88.8
+    assert combined[0]["combined_score"] == 88.8
+    assert combined[0]["p1_bonus"] == 6.5
 
 
 def test_score_momentum_flat():
@@ -249,3 +264,98 @@ def test_phase1_real_etfs():
     for r in ranked:
         assert r["quick_score"] is not None
         assert 0 <= r["quick_score"] <= 100
+
+
+# --- _piecewise_linear tests ---
+
+
+def test_piecewise_linear_basic():
+    """Basic interpolation between anchors."""
+    anchors = [(0, 0), (50, 50), (100, 100)]
+    assert _piecewise_linear(25, anchors) == 25.0
+    assert _piecewise_linear(75, anchors) == 75.0
+
+
+def test_piecewise_linear_clamp():
+    """Output clamped to [0, 100]."""
+    anchors = [(0, 0), (50, 50), (100, 100)]
+    assert _piecewise_linear(-100, anchors) == 0.0
+    assert _piecewise_linear(200, anchors) == 100.0
+
+
+def test_piecewise_linear_non_monotonic():
+    """IOPV-style non-monotonic anchors."""
+    anchors = [(-2, 10), (-0.5, 40), (-0.3, 85), (-0.05, 65), (0.15, 30), (0.3, 15), (2, 0)]
+    assert _piecewise_linear(-0.3, anchors) == 85.0  # exact anchor
+    result = _piecewise_linear(-0.4, anchors)
+    assert 40 < result < 85  # interpolates between 40 and 85
+
+
+def test_continuous_scoring_no_cliffs():
+    """Small input changes produce small output changes."""
+    # capital_flow near old 20M boundary
+    s1 = score_capital_flow({"data": [{"main_net_inflow": 19999999}]})
+    s2 = score_capital_flow({"data": [{"main_net_inflow": 20000001}]})
+    assert abs(s1 - s2) < 5, f"Cliff at capital_flow boundary: {s1} vs {s2}"
+
+    # shares_trend near 1% boundary
+    etf1 = {"recent_flows": [{"shares_billion": 1.0}, {"shares_billion": 1.00999}]}
+    etf2 = {"recent_flows": [{"shares_billion": 1.0}, {"shares_billion": 1.01001}]}
+    s1 = score_shares_trend(etf1)
+    s2 = score_shares_trend(etf2)
+    assert abs(s1 - s2) < 5, f"Cliff at shares_trend boundary: {s1} vs {s2}"
+
+
+# --- detect_contradictions tests ---
+
+
+def test_detect_contradictions_shrink_up():
+    """High momentum + low volume triggers 缩量上涨."""
+    dims = {"momentum": 75, "volume": 30, "capital_flow": 50, "shares_trend": None, "iopv": None}
+    w = detect_contradictions(dims)
+    assert "缩量上涨，动能不可靠" in w
+
+
+def test_detect_contradictions_momentum_flow_mismatch():
+    """High momentum + capital outflow triggers warning."""
+    dims = {"momentum": 75, "volume": 60, "capital_flow": 25, "shares_trend": None, "iopv": None}
+    w = detect_contradictions(dims)
+    assert "动量与资金流向矛盾" in w
+
+
+def test_detect_contradictions_flow_premium():
+    """Capital inflow + high premium triggers warning."""
+    dims = {"momentum": 50, "volume": 50, "capital_flow": 75, "iopv": 20, "shares_trend": None}
+    w = detect_contradictions(dims)
+    assert "资金流入但溢价偏高" in w
+
+
+def test_detect_contradictions_dump():
+    """High volume + low momentum triggers 放量下跌."""
+    dims = {"momentum": 20, "volume": 80, "capital_flow": 50, "shares_trend": None, "iopv": None}
+    w = detect_contradictions(dims)
+    assert "放量下跌" in w
+
+
+def test_detect_contradictions_no_warning():
+    """Consistent signals produce no warnings."""
+    dims = {"momentum": 60, "volume": 60, "capital_flow": 50, "shares_trend": 50, "iopv": 50}
+    assert len(detect_contradictions(dims)) == 0
+
+
+def test_detect_contradictions_none_dims():
+    """None dimensions should not trigger false contradictions."""
+    dims = {"momentum": 75, "volume": None, "capital_flow": None, "shares_trend": None, "iopv": None}
+    assert len(detect_contradictions(dims)) == 0
+
+
+def test_compute_quick_score_includes_warnings():
+    """compute_quick_score includes warnings field."""
+    kline = [{"close": 100 + i, "vol": 1000000, "amount": 100000000} for i in range(80)]
+    result = {"code": "513180", "ts_code": "513180.SH",
+              "kline": kline, "capital_flow": None, "etf_data": None}
+    weights = {"momentum": 30, "volume": 20, "capital_flow": 20,
+               "shares_trend": 15, "iopv": 15}
+    scored = compute_quick_score(result, weights)
+    assert "warnings" in scored
+    assert isinstance(scored["warnings"], list)
