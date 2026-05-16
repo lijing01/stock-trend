@@ -12,6 +12,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/compute_scores.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/etf_scanner.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_etf_data.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_futures_data.py *)
@@ -28,6 +29,33 @@ allowed-tools:
 ---
 
 # 股票趋势判断 Skill
+
+## /etf-scan [--top N] [--focus <板块>] [--output compact|full]
+
+扫描精选 ETF 池，输出当日趋势排名和投资建议。
+
+参数：
+- `--top N`    深度分析 ETF 数量，默认 10
+- `--focus <板块>`  只扫描指定板块：宽基指数、科技、金融、消费医药、制造周期、商品跨境
+- `--output compact|full`  输出简版/完整版，默认 full
+
+执行流程：
+1. 读取 watchlist.yaml 配置
+2. Phase 1 快速扫描：并行获取 K 线、资金流向和 ETF 数据，计算速评分
+3. Phase 1 筛选：排除流动性不足 ETF，按速评分排名取 Top N
+4. Phase 2 深度分析：对 Top N 运行 run_pipeline.py + compute_scores.py
+5. Phase 3 聚合输出：合并排名、Top Picks 投资逻辑、排除原因、板块强弱总结
+
+```bash
+# 全量扫描
+python3 .claude/skills/stock-trend/scripts/etf_scanner.py
+
+# 只扫描科技板块，深度分析 5 只
+python3 .claude/skills/stock-trend/scripts/etf_scanner.py --top 5 --focus 科技
+
+# 简版输出
+python3 .claude/skills/stock-trend/scripts/etf_scanner.py --output compact
+```
 
 ## Step 1: 解析输入
 
