@@ -187,6 +187,81 @@ if [ -n "$SKILL_STAGED" ]; then
 fi
 
 # ──────────────────────────────────────────────
+# Check 5: Golden snapshot diff
+# ──────────────────────────────────────────────
+if [ -n "$ANY_SCRIPT_STAGED" ]; then
+    echo ""
+    echo "🔍 Golden snapshot diff 检查..."
+
+    GOLDEN_TEST="$SKILL_DIR/tests/test_golden.py"
+    if [ -f "$GOLDEN_TEST" ]; then
+        GOLDEN_DIFF_OUTPUT=$(python3 "$GOLDEN_TEST" --diff 2>&1)
+        GOLDEN_EXIT=$?
+
+        if [ "$GOLDEN_EXIT" -ne 0 ]; then
+            # Check if commit message contains [skip-golden]
+            COMMIT_MSG=$(git log -1 --format=%s 2>/dev/null || true)
+            if echo "$COMMIT_MSG" | grep -q '\[skip-golden\]'; then
+                msg_warn "Golden diff 检查跳过 ([skip-golden])"
+            else
+                msg_fail "Golden snapshot diff 未通过"
+                echo "$GOLDEN_DIFF_OUTPUT" | head -20
+                has_errors=1
+            fi
+        else
+            # Count warnings
+            WARN_COUNT=$(echo "$GOLDEN_DIFF_OUTPUT" | grep -c "warning" || true)
+            if [ "$WARN_COUNT" -gt 0 ]; then
+                msg_warn "Golden diff 通过但有 ${WARN_COUNT} 个警告"
+                has_warnings=1
+            else
+                msg_pass "Golden snapshot diff 通过"
+            fi
+        fi
+    else
+        msg_warn "test_golden.py 未找到，跳过 diff 检查"
+    fi
+fi
+
+# ──────────────────────────────────────────────
+# Check 6: compute_scores schema validation
+# ──────────────────────────────────────────────
+COMPUTE_SCORES_STAGED=$(echo "$STAGED" | grep -E '^\.claude/skills/stock-trend/scripts/compute_scores\.py$' || true)
+if [ -n "$COMPUTE_SCORES_STAGED" ]; then
+    echo ""
+    echo "🔍 compute_scores schema 校验..."
+
+    cd "$SKILL_DIR/scripts" || true
+    SCHEMA_CHECK=$(python3 -c "
+from compute_scores import validate_input
+
+# Test with valid data
+valid = {
+    'summary': {'total_score': 5.2, 'direction': 'bullish', 'confidence': 0.7},
+    'data_quality': 'good',
+}
+errors = validate_input(valid, {})
+if errors:
+    print('FAIL: validate_input returned errors for valid data:', errors)
+else:
+    # Test with invalid data
+    invalid = {'summary': {}}
+    errors2 = validate_input(invalid, {})
+    if not errors2:
+        print('FAIL: validate_input did not catch invalid data')
+    else:
+        print('OK: schema validation working')
+" 2>&1)
+
+    if echo "$SCHEMA_CHECK" | grep -q "^OK:"; then
+        msg_pass "compute_scores schema 校验正常"
+    else
+        msg_fail "compute_scores schema 校验失败: $SCHEMA_CHECK"
+        has_errors=1
+    fi
+fi
+
+# ──────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────
 echo ""
