@@ -63,3 +63,17 @@ reports/                                    # 生成的报告（已 gitignore）
 
 - 不要主动扫描、读取或列出 `reports/` 目录下的文件，除非用户明确触发与报告相关的操作（如 `/stock-trend`、查看报告、生成报告等语义）
 - Explore agent 搜索范围应排除 `reports/` 目录
+
+## 修改代码工作流
+
+修改 `.claude/skills/stock-trend/scripts/` 下任何 `.py` 文件时：
+
+1. **Plan**: 说明改什么、影响范围
+2. **Execute**: 做修改
+3. **Test**: 必须执行以下步骤
+   a. `python3 .claude/skills/stock-trend/scripts/test_stock_trend.py`  — 现有测试全过
+   b. `python3 .claude/skills/stock-trend/tests/test_golden.py --diff`  — Golden snapshot diff 无失败
+   c. 如果 diff 有数值变化但合理：用 `--regenerate` 更新 golden，commit message 说明原因
+4. **Commit**: 确认 3a+3b 通过后再提交
+
+不可跳过步骤 3。合理的 golden 变化必须 `--regenerate` 并在 commit message 说明。
