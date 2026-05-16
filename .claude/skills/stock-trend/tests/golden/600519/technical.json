@@ -1,0 +1,166 @@
+{
+  "meta": {
+    "ts_code": "600519.SH",
+    "analysis_date": "20260516",
+    "data_points": 242,
+    "indicators_computed": [
+      "ma",
+      "macd",
+      "rsi",
+      "kdj",
+      "bollinger",
+      "volume",
+      "adx",
+      "obv",
+      "patterns"
+    ]
+  },
+  "latest": {
+    "date": "20260515",
+    "close": 1332.95,
+    "ma": {
+      "values": {
+        "ma5": 1347.018,
+        "ma10": 1364.009,
+        "ma20": 1394.788,
+        "ma60": 1427.8037
+      },
+      "alignment": "bearish",
+      "signal": {
+        "type": "bearish_align",
+        "description": "空头排列",
+        "score": -2
+      }
+    },
+    "macd": {
+      "dif": -24.7416,
+      "dea": -18.0332,
+      "histogram": -13.4169,
+      "signal": {
+        "type": "neutral",
+        "description": "绿柱缩窄",
+        "score": 0
+      }
+    },
+    "rsi": {
+      "rsi14": 28.97,
+      "signal": {
+        "type": "oversold",
+        "description": "RSI=29.0，超卖",
+        "score": 1
+      }
+    },
+    "kdj": {
+      "k": 8.29,
+      "d": 9.17,
+      "j": 6.54,
+      "signal": {
+        "type": "neutral",
+        "description": "超卖区",
+        "score": 1
+      }
+    },
+    "bollinger": {
+      "upper": 1473.1085,
+      "middle": 1394.788,
+      "lower": 1316.4675,
+      "signal": {
+        "type": "middle_support",
+        "description": "中轨下方运行",
+        "score": 0
+      }
+    },
+    "volume": {
+      "vol": 5818365.0,
+      "vol_ma20": 4642708.0,
+      "vol_ratio": 1.25,
+      "signal": {
+        "type": "neutral",
+        "description": "量价中性(量比1.25)",
+        "score": 0
+      }
+    },
+    "adx": {
+      "adx": 21.23,
+      "plus_di": 19.47,
+      "minus_di": 30.42,
+      "signal": {
+        "type": "trend_strength",
+        "description": "ADX=21.2，趋势弱",
+        "score": 0
+      }
+    },
+    "obv": {
+      "obv": -95886459.0,
+      "signal": {
+        "type": "money_flow",
+        "description": "OBV在20日均线下方，资金净流出",
+        "score": -1
+      }
+    },
+    "atr": {
+      "atr": 21.9071,
+      "atr_pct": 1.64,
+      "volatility_level": "normal",
+      "signal": {
+        "type": "volatility",
+        "description": "ATR=21.91(1.6%)，正常波动",
+        "score": 0
+      }
+    },
+    "max_drawdown": {
+      "max_drawdown_pct": -14.96,
+      "drawdown_days": 174
+    }
+  },
+  "patterns": [
+    {
+      "name": "纺锤线",
+      "name_en": "Spinning Top",
+      "direction": "neutral",
+      "position": "indecision",
+      "score": 0,
+      "candles": 1
+    }
+  ],
+  "summary": {
+    "total_score": 0,
+    "direction": "neutral",
+    "confidence": "low",
+    "consistency": 0.25,
+    "key_signals": [
+      "空头排列",
+      "绿柱缩窄",
+      "RSI=29.0，超卖",
+      "超卖区",
+      "中轨下方运行",
+      "量价中性(量比1.25)",
+      "ADX=21.2，趋势弱",
+      "OBV在20日均线下方，资金净流出"
+    ],
+    "support_levels": [
+      1327.11,
+      1200,
+      1100,
+      1000,
+      900
+    ],
+    "resistance_levels": [
+      1339.28,
+      1372.89,
+      1409.39,
+      1445.005,
+      1498.07
+    ],
+    "stop_loss": 1305.2,
+    "target_conservative": 1339.28,
+    "target_moderate": 1409.39,
+    "target_aggressive": 1445.0,
+    "target": 1409.39,
+    "risk_reward_ratio": 2.75,
+    "favorable_rr": true,
+    "position_sizing": "标准仓位(50-70%)",
+    "risk_reward_warning": null,
+    "max_drawdown_pct": -14.96
+  }
+}

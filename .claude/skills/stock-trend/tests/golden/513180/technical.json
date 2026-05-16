@@ -1,0 +1,162 @@
+{
+  "meta": {
+    "ts_code": "513180.SH",
+    "analysis_date": "20260516",
+    "data_points": 85,
+    "indicators_computed": [
+      "ma",
+      "macd",
+      "rsi",
+      "kdj",
+      "bollinger",
+      "volume",
+      "adx",
+      "obv",
+      "patterns"
+    ]
+  },
+  "latest": {
+    "date": "20260515",
+    "close": 0.629,
+    "ma": {
+      "values": {
+        "ma5": 0.6434,
+        "ma10": 0.6415,
+        "ma20": 0.639,
+        "ma60": 0.6431
+      },
+      "alignment": "mixed",
+      "signal": {
+        "type": "mixed",
+        "description": "均线缠绕，方向不明",
+        "score": 0
+      }
+    },
+    "macd": {
+      "dif": 0.0018,
+      "dea": 0.001,
+      "histogram": 0.0016,
+      "signal": {
+        "type": "neutral",
+        "description": "红柱缩窄",
+        "score": 0
+      }
+    },
+    "rsi": {
+      "rsi14": 44.68,
+      "signal": {
+        "type": "neutral",
+        "description": "RSI=44.7，中性区间；顶背离",
+        "score": -2
+      }
+    },
+    "kdj": {
+      "k": 52.59,
+      "d": 64.46,
+      "j": 28.83,
+      "signal": {
+        "type": "neutral",
+        "description": "KDJ中性区域(K=52.6,D=64.5,J=28.8)",
+        "score": 0
+      }
+    },
+    "bollinger": {
+      "upper": 0.6604,
+      "middle": 0.639,
+      "lower": 0.6177,
+      "signal": {
+        "type": "middle_support",
+        "description": "中轨下方运行；布林带极度收口(3%分位，即将变盘)",
+        "score": 0
+      }
+    },
+    "volume": {
+      "vol": 8583714092.0,
+      "vol_ma20": 6481364548.0,
+      "vol_ratio": 1.32,
+      "signal": {
+        "type": "neutral",
+        "description": "量价中性(量比1.32)",
+        "score": 0
+      }
+    },
+    "adx": {
+      "adx": 14.31,
+      "plus_di": 26.18,
+      "minus_di": 31.41,
+      "signal": {
+        "type": "trend_strength",
+        "description": "ADX=14.3，震荡市",
+        "score": 0
+      }
+    },
+    "obv": {
+      "obv": -71216609113.0,
+      "signal": {
+        "type": "money_flow",
+        "description": "OBV在20日均线下方，资金净流出",
+        "score": -1
+      }
+    },
+    "atr": {
+      "atr": 0.0136,
+      "atr_pct": 2.17,
+      "volatility_level": "normal",
+      "signal": {
+        "type": "volatility",
+        "description": "ATR=0.01(2.2%)，正常波动",
+        "score": 0
+      }
+    },
+    "max_drawdown": {
+      "max_drawdown_pct": -23.18,
+      "drawdown_days": 51
+    }
+  },
+  "patterns": [
+    {
+      "name": "跳空向下",
+      "name_en": "Bearish Gap Down",
+      "direction": "bearish",
+      "position": "breakdown",
+      "score": -2,
+      "candles": 2
+    }
+  ],
+  "summary": {
+    "total_score": 0,
+    "direction": "neutral",
+    "confidence": "low",
+    "consistency": 0.25,
+    "key_signals": [
+      "均线缠绕，方向不明",
+      "红柱缩窄",
+      "RSI=44.7，中性区间；顶背离",
+      "KDJ中性区域(K=52.6,D=64.5,J=28.8)",
+      "中轨下方运行；布林带极度收口(3%分位，即将变盘)",
+      "量价中性(量比1.32)",
+      "ADX=14.3，震荡市",
+      "OBV在20日均线下方，资金净流出"
+    ],
+    "support_levels": [
+      0.628,
+      0.604
+    ],
+    "resistance_levels": [
+      0.63,
+      0.652,
+      0.677,
+      0.7183
+    ],
+    "stop_loss": 0.61,
+    "target_conservative": 0.63,
+    "target_moderate": 0.68,
+    "target_aggressive": 0.72,
+    "target": 0.68,
+    "risk_reward_ratio": 2.68,
+    "favorable_rr": true,
+    "position_sizing": "标准仓位(50-70%)",
+    "risk_reward_warning": null,
+    "max_drawdown_pct": -23.18
+  }
+}

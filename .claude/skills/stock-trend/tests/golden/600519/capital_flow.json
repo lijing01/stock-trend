@@ -1,0 +1,58 @@
+{
+  "meta": {
+    "ts_code": "600519.SH",
+    "asset": "E",
+    "data_source": "error",
+    "error": "资金流向获取失败: Remote end closed connection without response"
+  },
+  "data": [],
+  "data_extended": {
+    "northbound_market": [
+      {
+        "date": "20260429",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260430",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260506",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260507",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260508",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260511",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260512",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260513",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260514",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260515",
+        "net_buy_billion": 0
+      }
+    ],
+    "northbound_individual": {
+      "hold_shares": null,
+      "hold_value_billion": null,
+      "change_shares": null
+    }
+  }
+}

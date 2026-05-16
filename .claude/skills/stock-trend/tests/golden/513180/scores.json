@@ -1,0 +1,65 @@
+{
+  "scores": {
+    "technical": 0,
+    "capital_flow": 0,
+    "fundamental": 0,
+    "sentiment": 0,
+    "macro": 1
+  },
+  "weights": {
+    "technical": 0.35,
+    "capital_flow": 0.25,
+    "fundamental": 0.15,
+    "sentiment": 0.15,
+    "macro": 0.1
+  },
+  "composite_score": 0.1,
+  "direction": "震荡偏多",
+  "direction_detail": "震荡",
+  "direction_modifier": "偏多",
+  "confidence": "低",
+  "consistency": 0.25,
+  "risks": [
+    "RSI=44.7，中性区间；顶背离",
+    "中轨下方运行；布林带极度收口(3%分位，即将变盘)",
+    "OBV在20日均线下方，资金净流出"
+  ],
+  "special": null,
+  "data_quality": null,
+  "automated_sources": {
+    "macro": "good"
+  },
+  "validation_warnings": [],
+  "confidence_penalty": 1.0,
+  "dimension_summaries": {
+    "capital": "",
+    "fundamental": "",
+    "sentiment": "",
+    "macro": ""
+  },
+  "analysis": null,
+  "report_params": {
+    "direction": "震荡偏多",
+    "score": 0.1,
+    "confidence": "低",
+    "ts_code": "513180.SH",
+    "stop_loss": 0.61,
+    "target_conservative": 0.63,
+    "target_moderate": 0.68,
+    "target_aggressive": 0.72,
+    "risk_reward_ratio": 2.68,
+    "favorable_rr": true,
+    "position_sizing": "标准仓位(50-70%)",
+    "max_drawdown_pct": -23.18,
+    "support_levels": [
+      0.628,
+      0.604
+    ],
+    "resistance_levels": [
+      0.63,
+      0.652,
+      0.677,
+      0.7183
+    ]
+  }
+}

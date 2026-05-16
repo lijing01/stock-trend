@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "data_source": "akshare",
+    "fetch_time": "20260516-092504"
+  },
+  "summary": {
+    "data_quality": "good",
+    "usd_cny": {
+      "usd_cny": {
+        "rate": 717.71,
+        "change_pct": 0.0
+      }
+    },
+    "shibor": {
+      "on": null,
+      "1w": null,
+      "1m": null
+    },
+    "lpr": {
+      "1y": 3.0,
+      "5y": 3.5
+    },
+    "pmi": 50.3,
+    "cpi_yoy": 1.2,
+    "m2_growth_pct": 0.27
+  },
+  "data": {
+    "usd_cny": {
+      "usd_cny": {
+        "rate": 717.71,
+        "change_pct": 0.0
+      }
+    },
+    "shibor": {
+      "on": null,
+      "1w": null,
+      "1m": null
+    },
+    "lpr": {
+      "1y": 3.0,
+      "5y": 3.5
+    },
+    "pmi": 50.3,
+    "cpi_yoy": 1.2,
+    "m2_growth_pct": 0.27
+  },
+  "errors": [
+    "hs300: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+  ]
+}

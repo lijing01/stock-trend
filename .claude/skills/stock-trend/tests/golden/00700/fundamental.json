@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "ts_code": "00700.HK",
+    "data_source": "akshare_hk",
+    "fetch_time": "20260516-092511",
+    "asset": "E"
+  },
+  "summary": {
+    "data_quality": "error"
+  },
+  "data": {},
+  "errors": [
+    "stock_hk_financial_indicator_em: 'NoneType' object is not subscriptable",
+    "stock_hk_valuation_baidu(pe): Expecting value: line 1 column 1 (char 0)"
+  ]
+}

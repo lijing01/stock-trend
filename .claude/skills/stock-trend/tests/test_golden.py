@@ -12,6 +12,8 @@ Usage:
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -321,17 +323,157 @@ def run_diff(config, verbose):
 def regenerate_golden(config):
     """Regenerate golden files from current pipeline outputs.
 
-    For now, prints a placeholder message. Full implementation will
-    be added in a follow-up task that runs each pipeline script
-    against fixtures and saves the outputs as golden references.
+    For each symbol in config:
+      1. Run resolve_code.py to get resolve.json
+      2. Run run_pipeline.py --code <code> --no-cache to fetch all data
+      3. Copy pipeline output files from cache to golden directory
+      4. Run compute_scores.py --code <code> and copy scores.json
+
+    Asset-type filtering:
+      - ETFs (asset=etf): include etf_data.json, futures_data.json; no fundamental
+      - Stocks (asset=stock): include fundamental.json; no etf_data/futures_data
+      - HK stocks (asset=hk): may not have fundamental; skip missing files
     """
-    print("Golden regeneration not yet implemented.")
-    print("This will be added in a future task that runs the pipeline")
-    print("scripts against fixture data and saves the outputs as golden references.")
-    print("\nTo manually create golden files, run the pipeline for each symbol")
-    print("and copy the cache outputs to the golden directory:")
-    print(f"  Golden dir: {GOLDEN_DIR}")
-    print(f"  Cache dir:  {CACHE_DIR}")
+    symbols = config.get("symbols", [])
+    scripts = config.get("scripts", [])
+
+    # Map script outputs to their per-asset applicability
+    # None means applicable to all asset types
+    ASSET_EXCLUSIONS = {
+        "fundamental": ["etf"],      # ETFs don't get fundamental data
+        "etf_data": ["stock", "hk"],  # Only ETFs get ETF data
+        "futures_data": ["stock", "hk"],  # Only ETFs get futures data
+    }
+
+    print("=" * 50)
+    print("Golden Snapshot Regeneration")
+    print("=" * 50)
+    print(f"Golden dir: {GOLDEN_DIR}")
+    print(f"Cache dir:  {CACHE_DIR}")
+    print("=" * 50)
+
+    # Create golden directory
+    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+
+    for symbol in symbols:
+        code = symbol["code"]
+        # Use numeric-only code for directory names (matches get_symbol_dir_name
+        # and ensures pipeline creates .cache/stock-trend/600519/ not 600519.SH/)
+        numeric_code = code.split(".")[0]
+        code_dir = numeric_code
+        asset_type = symbol.get("asset", "stock")
+        symbol_label = f"{symbol['name']}({code})"
+
+        print(f"\n--- Processing {symbol_label} (asset={asset_type}) ---")
+
+        golden_symbol_dir = GOLDEN_DIR / code_dir
+        cache_symbol_dir = CACHE_DIR / code_dir
+        golden_symbol_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: Run resolve_code.py
+        print(f"  [1/3] Resolving code {numeric_code}...")
+        resolve_output = golden_symbol_dir / "resolve.json"
+        try:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "resolve_code.py"), numeric_code],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                try:
+                    resolve_data = json.loads(result.stdout)
+                    with open(resolve_output, "w", encoding="utf-8") as f:
+                        json.dump(resolve_data, f, ensure_ascii=False, indent=2)
+                    print(f"    resolve.json saved ({resolve_data.get('ts_code', 'unknown')})")
+                except json.JSONDecodeError:
+                    print(f"    WARNING: resolve output is not valid JSON, skipping")
+            else:
+                print(f"    WARNING: resolve_code failed: {result.stderr[:200]}")
+        except Exception as e:
+            print(f"    WARNING: resolve_code error: {e}")
+
+        # Step 2: Run pipeline (use numeric code so directory is .cache/stock-trend/600519/)
+        print(f"  [2/3] Running pipeline for {numeric_code}...")
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable, str(SCRIPTS_DIR / "run_pipeline.py"),
+                    "--code", numeric_code, "--no-cache",
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                print(f"    WARNING: pipeline returned non-zero exit code: {result.returncode}")
+                if result.stderr:
+                    print(f"    stderr: {result.stderr[:300]}")
+            else:
+                print(f"    Pipeline completed successfully")
+        except subprocess.TimeoutExpired:
+            print(f"    WARNING: pipeline timed out (120s)")
+        except Exception as e:
+            print(f"    WARNING: pipeline error: {e}")
+
+        # Step 3: Copy output files from cache to golden
+        print(f"  [3/3] Copying output files to golden directory...")
+        copied = 0
+        skipped = 0
+
+        for script in scripts:
+            output_file = script["output"]
+            src = cache_symbol_dir / output_file
+
+            # Check if this output is excluded for this asset type
+            script_name = script["name"]
+            excluded_assets = ASSET_EXCLUSIONS.get(script_name, [])
+            if asset_type in excluded_assets:
+                print(f"    SKIP {output_file} (not applicable for asset={asset_type})")
+                skipped += 1
+                continue
+
+            if src.exists():
+                shutil.copy2(src, golden_symbol_dir / output_file)
+                # Validate it's valid JSON
+                try:
+                    with open(src, "r", encoding="utf-8") as f:
+                        json.load(f)
+                    print(f"    COPIED {output_file}")
+                    copied += 1
+                except (json.JSONDecodeError, OSError):
+                    print(f"    WARNING: {output_file} is not valid JSON, skipping")
+                    (golden_symbol_dir / output_file).unlink(missing_ok=True)
+            else:
+                print(f"    SKIP {output_file} (not in cache, likely unavailable for this asset)")
+                skipped += 1
+
+        # Step 4: Run compute_scores
+        # Only run if we have the required technical.json in cache
+        tech_path = cache_symbol_dir / "technical.json"
+        if tech_path.exists():
+            print(f"  [bonus] Running compute_scores for {numeric_code}...")
+            try:
+                result = subprocess.run(
+                    [
+                        sys.executable, str(SCRIPTS_DIR / "compute_scores.py"),
+                        "--code", numeric_code,
+                    ],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0:
+                    scores_src = cache_symbol_dir / "scores.json"
+                    if scores_src.exists():
+                        shutil.copy2(scores_src, golden_symbol_dir / "scores.json")
+                        print(f"    COPIED scores.json")
+                    else:
+                        print(f"    WARNING: compute_scores ran but scores.json not found")
+                else:
+                    print(f"    WARNING: compute_scores failed: {result.stderr[:200]}")
+            except Exception as e:
+                print(f"    WARNING: compute_scores error: {e}")
+
+        print(f"  Done: {copied} files copied, {skipped} skipped")
+
+    print("\n" + "=" * 50)
+    print("Golden regeneration complete")
+    print("=" * 50)
 
 
 def main():

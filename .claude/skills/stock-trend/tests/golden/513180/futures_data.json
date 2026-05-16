@@ -1,0 +1,19 @@
+{
+  "meta": {
+    "etf_code": "513180",
+    "futures_code": "HTI_M",
+    "futures_secid": "134.HTI_M",
+    "index_secid": "100.HSTECH",
+    "data_source": "unavailable",
+    "record_count": 0,
+    "warnings": [
+      "All futures data sources failed for HTI_M"
+    ]
+  },
+  "futures": null,
+  "basis": null,
+  "signals": null,
+  "errors": [
+    "EM futures: East Money全节点失败: Remote end closed connection without response"
+  ]
+}

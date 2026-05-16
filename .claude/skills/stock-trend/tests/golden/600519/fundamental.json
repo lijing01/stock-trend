@@ -1,0 +1,20 @@
+{
+  "meta": {
+    "ts_code": "600519.SH",
+    "data_source": "akshare",
+    "fetch_time": "20260516-092432",
+    "asset": "E"
+  },
+  "summary": {
+    "data_quality": "error",
+    "roe": null,
+    "eps": null,
+    "debt_ratio": null
+  },
+  "data": {},
+  "errors": [
+    "stock_individual_info_em: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))",
+    "stock_yjbb_em: 'NoneType' object is not subscriptable",
+    "stock_zh_valuation_baidu(pe): 'NoneType' object is not subscriptable"
+  ]
+}

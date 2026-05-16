@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "ts_code": "00700.HK",
+    "data_source": "error",
+    "error": "不支持的市场代码: 00700.HK"
+  },
+  "data": [],
+  "data_extended": {}
+}
