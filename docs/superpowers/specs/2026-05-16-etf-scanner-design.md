@@ -141,7 +141,7 @@ categories:
 settings:
   top_n: 10             # Phase 2 深度分析数量
   quick_kline_days: 60  # 粗筛 K 线天数
-  min_volume: 10000000  # 最低成交额过滤 (元)
+  min_amount: 10000000  # 最低成交额过滤 (元)
   min_scale: 200000000  # 最低规模过滤 (元)
   quick_score_weights:
     momentum: 30
