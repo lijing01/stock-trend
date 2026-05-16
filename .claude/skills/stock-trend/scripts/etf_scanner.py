@@ -428,7 +428,7 @@ def run_phase1(
     watchlist: dict,
     settings: dict,
     focus: Optional[str] = None,
-    max_workers: int = 4,
+    max_workers: Optional[int] = None,
 ) -> tuple[dict, list[dict]]:
     """Run Phase 1 quick scan on all ETFs.
 
@@ -436,6 +436,8 @@ def run_phase1(
     """
     etf_list = build_phase1_etf_list(watchlist, focus)
     weights = settings.get("quick_score_weights", {})
+    if max_workers is None:
+        max_workers = settings.get("max_workers", 4)
 
     # Fetch data in parallel
     raw_results: dict[str, Any] = {}
