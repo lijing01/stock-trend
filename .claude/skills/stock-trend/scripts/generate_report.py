@@ -47,9 +47,9 @@ def render_template(template_str, context):
                 items = []
                 for item in value:
                     if isinstance(item, dict):
-                        items.append(render_template(body, item))
+                        items.append(render_template(body, item).strip())
                     else:
-                        items.append(render_template(body, {key + "_item": item}))
+                        items.append(render_template(body, {key + "_item": item}).strip())
                 replacement = "\n".join(items)
             else:
                 replacement = render_template(body, context)

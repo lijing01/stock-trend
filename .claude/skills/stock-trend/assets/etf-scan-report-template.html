@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ETF 扫描报告</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f5f7;color:#1d1d1f;line-height:1.6;padding:20px}
+.c{max-width:960px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:36px 40px}
+header{border-bottom:2px solid #f0f0f0;padding-bottom:16px;margin-bottom:24px}
+h1{font-size:24px;color:#1a1a1a;margin-bottom:4px}
+.dt{color:#86868b;font-size:14px;margin-bottom:4px}
+.meta{color:#86868b;font-size:14px}
+h2{font-size:18px;margin:28px 0 14px;padding-bottom:6px;border-bottom:1px solid #f0f0f0;color:#1d4ed8}
+table{width:100%;border-collapse:collapse;margin-bottom:16px;border-radius:8px;overflow:hidden}
+th,td{padding:10px 14px;text-align:left;border-bottom:1px solid #f0f0f0}
+th{background:#1d4ed8;color:#fff;font-weight:600;font-size:13px}
+tr:nth-child(even) td{background:#f9fafb}
+td{font-size:14px}
+.sc{font-weight:600;text-align:center}
+.s3{color:#16a34a;font-weight:700}
+.s2{color:#2563eb;font-weight:600}
+.s1{color:#9ca3af;font-weight:500}
+.s0{color:#dc2626;font-weight:600}
+.signal-up{color:#dc2626;font-weight:700}
+.signal-flat{color:#6b7280;font-weight:600}
+.signal-down{color:#16a34a;font-weight:700}
+.pick-item{padding:10px 0 10px 16px;border-left:3px solid #1d4ed8;margin-bottom:8px;background:#f9fafb;border-radius:0 6px 6px 0}
+.pick-item .pick-name{font-weight:600;color:#1a1a1a}
+.pick-item .pick-code{color:#86868b;font-size:13px;margin-left:6px}
+.pick-item .pick-logic{color:#4b5563;font-size:14px;margin-top:2px}
+.pick-item .pick-score{color:#1d4ed8;font-size:13px;font-weight:600}
+.sector-row{display:flex;gap:16px;margin-bottom:12px}
+.sector-tag{display:inline-block;padding:4px 10px;border-radius:6px;font-size:13px;font-weight:500}
+.sector-strong{background:rgba(239,83,80,.08);color:#dc2626;border:1px solid rgba(239,83,80,.2)}
+.sector-weak{background:rgba(22,163,74,.08);color:#16a34a;border:1px solid rgba(22,163,74,.2)}
+.excluded{color:#6b7280;font-size:13px;line-height:1.8}
+footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
+.disc{color:#a1a1a6;font-size:12px;font-style:italic}
+</style>
+</head>
+<body>
+<div class="c">
+
+<header>
+  <h1>ETF 扫描报告</h1>
+  <p class="dt">扫描时间: {{scan_time}}</p>
+  <p class="meta">范围: {{total_etfs}} 只 | 有效: {{valid_etfs}} 只 | 耗时: {{duration_seconds}}s</p>
+</header>
+
+{{#has_ranking}}
+<h2>综合排名</h2>
+<table>
+<thead><tr><th>排名</th><th>代码</th><th>名称</th><th>速评分</th><th>深度分</th><th>信号</th><th>推荐</th></tr></thead>
+<tbody>
+{{#ranking_rows}}
+<tr>
+  <td>{{rank}}</td>
+  <td>{{code}}</td>
+  <td>{{name}}</td>
+  <td class="sc">{{quick_score}}</td>
+  <td class="sc">{{deep_score}}</td>
+  <td class="signal-{{signal_dir}}">{{signal}}</td>
+  <td class="s{{stars_num}}">{{stars}}</td>
+</tr>
+{{/ranking_rows}}
+</tbody>
+</table>
+{{/has_ranking}}
+
+{{#has_top_picks}}
+<h2>Top 投资逻辑</h2>
+{{#top_picks}}
+<div class="pick-item">
+  <div><span class="pick-name">#{{pick_rank}} {{name}}</span><span class="pick-code">{{code}}</span><span class="pick-score"> 评分 {{combined_score}}</span></div>
+  <div class="pick-logic">{{logic}}</div>
+</div>
+{{/top_picks}}
+{{/has_top_picks}}
+
+{{#has_excluded}}
+<h2>低分排除</h2>
+<div class="excluded">{{excluded_summary}}</div>
+{{/has_excluded}}
+
+{{#has_sector_summary}}
+<h2>板块强弱</h2>
+<div class="sector-row">
+{{#sector_strong}}
+<span class="sector-tag sector-strong">{{name}} +{{avg_score}}</span>
+{{/sector_strong}}
+{{#sector_weak}}
+<span class="sector-tag sector-weak">{{name}} {{avg_score}}</span>
+{{/sector_weak}}
+</div>
+{{/has_sector_summary}}
+
+<footer>
+<p class="disc">免责声明：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</p>
+</footer>
+
+</div>
+</body>
+</html>
