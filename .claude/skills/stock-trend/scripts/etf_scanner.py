@@ -1382,6 +1382,7 @@ def _cleanup_combined(combined: list[dict]) -> list[dict]:
         for key in internal:
             c.pop(key, None)
     return combined
+def build_top_picks(combined: list[dict]) -> list[dict]:
     """Extract top picks with brief logic."""
     picks = combined[:5]
     result: list[dict] = []
@@ -1402,19 +1403,17 @@ def _cleanup_combined(combined: list[dict]) -> list[dict]:
         iv = dims.get("iopv")
         if iv is not None and iv >= 65:
             logic_parts.append("折价安全边际")
-        # Append contradiction warnings
         warnings = p.get("warnings", [])
         if warnings:
             logic_parts.extend([f"⚠{w}" for w in warnings])
         if not logic_parts:
             logic_parts.append("综合评分居前")
-            entry = {
+        entry = {
             "code": p["code"],
             "name": p["name"],
             "combined_score": p["combined_score"],
             "logic": "，".join(logic_parts),
         }
-        # Include trading plan and trend stage if available
         if "trading_plan" in p:
             entry["trading_plan"] = p["trading_plan"]
         if "trend_stage" in p:
