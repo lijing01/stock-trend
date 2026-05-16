@@ -303,7 +303,11 @@ def _trend_strength(closes: list) -> tuple[float, float]:
 
 
 def score_momentum(kline: list) -> float:
-    """Score momentum: MA trend + RSI + MACD + trend strength. Returns 0-100."""
+    """Score momentum: MA trend + RSI + MACD + trend strength. Returns 0-100.
+
+    Symmetric scoring: bullish and bearish signals have equal magnitude.
+    Base 50, each component ranges roughly -20 to +20 around base.
+    """
     closes = [r["close"] for r in kline]
     if len(closes) < 20:
         return 50.0
@@ -316,38 +320,39 @@ def score_momentum(kline: list) -> float:
     _, trend_dir = _trend_strength(closes)
 
     score = 50.0
-    # --- MA alignment (0-40 points) ---
+    # --- MA alignment: symmetric ±15 ---
     if ma5 > ma20 > ma60:
-        score += 30
-    elif ma5 > ma20 and len(closes) >= 60 and ma20 > ma60:
-        score += 20
-    elif ma5 > ma20:
-        score += 8
+        score += 15
     elif ma5 < ma20 and ma20 < ma60:
         score -= 15
+    elif ma5 > ma20:
+        score += 5
     elif ma5 < ma20:
         score -= 5
 
-    # --- RSI (0-30 points) ---
+    # --- RSI: symmetric scoring ---
     if 40 <= rsi_val <= 60:
-        score += 15
-    elif 30 <= rsi_val < 40 or 60 < rsi_val <= 70:
-        score += 5
-    elif rsi_val > 80 or rsi_val < 20:
+        score += 10
+    elif 30 <= rsi_val < 40:
+        score += 3
+    elif 60 < rsi_val <= 70:
+        score += 3
+    elif rsi_val > 80:
+        score -= 10
+    elif rsi_val < 20:
+        score -= 10
+
+    # --- MACD direction: symmetric ±8 ---
+    if macd_val > 0:
+        score += 8
+    else:
         score -= 8
 
-    # --- MACD direction (0-30 points) ---
-    if macd_val > 0:
-        score += 10
-    else:
-        score -= 5
-
-    # --- Trend strength confirmation ---
-    # Strong bearish trend confirmed by both MA alignment and price momentum
+    # --- Trend strength: symmetric ---
     if trend_dir == -1:
-        score -= 10
+        score -= 8
     elif trend_dir == 1:
-        score += 5
+        score += 8
 
     return max(0.0, min(100.0, score))
 
@@ -390,15 +395,15 @@ def score_volume(kline: list) -> float:
     return max(0.0, min(100.0, score))
 
 
-def score_capital_flow(flow_data: Optional[dict]) -> float:
-    """Score capital flow from main force net flow. Returns 0-100.
+def score_capital_flow(flow_data: Optional[dict]) -> Optional[float]:
+    """Score capital flow from main force net flow. Returns 0-100 or None if no data.
 
     Reads 'main_net_inflow' (yuan) from E-type capital flow data.
     For FD-type ETFs the field is not present and the function returns
-    neutral (50).  The shares-based signal is captured by score_shares_trend.
+    None to signal missing data so it can be excluded from weighting.
     """
     if not flow_data:
-        return 50.0
+        return None
     data = flow_data.get("data", [])
     if not data:
         return 50.0
@@ -411,7 +416,7 @@ def score_capital_flow(flow_data: Optional[dict]) -> float:
                 net_flows.append(float(net))
 
     if not net_flows:
-        return 50.0
+        return None
 
     avg_net = sum(net_flows) / len(net_flows)
 
@@ -426,26 +431,22 @@ def score_capital_flow(flow_data: Optional[dict]) -> float:
     return 10.0                 # strong outflow
 
 
-def score_shares_trend(etf_data: Optional[dict]) -> float:
-    """Score shares outstanding trend from recent flows. Returns 0-100.
-
-    Computes the percentage change in shares_billion over the available
-    recent_flows period (from fetch_etf_data.py).
-    """
+def score_shares_trend(etf_data: Optional[dict]) -> Optional[float]:
+    """Score shares outstanding trend from recent flows. Returns 0-100 or None if no data."""
     if not etf_data:
-        return 50.0
+        return None
     recent_flows = etf_data.get("recent_flows")
     if not isinstance(recent_flows, list) or len(recent_flows) < 2:
-        return 50.0
+        return None
 
     valid = [r for r in recent_flows if isinstance(r, dict) and r.get("shares_billion") is not None]
     if len(valid) < 2:
-        return 50.0
+        return None
 
     first = float(valid[0]["shares_billion"])
     last = float(valid[-1]["shares_billion"])
     if first == 0:
-        return 50.0
+        return None
 
     change_pct = (last - first) / abs(first) * 100
 
@@ -460,21 +461,21 @@ def score_shares_trend(etf_data: Optional[dict]) -> float:
     return 10.0
 
 
-def score_iopv(etf_data: Optional[dict]) -> float:
-    """Score IOPV discount/premium from fetch_etf_data.py output. Returns 0-100.
+def score_iopv(etf_data: Optional[dict]) -> Optional[float]:
+    """Score IOPV discount/premium. Returns 0-100 or None if no data.
 
     A slight discount (-0.5% ~ -0.1%) is the best signal — it means the ETF
     trades below NAV, offering an entry at a small arbitrage discount.
     Deep discounts or premiums are scored lower.
     """
     if not etf_data:
-        return 50.0
+        return None
     nav = etf_data.get("nav")
     if not isinstance(nav, dict):
-        return 50.0
+        return None
     premium = nav.get("iopv_premium_pct")
     if premium is None:
-        return 50.0
+        return None
 
     premium = float(premium)
     if -0.5 < premium <= -0.1:
@@ -516,6 +517,51 @@ def scan_single_etf(code: str, settings: dict) -> dict:
     return result
 
 
+def normalize_scores_by_cohort(scored: list[dict], weights: dict) -> list[dict]:
+    """Rebase dimension scores to percentile ranks within this scan cohort.
+
+    For each dimension, rank all ETFs and replace the raw score with its
+    percentile (0-100). Then recompute quick_score using the same weights.
+    This ensures differentiation even when absolute scores cluster (e.g.,
+    all momentum scores near 100 in a bull market).
+    Dimensions with None values are excluded from ranking for that dimension.
+    """
+    dim_keys = [k for k in weights if k != "quick_score"]
+    n = len(scored)
+    if n < 2:
+        return scored
+
+    for dim in dim_keys:
+        # Collect pairs of (index, value) for non-None values
+        pairs = []
+        for i, s in enumerate(scored):
+            val = s.get("dimensions", {}).get(dim)
+            if val is not None:
+                pairs.append((i, val))
+        if not pairs:
+            continue
+        # Sort by value ascending
+        pairs.sort(key=lambda x: x[1])
+        # Assign percentile: rank / (n_with_data - 1) * 100
+        count = len(pairs)
+        for rank, (idx, _val) in enumerate(pairs):
+            pct = rank / (count - 1) * 100 if count > 1 else 50.0
+            scored[idx]["dimensions"][dim] = round(pct, 1)
+
+    # Recompute quick_score from normalized dimensions
+    for s in scored:
+        total_weight = 0
+        weighted_score = 0.0
+        for dim, w in weights.items():
+            val = s.get("dimensions", {}).get(dim)
+            if val is not None:
+                weighted_score += val * w
+                total_weight += w
+        s["quick_score"] = round(weighted_score / total_weight, 1) if total_weight > 0 else None
+
+    return scored
+
+
 def compute_quick_score(result: dict, weights: dict) -> dict:
     """Compute quick score for a single ETF result. Returns scored result."""
     if result.get("error") or not result.get("kline"):
@@ -530,19 +576,21 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
     cap_flow = result.get("capital_flow")
     etf_data = result.get("etf_data")
 
-    dims: dict[str, float] = {}
+    dims: dict[str, Optional[float]] = {}
     dims["momentum"] = score_momentum(kline)
     dims["volume"] = score_volume(kline)
     dims["capital_flow"] = score_capital_flow(cap_flow)
     dims["shares_trend"] = score_shares_trend(etf_data)
     dims["iopv"] = score_iopv(etf_data)
 
-    # Weighted sum with missing-dimension handling
+    # Weighted sum: skip None dimensions, redistribute their weight
     total_weight = 0
     weighted_score = 0.0
     for dim, w in weights.items():
-        weighted_score += dims.get(dim, 50) * w
-        total_weight += w
+        val = dims.get(dim)
+        if val is not None:
+            weighted_score += val * w
+            total_weight += w
 
     quick_score = round(weighted_score / total_weight, 1) if total_weight > 0 else None
 
@@ -640,6 +688,12 @@ def run_phase1(
 
     # Filter valid (non-error) and sort descending
     valid = [s for s in scored if s["quick_score"] is not None]
+
+    # Within-cohort percentile normalization: rebase each dimension
+    # to its rank-percentile within this scan, then recompute quick_score.
+    # This prevents bull-market clustering where all ETFs score 80-100.
+    valid = normalize_scores_by_cohort(valid, weights)
+
     valid.sort(key=lambda x: x["quick_score"], reverse=True)
 
     for i, s in enumerate(valid):
