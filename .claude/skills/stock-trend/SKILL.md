@@ -40,23 +40,57 @@ allowed-tools:
 - `--focus <板块>`  只扫描指定板块：宽基指数、科技、金融、消费医药、制造周期、商品跨境
 - `--output compact|full`  输出简版/完整版，默认 full
 
-执行流程：
-1. 读取 watchlist.yaml 配置
-2. Phase 1 快速扫描：并行获取 K 线、资金流向和 ETF 数据，计算速评分
-3. Phase 1 筛选：排除流动性不足 ETF，按速评分排名取 Top N
-4. Phase 2 深度分析：对 Top N 运行 run_pipeline.py + compute_scores.py
-5. Phase 3 聚合输出：合并排名、Top Picks 投资逻辑、排除原因、板块强弱总结
+### /etf-scan 执行步骤
+
+1. **运行扫描脚本**
 
 ```bash
-# 全量扫描
-python3 .claude/skills/stock-trend/scripts/etf_scanner.py
-
-# 只扫描科技板块，深度分析 5 只
-python3 .claude/skills/stock-trend/scripts/etf_scanner.py --top 5 --focus 科技
-
-# 简版输出
-python3 .claude/skills/stock-trend/scripts/etf_scanner.py --output compact
+python3 .claude/skills/stock-trend/scripts/etf_scanner.py [--top N] [--focus <板块>] [--output compact|full]
 ```
+
+脚本输出 JSON 到 stdout，包含 `meta`、`combined_ranking`、`top_picks`、`excluded`、`sector_summary` 字段。
+
+2. **解析 JSON 并呈现结果**
+
+根据 JSON 输出，在对话中呈现以下内容：
+
+**完整模式** (`--output full` 或默认):
+
+```
+📊 ETF 扫描报告    {scan_time}
+
+▸ 扫描范围: {total_etfs} 只 ETF
+▸ 有效数据: {valid_etfs} 只
+▸ 耗时: {duration_seconds}s
+
+┌─ 综合排名 ─────────────────────────────────────────┐
+│ 排名  代码    名称            速评分  深度分  信号  推荐 │
+│ ─────────────────────────────────────────────────── │
+│  1   513180  恒生科技ETF      82     87     ↑↑   ★★★ │
+│  2   512880  证券ETF         78     84     ↑    ★★☆ │
+│  ...                                               │
+└───────────────────────────────────────────────────┘
+
+🏆 Top 3 投资逻辑:
+#1 恒生科技ETF (513180): MA多头排列，主力净流入8.2亿，份额月增12%
+#2 证券ETF (512880): MACD金叉，资金流入，板块联动走强
+#3 ...
+
+❌ 低分排除: 515050(5G ETF) 动量↓资金↓, 588000(科创50) RSI过热
+
+📈 板块: 强势 恒生科技(+3↑) | 弱势 军工(-4↓)
+```
+
+**简略模式** (`--output compact`):
+
+只输出 Top 5 排名表 + Top 1-2 一句话逻辑 + 排除摘要。
+
+3. **补充说明**
+
+- 如果 `deep_score` 为 null（深度分析跳过），仅展示速评分，标注"深度分析跳过"
+- 信号方向映射: ≥ +2.0 → ↑↑(看多), +0.5~+2.0 → ↑(偏多), -0.5~+0.5 → →(震荡), < -0.5 → ↓(偏空)
+- 推荐星级: 综合分 ≥ 80 → ★★★, ≥ 65 → ★★☆, ≥ 50 → ★☆☆
+- 所有输出必须附带免责声明: 本报告仅供学习参考，不构成任何投资建议
 
 ## Step 1: 解析输入
 
