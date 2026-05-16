@@ -845,15 +845,19 @@ def build_top_picks(combined: list[dict]) -> list[dict]:
     for p in picks:
         logic_parts: list[str] = []
         dims = p.get("dimensions", {})
-        if dims.get("momentum", 0) >= 70:
+        m = dims.get("momentum")
+        if m is not None and m >= 70:
             logic_parts.append("动量强势")
-        elif dims.get("momentum", 0) >= 55:
+        elif m is not None and m >= 55:
             logic_parts.append("动量偏强")
-        if dims.get("capital_flow", 0) >= 65:
+        cf = dims.get("capital_flow")
+        if cf is not None and cf >= 65:
             logic_parts.append("主力资金流入")
-        if dims.get("shares_trend", 0) >= 65:
+        st = dims.get("shares_trend")
+        if st is not None and st >= 65:
             logic_parts.append("份额持续增长")
-        if dims.get("iopv", 0) >= 65:
+        iv = dims.get("iopv")
+        if iv is not None and iv >= 65:
             logic_parts.append("折价安全边际")
         if not logic_parts:
             logic_parts.append("综合评分居前")
@@ -873,13 +877,13 @@ def build_excluded(scored_all: list[dict]) -> list[dict]:
         if s["quick_score"] is not None and s["quick_score"] < 40:
             reasons: list[str] = []
             dims = s.get("dimensions", {})
-            if dims.get("momentum", 50) < 40:
+            if (dims.get("momentum") or 50) < 40:
                 reasons.append("动量弱")
-            if dims.get("capital_flow", 50) < 30:
+            if (dims.get("capital_flow") or 50) < 30:
                 reasons.append("资金流出")
-            if dims.get("shares_trend", 50) < 30:
+            if (dims.get("shares_trend") or 50) < 30:
                 reasons.append("份额缩水")
-            if dims.get("volume", 50) < 30:
+            if (dims.get("volume") or 50) < 30:
                 reasons.append("量能不足")
             excluded.append({
                 "code": s["code"],
