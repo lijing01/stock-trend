@@ -313,6 +313,91 @@ def build_special_section(asset_type, technical_data, etf_data=None, capital_flo
     return None
 
 
+def validate_input(technical_data, dimension_scores, data_dir=None):
+    """Validate input data for score computation.
+
+    Args:
+        technical_data: dict of technical analysis output
+        dimension_scores: dict of {dim: score} dimension scores
+        data_dir: optional Path or str pointing to data directory
+
+    Returns:
+        List of error strings (empty list = all checks pass)
+    """
+    errors = []
+
+    # Check a: technical_data must be a dict
+    if not isinstance(technical_data, dict):
+        errors.append(
+            f"technical_data must be a dict, got {type(technical_data).__name__}"
+        )
+        return errors  # no point checking deeper
+
+    # Check b: technical_data["summary"] must be a dict with required keys
+    summary = technical_data.get("summary")
+    if not isinstance(summary, dict):
+        errors.append(
+            f"technical_data['summary'] must be a dict, got {type(summary).__name__}"
+        )
+    else:
+        required_summary_keys = {
+            "total_score": (int, float),
+            "direction": str,
+            "confidence": (int, float),
+        }
+        for key, expected_types in required_summary_keys.items():
+            val = summary.get(key)
+            if val is None:
+                errors.append(
+                    f"technical_data['summary'] missing required key '{key}'"
+                )
+            elif not isinstance(val, expected_types):
+                errors.append(
+                    f"technical_data['summary']['{key}'] expected "
+                    f"{expected_types[0].__name__ if isinstance(expected_types, tuple) else expected_types.__name__}, "
+                    f"got {type(val).__name__}={val!r}"
+                )
+
+    # Check c: technical_data["data_quality"] must be a valid enum value
+    valid_qualities = ("good", "limited", "insufficient", "partial")
+    dq = technical_data.get("data_quality")
+    if dq is not None and dq not in valid_qualities:
+        errors.append(
+            f"technical_data['data_quality'] must be one of {valid_qualities}, "
+            f"got {dq!r}"
+        )
+
+    # Check d: all dimension_scores values must be numeric and in [-100, 100]
+    if not isinstance(dimension_scores, dict):
+        errors.append(
+            f"dimension_scores must be a dict, got {type(dimension_scores).__name__}"
+        )
+    else:
+        for dim, score in dimension_scores.items():
+            if not isinstance(score, (int, float)):
+                errors.append(
+                    f"dimension_scores['{dim}'] must be numeric, got {type(score).__name__}={score!r}"
+                )
+            elif score < -100 or score > 100:
+                errors.append(
+                    f"dimension_scores['{dim}'] out of range [-100, 100]: {score}"
+                )
+
+    # Check e: if data_dir is provided and exists, check dimension data files
+    if data_dir is not None:
+        data_path = Path(data_dir) if not isinstance(data_dir, Path) else data_dir
+        if data_path.exists():
+            required_dim_files = ["capital_flow.json", "fundamental.json", "macro_snapshot.json"]
+            for filename in required_dim_files:
+                fpath = data_path / filename
+                if not fpath.exists():
+                    errors.append(
+                        f"dimension data file missing: {fpath}"
+                    )
+
+    return errors
+
+
 def find_data_file(data_dir, filename):
     """Find a data file in the data directory, return (parsed_json, path) or (None, path)."""
     path = Path(data_dir) / filename
@@ -409,6 +494,13 @@ def main():
         "sentiment": round(args.sentiment_score, 2) if args.sentiment_score is not None else 0,
         "macro": round(args.macro_score, 2) if args.macro_score is not None else 0,
     }
+
+    # Validate input before score computation
+    validation_errors = validate_input(technical_data, scores, data_dir)
+    if validation_errors:
+        print("⚠ Input validation warnings:", file=sys.stderr)
+        for err in validation_errors:
+            print(f"  - {err}", file=sys.stderr)
 
     # Populate dimension data args from data directory when --code is used
     if data_dir:

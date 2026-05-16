@@ -625,6 +625,82 @@ def run_pipeline_tests(tmpdir):
 
 
 # ========================
+# Validate Input Tests (VI-*)
+# ========================
+
+def run_validate_tests():
+    """Test validate_input() function in compute_scores.py."""
+    print("\n✅ 输入校验测试 (Validate)")
+    print("=" * 50)
+
+    # Import validate_input from compute_scores
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from compute_scores import validate_input
+
+    # VI-valid-tech: valid technical data passes (errors == 0)
+    valid_tech = {
+        "summary": {
+            "total_score": 1.5,
+            "direction": "看多",
+            "confidence": 0.7,
+        },
+        "data_quality": "good",
+    }
+    valid_scores = {
+        "technical": 1.5,
+        "capital_flow": 0.5,
+        "fundamental": -1,
+        "sentiment": 0,
+        "macro": 0,
+    }
+    errors = validate_input(valid_tech, valid_scores)
+    test("VI-valid-tech: valid technical data passes",
+         len(errors) == 0, f"errors={errors}", "validate")
+
+    # VI-missing-fields: missing required fields (errors > 0)
+    missing_fields_tech = {
+        "summary": {},  # missing total_score, direction, confidence
+    }
+    errors = validate_input(missing_fields_tech, valid_scores)
+    test("VI-missing-fields: missing required fields",
+         len(errors) > 0, f"errors={errors}", "validate")
+
+    # VI-bad-quality: invalid data_quality enum (errors > 0)
+    bad_quality_tech = {
+        "summary": {
+            "total_score": 1.5,
+            "direction": "看多",
+            "confidence": 0.7,
+        },
+        "data_quality": "invalid_quality",
+    }
+    errors = validate_input(bad_quality_tech, valid_scores)
+    test("VI-bad-quality: invalid data_quality enum",
+         len(errors) > 0, f"errors={errors}", "validate")
+
+    # VI-score-range: score out of range [-100, 100]
+    out_of_range_scores = {
+        "technical": 200,
+        "capital_flow": 0.5,
+        "fundamental": -1,
+        "sentiment": 0,
+        "macro": 0,
+    }
+    errors = validate_input(valid_tech, out_of_range_scores)
+    test("VI-score-range: score out of range",
+         any("range" in e for e in errors), f"errors={errors}", "validate")
+
+    # VI-missing-dim: dimension data file missing
+    tmpdir = tempfile.mkdtemp()
+    errors = validate_input(valid_tech, valid_scores, data_dir=tmpdir)
+    test("VI-missing-dim: dimension data file missing",
+         any("missing" in e.lower() or "not found" in e.lower() for e in errors),
+         f"errors={errors}", "validate")
+    # Cleanup
+    os.rmdir(tmpdir)
+
+
+# ========================
 # Main
 # ========================
 
@@ -658,6 +734,10 @@ def main():
 
     if not args.fetch_only and not args.analyze_only:
         run_diagnostic_tests()
+
+    # Validate input tests (unit tests, no network needed)
+    if not args.fetch_only and not args.analyze_only:
+        run_validate_tests()
 
     # Pipeline & automation tests
     if not args.fetch_only and not args.analyze_only:
