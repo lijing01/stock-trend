@@ -479,52 +479,287 @@ def run_phase1(
     return raw_results, valid
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+# --- Phase 2: Deep Analysis ---
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="ETF Scanner — scan watchlist and rank A-share ETFs",
-    )
-    parser.add_argument(
-        "--top", type=int, default=None,
-        help="Number of top ETFs to show (default: from settings)",
-    )
-    parser.add_argument(
-        "--focus", type=str, default=None,
-        help="Focus on a specific category (e.g., 科技)",
-    )
-    parser.add_argument(
-        "--output", choices=["compact", "full"], default="compact",
-        help="Output format (default: compact)",
-    )
-    args = parser.parse_args()
+def get_cached_pipeline_output(code: str) -> Optional[dict]:
+    """Read existing pipeline_output.json from cache."""
+    path = CACHE_DIR / code / "pipeline_output.json"
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
-    watchlist = load_watchlist()
-    settings = watchlist["settings"]
 
-    start = time.time()
-    raw_results, ranked = run_phase1(watchlist, settings, focus=args.focus)
-    elapsed = time.time() - start
+def get_cached_scores(code: str) -> Optional[dict]:
+    """Read existing scores.json from cache."""
+    path = CACHE_DIR / code / "scores.json"
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
-    top_n = args.top or settings.get("top_n", 10)
-    results = ranked[:top_n]
 
-    output: dict[str, Any] = {
-        "timestamp": datetime.now(timezone(timedelta(hours=8))).isoformat(),
-        "phase": 1,
-        "total_scanned": len(build_phase1_etf_list(watchlist, args.focus)),
-        "total_ranked": len(ranked),
-        "elapsed_seconds": round(elapsed, 1),
-        "results": results,
+def run_deep_analysis(code: str, settings: dict) -> dict:
+    """Run full pipeline + scoring for one ETF. Returns deep score result."""
+    result: dict[str, Any] = {"code": code, "ts_code": code_to_ts_code(code)}
+
+    pipeline_result = get_cached_pipeline_output(code)
+    if pipeline_result:
+        result["pipeline_source"] = "cache"
+    else:
+        result["pipeline_source"] = "fresh"
+        pipeline_cmd = [sys.executable, str(SKILL_DIR / "run_pipeline.py"),
+                        "--code", code]
+        try:
+            subprocess.run(pipeline_cmd, capture_output=True, text=True,
+                         timeout=settings.get("phase2_timeout", 45))
+        except subprocess.TimeoutExpired:
+            result["error"] = "pipeline_timeout"
+            return result
+
+    # Run scoring
+    scores_result = get_cached_scores(code)
+    if not scores_result:
+        scores_cmd = [sys.executable, str(SKILL_DIR / "compute_scores.py"),
+                      "--code", code]
+        try:
+            subprocess.run(scores_cmd, capture_output=True, text=True,
+                         timeout=30)
+            scores_result = get_cached_scores(code)
+        except subprocess.TimeoutExpired:
+            result["error"] = "scores_timeout"
+            return result
+
+    if scores_result:
+        result["deep_score"] = scores_result.get("composite_score")
+        result["verdict"] = scores_result.get("direction")
+        result["confidence"] = scores_result.get("confidence")
+        dims = scores_result.get("scores", {}) or {}
+        result["dimension_scores"] = {
+            "technical": dims.get("technical"),
+            "capital_flow": dims.get("capital_flow"),
+            "fundamental": dims.get("fundamental"),
+            "sentiment": dims.get("sentiment"),
+            "macro": dims.get("macro"),
+        }
+        result["risks"] = scores_result.get("risks", [])
+        rp = scores_result.get("report_params", {}) or {}
+        result["stop_loss"] = rp.get("stop_loss")
+        result["targets"] = {
+            "conservative": rp.get("target_conservative"),
+            "moderate": rp.get("target_moderate"),
+        }
+
+    return result
+
+
+def run_phase2(top_candidates: list[dict], settings: dict, max_workers: int = 4) -> dict[str, dict]:
+    """Run deep analysis on top N ETF codes in parallel."""
+    codes = [c["code"] for c in top_candidates]
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        fut_map = {pool.submit(run_deep_analysis, code, settings): code
+                   for code in codes}
+        for fut in as_completed(fut_map):
+            code = fut_map[fut]
+            try:
+                results[code] = fut.result()
+            except Exception as e:
+                results[code] = {"code": code, "error": str(e)}
+    return results
+
+
+# --- Phase 3: Aggregate Output ---
+
+
+def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, dict],
+                           settings: dict) -> list[dict]:
+    """Merge Phase 1 and Phase 2 results into combined ranking."""
+    combined: list[dict] = []
+    for p1 in phase1_ranked:
+        code = p1["code"]
+        p2 = phase2_results.get(code, {})
+        entry: dict[str, Any] = {
+            "code": code,
+            "ts_code": p1["ts_code"],
+            "name": p2.get("name", ""),
+            "category": p1.get("category", ""),
+            "quick_score": p1["quick_score"],
+            "deep_score": p2.get("deep_score"),
+            "verdict": p2.get("verdict"),
+            "confidence": p2.get("confidence"),
+            "dimensions": p1.get("dimensions", {}),
+            "deep_dimensions": p2.get("dimension_scores", {}),
+            "risks": p2.get("risks", []),
+            "stop_loss": p2.get("stop_loss"),
+            "targets": p2.get("targets", {}),
+        }
+
+        if entry["deep_score"] is not None:
+            entry["combined_score"] = round(
+                0.3 * entry["quick_score"] + 0.7 * entry["deep_score"], 1
+            )
+        else:
+            entry["combined_score"] = entry["quick_score"]
+        combined.append(entry)
+
+    combined.sort(key=lambda x: x["combined_score"] or 0, reverse=True)
+    for i, c in enumerate(combined):
+        c["rank"] = i + 1
+        cs = c["combined_score"] or 0
+        c["stars"] = 3 if cs >= 80 else 2 if cs >= 65 else 1 if cs >= 50 else 0
+
+    return combined
+
+
+def build_top_picks(combined: list[dict]) -> list[dict]:
+    """Extract top picks with brief logic."""
+    picks = combined[:5]
+    result: list[dict] = []
+    for p in picks:
+        logic_parts: list[str] = []
+        dims = p.get("dimensions", {})
+        if dims.get("momentum", 0) >= 70:
+            logic_parts.append("动量强势")
+        elif dims.get("momentum", 0) >= 55:
+            logic_parts.append("动量偏强")
+        if dims.get("capital_flow", 0) >= 65:
+            logic_parts.append("主力资金流入")
+        if dims.get("shares_trend", 0) >= 65:
+            logic_parts.append("份额持续增长")
+        if dims.get("iopv", 0) >= 65:
+            logic_parts.append("折价安全边际")
+        if not logic_parts:
+            logic_parts.append("综合评分居前")
+        result.append({
+            "code": p["code"],
+            "name": p["name"],
+            "combined_score": p["combined_score"],
+            "logic": "，".join(logic_parts),
+        })
+    return result
+
+
+def build_excluded(scored_all: list[dict]) -> list[dict]:
+    """Build list of low-score ETFs with reasons."""
+    excluded: list[dict] = []
+    for s in scored_all:
+        if s["quick_score"] is not None and s["quick_score"] < 40:
+            reasons: list[str] = []
+            dims = s.get("dimensions", {})
+            if dims.get("momentum", 50) < 40:
+                reasons.append("动量弱")
+            if dims.get("capital_flow", 50) < 30:
+                reasons.append("资金流出")
+            if dims.get("shares_trend", 50) < 30:
+                reasons.append("份额缩水")
+            if dims.get("volume", 50) < 30:
+                reasons.append("量能不足")
+            excluded.append({
+                "code": s["code"],
+                "name": s.get("name", ""),
+                "quick_score": s["quick_score"],
+                "reason": " ".join(reasons) if reasons else "综合评分偏低",
+            })
+    return excluded
+
+
+def build_sector_summary(combined: list[dict]) -> dict:
+    """Build sector-level strength summary."""
+    from collections import defaultdict
+    sector_scores: dict[str, list[float]] = defaultdict(list)
+    for c in combined:
+        cat = c.get("category", "其他")
+        sector_scores[cat].append(c.get("combined_score") or 0)
+
+    strong, weak = [], []
+    for sector, scores in sector_scores.items():
+        avg = sum(scores) / len(scores) if scores else 0
+        if avg >= 70:
+            strong.append({"name": sector, "avg_score": round(avg, 1)})
+        elif avg < 50:
+            weak.append({"name": sector, "avg_score": round(avg, 1)})
+
+    return {
+        "strong": sorted(strong, key=lambda x: x["avg_score"], reverse=True),
+        "weak": sorted(weak, key=lambda x: x["avg_score"]),
     }
 
-    if args.output == "full":
-        output["raw_results"] = raw_results
 
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dict[str, dict],
+                 settings: dict, args: argparse.Namespace, elapsed: float) -> dict:
+    """Build final JSON output."""
+    combined = build_combined_ranking(phase1_ranked, phase2_results, settings)
+
+    valid_count = len(phase1_ranked)
+    total_count = sum(len(c["etfs"]) for c in watchlist["categories"])
+
+    return {
+        "meta": {
+            "scan_time": datetime.now(timezone(timedelta(hours=8))).strftime(
+                "%Y-%m-%dT%H:%M:%S+08:00"
+            ),
+            "total_etfs": total_count,
+            "valid_etfs": valid_count,
+            "duration_seconds": round(elapsed, 1),
+        },
+        "combined_ranking": combined,
+        "top_picks": build_top_picks(combined),
+        "excluded": build_excluded(phase1_ranked),
+        "sector_summary": build_sector_summary(combined),
+    }
+
+
+# --- CLI ---
+
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="ETF Scanner — scan watchlist and rank A-share ETFs")
+    parser.add_argument("--top", type=int, default=None,
+                        help="Number of ETFs for deep analysis (default: from config)")
+    parser.add_argument("--focus", type=str, default=None,
+                        help="Scan only specific category (e.g. 宽基指数, 科技)")
+    parser.add_argument("--output", choices=["compact", "full"], default="full",
+                        help="Output format")
+    parser.add_argument("--watchlist", type=str, default=None,
+                        help="Custom watchlist path")
+    parser.add_argument("--no-deep", action="store_true",
+                        help="Skip Phase 2 deep analysis")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    """ETF Scanner main entry point."""
+    args = parse_args(argv)
+    start = time.time()
+
+    # Load config
+    watchlist = load_watchlist(Path(args.watchlist) if args.watchlist else None)
+    settings = watchlist.get("settings", {})
+
+    # Apply CLI overrides
+    if args.top is not None:
+        settings["top_n"] = args.top
+
+    # Phase 1
+    _, phase1_ranked = run_phase1(watchlist, settings, args.focus)
+
+    # Phase 2
+    phase2_results: dict[str, dict] = {}
+    if not args.no_deep and phase1_ranked:
+        top_n = settings.get("top_n", 10)
+        top_candidates = phase1_ranked[:top_n]
+        phase2_results = run_phase2(top_candidates, settings)
+
+    # Phase 3
+    elapsed = time.time() - start
+    output = build_output(watchlist, phase1_ranked, phase2_results, settings, args, elapsed)
+
+    json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
+    print()  # trailing newline
 
 
 if __name__ == "__main__":
