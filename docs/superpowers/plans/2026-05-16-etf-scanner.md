@@ -297,7 +297,7 @@ def score_volume(kline: list) -> float:
     """Score volume activity dimension. Returns 0-100."""
     if len(kline) < 10:
         return 50.0
-    volumes = [r.get("volume", 0) or 0 for r in kline]
+    volumes = [r.get("vol", 0) or 0 for r in kline]
     recent_avg = sum(volumes[-5:]) / 5
     long_avg = sum(volumes) / len(volumes)
     ratio = recent_avg / long_avg if long_avg > 0 else 1.0
@@ -456,7 +456,7 @@ def build_phase1_etf_list(watchlist: dict, focus: Optional[str] = None) -> list:
 
 ```python
 def run_phase1(watchlist: dict, settings: dict, focus: Optional[str] = None,
-               max_workers: int = 8) -> tuple[list, list]:
+               max_workers: int = 4) -> tuple[list, list]:
     """Run Phase 1 quick scan on all ETFs.
 
     Returns (results_by_code, ranked_list).
