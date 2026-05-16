@@ -130,14 +130,17 @@ def build_report_context(output: dict) -> dict:
     }
 
 
-def generate_report(output: dict) -> Path:
-    """Render ETF scan report template and write to reports/lists/."""
+def generate_report(output: dict) -> tuple[Path, str]:
+    """Render ETF scan report template and write to reports/lists/.
+
+    Returns (output_path, report_content) so callers can embed in JSON.
+    """
     from generate_report import render_template
 
     template_path = ASSETS_DIR / "etf-scan-report-template.md"
     if not template_path.exists():
         print(f"Warning: template not found at {template_path}", file=sys.stderr)
-        return None
+        return None, ""
 
     template = template_path.read_text(encoding="utf-8")
     context = build_report_context(output)
@@ -148,8 +151,7 @@ def generate_report(output: dict) -> Path:
     output_path = REPORTS_LISTS_DIR / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report, encoding="utf-8")
-    print(f"Report written to {output_path}", file=sys.stderr)
-    return output_path
+    return output_path, report
 
 
 # ---------------------------------------------------------------------------
@@ -989,11 +991,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     elapsed = time.time() - start
     output = build_output(watchlist, phase1_ranked, phase2_results, settings, args, elapsed)
 
+    if args.output_md:
+        report_path, report_md = generate_report(output)
+        if report_path:
+            output["report_path"] = str(report_path)
+            output["report_md"] = report_md
+
     json.dump(output, sys.stdout, ensure_ascii=False, indent=2)
     print()  # trailing newline
-
-    if args.output_md:
-        generate_report(output)
 
 
 if __name__ == "__main__":
