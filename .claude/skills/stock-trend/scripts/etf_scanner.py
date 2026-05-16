@@ -30,6 +30,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
 DEFAULT_WATCHLIST = SKILL_DIR / "watchlist.yaml"
+CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 
 
 # ---------------------------------------------------------------------------
