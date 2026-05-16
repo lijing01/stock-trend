@@ -69,6 +69,12 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 </table>
 {{/has_ranking}}
 
+{{#has_remainder}}
+<div class="remainder" style="background:#f9fafb;border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:14px;color:#4b5563">
+  其余 {{remainder_count}} 只：<span class="signal-up">↑↑/↑ {{remainder_up}}</span> 只 | <span class="signal-flat">→ {{remainder_flat}}</span> 只 | <span class="signal-down">↓ {{remainder_down}}</span> 只
+</div>
+{{/has_remainder}}
+
 {{#has_top_picks}}
 <h2>Top 投资逻辑</h2>
 {{#top_picks}}

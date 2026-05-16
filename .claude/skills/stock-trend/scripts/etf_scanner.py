@@ -83,12 +83,14 @@ def build_report_context(output: dict) -> dict:
     excluded = output.get("excluded", [])
     sector = output.get("sector_summary", {})
 
-    # Ranking rows
+    # Ranking rows — top 50 detail, remainder summarized
+    TOP_N = 50
     ranking_rows = []
-    for c in combined:
+    remainder_rows = []
+    for i, c in enumerate(combined):
         ds = c.get("deep_score")
         cs = c.get("combined_score", 0)
-        ranking_rows.append({
+        row = {
             "rank": c.get("rank", ""),
             "code": c.get("code", ""),
             "name": c.get("name", ""),
@@ -98,7 +100,11 @@ def build_report_context(output: dict) -> dict:
             "signal_dir": _signal_direction(cs),
             "stars": _stars_text(c.get("stars", 0)),
             "stars_num": c.get("stars", 0),
-        })
+        }
+        if i < TOP_N:
+            ranking_rows.append(row)
+        else:
+            remainder_rows.append(row)
 
     # Top picks
     pick_rows = []
@@ -121,6 +127,14 @@ def build_report_context(output: dict) -> dict:
     strong_list = sector.get("strong", [])
     weak_list = sector.get("weak", [])
 
+    # Remainder summary: count by signal direction
+    remainder_count = len(remainder_rows)
+    remainder_by_signal = {"up": 0, "flat": 0, "down": 0}
+    for r in remainder_rows:
+        d = r.get("signal_dir", "down")
+        if d in remainder_by_signal:
+            remainder_by_signal[d] += 1
+
     return {
         "scan_time": meta.get("scan_time", ""),
         "total_etfs": meta.get("total_etfs", ""),
@@ -128,6 +142,11 @@ def build_report_context(output: dict) -> dict:
         "duration_seconds": meta.get("duration_seconds", ""),
         "has_ranking": bool(ranking_rows),
         "ranking_rows": ranking_rows if ranking_rows else None,
+        "has_remainder": remainder_count > 0,
+        "remainder_count": remainder_count,
+        "remainder_up": remainder_by_signal["up"],
+        "remainder_flat": remainder_by_signal["flat"],
+        "remainder_down": remainder_by_signal["down"],
         "has_top_picks": bool(pick_rows),
         "top_picks": pick_rows if pick_rows else None,
         "has_excluded": bool(excluded),
