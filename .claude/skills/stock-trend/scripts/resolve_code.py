@@ -276,6 +276,13 @@ def main():
 
     result = resolve_code(args.input)
 
+    # Add futures mapping for ETFs
+    if "error" not in result and result.get("asset") == "FD":
+        from eastmoney_utils import get_futures_secid
+        futures_code, futures_secid = get_futures_secid(result.get("code", ""))
+        result["futures_code"] = futures_code
+        result["futures_secid"] = futures_secid
+
     if "error" in result:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(1)

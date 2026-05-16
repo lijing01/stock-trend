@@ -433,6 +433,26 @@ def build_context(args):
             pass
     context["has_macro_data"] = has_macro
 
+    # Load futures data
+    futures_data = {}
+    if args.futures_data:
+        try:
+            with open(args.futures_data, "r", encoding="utf-8") as f:
+                futures_data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+    if futures_data:
+        basis_pct = futures_data.get("basis_pct")
+        direction = "升水" if basis_pct is not None and basis_pct > 0 else "贴水"
+        context["futures_basis"] = f"{basis_pct:+.2f}%({direction})" if basis_pct is not None else ""
+        _signals = futures_data.get("signals") or {}
+        context["futures_signal"] = _signals.get("composite_signal", "")
+        context["has_futures_data"] = True
+    else:
+        context["futures_basis"] = ""
+        context["futures_signal"] = ""
+        context["has_futures_data"] = False
+
     # Comprehensive analysis (综合研判 section) from args.analysis JSON
     analysis_data = None
     if args.analysis:
@@ -448,7 +468,11 @@ def build_context(args):
         context["核心矛盾"] = analysis_data.get("core_conflict", "")
         context["关键事件"] = len(events) > 0
         context["事件列表"] = [
-            {"日期": e.get("date", ""), "事件": e.get("event", ""), "影响": e.get("impact", "")}
+            {
+                "日期": e.get("date") or e.get("name") or "",
+                "事件": e.get("event") or e.get("detail") or "",
+                "影响": e.get("impact", ""),
+            }
             for e in events
         ]
         context["操作建议列表"] = [{"内容": a} for a in advice if a]
@@ -504,6 +528,7 @@ def main():
     parser.add_argument("--chart", help="Path to chart HTML fragment to embed")
     parser.add_argument("--fundamental-data", help="Path to fundamental data JSON")
     parser.add_argument("--macro-data", help="Path to macro snapshot JSON")
+    parser.add_argument("--futures-data", help="Path to futures data JSON (ETF only)")
     # Output paths
     parser.add_argument("--output-md", help="Output Markdown file path")
     parser.add_argument("--output-html", help="Output HTML file path")
@@ -532,6 +557,11 @@ def main():
             chart_path = data_dir / "chart_fragment.html"
             if chart_path.exists():
                 args.chart = str(chart_path)
+
+        if not args.futures_data:
+            futures_path = data_dir / "futures_data.json"
+            if futures_path.exists():
+                args.futures_data = str(futures_path)
 
     if not args.output_md and not args.output_html:
         print("Error: at least one of --output-md or --output-html is required", file=sys.stderr)

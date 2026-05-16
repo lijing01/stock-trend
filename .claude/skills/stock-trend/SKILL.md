@@ -14,6 +14,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_kline_eastmoney.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/analyze_technical.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_etf_data.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetch_futures_data.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_capital_flow.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_fundamental.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_macro_snapshot.py *)
@@ -75,12 +76,14 @@ python3 .claude/skills/stock-trend/scripts/run_pipeline.py --code <code>
 5. 资金流向获取（含北向/融资融券/龙虎榜）
 6. 基本面数据获取（AKShare，ETF跳过）
 7. 宏观数据快照（汇率/利率/PMI/CPI/M2）
+8. 指数期货数据获取（标的为ETF时，获取对应指数期货的基差、持仓量、成交量信号）
 
 输出到 `.cache/stock-trend/{code}/` 目录：
 - `pipeline_output.json` — 管线汇总（包含数据源、记录数、耗时等元信息）
 - `kline.json` — K线数据
 - `technical.json` — 技术分析结果
 - `etf_data.json` — ETF数据（仅ETF标的）
+- `futures_data.json` — 指数期货数据（仅ETF标的，含基差、持仓量趋势、成交量确认信号）
 - `capital_flow.json` — 资金流向（含 data_extended 增强数据）
 - `fundamental.json` — 基本面数据（AKShare，非ETF）
 - `macro_snapshot.json` — 宏观快照（AKShare）
@@ -107,7 +110,7 @@ python3 .claude/skills/stock-trend/scripts/generate_chart_html.py .cache/stock-t
 
 | 维度 | 权重 | 自动化基线 | 搜索关键词 | 反向验证词 |
 |------|------|-----------|-----------|-----------|
-| 资金面 | 25% | `data_extended.northbound/margin`（管线已获取） | `"{stock_name} {ts_code} 资金流向 北向资金 {YYYY}年{M}月"` | `"流出 危机 减持"` |
+| 资金面 | 25% | `data_extended.northbound/margin` + `futures_data.json`（基差+OI信号） | `"{stock_name} {ts_code} 资金流向 北向资金 {YYYY}年{M}月"` | `"流出 危机 减持"` |
 | 基本面 | 15% | `fundamental.json`（PE/PB/ROE/财务数据已获取） | `"{stock_name} {ts_code} 估值 业绩 {YYYY}年{M}月"` | `"风险 下滑 亏损"` |
 | 情绪面 | 15% | 无自动化 | `"{stock_name} 涨跌停 换手率 板块 {YYYY}年{M}月"` | `"下跌 跌停 恐慌"` |
 | 宏观面 | 10% | `macro_snapshot.json`（汇率/利率/PMI已获取） | `"今日宏观 政策 利率 汇率 外盘 {YYYY}年{M}月"` | `"鹰派 衰退 收紧"` |
@@ -223,7 +226,7 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py --code <code> \
 - 风险项自动从 `key_signals` 提取（自动去重同主题风险）
 - ETF/HK/ST 特殊标记自动生成
 - **维度摘要**（`--*-summary`）：每个非技术面维度的1-2句分析摘要，展示在报告"关键信号"表。摘要来自 Step 2 WebSearch 结果
-- **综合研判**（`--analysis`）：结构化 JSON，包含 `core_conflict`（核心矛盾）、`events`（关键事件数组）、`advice`（操作建议数组），展示在报告"七、综合研判"
+- **综合研判**（`--analysis`）：结构化 JSON，包含 `core_conflict`（核心矛盾）、`events`（关键事件数组）、`advice`（操作建议数组），展示在报告"七、综合研判"。events 元素支持两种字段格式：`{date, event, impact}` 或 `{name, detail, impact}`
 
 输出 `.cache/stock-trend/{code}/scores.json` 包含综合评分、方向、置信度、风险项、维度摘要、综合研判、报告参数等全部字段。
 
@@ -272,7 +275,7 @@ python3 .claude/skills/stock-trend/scripts/compute_scores.py --code <code> \
 
 - **ST/*ST**：基本面强制 -1；标题行标注退市风险
 - **港股**：增恒指联动、卖空占比、南向资金、AH溢价；标注无涨跌停
-- **ETF**：增 IOPV 折溢价、跟踪误差、申赎、成交额分析
+- **ETF**：增 IOPV 折溢价、跟踪误差、申赎、成交额分析；**指数期货基差、持仓量趋势（资金面）、期货成交量确认（情绪面）**
 - **可转债**：增转股溢价率、纯债价值、强赎风险
 
 ### 生成报告

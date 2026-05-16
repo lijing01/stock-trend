@@ -265,7 +265,7 @@ def extract_risks(technical_data, score_data):
     return risks
 
 
-def build_special_section(asset_type, technical_data, etf_data=None, capital_flow_data=None):
+def build_special_section(asset_type, technical_data, etf_data=None, capital_flow_data=None, futures_data=None):
     """Build special section for ETF/HK/ST assets."""
     if asset_type == "etf" and etf_data:
         nav = etf_data.get("nav", {})
@@ -280,6 +280,15 @@ def build_special_section(asset_type, technical_data, etf_data=None, capital_flo
         fund_name = etf_data.get("fund_name", "")
         if fund_name:
             content_parts.insert(0, f"基金名称: {fund_name}")
+
+        # Futures data for ETF
+        if futures_data and futures_data.get("meta", {}).get("data_source") not in ("error", "unavailable", "unsupported", None):
+            basis = futures_data.get("basis", {})
+            signals = futures_data.get("signals", {})
+            if basis and basis.get("basis_pct") is not None:
+                content_parts.append(f"期现价差: {basis['basis_pct']:+.2f}%（{basis.get('direction', '')}）")
+            if signals and signals.get("composite_signal"):
+                content_parts.append(f"期货信号: {signals['composite_signal']}")
 
         return {
             "type": "etf",
@@ -337,6 +346,7 @@ def main():
     parser.add_argument("--asset-type", choices=["etf", "hk", "st", "stock"],
                         default="stock", help="Asset type for special sections")
     parser.add_argument("--etf-data", help="Path to ETF data JSON")
+    parser.add_argument("--futures-data", help="Path to futures data JSON (ETF only)")
     parser.add_argument("--capital-flow-data", help="Path to capital flow JSON")
     parser.add_argument("--fundamental-data", help="Path to fundamental data JSON (automated scoring)")
     parser.add_argument("--macro-data", help="Path to macro snapshot JSON (automated scoring)")
@@ -351,7 +361,7 @@ def main():
                         help="Macro dimension summary text")
     # Comprehensive analysis for 综合研判 section
     parser.add_argument("--analysis", default=None,
-                        help="JSON object with core_conflict, events (array of {date,event,impact}), advice (array of strings)")
+                        help="JSON object with core_conflict, events (array of {date,event,impact} or {name,detail,impact}), advice (array of strings)")
     parser.add_argument("--risks", help="JSON array of additional risk strings")
     parser.add_argument("--self-check", default=None,
                         help="JSON with self-check results per dimension: {dim: {counter_found, adjusted, covered_items, original, revised}}")
@@ -507,6 +517,35 @@ def main():
         except Exception:
             pass
 
+    # Automated futures scoring (ETF only, when futures data is available)
+    if args.futures_data and args.asset_type == "etf":
+        try:
+            fut_path = args.futures_data
+            if not Path(fut_path).exists() and data_dir:
+                fut_path = str(Path(data_dir) / "futures_data.json")
+            if Path(fut_path).exists():
+                with open(fut_path, "r", encoding="utf-8") as f:
+                    fut_data = json.load(f)
+                fut_meta = fut_data.get("meta", {})
+                fut_signals = fut_data.get("signals", {})
+                if fut_meta.get("data_source") not in ("error", "unavailable", "unsupported", None):
+                    basis_score = fut_signals.get("basis_score", 0)
+                    oi_score = fut_signals.get("oi_score", 0)
+                    volume_score = fut_signals.get("volume_score", 0)
+                    # Basis + OI contribute to capital_flow
+                    if basis_score != 0 or oi_score != 0:
+                        futures_capital = round((basis_score + oi_score) / 2, 2)
+                        scores["capital_flow"] = round(scores.get("capital_flow", 0) + futures_capital, 2)
+                        scores["capital_flow"] = max(-3, min(3, scores["capital_flow"]))
+                        automated_sources["capital_flow_futures"] = fut_meta.get("data_source", "eastmoney")
+                    # Volume confirmation contributes to sentiment
+                    if volume_score != 0:
+                        scores["sentiment"] = round(scores.get("sentiment", 0) + volume_score * 0.5, 2)
+                        scores["sentiment"] = max(-3, min(3, scores["sentiment"]))
+                        automated_sources["sentiment_futures"] = fut_meta.get("data_source", "eastmoney")
+        except Exception:
+            pass
+
     # Parse self-check and signals-info
     self_check = {}
     if args.self_check:
@@ -601,15 +640,21 @@ def main():
     # Build special section
     etf_data = None
     etf_source = None
+    futures_data = None
     if data_dir:
         etf_data, etf_source = find_data_file(data_dir, "etf_data.json")
+        futures_data, _ = find_data_file(data_dir, "futures_data.json")
     elif args.etf_data and Path(args.etf_data).exists():
         with open(args.etf_data, "r", encoding="utf-8") as f:
             etf_data = json.load(f)
+    if args.futures_data and Path(args.futures_data).exists() and futures_data is None:
+        with open(args.futures_data, "r", encoding="utf-8") as f:
+            futures_data = json.load(f)
 
     special = build_special_section(
         args.asset_type, technical_data,
         etf_data=etf_data,
+        futures_data=futures_data,
     )
 
     # Build output

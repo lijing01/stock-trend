@@ -24,6 +24,65 @@ MARKET_PREFIX = {
     ".SZ": "0",
 }
 
+# ETF code -> corresponding index futures code
+ETF_FUTURES_MAP = {
+    # 沪深300
+    "510300": "IF",   # 沪深300ETF华泰柏瑞
+    "510310": "IF",   # 沪深300ETF易方达
+    "159919": "IF",   # 沪深300ETF嘉实
+    # 上证50
+    "510050": "IH",   # 上证50ETF
+    "510800": "IH",   # 上证50ETF易方达
+    # 中证500
+    "510500": "IC",   # 中证500ETF
+    "159915": "IC",   # 创业板ETF (approximate, mid-cap proxy)
+    # 中证1000
+    "560010": "IM",   # 中证1000ETF
+    "560011": "IM",   # 中证1000ETF易方达
+    # 恒生科技
+    "513180": "HTI_M",  # 恒生科技ETF华夏
+    "513130": "HTI_M",  # 恒生科技ETF华泰柏瑞
+    "513010": "HTI_M",  # 恒生科技ETF易方达
+    "520920": "HTI_M",  # 恒生科技ETF天弘
+    "159740": "HTI_M",  # 恒生科技ETF大成
+    "159741": "HTI_M",  # 恒生科技ETF嘉实
+    "159742": "HTI_M",  # 恒生科技ETF博时
+    # 恒生指数
+    "159920": "HSI_M",  # 恒生ETF
+    "513010": "HTI_M",  # 恒生科技ETF易方达
+}
+
+# Futures code -> East Money secid
+FUTURES_SECID_MAP = {
+    "IF":     "8.IF",       # 沪深300股指期货主连
+    "IH":     "8.IH",       # 上证50股指期货主连
+    "IC":     "8.IC",       # 中证500股指期货主连
+    "IM":     "8.IM",       # 中证1000股指期货主连
+    "HTI_M":  "134.HTI_M",  # 恒生科技指数期货主连
+    "HSI_M":  "134.HSI_M",  # 恒生指数期货主连
+}
+
+# Futures code -> underlying spot index secid (for basis calculation)
+INDEX_SECID_MAP = {
+    "IF":     "1.000300",   # 沪深300
+    "IH":     "1.000016",   # 上证50
+    "IC":     "0.399905",   # 中证500
+    "IM":     "0.399852",   # 中证1000
+    "HTI_M":  "100.HSTECH", # 恒生科技指数
+    "HSI_M":  "100.HSI",   # 恒生指数
+}
+
+
+def get_futures_secid(etf_code):
+    """Map ETF code to its corresponding index futures secid.
+
+    Returns (futures_code, secid) tuple or (None, None) if no mapping exists.
+    """
+    futures_code = ETF_FUTURES_MAP.get(etf_code)
+    if futures_code:
+        return futures_code, FUTURES_SECID_MAP[futures_code]
+    return None, None
+
 
 def build_secid(ts_code):
     """Convert ts_code to East Money secid format.

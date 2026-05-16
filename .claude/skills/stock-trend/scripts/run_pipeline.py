@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--no-capital", action="store_true", help="Skip capital flow fetch")
     parser.add_argument("--no-fundamental", action="store_true", help="Skip fundamental data fetch")
     parser.add_argument("--no-macro", action="store_true", help="Skip macro snapshot fetch")
+    parser.add_argument("--no-futures", action="store_true", help="Skip futures data fetch (ETF only)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore all cache")
     parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp). Ignored when --code is used.")
     args = parser.parse_args()
@@ -331,6 +332,21 @@ def main():
             macro_path,
         ))
 
+    # Futures data (ETF only, requires ETF code mapping)
+    if is_etf and not args.no_futures:
+        futures_path = str(output_dir / "futures_data.json")
+        futures_cmd = [
+            sys.executable, str(SCRIPT_DIR / "fetch_futures_data.py"),
+            code, "-o", futures_path,
+        ]
+        if args.no_cache:
+            futures_cmd.append("--no-cache")
+        parallel_tasks.append((
+            futures_cmd,
+            "fetch_futures_data",
+            futures_path,
+        ))
+
     if parallel_tasks:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
@@ -370,6 +386,18 @@ def main():
                     dq = data.get("summary", {}).get("data_quality", "error")
                     results["macro_snapshot"] = {"data_quality": dq}
                     print(f"  Macro snapshot: {dq}")
+                elif label == "fetch_futures_data" and data:
+                    futures_meta = data.get("meta", {})
+                    signals = data.get("signals", {})
+                    results["futures_data"] = {
+                        "futures_code": futures_meta.get("futures_code"),
+                        "data_source": futures_meta.get("data_source"),
+                        "composite_score": signals.get("composite_score") if signals else None,
+                        "composite_signal": signals.get("composite_signal") if signals else None,
+                    }
+                    print(f"  Futures: code={futures_meta.get('futures_code')}, "
+                          f"signal={signals.get('composite_signal') if signals else 'N/A'}, "
+                          f"score={signals.get('composite_score') if signals else 'N/A'}")
 
     # --- Step 5: Write pipeline summary ---
     print(f"[5/5] Writing pipeline output...")
@@ -397,6 +425,7 @@ def main():
             "capital_flow": str(output_dir / "capital_flow.json") if not args.no_capital else None,
             "fundamental": str(output_dir / "fundamental.json") if not args.no_fundamental and asset != "FD" else None,
             "macro_snapshot": str(output_dir / "macro_snapshot.json") if not args.no_macro else None,
+            "futures_data": str(output_dir / "futures_data.json") if is_etf and not args.no_futures else None,
         },
     }
 
