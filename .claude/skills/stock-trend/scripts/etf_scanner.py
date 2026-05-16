@@ -31,12 +31,12 @@ from typing import Any, Optional
 import yaml
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SKILL_DIR = SCRIPT_DIR
+SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
-DEFAULT_WATCHLIST = SKILL_DIR / "watchlist.yaml"
+DEFAULT_WATCHLIST = SCRIPT_DIR / "watchlist.yaml"
 CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
-ASSETS_DIR = SKILL_DIR.parent / "assets"
+ASSETS_DIR = SKILL_DIR / "assets"
 
 
 # ---------------------------------------------------------------------------
