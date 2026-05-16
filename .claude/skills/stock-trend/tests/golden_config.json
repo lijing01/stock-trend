@@ -1,0 +1,34 @@
+{
+  "thresholds": {
+    "score": 0.01,
+    "price": 0.0001,
+    "default": 0.001
+  },
+  "symbols": [
+    {"code": "600519.SH", "asset": "stock", "name": "贵州茅台"},
+    {"code": "513180.SH", "asset": "etf", "name": "沪深300ETF"},
+    {"code": "00700.HK", "asset": "hk", "name": "腾讯控股"}
+  ],
+  "scripts": [
+    {"name": "resolve", "output": "resolve.json", "accepts_stdin": false},
+    {"name": "kline", "output": "kline.json", "accepts_stdin": true},
+    {"name": "technical", "output": "technical.json", "accepts_stdin": true},
+    {"name": "capital_flow", "output": "capital_flow.json", "accepts_stdin": true},
+    {"name": "fundamental", "output": "fundamental.json", "accepts_stdin": false},
+    {"name": "macro_snapshot", "output": "macro_snapshot.json", "accepts_stdin": false},
+    {"name": "etf_data", "output": "etf_data.json", "accepts_stdin": false},
+    {"name": "futures_data", "output": "futures_data.json", "accepts_stdin": false},
+    {"name": "scores", "output": "scores.json", "accepts_stdin": true}
+  ],
+  "numeric_threshold_map": {
+    "total_score": "score",
+    "confidence": "score",
+    "pe_percentile_3y": "score",
+    "close": "price",
+    "open": "price",
+    "high": "price",
+    "low": "price",
+    "volume": "default",
+    "amount": "default"
+  }
+}
