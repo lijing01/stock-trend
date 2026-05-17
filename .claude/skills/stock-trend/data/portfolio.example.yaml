@@ -1,0 +1,17 @@
+# 持仓管理示例文件
+# 复制为 portfolio.yaml 后编辑，portfolio.yaml 不纳入版本控制
+holdings:
+  - code: "513180"
+    ts_code: "513180.SH"
+    name: "恒生科技ETF华夏"
+    buy_price: 1.025
+    buy_date: "2026-04-15"
+    quantity: 2000
+    stop_loss: 0.95
+    targets: [1.15, 1.25]
+    notes: "趋势初期建仓"
+    status: "active"
+
+settings:
+  alert_threshold_pct: 3.0
+  default_stop_loss_pct: 5.0

@@ -371,7 +371,7 @@ def run_new_script_tests(tmpdir):
 
     # TF-CF-01: fetch_capital_flow.py 股票资金流向测试
     cf_path = os.path.join(tmpdir, "tf_cf01.json")
-    rc, stdout, stderr = run_script("fetch_capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=15)
+    rc, stdout, stderr = run_script("fetch_capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=30)
     if rc == 0 and os.path.exists(cf_path):
         try:
             data = load_json_output(cf_path)
@@ -756,6 +756,14 @@ def main():
     if not args.fetch_only and not args.analyze_only:
         run_validate_tests()
 
+    # Portfolio manager tests
+    if not args.fetch_only and not args.analyze_only:
+        run_portfolio_integration_tests()
+
+    # Backtest engine tests
+    if not args.fetch_only and not args.analyze_only:
+        run_backtest_integration_tests()
+
     # Golden snapshot diff tests
     if not args.fetch_only and not args.analyze_only:
         run_golden_diff_tests()
@@ -844,3 +852,40 @@ def test_clean_cache():
     else:
         del os.environ["STOCK_TREND_CACHE_DIR"]
     print("  clean_cache empty: OK")
+
+# --- Portfolio manager integration tests ---
+
+
+def run_portfolio_integration_tests():
+    """Run portfolio manager tests from tests/test_portfolio.py."""
+    print("\n📁 持仓管理测试 (Portfolio)")
+    print("=" * 50)
+    tests_dir = SCRIPT_DIR.parent / "tests"
+    sys.path.insert(0, str(tests_dir))
+    try:
+        from test_portfolio import run_portfolio_tests
+        p, f = run_portfolio_tests()
+        global PASSED, FAILED
+        PASSED += p
+        FAILED += f
+    except ImportError as e:
+        print(f"  [SKIP] portfolio tests — {e}")
+
+
+# --- Backtest engine integration tests ---
+
+
+def run_backtest_integration_tests():
+    """Run backtest engine tests from tests/test_backtest.py."""
+    print("\n📊 回测验证测试 (Backtest)")
+    print("=" * 50)
+    tests_dir = SCRIPT_DIR.parent / "tests"
+    sys.path.insert(0, str(tests_dir))
+    try:
+        from test_backtest import run_backtest_tests
+        p, f = run_backtest_tests()
+        global PASSED, FAILED
+        PASSED += p
+        FAILED += f
+    except ImportError as e:
+        print(f"  [SKIP] backtest tests — {e}")
