@@ -1,7 +1,7 @@
 {
   "scores": {
     "technical": -0.39,
-    "capital_flow": 0,
+    "capital_flow": 0.5,
     "fundamental": 0,
     "sentiment": 0,
     "macro": 1
@@ -13,10 +13,10 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": -0.036,
-  "direction": "震荡偏空",
+  "composite_score": 0.089,
+  "direction": "震荡偏多",
   "direction_detail": "震荡",
-  "direction_modifier": "偏空",
+  "direction_modifier": "偏多",
   "confidence": "低",
   "consistency": 0.25,
   "risks": [
@@ -24,10 +24,15 @@
     "中轨下方运行；布林带极度收口(3%分位，即将变盘)",
     "OBV在20日均线下方，资金净流出"
   ],
-  "special": null,
+  "special": {
+    "type": "etf",
+    "title": "ETF 特殊分析",
+    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: -2.52%（折价）；最新净值: 0.65"
+  },
   "data_quality": "good",
   "automated_sources": {
-    "macro": "good"
+    "macro": "good",
+    "capital_flow_iopv": -2.5231
   },
   "validation_warnings": [],
   "confidence_penalty": 1.0,
@@ -39,8 +44,8 @@
   },
   "analysis": null,
   "report_params": {
-    "direction": "震荡偏空",
-    "score": -0.036,
+    "direction": "震荡偏多",
+    "score": 0.089,
     "confidence": "低",
     "ts_code": "513180.SH",
     "stop_loss": 0.61,

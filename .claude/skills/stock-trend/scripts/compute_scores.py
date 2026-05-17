@@ -476,6 +476,7 @@ def main():
                         default="stock", help="Asset type for special sections")
     parser.add_argument("--etf-data", help="Path to ETF data JSON")
     parser.add_argument("--futures-data", help="Path to futures data JSON (ETF only)")
+    parser.add_argument("--index-valuation", help="Path to index valuation JSON (ETF only)")
     parser.add_argument("--capital-flow-data", help="Path to capital flow JSON")
     parser.add_argument("--fundamental-data", help="Path to fundamental data JSON (automated scoring)")
     parser.add_argument("--macro-data", help="Path to macro snapshot JSON (automated scoring)")
@@ -510,6 +511,19 @@ def main():
         if not data_dir.exists():
             print(f"Error: data directory not found: {data_dir}", file=sys.stderr)
             sys.exit(1)
+
+        # Auto-infer asset_type from resolve.json if not explicitly set
+        if args.asset_type == "stock":  # default value, user didn't override
+            resolve_path = data_dir / "resolve.json"
+            if resolve_path.exists():
+                try:
+                    with open(resolve_path, "r", encoding="utf-8") as _f:
+                        _resolve = json.load(_f)
+                    _asset = _resolve.get("asset", "")
+                    if _asset == "FD":
+                        args.asset_type = "etf"
+                except Exception:
+                    pass
 
     # Read technical analysis
     if data_dir:
@@ -556,6 +570,8 @@ def main():
             _, args.capital_flow_data = find_data_file(data_dir, "capital_flow.json")
         if not args.etf_data:
             _, args.etf_data = find_data_file(data_dir, "etf_data.json")
+        if not args.index_valuation:
+            _, args.index_valuation = find_data_file(data_dir, "index_valuation.json")
 
     automated_sources = {}
 
@@ -587,6 +603,47 @@ def main():
                 fund_score = max(-3, min(3, fund_score))
             scores["fundamental"] = fund_score
             automated_sources["fundamental"] = dq
+        except Exception:
+            pass
+
+    # Automated ETF index valuation scoring (contributes to fundamental for ETFs)
+    # Uses index PE percentile same logic as stock fundamental
+    if args.index_valuation and args.fundamental_score is None and args.asset_type == "etf":
+        try:
+            with open(args.index_valuation, "r", encoding="utf-8") as f:
+                iv_data = json.load(f)
+            iv_summary = iv_data.get("summary", {})
+            iv_dq = iv_summary.get("data_quality")
+            if iv_dq in ("good", "partial"):
+                iv_score = 0
+                pe_pct_3y = iv_summary.get("pe_percentile_3y")
+                pe_pct_20d = iv_summary.get("pe_percentile_20d")
+                div_yield = iv_summary.get("dividend_yield_pct")
+
+                # Use 3-yr percentile if available (legulegu), else 20-day (csindex)
+                if pe_pct_3y is not None:
+                    if pe_pct_3y < 30:
+                        iv_score += 1
+                    elif pe_pct_3y > 70:
+                        iv_score -= 1
+                elif pe_pct_20d is not None:
+                    if pe_pct_20d < 20:
+                        iv_score += 1
+                    elif pe_pct_20d > 80:
+                        iv_score -= 1
+
+                # Dividend yield bonus for ETFs
+                if div_yield is not None and div_yield > 3:
+                    iv_score += 1
+                elif div_yield is not None and div_yield < 0.5:
+                    iv_score -= 1
+
+                iv_score = max(-3, min(3, iv_score))
+                # Merge into existing fundamental score (starts at 0 for ETFs)
+                scores["fundamental"] = round(scores.get("fundamental", 0) + iv_score, 2)
+                scores["fundamental"] = max(-3, min(3, scores["fundamental"]))
+                automated_sources["fundamental_index_pe"] = iv_summary.get("pe_ttm")
+                automated_sources["fundamental_data_source"] = iv_data.get("meta", {}).get("data_source")
         except Exception:
             pass
 

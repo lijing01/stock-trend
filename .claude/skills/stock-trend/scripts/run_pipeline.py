@@ -98,6 +98,7 @@ def main():
     parser.add_argument("--no-fundamental", action="store_true", help="Skip fundamental data fetch")
     parser.add_argument("--no-macro", action="store_true", help="Skip macro snapshot fetch")
     parser.add_argument("--no-futures", action="store_true", help="Skip futures data fetch (ETF only)")
+    parser.add_argument("--no-index-valuation", action="store_true", help="Skip index PE valuation fetch (ETF only)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore all cache")
     parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp). Ignored when --code is used.")
     args = parser.parse_args()
@@ -329,6 +330,21 @@ def main():
             futures_path,
         ))
 
+    # Index valuation (ETF only)
+    if is_etf and not args.no_index_valuation:
+        index_valuation_path = str(output_dir / "index_valuation.json")
+        index_valuation_cmd = [
+            sys.executable, str(SCRIPT_DIR / "fetch_index_valuation.py"),
+            "--code", code, "-o", index_valuation_path,
+        ]
+        if args.no_cache:
+            index_valuation_cmd.append("--no-cache")
+        parallel_tasks.append((
+            index_valuation_cmd,
+            "fetch_index_valuation",
+            index_valuation_path,
+        ))
+
     if parallel_tasks:
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
@@ -380,6 +396,24 @@ def main():
                     print(f"  Futures: code={futures_meta.get('futures_code')}, "
                           f"signal={signals.get('composite_signal') if signals else 'N/A'}, "
                           f"score={signals.get('composite_score') if signals else 'N/A'}")
+                elif label == "fetch_index_valuation" and data:
+                    dq = data.get("meta", {}).get("data_quality", "error")
+                    pe = data.get("summary", {}).get("pe_ttm")
+                    pct = data.get("summary", {}).get("pe_percentile_3y")
+                    pct_suffix = f" (3-yr: {pct}%)" if pct is not None else ""
+                    results["index_valuation"] = {
+                        "data_quality": dq,
+                        "pe_ttm": pe,
+                        "pe_percentile_3y": pct,
+                        "index_name": data.get("meta", {}).get("index_name"),
+                    }
+                    if dq == "good" and pe:
+                        print(f"  Index valuation: {data['meta'].get('index_name')} PE={pe}{pct_suffix}")
+                    elif dq == "partial" and pe:
+                        pct_20d = data.get("summary", {}).get("pe_percentile_20d")
+                        print(f"  Index valuation: {data['meta'].get('index_name')} PE={pe} (20d: {pct_20d}%)")
+                    else:
+                        print(f"  Index valuation: {data['meta'].get('index_name')} ({dq})")
 
     # --- Step 5: Write pipeline summary ---
     print(f"[5/5] Writing pipeline output...")
@@ -408,6 +442,7 @@ def main():
             "fundamental": str(output_dir / "fundamental.json") if not args.no_fundamental and asset != "FD" else None,
             "macro_snapshot": str(output_dir / "macro_snapshot.json") if not args.no_macro else None,
             "futures_data": str(output_dir / "futures_data.json") if is_etf and not args.no_futures else None,
+            "index_valuation": str(output_dir / "index_valuation.json") if is_etf and not args.no_index_valuation else None,
         },
     }
 

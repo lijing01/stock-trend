@@ -343,6 +343,7 @@ def regenerate_golden(config):
         "fundamental": ["etf"],      # ETFs don't get fundamental data
         "etf_data": ["stock", "hk"],  # Only ETFs get ETF data
         "futures_data": ["stock", "hk"],  # Only ETFs get futures data
+        "index_valuation": ["stock", "hk"],  # Only ETFs get index valuation
     }
 
     print("=" * 50)

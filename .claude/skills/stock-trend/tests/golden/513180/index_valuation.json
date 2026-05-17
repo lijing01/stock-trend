@@ -1,0 +1,14 @@
+{
+  "meta": {
+    "etf_code": "513180",
+    "index_name": "恒生科技",
+    "data_source": "skip",
+    "data_quality": "skip",
+    "note": "恒生科技 指数PE数据暂无可用的自动数据源"
+  },
+  "summary": {
+    "data_quality": "skip"
+  },
+  "data": {},
+  "errors": []
+}

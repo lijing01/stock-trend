@@ -18,6 +18,7 @@
     {"name": "macro_snapshot", "output": "macro_snapshot.json", "accepts_stdin": false},
     {"name": "etf_data", "output": "etf_data.json", "accepts_stdin": false},
     {"name": "futures_data", "output": "futures_data.json", "accepts_stdin": false},
+    {"name": "index_valuation", "output": "index_valuation.json", "accepts_stdin": false},
     {"name": "scores", "output": "scores.json", "accepts_stdin": true}
   ],
   "numeric_threshold_map": {
