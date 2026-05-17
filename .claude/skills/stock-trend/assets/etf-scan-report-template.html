@@ -46,6 +46,7 @@ td{font-size:14px}
 .sector-row{display:flex;gap:16px;margin-bottom:12px}
 .sector-tag{display:inline-block;padding:4px 10px;border-radius:6px;font-size:13px;font-weight:500}
 .sector-strong{background:rgba(239,83,80,.08);color:#dc2626;border:1px solid rgba(239,83,80,.2)}
+.sector-neutral{background:rgba(234,179,8,.08);color:#ca8a04;border:1px solid rgba(234,179,8,.2)}
 .sector-weak{background:rgba(22,163,74,.08);color:#16a34a;border:1px solid rgba(22,163,74,.2)}
 .excluded{color:#6b7280;font-size:13px;line-height:1.8}
 footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
@@ -120,6 +121,9 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 {{#sector_strong}}
 <span class="sector-tag sector-strong">{{name}} +{{avg_score}}</span>
 {{/sector_strong}}
+{{#sector_neutral}}
+<span class="sector-tag sector-neutral">{{name}} {{avg_score}}</span>
+{{/sector_neutral}}
 {{#sector_weak}}
 <span class="sector-tag sector-weak">{{name}} {{avg_score}}</span>
 {{/sector_weak}}

@@ -177,6 +177,7 @@ def build_report_context(output: dict) -> dict:
 
     # Sector summary — pass structured data for HTML template
     strong_list = sector.get("strong", [])
+    neutral_list = sector.get("neutral", [])
     weak_list = sector.get("weak", [])
 
     # Remainder summary: count by signal direction
@@ -203,13 +204,17 @@ def build_report_context(output: dict) -> dict:
         "top_picks": pick_rows if pick_rows else None,
         "has_excluded": bool(excluded),
         "excluded_summary": excluded_summary,
-        "has_sector_summary": bool(strong_list or weak_list),
+        "has_sector_summary": bool(strong_list or neutral_list or weak_list),
         "sector_strong": strong_list if strong_list else None,
+        "sector_neutral": neutral_list if neutral_list else None,
         "sector_weak": weak_list if weak_list else None,
         # Keep text summaries for backward compat
         "sector_strong_summary": " | ".join(
             f"{s['name']}(+{s['avg_score']}↑)" for s in strong_list
         ) if strong_list else "",
+        "sector_neutral_summary": " | ".join(
+            f"{n['name']}({n['avg_score']}→)" for n in neutral_list
+        ) if neutral_list else "",
         "sector_weak_summary": " | ".join(
             f"{w['name']}({w['avg_score']}↓)" for w in weak_list
         ) if weak_list else "",
@@ -1316,6 +1321,10 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
             "stop_loss": p2.get("stop_loss"),
             "targets": p2.get("targets", {}),
             "warnings": p1.get("warnings", []),
+            "trend_stage": p1.get("trend_stage", ""),
+            "sector_rank": p1.get("sector_rank", ""),
+            "sector_count": p1.get("sector_count", ""),
+            "sector_percentile": p1.get("sector_percentile", 100),
         }
 
         trend_mult = p1.get("trend_stage_multiplier", 1.0)
@@ -1462,16 +1471,19 @@ def build_sector_summary(combined: list[dict]) -> dict:
         cat = c.get("category", "其他")
         sector_scores[cat].append(c.get("combined_score") or 0)
 
-    strong, weak = [], []
+    strong, neutral, weak = [], [], []
     for sector, scores in sector_scores.items():
         avg = sum(scores) / len(scores) if scores else 0
-        if avg >= 70:
+        if avg >= 60:
             strong.append({"name": sector, "avg_score": round(avg, 1)})
-        elif avg < 50:
+        elif avg >= 50:
+            neutral.append({"name": sector, "avg_score": round(avg, 1)})
+        else:
             weak.append({"name": sector, "avg_score": round(avg, 1)})
 
     return {
         "strong": sorted(strong, key=lambda x: x["avg_score"], reverse=True),
+        "neutral": sorted(neutral, key=lambda x: x["avg_score"], reverse=True),
         "weak": sorted(weak, key=lambda x: x["avg_score"]),
     }
 
