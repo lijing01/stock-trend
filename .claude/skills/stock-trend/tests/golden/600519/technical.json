@@ -1,8 +1,8 @@
 {
   "meta": {
     "ts_code": "600519.SH",
-    "analysis_date": "20260516",
-    "data_points": 242,
+    "analysis_date": "20260517",
+    "data_points": 241,
     "indicators_computed": [
       "ma",
       "macd",
@@ -91,7 +91,7 @@
       }
     },
     "obv": {
-      "obv": -95886459.0,
+      "obv": -92080176.0,
       "signal": {
         "type": "money_flow",
         "description": "OBV在20日均线下方，资金净流出",
@@ -109,8 +109,8 @@
       }
     },
     "max_drawdown": {
-      "max_drawdown_pct": -14.96,
-      "drawdown_days": 174
+      "max_drawdown_pct": -14.28,
+      "drawdown_days": 61
     }
   },
   "patterns": [
@@ -124,7 +124,7 @@
     }
   ],
   "summary": {
-    "total_score": 0,
+    "total_score": -0.26,
     "direction": "neutral",
     "confidence": "low",
     "consistency": 0.25,
@@ -138,6 +138,18 @@
       "ADX=21.2，趋势弱",
       "OBV在20日均线下方，资金净流出"
     ],
+    "data_quality": "good",
+    "dimension_scores": {
+      "ma": -2,
+      "macd": 0,
+      "rsi": 1,
+      "kdj": 1,
+      "bollinger": 0,
+      "volume": 0,
+      "adx": 0,
+      "obv": -1,
+      "patterns": 0
+    },
     "support_levels": [
       1327.11,
       1200,
@@ -161,6 +173,6 @@
     "favorable_rr": true,
     "position_sizing": "标准仓位(50-70%)",
     "risk_reward_warning": null,
-    "max_drawdown_pct": -14.96
+    "max_drawdown_pct": -14.28
   }
 }

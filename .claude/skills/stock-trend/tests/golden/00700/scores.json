@@ -1,6 +1,6 @@
 {
   "scores": {
-    "technical": 0,
+    "technical": -0.24,
     "capital_flow": 0,
     "fundamental": 0,
     "sentiment": 0,
@@ -13,7 +13,7 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": 0.1,
+  "composite_score": 0.016,
   "direction": "震荡偏多",
   "direction_detail": "震荡",
   "direction_modifier": "偏多",
@@ -27,7 +27,7 @@
     "OBV在20日均线下方，资金净流出"
   ],
   "special": null,
-  "data_quality": null,
+  "data_quality": "good",
   "automated_sources": {
     "fundamental": "error",
     "macro": "good"
@@ -43,7 +43,7 @@
   "analysis": null,
   "report_params": {
     "direction": "震荡偏多",
-    "score": 0.1,
+    "score": 0.016,
     "confidence": "低",
     "ts_code": "00700.HK",
     "stop_loss": 442.26,

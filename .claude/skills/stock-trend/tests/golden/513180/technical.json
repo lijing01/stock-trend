@@ -1,7 +1,7 @@
 {
   "meta": {
     "ts_code": "513180.SH",
-    "analysis_date": "20260516",
+    "analysis_date": "20260517",
     "data_points": 85,
     "indicators_computed": [
       "ma",
@@ -124,7 +124,7 @@
     }
   ],
   "summary": {
-    "total_score": 0,
+    "total_score": -0.39,
     "direction": "neutral",
     "confidence": "low",
     "consistency": 0.25,
@@ -138,6 +138,18 @@
       "ADX=14.3，震荡市",
       "OBV在20日均线下方，资金净流出"
     ],
+    "data_quality": "good",
+    "dimension_scores": {
+      "ma": 0,
+      "macd": 0,
+      "rsi": -2,
+      "kdj": 0,
+      "bollinger": 0,
+      "volume": 0,
+      "adx": 0,
+      "obv": -1,
+      "patterns": -2
+    },
     "support_levels": [
       0.628,
       0.604

@@ -1,7 +1,7 @@
 {
   "meta": {
     "ts_code": "00700.HK",
-    "analysis_date": "20260516",
+    "analysis_date": "20260517",
     "data_points": 250,
     "indicators_computed": [
       "ma",
@@ -114,7 +114,7 @@
   },
   "patterns": [],
   "summary": {
-    "total_score": 0,
+    "total_score": -0.24,
     "direction": "neutral",
     "confidence": "low",
     "consistency": 0.38,
@@ -128,6 +128,17 @@
       "ADX=44.3，强趋势；-DI>+DI确认空头",
       "OBV在20日均线下方，资金净流出"
     ],
+    "data_quality": "good",
+    "dimension_scores": {
+      "ma": -2,
+      "macd": 2,
+      "rsi": 0,
+      "kdj": 0,
+      "bollinger": 0,
+      "volume": 0,
+      "adx": -1,
+      "obv": -1
+    },
     "support_levels": [
       454.2,
       190,

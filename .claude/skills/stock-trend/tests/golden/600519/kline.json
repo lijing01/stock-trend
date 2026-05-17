@@ -4,25 +4,13 @@
     "asset": "E",
     "freq": "D",
     "adj": "qfq",
-    "record_count": 242,
-    "data_points": 242,
+    "record_count": 241,
+    "data_points": 241,
     "data_source": "baostock",
     "em_host": null,
     "warnings": []
   },
   "data": [
-    {
-      "trade_date": "20250516",
-      "open": 1575.74806044,
-      "high": 1578.64112844,
-      "low": 1556.59595028,
-      "close": 1556.59595028,
-      "pct_chg": -1.0956,
-      "vol": 2293522.0,
-      "amount": 3714508659.19,
-      "pre_close": 1573.83863556,
-      "ts_code": "600519.SH"
-    },
     {
       "trade_date": "20250519",
       "open": 1539.112176,

@@ -51,6 +51,50 @@ FOCUS_WEIGHTS = {
     },
 }
 
+# IOPV premium → capital_flow score contribution ([-1.5, +1.5] range)
+# Slight discount is optimal (buyers get good price), deep discount is modest positive
+# (may signal liquidity concerns), premium is negative (overpaying).
+IOPV_CAPITAL_FLOW_ANCHORS = [
+    (-2.0, 0.5),    # Deep discount — modest positive, but liquidity risk
+    (-1.0, 0.8),    # Moderate discount — positive
+    (-0.5, 1.2),    # Decent discount — good
+    (-0.3, 1.5),    # Slight discount — best entry signal
+    (-0.1, 1.0),    # Near-zero discount — positive
+    (0.0, 0.0),     # Fair value — neutral
+    (0.15, -0.5),   # Small premium — slight negative
+    (0.3, -1.0),    # Moderate premium — negative
+    (1.0, -1.5),    # Large premium — strongly negative
+    (2.0, -1.5),    # Extreme premium — strongly negative (capped)
+]
+
+
+def _piecewise_linear(value, anchors):
+    """Interpolate value through piecewise-linear anchors.
+
+    Anchors is a sorted list of (x, y) pairs. Returns interpolated y.
+    """
+    if value <= anchors[0][0]:
+        return anchors[0][1]
+    if value >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(len(anchors) - 1):
+        x0, y0 = anchors[i]
+        x1, y1 = anchors[i + 1]
+        if x0 <= value <= x1:
+            t = (value - x0) / (x1 - x0) if x1 != x0 else 0
+            return y0 + t * (y1 - y0)
+    return anchors[-1][1]
+
+
+def score_iopv_capital_flow(iopv_premium_pct):
+    """Convert IOPV premium/discount % to a capital_flow score contribution.
+
+    Returns a value in [-1.5, +1.5] range, suitable for adding to the
+    capital_flow dimension score (which is on the [-3, +3] scale).
+    """
+    return round(_piecewise_linear(float(iopv_premium_pct), IOPV_CAPITAL_FLOW_ANCHORS), 2)
+
+
 # Data quality weight adjustments
 DATA_QUALITY_WEIGHTS = {
     "insufficient": {"technical": 0.175},  # 17.5% for tech, rest redistributed
@@ -638,6 +682,37 @@ def main():
         except Exception:
             pass
 
+    # Load ETF and futures data for IOPV scoring and special section
+    etf_data = None
+    etf_source = None
+    futures_data = None
+    if data_dir:
+        etf_data, etf_source = find_data_file(data_dir, "etf_data.json")
+        futures_data, _ = find_data_file(data_dir, "futures_data.json")
+    elif args.etf_data and Path(args.etf_data).exists():
+        with open(args.etf_data, "r", encoding="utf-8") as f:
+            etf_data = json.load(f)
+    if args.futures_data and Path(args.futures_data).exists() and futures_data is None:
+        with open(args.futures_data, "r", encoding="utf-8") as f:
+            futures_data = json.load(f)
+
+    # Automated IOPV premium scoring for ETFs (contributes to capital_flow)
+    if args.asset_type == "etf" and args.capital_flow_score is None:
+        iopv_premium = None
+        if etf_data and isinstance(etf_data, dict):
+            nav = etf_data.get("nav")
+            if isinstance(nav, dict):
+                iopv_premium = nav.get("iopv_premium_pct")
+        if iopv_premium is not None:
+            try:
+                iopv_score = score_iopv_capital_flow(iopv_premium)
+                if iopv_score != 0:
+                    scores["capital_flow"] = round(scores.get("capital_flow", 0) + iopv_score, 2)
+                    scores["capital_flow"] = max(-3, min(3, scores["capital_flow"]))
+                    automated_sources["capital_flow_iopv"] = round(float(iopv_premium), 4)
+            except Exception:
+                pass
+
     # Parse self-check and signals-info
     self_check = {}
     if args.self_check:
@@ -729,20 +804,7 @@ def main():
             seen_topics.add(topic)
         unique_risks.append(r)
 
-    # Build special section
-    etf_data = None
-    etf_source = None
-    futures_data = None
-    if data_dir:
-        etf_data, etf_source = find_data_file(data_dir, "etf_data.json")
-        futures_data, _ = find_data_file(data_dir, "futures_data.json")
-    elif args.etf_data and Path(args.etf_data).exists():
-        with open(args.etf_data, "r", encoding="utf-8") as f:
-            etf_data = json.load(f)
-    if args.futures_data and Path(args.futures_data).exists() and futures_data is None:
-        with open(args.futures_data, "r", encoding="utf-8") as f:
-            futures_data = json.load(f)
-
+    # Build special section (etf_data and futures_data loaded earlier for IOPV scoring)
     special = build_special_section(
         args.asset_type, technical_data,
         etf_data=etf_data,

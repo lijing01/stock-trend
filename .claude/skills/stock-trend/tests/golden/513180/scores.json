@@ -1,6 +1,6 @@
 {
   "scores": {
-    "technical": 0,
+    "technical": -0.39,
     "capital_flow": 0,
     "fundamental": 0,
     "sentiment": 0,
@@ -13,10 +13,10 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": 0.1,
-  "direction": "震荡偏多",
+  "composite_score": -0.036,
+  "direction": "震荡偏空",
   "direction_detail": "震荡",
-  "direction_modifier": "偏多",
+  "direction_modifier": "偏空",
   "confidence": "低",
   "consistency": 0.25,
   "risks": [
@@ -25,7 +25,7 @@
     "OBV在20日均线下方，资金净流出"
   ],
   "special": null,
-  "data_quality": null,
+  "data_quality": "good",
   "automated_sources": {
     "macro": "good"
   },
@@ -39,8 +39,8 @@
   },
   "analysis": null,
   "report_params": {
-    "direction": "震荡偏多",
-    "score": 0.1,
+    "direction": "震荡偏空",
+    "score": -0.036,
     "confidence": "低",
     "ts_code": "513180.SH",
     "stop_loss": 0.61,
