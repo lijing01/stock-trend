@@ -100,7 +100,7 @@ def main():
     parser.add_argument("--no-futures", action="store_true", help="Skip futures data fetch (ETF only)")
     parser.add_argument("--no-index-valuation", action="store_true", help="Skip index PE valuation fetch (ETF only)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore all cache")
-    parser.add_argument("-o", "--output-dir", default="/tmp", help="Output directory (default: /tmp). Ignored when --code is used.")
+    parser.add_argument("-o", "--output-dir", default=None, help="Output directory (default: .cache/stock-trend/{code}/). Ignored when --code is used.")
     args = parser.parse_args()
 
     # Clean cache on pipeline start
@@ -130,7 +130,7 @@ def main():
     elif args.ts_code:
         ts_code = args.ts_code
         code = ts_code.split(".")[0]
-        output_dir = Path(args.output_dir)
+        output_dir = Path(args.output_dir) if args.output_dir else get_data_dir(code)
         output_dir.mkdir(parents=True, exist_ok=True)
     else:
         parser.error("Provide either ts_code (positional) or --code")

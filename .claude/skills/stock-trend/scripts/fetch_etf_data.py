@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import urllib.request
+from cache_utils import safe_float
 from eastmoney_utils import EM_HEADERS
 
 
@@ -79,17 +80,17 @@ def fetch_etf_data(fund_code):
                     period = str(item[0])
                     rate = item[1]
                     if "近1月" in period or period == "0":
-                        returns["1m"] = _safe_float(rate)
+                        returns["1m"] = safe_float(rate)
                     elif "近3月" in period or period == "1":
-                        returns["3m"] = _safe_float(rate)
+                        returns["3m"] = safe_float(rate)
                     elif "近6月" in period or period == "2":
-                        returns["6m"] = _safe_float(rate)
+                        returns["6m"] = safe_float(rate)
                     elif "近1年" in period or period == "3":
-                        returns["1y"] = _safe_float(rate)
+                        returns["1y"] = safe_float(rate)
         result["returns"] = returns
 
         # Stock position ratio
-        result["stock_position"] = _safe_float(vars_dict.get("Data_currentFundPosition", None))
+        result["stock_position"] = safe_float(vars_dict.get("Data_currentFundPosition", None))
 
         # Top 10 holdings: Data_holderStructure or stockCodesNew
         holdings = []
@@ -102,7 +103,7 @@ def fetch_etf_data(fund_code):
                             holdings.append({
                                 "name": str(h[0]),
                                 "code": str(h[1]) if len(h) > 1 else "",
-                                "weight": _safe_float(h[2]) if len(h) > 2 else None,
+                                "weight": safe_float(h[2]) if len(h) > 2 else None,
                             })
             except (TypeError, IndexError):
                 pass
@@ -117,7 +118,7 @@ def fetch_etf_data(fund_code):
                             holdings.append({
                                 "name": str(s[1]),
                                 "code": str(s[0]),
-                                "weight": _safe_float(s[2]),
+                                "weight": safe_float(s[2]),
                             })
             except (TypeError, IndexError):
                 pass
@@ -129,11 +130,11 @@ def fetch_etf_data(fund_code):
         if "Data_flvol" in vars_dict and isinstance(vars_dict["Data_flvol"], list) and vars_dict["Data_flvol"]:
             last = vars_dict["Data_flvol"][-1]
             if isinstance(last, list) and len(last) >= 2:
-                fund_size["shares_billion"] = _safe_float(last[1])
+                fund_size["shares_billion"] = safe_float(last[1])
         if "Data_endNav" in vars_dict and isinstance(vars_dict["Data_endNav"], list) and vars_dict["Data_endNav"]:
             last = vars_dict["Data_endNav"][-1]
             if isinstance(last, list) and len(last) >= 2:
-                fund_size["net_asset_billion"] = _safe_float(last[1])
+                fund_size["net_asset_billion"] = safe_float(last[1])
         result["fund_size"] = fund_size
 
         # Tracking index
@@ -170,15 +171,15 @@ def fetch_etf_data(fund_code):
         if m:
             nav_data = json.loads(m.group(1))
             result["nav"] = {
-                "nav": _safe_float(nav_data.get("dwjz")),
+                "nav": safe_float(nav_data.get("dwjz")),
                 "nav_date": nav_data.get("jzrq", ""),
-                "iopv": _safe_float(nav_data.get("gsz")),
+                "iopv": safe_float(nav_data.get("gsz")),
                 "iopv_time": nav_data.get("gztime", ""),
-                "iopv_chg_pct": _safe_float(nav_data.get("gszzl")),
+                "iopv_chg_pct": safe_float(nav_data.get("gszzl")),
             }
             # Calculate IOPV premium/discount
-            iopv = _safe_float(nav_data.get("gsz"))
-            nav = _safe_float(nav_data.get("dwjz"))
+            iopv = safe_float(nav_data.get("gsz"))
+            nav = safe_float(nav_data.get("dwjz"))
             if iopv and nav and nav > 0:
                 result["nav"]["iopv_premium_pct"] = round((iopv - nav) / nav * 100, 4)
     except Exception as e:
@@ -193,7 +194,7 @@ def fetch_etf_data(fund_code):
                 if isinstance(item, list) and len(item) >= 2:
                     recent_flows.append({
                         "date": str(item[0]),
-                        "shares_billion": _safe_float(item[1]),
+                        "shares_billion": safe_float(item[1]),
                     })
             result["recent_flows"] = recent_flows
     except Exception:
@@ -201,16 +202,6 @@ def fetch_etf_data(fund_code):
 
     result["errors"] = errors if errors else None
     return result
-
-
-def _safe_float(val):
-    """Safely convert value to float, returning None on failure."""
-    if val is None or val == "" or val == "-":
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
 
 
 def main():

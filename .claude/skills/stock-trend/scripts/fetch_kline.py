@@ -17,7 +17,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
+from resolve_code import detect_asset, detect_adj
 
 # --- Token resolution ---
 
@@ -49,21 +50,6 @@ def resolve_token(cli_token=None):
 
 
 # --- Auto-detect asset type ---
-
-
-def detect_asset(ts_code):
-    """Auto-detect asset type from ts_code pattern."""
-    code = ts_code.split(".")[0]
-    if code.startswith(("5", "15")):
-        return "FD"
-    return "E"
-
-
-def detect_adj(ts_code):
-    """Auto-detect adjustment type from ts_code."""
-    if ts_code.endswith(".HK"):
-        return "none"
-    return "qfq"
 
 
 def calc_start_date(end_date, freq):
@@ -270,7 +256,7 @@ def main():
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
         if cached:
-            _output(cached, args.output)
+            output_json(cached, output_path=args.output)
             return
 
     # Resolve token
@@ -289,7 +275,7 @@ def main():
             },
             "data": [],
         }
-        _output(result, args.output)
+        output_json(result, output_path=args.output)
         return
 
     # Resolve parameters
@@ -316,7 +302,7 @@ def main():
             },
             "data": [],
         }
-        _output(result, args.output)
+        output_json(result, output_path=args.output)
         return
 
     # Process data
@@ -359,19 +345,8 @@ def main():
     if result.get("meta", {}).get("data_source") != "error":
         save_cache(cache_key, result)
 
-    _output(result, args.output)
+    output_json(result, output_path=args.output)
 
-
-def _output(result, output_path=None):
-    """Write JSON result to file or stdout."""
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if output_path:
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Data written to {output_path}", file=sys.stderr)
-    else:
-        print(text)
 
 
 # Lazy import for pandas (used in df_to_records and NaN check)

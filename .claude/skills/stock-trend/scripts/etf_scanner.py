@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from resolve_code import code_to_ts_code
 
 import yaml
 
@@ -248,16 +249,6 @@ def generate_report(output: dict) -> tuple[Path, str]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def code_to_ts_code(code: str) -> str:
-    """Convert raw ETF code to ts_code for existing scripts."""
-    code = str(code).strip()
-    if code.startswith("159"):
-        return f"{code}.SZ"
-    # All other ETF codes (5xx, 15xx, 51xx, 56xx, 58xx, 588xx) are SH
-    return f"{code}.SH"
-
 
 def load_watchlist(path: Optional[Path] = None) -> dict:
     """Load ETF watchlist from YAML config."""

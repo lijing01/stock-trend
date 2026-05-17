@@ -20,9 +20,8 @@ import json
 import os
 import sys
 import logging
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, output_json, safe_float, save_cache, retry, get_market_day_ttl
 from datetime import datetime
-from contextlib import contextmanager
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
 
@@ -60,41 +59,6 @@ ETF_INDEX_MAP = {
 }
 
 
-def _safe_float(val):
-    if val is None:
-        return None
-    try:
-        return round(float(val), 2)
-    except (ValueError, TypeError):
-        return None
-
-
-@contextmanager
-def _suppress_stderr():
-    """Temporarily suppress stderr to hide AKShare tqdm progress bars."""
-    old_stderr = sys.stderr
-    sys.stderr = open(os.devnull, "w")
-    try:
-        yield
-    finally:
-        sys.stderr.close()
-        sys.stderr = old_stderr
-
-
-def _retry(func, max_attempts=2, delay=2):
-    """Call func with retry. Suppresses stderr during call."""
-    import time
-    last_err = None
-    for attempt in range(max_attempts):
-        try:
-            with _suppress_stderr():
-                return func(), None
-        except Exception as e:
-            last_err = e
-            if attempt < max_attempts - 1:
-                time.sleep(delay)
-    return None, str(last_err)
-
 
 def _calc_percentile(values, current_val):
     """Calculate what percent of values are below current_val (0-100)."""
@@ -112,7 +76,7 @@ def fetch_index_valuation_tier1_lg(etf_code, lg_name):
     import akshare as ak
     import pandas as pd
 
-    df, err = _retry(lambda: ak.stock_index_pe_lg(symbol=lg_name), max_attempts=2, delay=3)
+    df, err = retry(lambda: ak.stock_index_pe_lg(symbol=lg_name), max_attempts=2, delay=3)
     if err:
         return None, f"stock_index_pe_lg({lg_name}): {err}"
     if df is None or df.empty:
@@ -127,7 +91,7 @@ def fetch_index_valuation_tier1_lg(etf_code, lg_name):
     if pe_values.empty:
         return None, f"stock_index_pe_lg({lg_name}): no valid PE values"
 
-    current_pe = _safe_float(pe_values.iloc[-1])
+    current_pe = safe_float(pe_values.iloc[-1], round_to=2)
     pe_percentile_3y = _calc_percentile(pe_values, current_pe)
 
     # Get date range
@@ -135,7 +99,7 @@ def fetch_index_valuation_tier1_lg(etf_code, lg_name):
     latest_date = str(df[date_col].iloc[-1]) if date_col in df.columns else ""
 
     # Also get the index close price
-    index_close = _safe_float(df["指数"].iloc[-1]) if "指数" in df.columns else None
+    index_close = safe_float(df["指数"].iloc[-1], round_to=2) if "指数" in df.columns else None
 
     result = {
         "pe_ttm": current_pe,
@@ -159,7 +123,7 @@ def fetch_index_valuation_tier2_csindex(etf_code, csindex_code):
     """
     import akshare as ak
 
-    df, err = _retry(lambda: ak.stock_zh_index_value_csindex(symbol=csindex_code), max_attempts=2, delay=3)
+    df, err = retry(lambda: ak.stock_zh_index_value_csindex(symbol=csindex_code), max_attempts=2, delay=3)
     if err:
         return None, f"stock_zh_index_value_csindex({csindex_code}): {err}"
     if df is None or df.empty:
@@ -176,7 +140,7 @@ def fetch_index_valuation_tier2_csindex(etf_code, csindex_code):
     if pe_values.empty:
         return None, f"stock_zh_index_value_csindex({csindex_code}): no valid PE values"
 
-    current_pe = _safe_float(pe_values.iloc[0])  # Most recent (sorted desc)
+    current_pe = safe_float(pe_values.iloc[0], round_to=2)  # Most recent (sorted desc)
     pe_percentile_20d = _calc_percentile(pe_values, current_pe)
 
     # Dividend yield
@@ -184,7 +148,7 @@ def fetch_index_valuation_tier2_csindex(etf_code, csindex_code):
     if dy_col in df.columns:
         dy_values = df[dy_col].dropna().astype(float)
         if not dy_values.empty:
-            div_yield = _safe_float(dy_values.iloc[0])
+            div_yield = safe_float(dy_values.iloc[0], round_to=2)
 
     latest_date = str(df["日期"].iloc[0]) if "日期" in df.columns else ""
 
@@ -239,7 +203,7 @@ def main():
             "data": {},
             "errors": ["no_index_mapping"],
         }
-        _output(result, args)
+        output_json(result, output_path=args.output)
         save_cache(cache_key, result)
         return
 
@@ -280,7 +244,7 @@ def main():
             "data": {},
             "errors": errors,
         }
-        _output(result, args)
+        output_json(result, output_path=args.output)
         save_cache(cache_key, result)
         return
 
@@ -304,20 +268,9 @@ def main():
     for field in ("latest_date", "record_count", "data_source"):
         summary.pop(field, None)
 
-    _output(result, args)
+    output_json(result, output_path=args.output)
     save_cache(cache_key, result)
 
-
-def _output(data, args):
-    """Write output to file or stdout."""
-    out = json.dumps(data, ensure_ascii=False, indent=2)
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(out)
-        print(f"Index valuation → {args.output}")
-    else:
-        print(out)
 
 
 if __name__ == "__main__":

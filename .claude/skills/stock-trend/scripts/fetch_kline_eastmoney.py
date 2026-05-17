@@ -18,24 +18,10 @@ import json
 import os
 import sys
 import urllib.request
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
+from resolve_code import detect_asset, detect_adj
 from datetime import datetime, timedelta
 from eastmoney_utils import EM_HEADERS, EM_API_HOSTS, build_secid
-
-
-def detect_asset(ts_code):
-    """Auto-detect asset type from ts_code pattern."""
-    code = ts_code.split(".")[0]
-    if code.startswith(("5", "15")):
-        return "FD"
-    return "E"
-
-
-def detect_adj(ts_code):
-    """Auto-detect adjustment type from ts_code."""
-    if ts_code.endswith(".HK"):
-        return "none"
-    return "qfq"
 
 
 def freq_to_klt(freq):
@@ -269,7 +255,7 @@ def main():
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
         if cached:
-            _output(cached, args.output)
+            output_json(cached, output_path=args.output)
             return
 
     # Check if market is supported by EastMoney
@@ -298,7 +284,7 @@ def main():
                 },
                 "data": [],
             }
-            _output(result, args.output)
+            output_json(result, output_path=args.output)
             return
 
         record_count = len(records)
@@ -322,7 +308,7 @@ def main():
             },
             "data": records,
         }
-        _output(result, args.output)
+        output_json(result, output_path=args.output)
         return
 
     if secid is None:
@@ -337,7 +323,7 @@ def main():
             },
             "data": [],
         }
-        _output(result, args.output)
+        output_json(result, output_path=args.output)
         return
 
     # Fetch data with host rotation
@@ -371,7 +357,7 @@ def main():
             },
             "data": [],
         }
-        _output(result, args.output)
+        output_json(result, output_path=args.output)
         return
 
     data_source = "eastmoney" if used_host in EM_API_HOSTS else "baostock"
@@ -405,7 +391,7 @@ def main():
     if result.get("meta", {}).get("data_source") not in ("error", None):
         save_cache(cache_key, result)
 
-    _output(result, args.output)
+    output_json(result, output_path=args.output)
 
 
 def fetch_baostock(ts_code, freq):
@@ -499,17 +485,6 @@ def fetch_baostock(ts_code, freq):
     finally:
         bs.logout()
 
-
-def _output(result, output_path=None):
-    """Write JSON result to file or stdout."""
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if output_path:
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Data written to {output_path}", file=sys.stderr)
-    else:
-        print(text)
 
 
 if __name__ == "__main__":

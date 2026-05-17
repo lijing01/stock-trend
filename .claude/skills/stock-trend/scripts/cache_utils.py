@@ -2,7 +2,7 @@
 """Shared caching utilities for stock-trend scripts.
 
 Provides file-based JSON caching with TTL support and market-hours-aware
-TTL calculation. Cache files are stored in /tmp/stock-trend-cache/ by default.
+TTL calculation. Cache files are stored in .cache/stock-trend/ by default.
 
 Usage in scripts:
     from cache_utils import load_cache, save_cache, get_market_day_ttl
@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -185,6 +186,66 @@ def get_market_day_ttl(trading_ttl: int = 300, after_hours_ttl: int = 57600) -> 
     if is_trading_hours():
         return trading_ttl
     return after_hours_ttl
+
+
+# ─── Shared utility functions ────────────────────────────────────────
+
+
+def safe_float(val, default=None, round_to=None):
+    """Convert value to float, return default on failure. Strips %, commas."""
+    if val is None or val == "" or val == "-" or val == "N/A":
+        return default
+    try:
+        s = str(val).replace("%", "").replace(",", "").strip()
+        result = float(s)
+        return round(result, round_to) if round_to is not None else result
+    except (ValueError, TypeError):
+        return default
+
+
+def output_json(data, output_path=None, compact=False):
+    """Write JSON to file or stdout. Creates output dir if needed.
+
+    Args:
+        data: JSON-serializable dict/list.
+        output_path: File path or None for stdout.
+        compact: If True, use no indentation. For dict data, only
+                 write data.get('summary', data).
+    """
+    out = data.get("summary", data) if compact and isinstance(data, dict) else data
+    text = json.dumps(out, ensure_ascii=False, indent=2 if not compact else None)
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(text)
+    else:
+        print(text)
+
+
+@contextmanager
+def suppress_stderr():
+    """Temporarily suppress stderr to hide progress bars."""
+    old_stderr = sys.stderr
+    sys.stderr = open(os.devnull, "w")
+    try:
+        yield
+    finally:
+        sys.stderr.close()
+        sys.stderr = old_stderr
+
+
+def retry(func, max_attempts=2, delay=2):
+    """Call func with retry and stderr suppression. Returns (result, error)."""
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            with suppress_stderr():
+                return func(), None
+        except Exception as e:
+            last_err = e
+            if attempt < max_attempts - 1:
+                time.sleep(delay)
+    return None, str(last_err)
 
 
 if __name__ == "__main__":

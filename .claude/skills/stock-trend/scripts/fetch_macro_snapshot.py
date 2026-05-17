@@ -13,31 +13,13 @@ import json
 import os
 import sys
 import logging
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, safe_float, save_cache, get_market_day_ttl
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
 
-
-def _safe_float(val):
-    if val is None:
-        return None
-    try:
-        return round(float(val), 2)
-    except (ValueError, TypeError):
-        return None
-
-
-def _safe_float_str(val):
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return round(float(val), 2)
-    s = str(val).replace("%", "").replace(",", "").strip()
-    try:
-        return round(float(s), 2)
-    except (ValueError, TypeError):
-        return None
+# Local shortcut: all macro values need 2-decimal rounding
+_sf = lambda v: safe_float(v, round_to=2)
 
 
 def _get_latest_row(df, date_col="月份"):
@@ -68,8 +50,8 @@ def fetch_usd_cny():
     df = ak.currency_boc_sina("美元")
     if df is not None and not df.empty:
         latest = df.iloc[-1]
-        rate = _safe_float_str(latest.get("中行钞卖价") or latest.get("中行折算价"))
-        prev = _safe_float_str(latest.get("中行折算价"))
+        rate = _sf(latest.get("中行钞卖价") or latest.get("中行折算价"))
+        prev = _sf(latest.get("中行折算价"))
         if rate and prev and prev != 0:
             return {"rate": rate, "change_pct": round((rate - prev) / prev * 100, 2)}
     return None
@@ -83,7 +65,7 @@ def fetch_china_10y_yield():
         for _, row in df.iterrows():
             name = str(row.iloc[0])
             if "中国" in name and "10" in name:
-                return _safe_float_str(row.iloc[1])
+                return _sf(row.iloc[1])
     return None
 
 
@@ -95,7 +77,7 @@ def fetch_us_10y_yield():
         for _, row in df.iterrows():
             name = str(row.iloc[0])
             if "美国" in name and "10" in name:
-                return _safe_float_str(row.iloc[1])
+                return _sf(row.iloc[1])
     return None
 
 
@@ -106,9 +88,9 @@ def fetch_shibor():
     latest = _get_latest_row(df)
     if latest is not None:
         return {
-            "on": _safe_float_str(latest.get("ON")),
-            "1w": _safe_float_str(latest.get("1W")),
-            "1m": _safe_float_str(latest.get("1M")),
+            "on": _sf(latest.get("ON")),
+            "1w": _sf(latest.get("1W")),
+            "1m": _sf(latest.get("1M")),
         }
     return None
 
@@ -120,8 +102,8 @@ def fetch_lpr():
     latest = _get_latest_row(df, date_col="日期")
     if latest is not None:
         return {
-            "1y": _safe_float_str(latest.get("LPR1Y") or latest.iloc[0]),
-            "5y": _safe_float_str(latest.get("LPR5Y") or latest.iloc[1]),
+            "1y": _sf(latest.get("LPR1Y") or latest.iloc[0]),
+            "5y": _sf(latest.get("LPR5Y") or latest.iloc[1]),
         }
     return None
 
@@ -133,7 +115,7 @@ def fetch_pmi():
     latest = _get_latest_row(df)
     if latest is not None:
         val = latest.get("制造业-指数") or latest.get("制造业PMI")
-        return _safe_float_str(val)
+        return _sf(val)
     return None
 
 
@@ -145,7 +127,7 @@ def fetch_cpi():
     if latest is not None:
         val = latest.get("全国-同比增长") or latest.get("当月同比")
         if val is not None:
-            raw = _safe_float_str(val)
+            raw = _sf(val)
             if raw is not None and raw > 50:
                 raw = round(raw - 100, 1)
             return raw
@@ -158,7 +140,7 @@ def fetch_m2():
     df = ak.macro_china_money_supply()
     latest = _get_latest_row(df)
     if latest is not None:
-        return _safe_float_str(latest.get("M2同比") or latest.iloc[-1])
+        return _sf(latest.get("M2同比") or latest.iloc[-1])
     return None
 
 
@@ -186,10 +168,10 @@ def fetch_hs300():
     if df is not None and not df.empty:
         latest = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else None
-        close = _safe_float(latest.get("收盘"))
+        close = _sf(latest.get("收盘"))
         change_pct = None
         if prev is not None:
-            prev_close = _safe_float(prev.get("收盘"))
+            prev_close = _sf(prev.get("收盘"))
             if close and prev_close:
                 change_pct = round((close - prev_close) / prev_close * 100, 2)
         return {"close": close, "change_pct": change_pct}

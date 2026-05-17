@@ -14,13 +14,27 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
-CACHE_PATH = "/tmp/stock-trend-diag.json"
+PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
+CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
+CACHE_PATH = str(CACHE_DIR / "diag.json")
 CACHE_TTL = 3600  # 1 hour
+
+# Shared temp dir for diagnostic subprocess outputs
+_DIAG_TMP_DIR = None
+
+
+def _diag_tmp(name):
+    """Return temp file path for a diagnostic check."""
+    global _DIAG_TMP_DIR
+    if _DIAG_TMP_DIR is None:
+        _DIAG_TMP_DIR = tempfile.mkdtemp(prefix="stock-trend-diag-")
+    return os.path.join(_DIAG_TMP_DIR, f"{name}.json")
 
 
 def check_python_deps():
@@ -67,11 +81,12 @@ def check_tushare_api():
         return {"status": "unavailable", "detail": "No Tushare token configured"}
 
     try:
-        result = _run_script("fetch_kline.py", "600519.SH", "--asset", "E", "-o", "/tmp/diag_tushare.json")
+        tmp = _diag_tmp("tushare")
+        result = _run_script("fetch_kline.py", "600519.SH", "--asset", "E", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
-        with open("/tmp/diag_tushare.json") as f:
+        with open(tmp) as f:
             data = json.load(f)
 
         ds = data.get("meta", {}).get("data_source", "")
@@ -88,11 +103,12 @@ def check_tushare_api():
 def check_eastmoney():
     """Check if EastMoney API is accessible."""
     try:
-        result = _run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", "/tmp/diag_eastmoney.json")
+        tmp = _diag_tmp("eastmoney")
+        result = _run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
-        with open("/tmp/diag_eastmoney.json") as f:
+        with open(tmp) as f:
             data = json.load(f)
 
         ds = data.get("meta", {}).get("data_source", "")
@@ -139,11 +155,12 @@ def check_baostock():
 def check_hk_support():
     """Check if HK stock data can be fetched."""
     try:
-        result = _run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", "/tmp/diag_hk.json")
+        tmp = _diag_tmp("hk")
+        result = _run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
-        with open("/tmp/diag_hk.json") as f:
+        with open(tmp) as f:
             data = json.load(f)
 
         ds = data.get("meta", {}).get("data_source", "")
@@ -160,11 +177,12 @@ def check_hk_support():
 def check_weekly_support():
     """Check if weekly K-line data can be fetched."""
     try:
-        result = _run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", "/tmp/diag_weekly.json")
+        tmp = _diag_tmp("weekly")
+        result = _run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
-        with open("/tmp/diag_weekly.json") as f:
+        with open(tmp) as f:
             data = json.load(f)
 
         ds = data.get("meta", {}).get("data_source", "")
@@ -206,6 +224,7 @@ def load_cache():
 def save_cache(result):
     """Save diagnostic results to cache."""
     try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
         with open(CACHE_PATH, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
     except OSError:

@@ -18,46 +18,13 @@ import os
 import sys
 import time
 import logging
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, safe_float, save_cache, retry, get_market_day_ttl
 from datetime import datetime
-from contextlib import contextmanager
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
 
-
-@contextmanager
-def _suppress_stderr():
-    """Temporarily suppress stderr to hide AKShare tqdm progress bars."""
-    old_stderr = sys.stderr
-    sys.stderr = open(os.devnull, "w")
-    try:
-        yield
-    finally:
-        sys.stderr.close()
-        sys.stderr = old_stderr
-
-
-def _safe_float(val):
-    if val is None:
-        return None
-    try:
-        return round(float(val), 2)
-    except (ValueError, TypeError):
-        return None
-
-
-def _retry(func, max_attempts=2, delay=2):
-    """Call func with retry. Suppresses stderr during call."""
-    last_err = None
-    for attempt in range(max_attempts):
-        try:
-            with _suppress_stderr():
-                return func(), None
-        except Exception as e:
-            last_err = e
-            if attempt < max_attempts - 1:
-                time.sleep(delay)
-    return None, str(last_err)
+# All fundamental values need 2-decimal rounding
+_sf = lambda v: safe_float(v, round_to=2)
 
 
 def fetch_a_share_fundamentals(code):
@@ -68,7 +35,7 @@ def fetch_a_share_fundamentals(code):
 
     # 1. Basic info: PE, PB, market cap, industry (with retry)
     info = None
-    df_info, err = _retry(lambda: ak.stock_individual_info_em(symbol=code), max_attempts=2, delay=3)
+    df_info, err = retry(lambda: ak.stock_individual_info_em(symbol=code), max_attempts=2, delay=3)
     if err:
         errors.append(f"stock_individual_info_em: {err}")
     elif df_info is not None and not df_info.empty:
@@ -79,27 +46,27 @@ def fetch_a_share_fundamentals(code):
         errors.append("stock_individual_info_em: empty result")
 
     if info:
-        result["pe_ttm"] = _safe_float(info.get("市盈率-动态"))
-        result["pb"] = _safe_float(info.get("市净率"))
-        mc = _safe_float(info.get("总市值"))
+        result["pe_ttm"] = _sf(info.get("市盈率-动态"))
+        result["pb"] = _sf(info.get("市净率"))
+        mc = _sf(info.get("总市值"))
         if mc is not None:
             result["market_cap_billion"] = round(mc / 1e8, 2)
         result["industry"] = info.get("行业")
 
     # 2. Financial analysis indicators (ROE, EPS, debt ratio)
     start_yr = str(datetime.now().year - 1)
-    df_fin, err = _retry(lambda: ak.stock_financial_analysis_indicator(symbol=code, start_year=start_yr),
+    df_fin, err = retry(lambda: ak.stock_financial_analysis_indicator(symbol=code, start_year=start_yr),
                          max_attempts=2, delay=2)
     if err:
         errors.append(f"stock_financial_analysis_indicator: {err}")
     elif df_fin is not None and not df_fin.empty:
         latest = df_fin.iloc[-1]
         if result.get("roe") is None:
-            result["roe"] = _safe_float(latest.get("净资产收益率"))
+            result["roe"] = _sf(latest.get("净资产收益率"))
         if result.get("eps") is None:
-            result["eps"] = _safe_float(latest.get("每股收益"))
+            result["eps"] = _sf(latest.get("每股收益"))
         if result.get("debt_ratio") is None:
-            result["debt_ratio"] = _safe_float(latest.get("资产负债率"))
+            result["debt_ratio"] = _sf(latest.get("资产负债率"))
 
     # 3. Revenue/profit growth from earnings report (confirmed working)
     today = datetime.now()
@@ -107,7 +74,7 @@ def fetch_a_share_fundamentals(code):
               f"{today.year}0630" if today.month < 9 else \
               f"{today.year}0930" if today.month < 11 else \
               f"{today.year}1231"
-    df_yjbb, err = _retry(lambda: ak.stock_yjbb_em(date=quarter), max_attempts=2, delay=2)
+    df_yjbb, err = retry(lambda: ak.stock_yjbb_em(date=quarter), max_attempts=2, delay=2)
     if err:
         errors.append(f"stock_yjbb_em: {err}")
     elif df_yjbb is not None and not df_yjbb.empty:
@@ -116,11 +83,11 @@ def fetch_a_share_fundamentals(code):
             match = df_yjbb[df_yjbb["股票代码"] == code.lstrip("0")]
         if not match.empty:
             row = match.iloc[0]
-            result["revenue_growth_pct"] = _safe_float(row.get("营业收入同比增长率"))
-            result["profit_growth_pct"] = _safe_float(row.get("净利润同比增长率"))
+            result["revenue_growth_pct"] = _sf(row.get("营业收入同比增长率"))
+            result["profit_growth_pct"] = _sf(row.get("净利润同比增长率"))
 
     # 4. PE/PB percentile (3-year) - try valuation API (may fail, non-critical)
-    df_val_pe, err_pe = _retry(
+    df_val_pe, err_pe = retry(
         lambda: ak.stock_zh_valuation_baidu(symbol=code, indicator="市盈率-动态", period="近三年"),
         max_attempts=1, delay=2
     )
@@ -138,7 +105,7 @@ def fetch_a_share_fundamentals(code):
         except Exception as e:
             errors.append(f"pe_percentile_calc: {e}")
 
-    df_val_pb, err_pb = _retry(
+    df_val_pb, err_pb = retry(
         lambda: ak.stock_zh_valuation_baidu(symbol=code, indicator="市净率", period="近三年"),
         max_attempts=1, delay=2
     )
@@ -188,11 +155,11 @@ def fetch_hk_fundamentals(code):
         df_hk = ak.stock_hk_financial_indicator_em(symbol=hk_code)
         if df_hk is not None and not df_hk.empty:
             latest = df_hk.iloc[-1]
-            result["pe_ttm"] = _safe_float(latest.get("市盈率"))
-            result["pb"] = _safe_float(latest.get("市净率"))
-            result["roe"] = _safe_float(latest.get("净资产收益率"))
-            result["eps"] = _safe_float(latest.get("每股收益"))
-            result["market_cap_billion"] = _safe_float(latest.get("总市值"))
+            result["pe_ttm"] = _sf(latest.get("市盈率"))
+            result["pb"] = _sf(latest.get("市净率"))
+            result["roe"] = _sf(latest.get("净资产收益率"))
+            result["eps"] = _sf(latest.get("每股收益"))
+            result["market_cap_billion"] = _sf(latest.get("总市值"))
             mc = result["market_cap_billion"]
             if mc is not None and mc > 1e6:
                 result["market_cap_billion"] = round(mc / 1e8, 2)

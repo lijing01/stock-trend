@@ -266,6 +266,23 @@ def resolve_code(input_str):
     return {"error": f"未找到标的: {input_str}"}
 
 
+# ── Import-friendly aliases ────────────────────────────────────────
+
+detect_asset = resolve_asset
+detect_adj = resolve_adj
+
+
+def code_to_ts_code(code: str) -> str:
+    """Convert raw code to ts_code (with .SH/.SZ/.HK suffix)."""
+    code = str(code).strip()
+    if code.endswith((".SH", ".SZ", ".HK")):
+        return code
+    suffix = resolve_suffix(code)
+    if suffix:
+        return f"{code}{suffix}"
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Resolve stock/ETF code from name or code input"

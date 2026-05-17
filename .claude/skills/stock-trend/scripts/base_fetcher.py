@@ -11,7 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
 
 
 class BaseFetcher:
@@ -63,14 +63,7 @@ class BaseFetcher:
 
     def _output(self, result, output_path=None):
         """Write JSON result to file or stdout."""
-        text = json.dumps(result, ensure_ascii=False, indent=2)
-        if output_path:
-            os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            print(f"Data written to {output_path}", file=sys.stderr)
-        else:
-            print(text)
+        output_json(result, output_path=output_path)
 
     def run(self):
         """Main entry point: parse args -> check cache -> fetch -> cache write -> output."""

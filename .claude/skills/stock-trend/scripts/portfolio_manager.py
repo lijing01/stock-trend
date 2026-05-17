@@ -22,6 +22,7 @@ import math
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Optional
+from resolve_code import code_to_ts_code
 
 import yaml
 
@@ -58,19 +59,7 @@ def find_holding(holdings: list, code: str) -> Optional[dict]:
     return None
 
 
-# ── Code helpers ──────────────────────────────────────────────────────────
-
-
-def code_to_ts_code(code: str) -> str:
-    """Map 6-digit ETF code to ts_code suffix."""
-    if code.endswith((".SH", ".SZ")):
-        return code
-    # 159xxx must be checked before 5/15 prefix (159 starts with "15")
-    if code.startswith(("159")):
-        return f"{code}.SZ"
-    if code.startswith(("5", "15")):
-        return f"{code}.SH"
-    return code
+# ── Fetch helpers ─────────────────────────────────────────────────────
 
 
 def fetch_current_price(ts_code: str) -> Optional[float]:

@@ -25,20 +25,11 @@ import urllib.request
 from datetime import datetime, timedelta
 
 from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import safe_float
 from eastmoney_utils import (
     EM_HEADERS, EM_API_HOSTS, rotate_em_host,
     get_futures_secid, FUTURES_SECID_MAP, INDEX_SECID_MAP,
 )
-
-
-def _safe_float(val):
-    """Safely convert value to float, returning None on failure."""
-    if val is None or val == "" or val == "-":
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
 
 
 def _fetch_futures_kline_em(secid, days=30, host="push2his.eastmoney.com"):

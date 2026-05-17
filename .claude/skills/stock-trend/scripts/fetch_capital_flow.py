@@ -18,20 +18,11 @@ import os
 import sys
 import urllib.request
 import logging
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from cache_utils import load_cache, safe_float, save_cache, get_market_day_ttl
 from datetime import datetime
 from eastmoney_utils import EM_HEADERS, build_secid as resolve_secid
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
-
-
-def _safe_float(val):
-    if val is None or val == "" or val == "-":
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
 
 
 # ──────────────────────────── Existing Functions ────────────────────────────
@@ -65,13 +56,13 @@ def fetch_stock_capital_flow(secid, days=5):
         try:
             record = {
                 "date": parts[0].replace("-", ""),
-                "main_net_inflow": _safe_float(parts[1]),
-                "main_inflow": _safe_float(parts[2]),
-                "main_outflow": _safe_float(parts[3]),
-                "retail_net_inflow": _safe_float(parts[4]),
-                "retail_inflow": _safe_float(parts[5]),
-                "retail_outflow": _safe_float(parts[6]),
-                "total_net_inflow": _safe_float(parts[7]) if len(parts) > 7 else None,
+                "main_net_inflow": safe_float(parts[1]),
+                "main_inflow": safe_float(parts[2]),
+                "main_outflow": safe_float(parts[3]),
+                "retail_net_inflow": safe_float(parts[4]),
+                "retail_inflow": safe_float(parts[5]),
+                "retail_outflow": safe_float(parts[6]),
+                "total_net_inflow": safe_float(parts[7]) if len(parts) > 7 else None,
             }
             records.append(record)
         except (ValueError, IndexError):
@@ -104,7 +95,7 @@ def fetch_etf_capital_flow(fund_code, days=5):
         if isinstance(item, list) and len(item) >= 2:
             records.append({
                 "date": str(item[0]).replace("-", ""),
-                "shares_billion": _safe_float(item[1]),
+                "shares_billion": safe_float(item[1]),
                 "type": "etf_subscription_redemption",
             })
     return records
@@ -122,7 +113,7 @@ def fetch_northbound_flow():
         for _, row in df.iterrows():
             records.append({
                 "date": str(row.iloc[0]).replace("-", ""),
-                "net_buy_billion": _safe_float(row.get("沪股通净流入") or row.get("深股通净流入")),
+                "net_buy_billion": safe_float(row.get("沪股通净流入") or row.get("深股通净流入")),
             })
         # Aggregate daily totals
         daily = {}
@@ -145,9 +136,9 @@ def fetch_individual_northbound(code):
         if df is not None and not df.empty:
             latest = df.iloc[-1] if len(df) > 1 else df.iloc[0]
             return {
-                "hold_shares": _safe_float(latest.get("持股股数")),
-                "hold_value_billion": _safe_float(latest.get("持股数")),
-                "change_shares": _safe_float(latest.get("股数变动")),
+                "hold_shares": safe_float(latest.get("持股股数")),
+                "hold_value_billion": safe_float(latest.get("持股数")),
+                "change_shares": safe_float(latest.get("股数变动")),
             }
     except Exception:
         pass
@@ -171,9 +162,9 @@ def fetch_margin_detail(code, exchange="SH"):
             if not match.empty:
                 row = match.iloc[0]
                 return {
-                    "margin_balance_billion": _safe_float(row.get("融资余额")),
-                    "margin_buy_billion": _safe_float(row.get("融资买入额")),
-                    "net_margin_billion": _safe_float(row.get("融资余额")),
+                    "margin_balance_billion": safe_float(row.get("融资余额")),
+                    "margin_buy_billion": safe_float(row.get("融资买入额")),
+                    "net_margin_billion": safe_float(row.get("融资余额")),
                 }
     except Exception:
         pass
@@ -199,8 +190,8 @@ def fetch_longhubang(code, days=5):
                     records.append({
                         "date": str(row.get("日期", "")).replace("-", ""),
                         "reason": row.get("上榜原因", ""),
-                        "total_net_buy_billion": _safe_float(row.get("龙虎榜净买入额")),
-                        "institution_net_buy_billion": _safe_float(row.get("机构净买入额")),
+                        "total_net_buy_billion": safe_float(row.get("龙虎榜净买入额")),
+                        "institution_net_buy_billion": safe_float(row.get("机构净买入额")),
                     })
                 return records[-days:]
     except Exception:

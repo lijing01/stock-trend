@@ -820,7 +820,9 @@ def main():
                 print(f"  - {r['name']}: {r['detail']}")
 
     # Save results
-    results_path = "/tmp/stock-trend-test-results.json"
+    results_dir = Path("/tmp/stock-trend-test-results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    results_path = str(results_dir / "results.json")
     with open(results_path, "w", encoding="utf-8") as f:
         json.dump({"summary": {"passed": PASSED, "failed": FAILED, "skipped": SKIPPED, "total": total},
                     "results": RESULTS}, f, ensure_ascii=False, indent=2)

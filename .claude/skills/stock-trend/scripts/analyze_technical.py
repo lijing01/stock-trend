@@ -19,6 +19,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from cache_utils import output_json
 
 
 # --- MA signal analysis ---
@@ -1380,20 +1381,7 @@ def _convert_numpy(obj):
 
 def _output(result, output_path=None, compact=False):
     """Write JSON result to file or stdout."""
-    if compact:
-        output = result.get("summary", result)
-    else:
-        output = result
-
-    output = _convert_numpy(output)
-    text = json.dumps(output, ensure_ascii=False, indent=2 if not compact else None)
-    if output_path:
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Analysis written to {output_path}", file=sys.stderr)
-    else:
-        print(text)
+    output_json(_convert_numpy(result), output_path=output_path, compact=compact)
 
 
 if __name__ == "__main__":
