@@ -134,34 +134,16 @@ def main():
     else:
         parser.error("Provide either ts_code (positional) or --code")
 
-    # Auto-detect asset and adj if not specified (for non --code mode)
-    asset = args.asset or asset if args.code else args.asset
-    if not asset:
-        if code.startswith(("5", "15")):
-            asset = "FD"
-        else:
-            asset = "E"
+    # Resolve asset/adj: CLI flag > resolve_code > auto-detect
+    if args.asset:
+        asset = args.asset
+    elif not asset:
+        asset = "FD" if code.startswith(("5", "15")) else "E"
 
-    adj = args.adj or adj if args.code else args.adj
-    if not adj:
-        if ts_code.endswith(".HK"):
-            adj = "none"
-        else:
-            adj = "qfq"
-    # Auto-detect asset and adj if not specified
-    asset = args.asset
-    if not asset:
-        if code.startswith(("5", "15")):
-            asset = "FD"
-        else:
-            asset = "E"
-
-    adj = args.adj
-    if not adj:
-        if ts_code.endswith(".HK"):
-            adj = "none"
-        else:
-            adj = "qfq"
+    if args.adj:
+        adj = args.adj
+    elif not adj:
+        adj = "none" if ts_code.endswith(".HK") else "qfq"
 
     is_etf = asset == "FD"
     is_hk = ts_code.endswith(".HK")
