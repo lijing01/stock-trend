@@ -1153,7 +1153,7 @@ def build_summary(indicator_results, patterns, data_points=None):
 
     # Weighted average, then scale back to [-3, +3]
     total = weighted_sum / weight_total if weight_total > 0 else 0
-    total = max(-3, min(3, round(total)))
+    total = max(-3, min(3, round(total, 2)))
 
     # Consistency factor: same-direction indicators increase confidence
     # Use only valid (non-insufficient_data) scores for consistency
@@ -1195,6 +1195,18 @@ def build_summary(indicator_results, patterns, data_points=None):
     elif data_points is not None and data_points < 60:
         result["data_quality"] = "limited"
         result["key_signals"].insert(0, f"⚠️ 数据仅{data_points}条，部分指标可能不准确")
+    else:
+        result["data_quality"] = "good"
+
+    # Build dimension scores dict for downstream consumers
+    dimension_scores = {}
+    for ind_name, ind_result in indicator_results.items():
+        signal = ind_result.get("signal", {})
+        dimension_scores[ind_name] = signal.get("score", 0)
+    if patterns:
+        pattern_score = sum(p["score"] for p in patterns)
+        dimension_scores["patterns"] = max(-3, min(3, pattern_score))
+    result["dimension_scores"] = dimension_scores
 
     return result
 
