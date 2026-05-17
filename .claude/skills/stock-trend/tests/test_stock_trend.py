@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
+SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
 
 # Test result tracking
 PASSED = 0
@@ -30,7 +31,7 @@ RESULTS = []
 
 def run_script(script_name, *args, timeout=30):
     """Run a script and return (exit_code, stdout, stderr)."""
-    script_path = SCRIPT_DIR / script_name
+    script_path = SCRIPTS_DIR / script_name
     cmd = [sys.executable, str(script_path)] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return result.returncode, result.stdout, result.stderr
@@ -291,7 +292,7 @@ def run_analyze_tests(tmpdir):
         with open(kline_path, "r") as f:
             kline_data = f.read()
         result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "analyze_technical.py"), "-", "-o", os.path.join(tmpdir, "ta_stdin.json")],
+            [sys.executable, str(SCRIPTS_DIR / "analyze_technical.py"), "-", "-o", os.path.join(tmpdir, "ta_stdin.json")],
             input=kline_data, capture_output=True, text=True, timeout=30
         )
         test("TA-stdin: 支持'-'作为stdin输入", result.returncode == 0,
@@ -634,7 +635,7 @@ def run_validate_tests():
     print("=" * 50)
 
     # Import validate_input from compute_scores
-    sys.path.insert(0, str(SCRIPT_DIR))
+    sys.path.insert(0, str(SCRIPTS_DIR))
     from compute_scores import validate_input
 
     # VI-valid-tech: valid technical data passes (errors == 0)
@@ -700,9 +701,41 @@ def run_validate_tests():
     os.rmdir(tmpdir)
 
 
+def run_portfolio_integration_tests():
+    """Run portfolio manager tests from tests/test_portfolio.py."""
+    print("\n📁 持仓管理测试 (Portfolio)")
+    print("=" * 50)
+    tests_dir = SCRIPT_DIR
+    sys.path.insert(0, str(tests_dir))
+    try:
+        from test_portfolio import run_portfolio_tests
+        p, f = run_portfolio_tests()
+        global PASSED, FAILED
+        PASSED += p
+        FAILED += f
+    except ImportError as e:
+        print(f"  [SKIP] portfolio tests — {e}")
+
+
+def run_backtest_integration_tests():
+    """Run backtest engine tests from tests/test_backtest.py."""
+    print("\n📊 回测验证测试 (Backtest)")
+    print("=" * 50)
+    tests_dir = SCRIPT_DIR
+    sys.path.insert(0, str(tests_dir))
+    try:
+        from test_backtest import run_backtest_tests
+        p, f = run_backtest_tests()
+        global PASSED, FAILED
+        PASSED += p
+        FAILED += f
+    except ImportError as e:
+        print(f"  [SKIP] backtest tests — {e}")
+
+
 def run_golden_diff_tests():
     """Run golden snapshot diff tests by invoking test_golden.py."""
-    test_golden_path = SCRIPT_DIR.parent / "tests" / "test_golden.py"
+    test_golden_path = SCRIPT_DIR / "test_golden.py"
     if not test_golden_path.exists():
         skip("TG-golden-diff", "test_golden.py not found")
         return
@@ -852,40 +885,3 @@ def test_clean_cache():
     else:
         del os.environ["STOCK_TREND_CACHE_DIR"]
     print("  clean_cache empty: OK")
-
-# --- Portfolio manager integration tests ---
-
-
-def run_portfolio_integration_tests():
-    """Run portfolio manager tests from tests/test_portfolio.py."""
-    print("\n📁 持仓管理测试 (Portfolio)")
-    print("=" * 50)
-    tests_dir = SCRIPT_DIR.parent / "tests"
-    sys.path.insert(0, str(tests_dir))
-    try:
-        from test_portfolio import run_portfolio_tests
-        p, f = run_portfolio_tests()
-        global PASSED, FAILED
-        PASSED += p
-        FAILED += f
-    except ImportError as e:
-        print(f"  [SKIP] portfolio tests — {e}")
-
-
-# --- Backtest engine integration tests ---
-
-
-def run_backtest_integration_tests():
-    """Run backtest engine tests from tests/test_backtest.py."""
-    print("\n📊 回测验证测试 (Backtest)")
-    print("=" * 50)
-    tests_dir = SCRIPT_DIR.parent / "tests"
-    sys.path.insert(0, str(tests_dir))
-    try:
-        from test_backtest import run_backtest_tests
-        p, f = run_backtest_tests()
-        global PASSED, FAILED
-        PASSED += p
-        FAILED += f
-    except ImportError as e:
-        print(f"  [SKIP] backtest tests — {e}")

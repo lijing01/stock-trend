@@ -98,6 +98,7 @@ categories:
     etfs:
       - code: 513180    # 恒生科技ETF华夏
       - code: 513130    # 恒生科技ETF华泰柏瑞
+      - code: 159740    # 恒生科技ETF大成
       - code: 513050    # 中概互联网ETF易方达
       - code: 513330    # 恒生互联网ETF华夏
       - code: 513090    # 香港证券ETF易方达

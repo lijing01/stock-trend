@@ -75,36 +75,11 @@
 
 ## 2. 数据源配置
 
-### 2.1 Tushare Pro API（主数据源）
-
-**Token 配置方式（优先级从高到低）：**
-
-1. 环境变量：`export TUSHARE_TOKEN=your_token`
-2. 配置文件：`.claude/tushare-config.json`，内容为 `{"token": "your_token"}`
-3. 未配置时：自动降级到东方财富数据源
-
-**获取 Token：** 注册 https://tushare.pro 并完善个人信息获取基础积分(120+)，即可调用日线行情接口。
-
-**积分要求：**
-- 日线/周线行情：120 积分起（注册+完善信息即可获得）
-- ETF日线（fund_daily）：需要更高积分
-- 每分钟请求限制：500次（基础积分）
-- 每次返回数据上限：6000条
-
-### 2.2 东方财富 API（降级数据源）
-
-**特点：**
-- 无需 Token，免费调用
-- 支持上交所和深交所的A股及ETF
-- 不支持港股（港股仍需 Tushare）
-- 不返回均线数据，由技术分析脚本自行计算
-- 返回数据量：最多250条
-- 3节点轮换：`push2his` → `38.push2his` → `48.push2his`
-- BaoStock 作为二级降级（免费，支持A股/ETF，不支持港股）
-
-### 2.3 港股数据源
-
-港股(.HK)仅支持 Tushare Pro API，东方财富和BaoStock均不支持港股。Tushare不可用时港股技术面按0分处理。
+详见 SKILL.md Step 2A。要点：
+- 主数据源：Tushare Pro API（需 Token，环境变量或 `.claude/tushare-config.json`）
+- 降级链：Tushare → 东方财富 → BaoStock
+- 港股仅 Tushare 支持；Tushare 不可用时港股技术面按 0 分处理
+- 东方财富无需 Token，3 节点轮换，最多 250 条数据
 
 ---
 
