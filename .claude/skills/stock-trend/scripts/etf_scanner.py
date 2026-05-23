@@ -791,8 +791,14 @@ def score_momentum(kline: list) -> float:
             score -= 8
         elif deviation_pct > 3:
             score -= 3
+        elif deviation_pct < -12:
+            score -= 20
+        elif deviation_pct < -8:
+            score -= 15
+        elif deviation_pct < -5:
+            score -= 8
         elif deviation_pct < -3:
-            score -= 5
+            score -= 3
 
     return max(0.0, min(100.0, score))
 

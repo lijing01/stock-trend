@@ -1,6 +1,6 @@
 {
   "scores": {
-    "technical": -0.26,
+    "technical": -0.46,
     "capital_flow": 0,
     "fundamental": 0,
     "sentiment": 0,
@@ -13,14 +13,15 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": 0.009,
-  "direction": "震荡偏多",
+  "composite_score": -0.061,
+  "direction": "震荡偏空",
   "direction_detail": "震荡",
-  "direction_modifier": "偏多",
+  "direction_modifier": "偏空",
   "confidence": "低",
-  "consistency": 0.25,
+  "consistency": 0.5,
   "risks": [
     "空头排列",
+    "ADX=36.1，趋势有效；-DI>+DI确认空头",
     "OBV在20日均线下方，资金净流出"
   ],
   "special": null,
@@ -39,31 +40,31 @@
   },
   "analysis": null,
   "report_params": {
-    "direction": "震荡偏多",
-    "score": 0.009,
+    "direction": "震荡偏空",
+    "score": -0.061,
     "confidence": "低",
     "ts_code": "600519.SH",
-    "stop_loss": 1305.2,
-    "target_conservative": 1339.28,
-    "target_moderate": 1409.39,
-    "target_aggressive": 1445.0,
-    "risk_reward_ratio": 2.75,
+    "stop_loss": 1271.57,
+    "target_conservative": 1300,
+    "target_moderate": 1329.86,
+    "target_aggressive": 1358.6,
+    "risk_reward_ratio": 2.13,
     "favorable_rr": true,
-    "position_sizing": "标准仓位(50-70%)",
-    "max_drawdown_pct": -14.28,
+    "position_sizing": "可重仓(70-80%)",
+    "max_drawdown_pct": -17.03,
     "support_levels": [
-      1327.11,
+      1290.12,
       1200,
       1100,
       1000,
       900
     ],
     "resistance_levels": [
-      1339.28,
-      1372.89,
-      1409.39,
-      1445.005,
-      1498.07
+      1300,
+      1329.859,
+      1358.6,
+      1388.0,
+      1419.0
     ]
   }
 }

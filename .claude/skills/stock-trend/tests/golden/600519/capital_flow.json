@@ -9,26 +9,6 @@
   "data_extended": {
     "northbound_market": [
       {
-        "date": "20260429",
-        "net_buy_billion": 0
-      },
-      {
-        "date": "20260430",
-        "net_buy_billion": 0
-      },
-      {
-        "date": "20260506",
-        "net_buy_billion": 0
-      },
-      {
-        "date": "20260507",
-        "net_buy_billion": 0
-      },
-      {
-        "date": "20260508",
-        "net_buy_billion": 0
-      },
-      {
         "date": "20260511",
         "net_buy_billion": 0
       },
@@ -46,6 +26,26 @@
       },
       {
         "date": "20260515",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260518",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260519",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260520",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260521",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260522",
         "net_buy_billion": 0
       }
     ],
