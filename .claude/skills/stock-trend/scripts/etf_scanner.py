@@ -93,7 +93,7 @@ def build_report_context(output: dict) -> dict:
         ds = c.get("deep_score")
         cs = c.get("combined_score", 0)
         ts = c.get("trend_stage", "")
-        stage_tag = {"early": "初期", "mid": "中期", "late": "末期"}.get(ts, "")
+        stage_tag = {"early": "初期", "mid": "中期", "late": "末期", "decline": "下跌"}.get(ts, "")
         sr = c.get("sector_rank", "")
         sc = c.get("sector_count", "")
         sector_str = f"{sr}/{sc}" if sr and sc else ""
@@ -127,7 +127,7 @@ def build_report_context(output: dict) -> dict:
             "combined_score": p.get("combined_score", ""),
             "logic": p.get("logic", ""),
             "trend_stage": p.get("trend_stage", ""),
-            "stage_tag": {"early": "初期", "mid": "中期", "late": "末期"}.get(p.get("trend_stage", ""), ""),
+            "stage_tag": {"early": "初期", "mid": "中期", "late": "末期", "decline": "下跌"}.get(p.get("trend_stage", ""), ""),
             "has_trading_plan": False,
             "entry_strategy": "",
             "entry_detail": "",
@@ -284,6 +284,28 @@ def fetch_quick_kline(code: str, days: int = 60) -> Optional[list]:
     return None
 
 
+def fetch_hs300_kline(days: int = 120) -> list[dict]:
+    """Fetch HS300 daily K-line for market regime detection via akshare."""
+    try:
+        import akshare as ak
+        df = ak.index_zh_a_hist(symbol="000300", period="daily")
+        if df is None or df.empty:
+            return []
+        df = df.tail(days)
+        records = []
+        for _, row in df.iterrows():
+            records.append({
+                "close": float(row["收盘"]),
+                "high": float(row["最高"]),
+                "low": float(row["最低"]),
+                "vol": float(row["成交量"]),
+                "amount": float(row["成交额"]),
+            })
+        return records
+    except Exception:
+        return []
+
+
 def fetch_quick_capital_flow(code: str) -> Optional[dict]:
     """Fetch capital flow for Phase 1 (main force net flow)."""
     ts_code = code_to_ts_code(code)
@@ -391,6 +413,27 @@ def detect_trend_stage(kline: list) -> dict:
         vol_ratio = 1.0
         is_volume_shrinking = False
 
+    # Bearish trend detection (must come before late/early checks)
+    decline_signals = 0
+    if not is_bullish and rsi_val < 40:
+        decline_signals += 1
+    if price_ext_pct < -3:
+        decline_signals += 1
+    if macd_val < -0.3 and not is_bullish:
+        decline_signals += 1
+    if is_volume_shrinking and not is_bullish:
+        decline_signals += 1
+
+    if decline_signals >= 2:
+        stage = "decline"
+        if price_ext_pct < -8:
+            multiplier = 0.3
+        elif price_ext_pct < -5:
+            multiplier = 0.5
+        else:
+            multiplier = 0.7
+        return {"stage": stage, "multiplier": multiplier}
+
     late_signals = 0
     if rsi_val > 70:
         late_signals += 1
@@ -428,6 +471,46 @@ def detect_trend_stage(kline: list) -> dict:
         multiplier = 1.0
 
     return {"stage": stage, "multiplier": multiplier}
+
+
+# ---------------------------------------------------------------------------
+# Market regime detection
+# ---------------------------------------------------------------------------
+
+
+def detect_market_regime(kline: list) -> dict:
+    """Classify broad market trend into bull/range/bear for position sizing.
+
+    Uses HS300 daily K-line MA alignment, RSI, and price position.
+    Returns dict with regime string and coefficient:
+      - bull (1.0):   MA20 > MA60, RSI > 45, close > MA20
+      - range (0.7):  mixed signals
+      - bear (0.4):   MA20 < MA60, RSI < 45, close < MA20
+      - unknown (1.0): insufficient data
+    """
+    closes = [r["close"] for r in kline]
+    if len(closes) < 20:
+        return {"regime": "unknown", "coefficient": 1.0}
+
+    ma20 = _ma(closes, 20)
+    ma60 = _ma(closes, 60) if len(closes) >= 60 else ma20
+    rsi_val = _rsi(closes, 14)
+    last_close = closes[-1]
+
+    is_bull_trend = ma20 > ma60 and last_close > ma20 and rsi_val > 45
+    is_bear_trend = ma20 < ma60 and last_close < ma20 and rsi_val < 45
+
+    if is_bull_trend:
+        regime = "bull"
+        coefficient = 1.0
+    elif is_bear_trend:
+        regime = "bear"
+        coefficient = 0.4
+    else:
+        regime = "range"
+        coefficient = 0.7
+
+    return {"regime": regime, "coefficient": coefficient}
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +610,8 @@ def compute_sector_ranking(scored: list[dict]) -> list[dict]:
 
 
 def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
-                       combined_score: float, score_stars: int) -> dict:
+                       combined_score: float, score_stars: int,
+                       regime_coef: float = 1.0) -> dict:
     """Build actionable trading plan: entry zone, stop loss, targets, position."""
     closes = [r["close"] for r in kline]
     close_price = closes[-1]
@@ -553,6 +637,11 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
         entry_low = round(ma20 * 0.98, 3)
         entry_high = round(min(ma20 * 1.02, close_price), 3)
         entry_detail = "趋势中期，等回踩均线入场"
+    elif trend_stage == "decline":
+        entry_strategy = "avoid"
+        entry_low = round(low_20, 3)
+        entry_high = round(close_price * 0.97, 3)
+        entry_detail = "下跌趋势，不建议入场，等待企稳信号"
     else:
         entry_strategy = "avoid"
         entry_low = round(low_20, 3)
@@ -576,7 +665,7 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
     base_pct = 20.0
     cf = 1.2 if combined_score >= 80 else (1.0 if combined_score >= 65 else 0.8)
     vf = 1.1 if volatility < 0.1 else (1.0 if volatility < 0.2 else 0.8)
-    position_pct = round(base_pct * cf * vf, 0)
+    position_pct = round(base_pct * cf * vf * regime_coef, 0)
     position_reason = "三星+低波动" if score_stars >= 3 else (
         "两星+中波动" if score_stars >= 2 else "一星+高波动"
     )
@@ -595,6 +684,9 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
     elif trend_stage == "mid":
         timing_action = "hold"
         timing_hint = "持仓不动，不加仓"
+    elif trend_stage == "decline":
+        timing_action = "exit"
+        timing_hint = "趋势走坏，持币观望或减仓"
     elif trend_stage == "late" and rsi_val >= 70:
         timing_action = "reduce"
         timing_hint = "减仓或设置跟踪止损"
@@ -617,6 +709,7 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
             "pct": int(position_pct),
             "range": [int(max(10, position_pct - 4)), int(min(30, position_pct + 4))],
             "reason": position_reason,
+            "regime_coef": regime_coef,
         },
         "timing": {"action": timing_action, "hint": timing_hint},
     }
@@ -1297,7 +1390,7 @@ def run_phase2(top_candidates: list[dict], settings: dict, max_workers: int = 4)
 
 
 def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, dict],
-                           settings: dict) -> list[dict]:
+                           settings: dict, regime_coef: float = 1.0) -> list[dict]:
     """Merge Phase 1 and Phase 2 results into combined ranking."""
     combined: list[dict] = []
     for p1 in phase1_ranked:
@@ -1375,7 +1468,7 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
             c["trading_plan"] = build_trading_plan(
                 c["code"], c.get("name", ""), kline,
                 c.get("trend_stage", "mid"),
-                cs, c["stars"],
+                cs, c["stars"], regime_coef,
             )
 
     return combined
@@ -1486,9 +1579,13 @@ def build_sector_summary(combined: list[dict]) -> dict:
 
 
 def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dict[str, dict],
-                 settings: dict, args: argparse.Namespace, elapsed: float) -> dict:
+                 settings: dict, args: argparse.Namespace, elapsed: float,
+                 regime: Optional[dict] = None) -> dict:
     """Build final JSON output."""
-    combined = build_combined_ranking(phase1_ranked, phase2_results, settings)
+    if regime is None:
+        regime = {"regime": "unknown", "coefficient": 1.0}
+    combined = build_combined_ranking(phase1_ranked, phase2_results, settings,
+                                      regime.get("coefficient", 1.0))
     combined = _cleanup_combined(combined)
 
     valid_count = len(phase1_ranked)
@@ -1502,6 +1599,8 @@ def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dic
             "total_etfs": total_count,
             "valid_etfs": valid_count,
             "duration_seconds": round(elapsed, 1),
+            "market_regime": regime["regime"],
+            "regime_coefficient": regime["coefficient"],
         },
         "combined_ranking": combined,
         "top_picks": build_top_picks(combined),
@@ -1545,6 +1644,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     if args.top is not None:
         settings["top_n"] = args.top
 
+    # Market regime detection (before scoring, not tied to any single ETF)
+    hs300_kline = fetch_hs300_kline()
+    regime = detect_market_regime(hs300_kline) if hs300_kline else {"regime": "unknown", "coefficient": 1.0}
+
     # Phase 1
     _, phase1_ranked = run_phase1(watchlist, settings, args.focus)
 
@@ -1557,7 +1660,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Phase 3
     elapsed = time.time() - start
-    output = build_output(watchlist, phase1_ranked, phase2_results, settings, args, elapsed)
+    output = build_output(watchlist, phase1_ranked, phase2_results, settings, args, elapsed,
+                          regime=regime)
 
     if args.output_html:
         report_path, report_html = generate_report(output)

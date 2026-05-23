@@ -13,8 +13,8 @@ Usage:
 Outputs JSON to stdout.
 
 Data limits:
-- Only momentum + volume dimensions have full historical data.
-- capital_flow, shares_trend, iopv return None for historical dates.
+- momentum, volume, shares_trend have full historical data.
+- capital_flow and iopv return None for historical dates (real-time only).
 - compute_quick_score redistributes weight from None dimensions automatically.
 """
 
@@ -22,10 +22,12 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -102,6 +104,50 @@ def fetch_kline_for_etf(ts_code: str) -> Optional[list]:
         return None
     except Exception:
         return None
+
+
+def fetch_historical_shares(fund_code: str) -> Optional[list]:
+    """Fetch full Data_flvol history from pingzhongdata.js.
+
+    Returns list of [date_str, shares_billion] entries spanning entire history,
+    or None on failure.
+    """
+    try:
+        url = f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "http://fund.eastmoney.com/",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            js_content = resp.read().decode("utf-8")
+        # Parse Data_flvol array from JS: var Data_flvol = [[...], ...];
+        m = re.search(r'var\s+Data_flvol\s*=\s*(\[.+?\]);', js_content, re.DOTALL)
+        if not m:
+            return None
+        raw = json.loads(m.group(1))
+        if not isinstance(raw, list) or len(raw) < 2:
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def slice_shares_to_etf_data(shares_history: list, target_date: str) -> Optional[dict]:
+    """Slice shares history up to target_date, format for score_shares_trend().
+
+    Returns {'recent_flows': [{date, shares_billion}, ...]} with entries
+    from shares_history where date <= target_date, or None if < 2 entries.
+    """
+    target = target_date.replace("-", "")
+    sliced = []
+    for item in shares_history:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            d = str(item[0]).replace("-", "")
+            if d <= target:
+                sliced.append({"date": d, "shares_billion": float(item[1])})
+    if len(sliced) < 2:
+        return None
+    return {"recent_flows": sliced}
 
 
 def load_watchlist(focus: Optional[str] = None, etf_code: Optional[str] = None) -> list[dict]:
@@ -186,6 +232,23 @@ def run_backtest(
     if not valid_etfs:
         return {"meta": {"error": "no valid ETF data"}, "summary": {}}
 
+    # Step 1b: Fetch historical shares data for all valid ETFs (parallel)
+    print(f"Fetching shares history for {len(valid_etfs)} ETFs...", file=sys.stderr)
+    shares_map: dict[str, Optional[list]] = {}
+
+    def _fetch_shares(etf):
+        sh = fetch_historical_shares(etf["code"])
+        return etf["code"], sh
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_fetch_shares, e): e for e in valid_etfs}
+        for f in as_completed(futures):
+            code, shares = f.result()
+            shares_map[code] = shares
+
+    shares_available = sum(1 for s in shares_map.values() if s is not None)
+    print(f"Shares data available: {shares_available}/{len(valid_etfs)}", file=sys.stderr)
+
     # Determine sample dates from the longest K-line
     all_klines = [etf_kline_map[e["code"]] for e in valid_etfs]
     max_kline = max(all_klines, key=len)
@@ -218,12 +281,15 @@ def run_backtest(
             if len(sliced) < 20:
                 continue
 
-            # Simulate Phase 1 scoring (capital_flow, shares_trend, iopv not available historically)
+            # Simulate Phase 1 scoring (capital_flow, iopv not available historically)
+            # shares_trend is backfilled from Data_flvol pingzhongdata
+            pseudo_etf_data = slice_shares_to_etf_data(shares_map.get(etf["code"], []), date) \
+                if shares_map.get(etf["code"]) else None
             dims = {
                 "momentum": score_momentum(sliced),
                 "volume": score_volume(sliced),
                 "capital_flow": None,
-                "shares_trend": None,
+                "shares_trend": score_shares_trend(pseudo_etf_data),
                 "iopv": None,
             }
 
@@ -276,7 +342,13 @@ def run_backtest(
             if len(valid_pairs) >= 5:
                 ic = spearman_rank_correlation([p[0] for p in valid_pairs], [p[1] for p in valid_pairs])
                 dimension_ics["quick_score"].append({"date": date, "window": w, "ic": round(ic, 4)})
-                # If we had capital_flow etc data, we'd compute per-dimension IC here
+                # Per-dimension IC for shares_trend (backfilled from Data_flvol)
+                shares_scores = [s["dimensions"].get("shares_trend") for s in scored]
+                st_returns = [s["returns"].get(str(w)) for s in scored]
+                st_pairs = [(st, r) for st, r in zip(shares_scores, st_returns) if st is not None and r is not None]
+                if len(st_pairs) >= 5:
+                    st_ic = spearman_rank_correlation([p[0] for p in st_pairs], [p[1] for p in st_pairs])
+                    dimension_ics["shares_trend"].append({"date": date, "window": w, "ic": round(st_ic, 4)})
 
         per_date_results.append({
             "date": date,
@@ -301,9 +373,9 @@ def run_backtest(
             "total_etfs_tested": len(valid_etfs),
             "data_notes": {
                 "capital_flow_available": False,
-                "etf_data_available": False,
-                "degraded_dims": ["capital_flow", "shares_trend", "iopv"],
-                "note": "Only momentum + volume dimensions have historical data. Other dimensions return None and weights are redistributed."
+                "etf_data_available": True,
+                "degraded_dims": ["capital_flow", "iopv"],
+                "note": "momentum + volume + shares_trend have historical data. capital_flow and iopv are real-time only."
             },
         },
         "summary": summary,

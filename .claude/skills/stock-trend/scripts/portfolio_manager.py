@@ -364,6 +364,20 @@ def cmd_status(args):
             )
             if rc == 0:
                 scan_data = json.loads(stdout)
+                # Extract market regime from scanner meta
+                scan_meta = scan_data.get("meta", {})
+                regime_info = {
+                    "regime": scan_meta.get("market_regime", "unknown"),
+                    "coefficient": scan_meta.get("regime_coefficient", 1.0),
+                }
+                # Add regime warning alert
+                if regime_info["regime"] == "bear":
+                    alerts.append({
+                        "code": "__market__", "name": "大盘",
+                        "type": "regime_warning",
+                        "detail": f"市场处于熊市(系数{regime_info['coefficient']})，建议减仓至40%以下",
+                        "severity": "warning",
+                    })
                 rankings = scan_data.get("combined_ranking", [])
                 ranking_map = {r["code"]: r for r in rankings}
                 for h in active:
@@ -392,7 +406,12 @@ def cmd_status(args):
 
     closed = [h for h in holdings if h.get("status") == "closed"]
     result = {
-        "meta": {"command": "status", "timestamp": datetime.now().isoformat()},
+        "meta": {
+            "command": "status",
+            "timestamp": datetime.now().isoformat(),
+            "market_regime": regime_info["regime"],
+            "regime_coefficient": regime_info["coefficient"],
+        },
         "holdings": enriched,
         "summary": {
             "total_active": len(active),
