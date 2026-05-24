@@ -251,6 +251,105 @@ def check_alerts(holdings: list[dict], settings: dict) -> list[dict]:
     return alerts
 
 
+# ── P3 #12: Portfolio-level risk control ──────────────────────────────────
+
+
+def portfolio_drawdown_alert(total_cost: float, total_value: float) -> list[dict]:
+    """Check portfolio-level drawdown > 10%."""
+    if total_cost <= 0:
+        return []
+    dd_pct = (total_value - total_cost) / total_cost * 100
+    if dd_pct < -15:
+        return [{
+            "code": "__portfolio__", "name": "组合",
+            "type": "portfolio_drawdown_critical",
+            "detail": f"组合整体回撤{dd_pct:.1f}%，超过15%警戒线，建议强制减仓至50%以下",
+            "severity": "critical",
+        }]
+    if dd_pct < -10:
+        return [{
+            "code": "__portfolio__", "name": "组合",
+            "type": "portfolio_drawdown_warning",
+            "detail": f"组合整体回撤{dd_pct:.1f}%，超过10%，建议减仓并暂停新开仓",
+            "severity": "warning",
+        }]
+    return []
+
+
+def portfolio_overlap_check(holdings: list[dict]) -> list[dict]:
+    """Detect ETFs tracking the same index."""
+    alerts = []
+    for i, a in enumerate(holdings):
+        if a.get("status") != "active":
+            continue
+        name_a = (a.get("name") or a["code"]).lower()
+        # Group by index keywords
+        index_groups = {
+            "沪深300": ["300", "hs300", "沪深300"],
+            "中证500": ["500", "zz500", "中证500"],
+            "创业板": ["创业板", "gem", "159915", "159949"],
+            "科创50": ["科创50", "588000", "588080", "588060"],
+            "恒生科技": ["恒生科技", "513180", "513130", "159740"],
+            "纳指": ["纳指", "纳斯达克", "513100", "159941"],
+            "标普500": ["标普500", "513500", "159655"],
+            "半导体/芯片": ["半导体", "芯片", "512760", "512480"],
+            "证券": ["证券", "512880", "159841"],
+            "军工": ["军工", "512660", "512710"],
+            "新能源": ["新能源", "515030", "516160", "515700"],
+            "医药": ["医药", "医疗", "512010", "512170"],
+            "黄金": ["黄金", "518880", "159812"],
+            "红利": ["红利", "股息", "510880", "563180"],
+        }
+        for group_name, keywords in index_groups.items():
+            matched = False
+            for kw in keywords:
+                if kw in name_a or kw in a["code"]:
+                    matched = True
+                    break
+            if not matched:
+                continue
+            for j, b in enumerate(holdings):
+                if j <= i or b.get("status") != "active":
+                    continue
+                name_b = (b.get("name") or b["code"]).lower()
+                for kw in keywords:
+                    if kw in name_b or kw in b["code"]:
+                        alerts.append({
+                            "code": f"{a['code']}+{b['code']}",
+                            "name": f"{a.get('name','')}/{b.get('name','')}",
+                            "type": "index_overlap",
+                            "detail": f"{a.get('name','') or a['code']}与{b.get('name','') or b['code']}跟踪同一指数({group_name})，建议合并",
+                            "severity": "info",
+                        })
+                        break
+                break
+            break
+    return alerts
+
+
+def cash_ratio_suggestion(regime: str, total_value: float, total_cost: float) -> dict | None:
+    """Suggest cash ratio based on market regime."""
+    pnl = ((total_value - total_cost) / total_cost * 100) if total_cost > 0 else 0
+    if regime == "bear":
+        suggested = "60-80%"
+        reason = "熊市建议大量保留现金"
+    elif regime == "oscillate":
+        suggested = "30-50%"
+        reason = "震荡市建议中等仓位保留现金"
+    else:
+        suggested = "10-20%"
+        reason = "牛市建议少量保留现金"
+    # If already in loss, tighten further
+    if pnl < -5:
+        suggested = "70-90%"
+        reason += "，且当前浮亏，建议进一步减仓"
+    return {
+        "suggested_cash_ratio": suggested,
+        "reason": reason,
+        "current_exposure_pct": round(100 * (1 - max(0, pnl) / 100), 1) if pnl > 0 else 100,
+    }
+
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 
@@ -411,9 +510,21 @@ def cmd_update(args):
 
 
 def cmd_alerts(args):
-    """Output alerts for all active holdings."""
+    """Output alerts for all active holdings (incl. portfolio risk)."""
     portfolio = load_portfolio()
-    alerts = check_alerts(portfolio.get("holdings", []), portfolio.get("settings", {}))
+    holdings = portfolio.get("holdings", [])
+    settings = portfolio.get("settings", {})
+    alerts = check_alerts(holdings, settings)
+    # Portfolio-level risk
+    active = [h for h in holdings if h.get("status") == "active"]
+    total_cost = sum(float(h.get("buy_price", 0)) * float(h.get("quantity", 0)) for h in active)
+    total_value = 0.0
+    for h in active:
+        p = fetch_current_price(code_to_ts_code(h["code"]))
+        if p is not None:
+            total_value += p * float(h.get("quantity", 0))
+    alerts.extend(portfolio_drawdown_alert(total_cost, total_value))
+    alerts.extend(portfolio_overlap_check(active))
     result = {"meta": {"command": "alerts", "timestamp": datetime.now().isoformat()}, "alerts": alerts}
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
@@ -463,6 +574,7 @@ def cmd_status(args):
 
     # Scan comparison — run etf_scanner quick phase only
     scan_compare = []
+    regime_info = {"regime": "unknown", "coefficient": 1.0}
     if getattr(args, 'skip_scan', False):
         scan_compare = [{"note": "已跳过 scan 对比 (--skip-scan)"}]
     else:
@@ -513,6 +625,16 @@ def cmd_status(args):
             scan_compare = [{"note": "etf-scan 执行失败，跳过排名对比"}]
 
     closed = [h for h in holdings if h.get("status") == "closed"]
+
+    # ── P3 #12: Portfolio-level risk checks ──
+    portfolio_dd = portfolio_drawdown_alert(total_cost, total_value)
+    alerts.extend(portfolio_dd)
+    overlap = portfolio_overlap_check(active)
+    alerts.extend(overlap)
+    cash_advice = cash_ratio_suggestion(
+        regime_info["regime"], total_value, total_cost,
+    )
+
     result = {
         "meta": {
             "command": "status",
@@ -531,6 +653,11 @@ def cmd_status(args):
         },
         "alerts": alerts,
         "scan_compare": scan_compare,
+        "portfolio_risk": {
+            "drawdown_alert": portfolio_dd,
+            "overlap_warnings": overlap,
+            "cash_advice": cash_advice,
+        },
     }
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")

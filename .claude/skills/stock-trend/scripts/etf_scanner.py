@@ -41,6 +41,7 @@ CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 ASSETS_DIR = SKILL_DIR / "assets"
 SECTOR_HISTORY_CACHE = CACHE_DIR / "sector_history.json"
+SCAN_HISTORY_CACHE = CACHE_DIR / "scan_history.json"
 
 
 # ---------------------------------------------------------------------------
@@ -1284,6 +1285,11 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
     trend_result = detect_trend_stage(kline)
     risk_result = compute_risk_penalty(kline)
 
+    # P3 #14: Liquidity assessment
+    liq = check_liquidity(kline, 10_000_000)
+    if liq["warning"] not in ("normal", "insufficient_data"):
+        warnings.append(f"流动性{liq['warning']}")
+
     # Weighted sum: skip None dimensions, redistribute their weight
     total_weight = 0
     weighted_score = 0.0
@@ -1310,6 +1316,8 @@ def compute_quick_score(result: dict, weights: dict) -> dict:
         "trend_stage": trend_result["stage"],
         "trend_stage_multiplier": trend_result["multiplier"],
         "risk_penalty": risk_result["penalty"],
+        "liquidity": {"score": liq["score"], "warning": liq["warning"],
+                       "avg_amount_5d": liq["avg_amount_5d"], "vol_trend_pct": liq["vol_trend_pct"]},
         "close_price": closes[-1] if closes else 0,
         "kline": kline,  # for trading plan in Phase 3
     }
@@ -1324,6 +1332,41 @@ def build_phase1_etf_list(watchlist: dict, focus: Optional[str] = None) -> list[
         for etf in cat["etfs"]:
             etfs.append({"code": str(etf["code"]), "category": cat["name"]})
     return etfs
+
+
+# ── P3 #14: Liquidity check ─────────────────────────────────────────────
+
+
+def check_liquidity(kline: list, min_amount: float = 10_000_000) -> dict:
+    """Assess ETF liquidity from kline data.
+
+    Returns {score, warning, avg_amount_5d, vol_trend}.
+    """
+    if not kline or len(kline) < 10:
+        return {"score": 50, "warning": "insufficient_data", "avg_amount_5d": 0, "vol_trend": "unknown"}
+    recent = kline[-5:]
+    older = kline[-10:-5]
+    avg_recent = sum(r.get("amount", 0) or 0 for r in recent) / 5
+    avg_older = sum(r.get("amount", 0) or 0 for r in older) / 5
+    vol_trend_pct = ((avg_recent - avg_older) / avg_older * 100) if avg_older > 0 else 0
+    if avg_recent < min_amount:
+        score = 10
+        warning = "low_liquidity"
+    elif avg_recent < min_amount * 2:
+        score = 30
+        warning = "below_average_liquidity"
+    else:
+        score = 80
+        warning = "normal"
+    # Volume declining trend
+    if vol_trend_pct < -20:
+        score = max(5, score - 20)
+        warning = "volume_declining"
+    elif vol_trend_pct < -10:
+        score = max(10, score - 10)
+        warning = warning if warning != "normal" else "volume_slightly_declining"
+    return {"score": score, "warning": warning, "avg_amount_5d": round(avg_recent, 0),
+            "vol_trend_pct": round(vol_trend_pct, 1)}
 
 
 def apply_filters(etf_list: list[dict], raw_results: dict, settings: dict) -> list[dict]:
@@ -1353,13 +1396,22 @@ def run_phase1(
     settings: dict,
     focus: Optional[str] = None,
     max_workers: Optional[int] = None,
+    regime: Optional[dict] = None,
 ) -> tuple[dict, list[dict]]:
     """Run Phase 1 quick scan on all ETFs.
 
     Returns (raw_results_dict, ranked_list).
     """
     etf_list = build_phase1_etf_list(watchlist, focus)
-    weights = settings.get("quick_score_weights", {})
+    weights = dict(settings.get("quick_score_weights", {}))
+    # P3 #14: Dynamic weight adjustment by regime
+    r = (regime or {}).get("regime", "unknown")
+    if r == "bull":
+        weights["momentum"] = max(weights.get("momentum", 30) - 5, 15)  # momentum less reliable in bull
+        weights["iopv"] = min(weights.get("iopv", 15) + 5, 25)  # premium caution
+    elif r == "bear":
+        weights["capital_flow"] = min(weights.get("capital_flow", 20) + 5, 30)  # capital flow more important
+        weights["shares_trend"] = min(weights.get("shares_trend", 15) + 3, 20)
     if max_workers is None:
         max_workers = settings.get("max_workers", 4)
 
@@ -1562,6 +1614,14 @@ def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, 
     combined.sort(key=lambda x: x["combined_score"] or 0, reverse=True)
     for i, c in enumerate(combined):
         c["rank"] = i + 1
+        # P3 #13: Streak + rank change from scan history
+        if scan_history and hasattr(scan_history, 'get'):
+            streak_info = compute_streak(c["code"], scan_history)
+            if streak_info["streak"] > 0:
+                c["top_streak"] = streak_info["streak"]
+            prev_rank = streak_info.get("prev_rank")
+            if prev_rank is not None:
+                c["rank_change"] = streak_info["prev_rank"] - (i + 1)  # positive = improved
         cs = c["combined_score"] or 0
 
         # Sector-adjusted stars: only top 30% per category can get 3 stars
@@ -1638,6 +1698,11 @@ def build_top_picks(combined: list[dict]) -> list[dict]:
             entry["sector_percentile"] = p["sector_percentile"]
         if "stars" in p:
             entry["stars"] = p["stars"]
+        # P3 #13: streak + rank change
+        if "top_streak" in p:
+            entry["top_streak"] = p["top_streak"]
+        if "rank_change" in p:
+            entry["rank_change"] = p["rank_change"]
         result.append(entry)
     return result
 
@@ -1657,6 +1722,10 @@ def build_excluded(scored_all: list[dict]) -> list[dict]:
                 reasons.append("份额缩水")
             if (dims.get("volume") or 50) < 30:
                 reasons.append("量能不足")
+            # P3 #14: liquidity warning
+            liq = s.get("liquidity", {})
+            if isinstance(liq, dict) and liq.get("warning") not in ("normal", "insufficient_data", None):
+                reasons.append(f"流动性({liq['warning']})")
             # Append contradiction warnings
             warnings = s.get("warnings", [])
             if warnings:
@@ -1666,6 +1735,7 @@ def build_excluded(scored_all: list[dict]) -> list[dict]:
                 "name": s.get("name", ""),
                 "quick_score": s["quick_score"],
                 "reason": " ".join(reasons) if reasons else "综合评分偏低",
+                "liquidity_warning": liq.get("warning") if isinstance(liq, dict) else None,
             })
     return excluded
 
@@ -1694,6 +1764,68 @@ def save_sector_history(sectors: dict[str, float]):
         history["records"] = history["records"][-60:]
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     SECTOR_HISTORY_CACHE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ── P3 #13: Scan result persistence + streak tracking ──────────────────────
+
+
+def load_scan_history() -> dict:
+    """Load scan history {records: [{date, top10, rankings:{code:rank}}]}."""
+    if SCAN_HISTORY_CACHE.exists():
+        try:
+            return json.loads(SCAN_HISTORY_CACHE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"records": []}
+    return {"records": []}
+
+
+def save_scan_result(combined: list[dict]):
+    """Save today scan top-10 rankings for streak + rank-change tracking."""
+    today = date.today().isoformat()
+    history = load_scan_history()
+    history.setdefault("records", [])
+    history["records"] = [r for r in history["records"] if r.get("date") != today]
+    top10 = [c["code"] for c in combined[:10] if c.get("code")]
+    rankings = {}
+    for c in combined:
+        code = c.get("code")
+        rank = c.get("rank")
+        if code and rank is not None:
+            rankings[code] = rank
+    history["records"].append({
+        "date": today, "top10": top10, "rankings": rankings,
+    })
+    if len(history["records"]) > 60:
+        history["records"] = history["records"][-60:]
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    SCAN_HISTORY_CACHE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def compute_streak(code: str, history: dict) -> dict:
+    """Compute consecutive days in top 10 + rank change from last scan."""
+    records = history.get("records", [])
+    if len(records) < 2:
+        return {"streak": 0, "prev_rank": None, "rank_change": None}
+    # Count streak from most recent backwards
+    streak = 0
+    for rec in reversed(records):
+        if code in rec.get("top10", []):
+            streak += 1
+        else:
+            break
+    # Previous rank (from last record before today)
+    today = date.today().isoformat()
+    prev_rec = None
+    for rec in reversed(records):
+        if rec.get("date") != today:
+            prev_rec = rec
+            break
+    prev_rank = None
+    rank_change = None
+    if prev_rec:
+        rankings = prev_rec.get("rankings", {})
+        prev_rank = rankings.get(code)
+    return {"streak": streak, "prev_rank": prev_rank, "rank_change": rank_change}
 
 
 def compute_sector_momentum(sector: str, history_records: list[dict]) -> dict:
@@ -1802,8 +1934,11 @@ def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dic
     """Build final JSON output."""
     if regime is None:
         regime = {"regime": "unknown", "coefficient": 1.0}
+    # Load scan history for streak tracking (P3 #13)
+    scan_history = load_scan_history()
     combined = build_combined_ranking(phase1_ranked, phase2_results, settings,
-                                      regime.get("coefficient", 1.0))
+                                      regime.get("coefficient", 1.0),
+                                      scan_history=scan_history)
     combined = _cleanup_combined(combined)
 
     history_records = sector_history.get("records", []) if sector_history else None
@@ -1818,7 +1953,7 @@ def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dic
     valid_count = len(phase1_ranked)
     total_count = sum(len(c["etfs"]) for c in watchlist["categories"])
 
-    return {
+    output = {
         "meta": {
             "scan_time": datetime.now(timezone(timedelta(hours=8))).strftime(
                 "%Y-%m-%dT%H:%M:%S+08:00"
@@ -1834,6 +1969,12 @@ def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dic
         "excluded": build_excluded(phase1_ranked),
         "sector_summary": build_sector_summary(combined, history_records),
     }
+    # Persist scan result for streak tracking (P3 #13)
+    try:
+        save_scan_result(combined)
+    except Exception:
+        pass
+    return output
 
 
 # --- CLI ---
@@ -1879,7 +2020,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     sector_history = load_sector_history()
 
     # Phase 1
-    _, phase1_ranked = run_phase1(watchlist, settings, args.focus)
+    _, phase1_ranked = run_phase1(watchlist, settings, args.focus, regime=regime)
 
     # Phase 2
     phase2_results: dict[str, dict] = {}

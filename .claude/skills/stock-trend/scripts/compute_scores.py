@@ -857,6 +857,63 @@ def main():
         except Exception:
             pass
 
+    # P3 #10: Automated sentiment scoring from northbound flow + margin data
+    if args.capital_flow_data and args.sentiment_score is None:
+        try:
+            with open(args.capital_flow_data, "r", encoding="utf-8") as f:
+                cap_data = json.load(f)
+            ext = cap_data.get("data_extended", {})
+            sent_score = 0.0
+            auto_src = []
+
+            # Market-level northbound: consecutive inflow days
+            nb_market = ext.get("northbound_market")
+            if isinstance(nb_market, list) and len(nb_market) >= 3:
+                streak = 0
+                for day in reversed(nb_market):
+                    if (day.get("net_buy_billion") or 0) > 0:
+                        streak += 1
+                    else:
+                        break
+                if streak >= 3:
+                    sent_score += 1.0
+                elif streak >= 1:
+                    sent_score += 0.3
+                latest_net = nb_market[-1].get("net_buy_billion", 0) or 0
+                if latest_net < -8:
+                    sent_score -= 1.0
+                elif latest_net < -3:
+                    sent_score -= 0.5
+                auto_src.append("northbound")
+
+            # Individual stock northbound holding change
+            nb_ind = ext.get("northbound_individual")
+            if isinstance(nb_ind, dict):
+                chg = nb_ind.get("change_shares")
+                if chg is not None:
+                    sent_score += 0.5 if chg > 0 else (-0.5 if chg < -10 else 0)
+                    auto_src.append("nb_ind")
+
+            # Margin balance - high = market confidence
+            margin = ext.get("margin")
+            if isinstance(margin, dict):
+                mb = margin.get("margin_balance_billion")
+                if mb is not None:
+                    if mb > 200:
+                        sent_score += 0.5
+                    elif mb < 30:
+                        sent_score -= 0.5
+                    auto_src.append("margin")
+
+            sent_score = max(-3, min(3, sent_score))
+            if sent_score != 0 or auto_src:
+                scores["sentiment"] = round(scores["sentiment"] + sent_score, 2)
+                scores["sentiment"] = max(-3, min(3, scores["sentiment"]))
+                if auto_src:
+                    automated_sources["sentiment"] = "+".join(auto_src)
+        except Exception:
+            pass
+
     # Automated futures scoring (ETF only, when futures data is available)
     if args.futures_data and args.asset_type == "etf":
         try:
@@ -899,6 +956,47 @@ def main():
     if args.futures_data and Path(args.futures_data).exists() and futures_data is None:
         with open(args.futures_data, "r", encoding="utf-8") as f:
             futures_data = json.load(f)
+
+    # ── P3 #11: Fund size change trend + share change rate → fundamental (ETF) ──
+    if args.asset_type == "etf" and args.fundamental_score is None and etf_data and isinstance(etf_data, dict):
+        try:
+            fund_size_add = 0.0
+            recent_flows = etf_data.get("recent_flows")
+            if isinstance(recent_flows, list) and len(recent_flows) >= 3:
+                mid = len(recent_flows) // 2
+                first_half_avg = sum(
+                    float(r["shares_billion"]) for r in recent_flows[:mid]
+                    if r.get("shares_billion") is not None
+                ) / max(sum(1 for r in recent_flows[:mid] if r.get("shares_billion") is not None), 1)
+                second_half_avg = sum(
+                    float(r["shares_billion"]) for r in recent_flows[mid:]
+                    if r.get("shares_billion") is not None
+                ) / max(sum(1 for r in recent_flows[mid:] if r.get("shares_billion") is not None), 1)
+                if first_half_avg > 0:
+                    trend_pct = (second_half_avg - first_half_avg) / abs(first_half_avg) * 100
+                    if trend_pct > 5:
+                        fund_size_add += 0.5
+                    elif trend_pct > 2:
+                        fund_size_add += 0.2
+                    elif trend_pct < -5:
+                        fund_size_add -= 0.5
+                    elif trend_pct < -2:
+                        fund_size_add -= 0.2
+            # Fund size growth = capital认可
+            fund_size = etf_data.get("fund_size", {})
+            shares = fund_size.get("shares_billion") if isinstance(fund_size, dict) else None
+            if shares is not None and shares > 50:
+                fund_size_add += 0.5
+            if fund_size_add != 0:
+                scores["fundamental"] = round(scores["fundamental"] + fund_size_add, 2)
+                scores["fundamental"] = max(-3, min(3, scores["fundamental"]))
+                automated_sources["fundamental"] = (
+                    automated_sources.get("fundamental", "") + "_fundsize"
+                    if automated_sources.get("fundamental")
+                    else "fundsize"
+                )
+        except Exception:
+            pass
 
     # Automated IOPV premium scoring for ETFs — P2 #9: enhanced with history + trend + shares linkage
     iopv_enhanced_info = None
