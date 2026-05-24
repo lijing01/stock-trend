@@ -1178,6 +1178,9 @@ def main():
             "max_drawdown_pct": summary.get("max_drawdown_pct"),
             "support_levels": summary.get("support_levels", []),
             "resistance_levels": summary.get("resistance_levels", []),
+            "entry_verdict": summary.get("entry_signals", {}).get("verdict", "wait"),
+            "entry_signals": summary.get("entry_signals", {}).get("signals", []),
+            "entry_signal_count": summary.get("entry_signals", {}).get("signal_count", 0),
         },
     }
 

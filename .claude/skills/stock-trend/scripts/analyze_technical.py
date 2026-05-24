@@ -1105,6 +1105,122 @@ def calc_risk_reward(df, atr_result, levels):
     }
 
 
+# --- Entry signal fusion ---
+
+
+def _calc_rsi_at(df, offset, period=14):
+    """Compute RSI at a specific offset from end of df."""
+    if len(df) < abs(offset) + period + 1:
+        return None
+    segment = df.iloc[offset - period:offset] if offset < 0 else df.iloc[offset:offset + period]
+    if len(segment) < period:
+        return None
+    closes = segment["close"].values
+    gains = 0
+    losses = 0
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses += abs(diff)
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return round(100 - 100 / (1 + rs), 1)
+
+
+def calc_entry_signals(df, indicator_results) -> dict:
+    """Fuse multi-indicator signals into entry timing advice.
+
+    Checks 4 confirmation signals:
+    1. Volume breakout: MA5 volume / MA20 volume > 1.3 + close > MA20
+    2. RSI inflection: RSI was < 30 5-10d ago, now > 35
+    3. Bollinger squeeze breakout: bandwidth < 5% + close breaks band
+    4. Volume-shrinking pullback: vol_ratio < 0.8 + close near MA20 (±1.5%)
+
+    Returns dict with signal_count, signals list, and verdict (ready/watch/wait/avoid).
+    """
+    close_price = float(df["close"].iloc[-1])
+
+    # Volume column: accept "vol" or "volume"
+    vol_col = "vol" if "vol" in df.columns else ("volume" if "volume" in df.columns else None)
+    if vol_col is None:
+        return {"signal_count": 0, "signals": [], "verdict": "wait"}
+    vol_ma5 = float(df[vol_col].tail(5).mean())
+    vol_ma20 = float(df[vol_col].tail(20).mean())
+    vol_ratio = vol_ma5 / vol_ma20 if vol_ma20 > 0 else 1.0
+
+    # MA20 value
+    ma20_val = None
+    ma_result = indicator_results.get("ma", {})
+    if isinstance(ma_result, dict):
+        ma20_val = ma_result.get("values", {}).get("ma20")
+    if ma20_val is None and "ma20" in df.columns:
+        ma20_val = float(df["ma20"].iloc[-1])
+    if ma20_val is None and len(df) >= 20:
+        ma20_val = float(df["close"].tail(20).mean())
+
+    signals_found = []
+
+    # 1) Volume breakout confirmation
+    if vol_ratio > 1.3 and ma20_val and close_price > ma20_val:
+        signals_found.append("放量突破")
+
+    # 2) RSI inflection from oversold
+    rsi_now = None
+    rsi_result = indicator_results.get("rsi", {})
+    if isinstance(rsi_result, dict):
+        rsi_now = rsi_result.get("rsi")
+    if rsi_now is None:
+        # Calc from df
+        rsi_now = _calc_rsi_at(df, -1, 14)
+    if rsi_now is not None:
+        rsi_10d = _calc_rsi_at(df, -10, 14) if len(df) >= 25 else None
+        rsi_5d = _calc_rsi_at(df, -5, 14) if len(df) >= 20 else None
+        ref_rsi = rsi_10d or rsi_5d
+        if ref_rsi and ref_rsi < 30 and rsi_now > ref_rsi and rsi_now > 35:
+            signals_found.append("RSI拐头")
+
+    # 3) Bollinger squeeze + breakout
+    bb_result = indicator_results.get("bollinger", {})
+    if isinstance(bb_result, dict):
+        bandwidth = bb_result.get("bandwidth_pct")
+        upper = bb_result.get("upper")
+        lower = bb_result.get("lower")
+        if bandwidth is not None and bandwidth < 5 and upper and lower:
+            if close_price >= float(upper) or close_price <= float(lower):
+                signals_found.append("布林变盘")
+
+    # 4) Volume-shrinking pullback to MA20
+    if vol_ratio < 0.8 and ma20_val and abs(close_price - ma20_val) / ma20_val < 0.015:
+        signals_found.append("缩量回踩")
+
+    # Verdict
+    count = len(signals_found)
+    summary = indicator_results.get("summary", {}) if "summary" in indicator_results else {}
+    direction = summary.get("direction", "") if isinstance(summary, dict) else ""
+
+    if count >= 2 and direction == "bullish":
+        verdict = "ready"
+    elif count >= 1 and direction == "bullish":
+        verdict = "watch"
+    elif count >= 2:
+        verdict = "watch"
+    elif direction == "bearish":
+        verdict = "avoid"
+    else:
+        verdict = "wait"
+
+    return {
+        "signal_count": count,
+        "signals": signals_found,
+        "verdict": verdict,
+    }
+
+
 # --- Aggregate summary ---
 
 
@@ -1333,6 +1449,9 @@ def main():
     summary["position_sizing"] = risk_reward.get("position_sizing")
     summary["risk_reward_warning"] = risk_reward.get("warning")
     summary["max_drawdown_pct"] = drawdown_result.get("max_drawdown_pct")
+
+    # Entry signal fusion
+    summary["entry_signals"] = calc_entry_signals(df, indicator_results)
 
     # Latest data point
     last = df.iloc[-1]

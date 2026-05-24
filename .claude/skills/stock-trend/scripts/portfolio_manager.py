@@ -105,6 +105,31 @@ def _run_script(script_name: str, *args, timeout: int = 20):
     return result.returncode, result.stdout, result.stderr
 
 
+def _fetch_technical_stop(ts_code: str) -> dict | None:
+    """Read latest technical.json for ATR-based stop/target levels.
+
+    Returns {"stop_loss": float|None, "atr": float|None, "atr_pct": float|None}
+    or None if unavailable.
+    """
+    from cache_utils import CACHE_DIR
+    code = ts_code.split(".")[0]
+    tech_path = Path(CACHE_DIR) / code / "technical.json"
+    if not tech_path.exists():
+        return None
+    try:
+        with open(tech_path, "r", encoding="utf-8") as f:
+            tech = json.load(f)
+        s = tech.get("summary", {})
+        atr_info = tech.get("latest", {}).get("atr", {})
+        return {
+            "stop_loss": s.get("stop_loss"),
+            "atr": atr_info.get("atr"),
+            "atr_pct": atr_info.get("atr_pct"),
+        }
+    except Exception:
+        return None
+
+
 # ── P&L calculation ────────────────────────────────────────────────────────
 
 
@@ -173,26 +198,45 @@ def check_alerts(holdings: list[dict], settings: dict) -> list[dict]:
                 alerts.append({"code": code, "name": h.get("name", ""), "type": "stop_loss_approaching",
                                "detail": f"现价{current:.4f}距止损{sl:.4f}仅{dist_pct:.1f}%", "severity": "warning"})
 
-        # ── 5a: 移动止损 advisory (requires kline for MA20) ──────────
-        if kline and len(kline) >= 20 and buy_price > 0:
-            closes = [r["close"] for r in kline]
-            ma20 = sum(closes[-20:]) / 20
-            # Price up 5% from cost: suggest trailing stop to MA20
-            if current >= buy_price * 1.05:
-                trailing_ma = ma20
-                if current < trailing_ma:
-                    # Price already below trailing stop level → alert
+        # ── 5a: ATR trailing stop (replaces MA20 trailing) ──────────
+        if kline and len(kline) >= 20 and buy_price > 0 and current >= buy_price * 1.05:
+            tech_stop = _fetch_technical_stop(ts_code)
+            atr_val = tech_stop.get("atr") if tech_stop else None
+            if atr_val and atr_val > 0:
+                high_since_buy = max(r.get("high", r["close"]) for r in kline)
+                atr_pct_val = tech_stop.get("atr_pct", 2.0) or 2.0
+                atr_mult = 3.5 if atr_pct_val > 3 else (2.0 if atr_pct_val < 1.5 else 3.0)
+                trail_stop = round(high_since_buy - atr_val * atr_mult, 4)
+                if current <= trail_stop:
+                    alerts.append({
+                        "code": code, "name": h.get("name", ""),
+                        "type": "atr_trailing_hit",
+                        "detail": f"盈利{pnl_pct:.1f}%但跌破ATR吊灯{trail_stop:.4f}({atr_mult}×ATR)，建议止盈",
+                        "severity": "warning",
+                    })
+                else:
+                    alerts.append({
+                        "code": code, "name": h.get("name", ""),
+                        "type": "atr_trailing_ready",
+                        "detail": f"盈利{pnl_pct:.1f}%，建议止损上移至ATR吊灯{trail_stop:.4f}({atr_mult}×ATR)",
+                        "severity": "info",
+                    })
+            else:
+                # Fallback: MA20
+                closes = [r["close"] for r in kline]
+                ma20 = sum(closes[-20:]) / 20
+                if current < ma20:
                     alerts.append({
                         "code": code, "name": h.get("name", ""),
                         "type": "trailing_stop_hit",
-                        "detail": f"盈利{pnl_pct:.1f}%但已跌破MA20{trailing_ma:.4f}，建议止盈",
+                        "detail": f"盈利{pnl_pct:.1f}%但已跌破MA20{ma20:.4f}，建议止盈",
                         "severity": "warning",
                     })
                 else:
                     alerts.append({
                         "code": code, "name": h.get("name", ""),
                         "type": "trailing_stop_ready",
-                        "detail": f"盈利{pnl_pct:.1f}%，建议将止损上移至MA20({trailing_ma:.4f})",
+                        "detail": f"盈利{pnl_pct:.1f}%，建议将止损上移至MA20({ma20:.4f})",
                         "severity": "info",
                     })
             # Price up 10% from cost: suggest trailing 8% from high
@@ -395,6 +439,12 @@ def _estimate_volatility(code: str) -> Optional[float]:
     Uses 85th-15th percentile return spread as vol proxy.
     """
     ts_code = code_to_ts_code(code)
+    # Prefer ATR_pct from technical.json
+    tech_stop = _fetch_technical_stop(ts_code)
+    if tech_stop and tech_stop.get("atr_pct"):
+        atr_pct = tech_stop["atr_pct"]
+        return round(min(0.4, max(0.05, atr_pct / 100 * 1.5)), 2)
+    # Fallback: percentile from kline
     kline = _fetch_kline(ts_code)
     if kline and len(kline) >= 15:
         closes = [float(r["close"]) for r in kline[-20:]]

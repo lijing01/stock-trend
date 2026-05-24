@@ -174,6 +174,14 @@ def build_context(args):
     kline_meta = kline.get("meta", {})
     patterns = technical.get("patterns", [])
 
+    # Parse entry signals JSON
+    entry_signals_list = []
+    if args.entry_signals:
+        try:
+            entry_signals_list = json.loads(args.entry_signals)
+        except (json.JSONDecodeError, TypeError):
+            entry_signals_list = [args.entry_signals] if isinstance(args.entry_signals, str) else []
+
     # Build context
     ts_code = args.ts_code or meta.get("ts_code", kline_meta.get("ts_code", "unknown"))
     stock_name = args.stock_name or etf_data.get("fund_name", ts_code)
@@ -409,6 +417,13 @@ def build_context(args):
         "has_chart": args.chart is not None and os.path.exists(args.chart),
         "tech_data_source": data_source if data_source else "Tushare/东方财富",
         "capital_data_source": capital_flow.get("meta", {}).get("data_source", "东方财富"),
+        # Entry timing
+        "入场时机": args.entry_verdict != "wait",
+        "entry_verdict": args.entry_verdict,
+        "entry_verdict_text": {"ready": "可入场", "watch": "等待确认", "wait": "暂观望", "avoid": "不建议入场"}.get(args.entry_verdict, ""),
+        "entry_signals": entry_signals_list,
+        "entry_signals_text": " + ".join(entry_signals_list) if entry_signals_list else "",
+        "entry_signal_count": len(entry_signals_list),
     }
 
     # Load fundamental data flag
@@ -523,6 +538,8 @@ def main():
     parser.add_argument("--sentiment-summary", help="Sentiment dimension summary")
     parser.add_argument("--macro-summary", help="Macro dimension summary")
     # Comprehensive analysis for 综合研判 section
+    parser.add_argument("--entry-verdict", default="wait", help="Entry timing: ready/watch/wait/avoid")
+    parser.add_argument("--entry-signals", default="[]", help="JSON array of entry confirmation signal strings")
     parser.add_argument("--analysis", help="JSON object with core_conflict, events, advice for 综合研判 section")
     # Chart and new data files
     parser.add_argument("--chart", help="Path to chart HTML fragment to embed")
@@ -625,6 +642,12 @@ def main():
                 analysis = scores_data.get("analysis")
                 if analysis:
                     args.analysis = json.dumps(analysis, ensure_ascii=False)
+            # Read entry signals from report_params
+            rp = scores_data.get("report_params", {})
+            if not args.entry_verdict:
+                args.entry_verdict = rp.get("entry_verdict", "wait")
+            if not args.entry_signals:
+                args.entry_signals = rp.get("entry_signals", [])
         except (OSError, json.JSONDecodeError):
             pass
 
