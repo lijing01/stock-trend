@@ -12,6 +12,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from portfolio_manager import (
     load_portfolio, save_portfolio, find_holding,
     code_to_ts_code, check_alerts,
+    calc_kelly_position_pct, portfolio_kelly_analysis,
 )
 
 # Test result tracking
@@ -179,6 +180,67 @@ def test_no_alerts_no_holdings():
     test("TPF-10: no alerts empty portfolio", len(alerts) == 0)
 
 
+# ── Kelly unit tests ───────────────────────────────────────────
+
+
+def test_kelly_default():
+    """Baseline: 55% win, 1.5:1, half-Kelly base=12.5% → ~13%."""
+    k = calc_kelly_position_pct(combined_score=65, volatility=0.15, regime_coef=1.0, trend_stage="mid")
+    test("KLY-01: baseline kelly_pct ~13",
+         12 <= k["kelly_pct"] <= 15,
+         detail=f"got {k['kelly_pct']}")
+
+
+def test_kelly_high_score_low_vol():
+    """High score + low vol + early trend → ~20%."""
+    k = calc_kelly_position_pct(combined_score=85, volatility=0.08, regime_coef=1.0, trend_stage="early")
+    test("KLY-02: high score early trend kelly_pct >= 18",
+         k["kelly_pct"] >= 18,
+         detail=f"got {k['kelly_pct']}")
+
+
+def test_kelly_low_score_bear():
+    """Low score + bear regime → clamped at min 5%."""
+    k = calc_kelly_position_pct(combined_score=45, volatility=0.25, regime_coef=0.4, trend_stage="decline")
+    test("KLY-03: low score bear kelly_pct == 5",
+         k["kelly_pct"] == 5,
+         detail=f"got {k['kelly_pct']}")
+
+
+def test_kelly_returns_all_keys():
+    """calc_kelly_position_pct returns all expected keys."""
+    k = calc_kelly_position_pct(50, 0.15, 1.0, "mid")
+    expected = {"kelly_pct", "kelly_range", "base_kelly", "score_mult", "vol_mult", "regime_coef", "trend_mult"}
+    test("KLY-04: all keys present", expected.issubset(k.keys()))
+
+
+def test_portfolio_kelly_empty():
+    """Empty portfolio → summary no_data."""
+    result = portfolio_kelly_analysis([], [], 0, 1.0)
+    test("KLY-05: empty portfolio", result.get("summary") == "no_data")
+
+
+def test_portfolio_kelly_with_holdings():
+    """Mock holdings get per-holding kelly analysis."""
+    holdings = [
+        {"code": "513180", "name": "恒生科技", "current_price": 1.05, "quantity": 2000,
+         "pnl_pct": 5.0, "status": "active"},
+        {"code": "518880", "name": "黄金ETF", "current_price": 5.5, "quantity": 500,
+         "pnl_pct": 8.0, "status": "active"},
+    ]
+    scan = [
+        {"code": "513180", "scan_score": 75, "combined_score": 80, "score_direction": "up"},
+        {"code": "518880", "scan_score": 60, "combined_score": 62, "score_direction": "up"},
+    ]
+    total_value = 1.05 * 2000 + 5.5 * 500  # 2100 + 2750 = 4850
+    result = portfolio_kelly_analysis(holdings, scan, total_value, 1.0)
+    holdings_out = result.get("holdings", [])
+    test("KLY-06: kelly analysis returns holdings", len(holdings_out) == 2)
+    test("KLY-07: each holding has action", all(h.get("action") in ("reduce", "hold", "increase") for h in holdings_out))
+    test("KLY-08: total_optimal_pct > 0", result.get("total_optimal_pct", 0) > 0)
+    test("KLY-09: cash_reserve_pct >= 0", result.get("cash_reserve_pct", -1) >= 0)
+
+
 # ── Integration tests (subprocess) ─────────────────────────────
 
 
@@ -285,6 +347,13 @@ def run_portfolio_tests():
     test_integration_add()
     test_integration_remove()
     test_integration_update()
+    # Kelly tests
+    test_kelly_default()
+    test_kelly_high_score_low_vol()
+    test_kelly_low_score_bear()
+    test_kelly_returns_all_keys()
+    test_portfolio_kelly_empty()
+    test_portfolio_kelly_with_holdings()
 
     print(f"\nPortfolio 结果: {PASSED} passed, {FAILED} failed, {SKIPPED} skipped")
     return PASSED, FAILED

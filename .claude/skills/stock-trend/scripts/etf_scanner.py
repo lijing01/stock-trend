@@ -1559,7 +1559,8 @@ def run_phase2(top_candidates: list[dict], settings: dict, max_workers: int = 4)
 
 
 def build_combined_ranking(phase1_ranked: list[dict], phase2_results: dict[str, dict],
-                           settings: dict, regime_coef: float = 1.0) -> list[dict]:
+                           settings: dict, regime_coef: float = 1.0,
+                           scan_history: Optional[dict] = None) -> list[dict]:
     """Merge Phase 1 and Phase 2 results into combined ranking."""
     combined: list[dict] = []
     for p1 in phase1_ranked:

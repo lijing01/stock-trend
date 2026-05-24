@@ -350,6 +350,166 @@ def cash_ratio_suggestion(regime: str, total_value: float, total_cost: float) ->
     }
 
 
+# ── Kelly position sizing (mirrors etf_scanner.py P2 #8) ──────────────────
+
+
+def calc_kelly_position_pct(
+    combined_score: float,
+    volatility: float,
+    regime_coef: float,
+    trend_stage: str = "mid",
+) -> dict:
+    """Kelly-optimal position % for a single holding.
+
+    Mirrors etf_scanner.py Phase 2 #8 logic:
+      half-Kelly baseline f=25% → score/vol/regime/trend multipliers.
+    """
+    # Half-Kelly baseline
+    win_rate = 0.55
+    avg_win_loss = 1.5
+    kelly_f = (avg_win_loss * win_rate - (1 - win_rate)) / avg_win_loss
+    f_val = max(0.05, min(0.4, kelly_f / 2))
+    base_kelly_pct = f_val * 100
+
+    score_mult = 1.2 if combined_score >= 80 else (1.0 if combined_score >= 65 else 0.8)
+    vol_mult = 1.1 if volatility < 0.1 else (1.0 if volatility < 0.2 else 0.8)
+    anti_martingale_mult = 1.2 if trend_stage == "early" else (1.0 if trend_stage == "mid" else 0.6)
+
+    position_pct = base_kelly_pct * score_mult * vol_mult * regime_coef * anti_martingale_mult
+    position_pct = round(max(5, min(40, position_pct)), 0)
+
+    return {
+        "kelly_pct": int(position_pct),
+        "kelly_range": [int(max(5, position_pct - 4)), int(min(40, position_pct + 4))],
+        "base_kelly": round(base_kelly_pct, 1),
+        "score_mult": score_mult,
+        "vol_mult": vol_mult,
+        "regime_coef": regime_coef,
+        "trend_mult": anti_martingale_mult,
+    }
+
+
+def _estimate_volatility(code: str) -> Optional[float]:
+    """Quick vol estimate from 20-day kline for Kelly input.
+
+    Uses 85th-15th percentile return spread as vol proxy.
+    """
+    ts_code = code_to_ts_code(code)
+    kline = _fetch_kline(ts_code)
+    if kline and len(kline) >= 15:
+        closes = [float(r["close"]) for r in kline[-20:]]
+        if len(closes) >= 10:
+            returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes))]
+            idx85 = int(len(returns) * 0.85)
+            idx15 = int(len(returns) * 0.15)
+            spread = sorted(returns)[idx85] - sorted(returns)[idx15]
+            return round(max(0.05, min(0.4, spread)), 2)
+    return 0.15  # default moderate vol
+
+
+def portfolio_kelly_analysis(
+    holdings: list[dict],
+    scan_compare: list[dict],
+    total_value: float,
+    regime_coef: float,
+) -> dict:
+    """Compare current allocation vs Kelly-optimal for each holding.
+
+    Uses scanner combined_score as win-probability proxy, kline vol as risk.
+    Returns per-holding action (reduce/hold/increase) + total exposure guidance.
+    """
+    if not holdings or total_value <= 0:
+        return {"holdings": [], "summary": "no_data"}
+
+    scan_map: dict[str, dict] = {}
+    for r in scan_compare:
+        if "code" in r:
+            scan_map[r["code"]] = r
+
+    results: list[dict] = []
+    total_kelly_pct = 0.0
+
+    for h in holdings:
+        if h.get("status") != "active":
+            continue
+        code = h["code"]
+        qty = float(h.get("quantity", 0))
+        price = float(h.get("current_price", 0) or 0)
+        current_value = qty * price
+        current_alloc_pct = round(current_value / total_value * 100, 1) if total_value > 0 else 0.0
+
+        scan = scan_map.get(code, {})
+        score = scan.get("combined_score") or scan.get("scan_score") or 50
+
+        vol = _estimate_volatility(code)
+
+        # Infer trend stage from PnL direction + scan direction
+        pnl = h.get("pnl_pct", 0) or 0
+        direction = scan.get("score_direction", "")
+        if direction == "down":
+            trend = "decline"
+        elif pnl < 3:
+            trend = "early" if direction in ("up", "") else "mid"
+        elif pnl < 15:
+            trend = "mid"
+        else:
+            trend = "late"
+
+        kelly = calc_kelly_position_pct(score, vol, regime_coef, trend)
+
+        diff = round(current_alloc_pct - kelly["kelly_pct"], 1)
+        abs_diff_pct = abs(diff) / max(kelly["kelly_pct"], 1) * 100 if kelly["kelly_pct"] > 0 else 0
+
+        if diff > 5 and abs_diff_pct > 30:
+            action = "reduce"
+            note = f"仓位{current_alloc_pct}%远超凯利{kelly['kelly_pct']}%，建议减仓"
+        elif diff < -3 and abs_diff_pct > 30:
+            action = "increase"
+            note = f"仓位{current_alloc_pct}%低于凯利{kelly['kelly_pct']}%，可适当加仓"
+        else:
+            action = "hold"
+            note = f"仓位{current_alloc_pct}%接近凯利{kelly['kelly_pct']}%，维持"
+
+        total_kelly_pct += kelly["kelly_pct"]
+
+        results.append({
+            "code": code,
+            "name": h.get("name", ""),
+            "score": score,
+            "current_alloc_pct": current_alloc_pct,
+            "optimal_pct": kelly["kelly_pct"],
+            "optimal_range": kelly["kelly_range"],
+            "diff_pct": diff,
+            "action": action,
+            "note": note,
+            "kelly_detail": kelly,
+        })
+
+    # Scale total if sum exceeds position limit (keep ~10% cash)
+    position_limit = 100 - 10
+    if total_kelly_pct > position_limit:
+        scale = position_limit / total_kelly_pct
+        for r in results:
+            r["scaled_pct"] = round(r["optimal_pct"] * scale, 1)
+            r["scaled_range"] = [
+                round(r["optimal_range"][0] * scale, 1),
+                round(r["optimal_range"][1] * scale, 1),
+            ]
+    else:
+        for r in results:
+            r["scaled_pct"] = r["optimal_pct"]
+            r["scaled_range"] = r["optimal_range"]
+
+    total_scaled = sum(r["scaled_pct"] for r in results)
+    return {
+        "holdings": results,
+        "total_optimal_pct": round(total_kelly_pct, 1),
+        "total_scaled_pct": round(total_scaled, 1),
+        "cash_reserve_pct": round(100 - total_scaled, 1),
+        "total_over_limit": total_kelly_pct > position_limit,
+    }
+
+
 # ── Commands ────────────────────────────────────────────────────────────────
 
 
@@ -619,6 +779,7 @@ def cmd_status(args):
                             "scan_rank": rank, "scan_score": score,
                             "score_direction": score_direction,
                             "is_top_pick": is_top_pick,
+                            "combined_score": r.get("combined_score") or score,
                             "recommendation": rec,
                         })
         except Exception:
@@ -634,6 +795,23 @@ def cmd_status(args):
     cash_advice = cash_ratio_suggestion(
         regime_info["regime"], total_value, total_cost,
     )
+
+    # ── Kelly portfolio analysis ──
+    kelly_analysis = {}
+    if scan_compare and isinstance(scan_compare, list) and "note" not in scan_compare[0]:
+        kelly_analysis = portfolio_kelly_analysis(
+            enriched, scan_compare, total_value,
+            regime_info.get("coefficient", 1.0),
+        )
+        # Add Kelly-based alerts for over-weighted positions
+        for kh in kelly_analysis.get("holdings", []):
+            if kh["action"] == "reduce":
+                alerts.append({
+                    "code": kh["code"], "name": kh["name"],
+                    "type": "kelly_overweight",
+                    "detail": kh["note"],
+                    "severity": "info",
+                })
 
     result = {
         "meta": {
@@ -657,6 +835,82 @@ def cmd_status(args):
             "drawdown_alert": portfolio_dd,
             "overlap_warnings": overlap,
             "cash_advice": cash_advice,
+            "kelly_analysis": kelly_analysis,
+        },
+    }
+    json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+
+
+def cmd_kelly(args):
+    """Standalone Kelly portfolio analysis (runs scan, outputs optimal allocation)."""
+    portfolio = load_portfolio()
+    holdings = portfolio.get("holdings", [])
+    active = [h for h in holdings if h.get("status") == "active"]
+
+    if not active:
+        result = {"meta": {"command": "kelly"}, "error": "无活跃持仓", "holdings": []}
+        json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return
+
+    # Fetch current prices
+    enriched = []
+    total_value = 0.0
+    for h in active:
+        current = fetch_current_price(code_to_ts_code(h["code"]))
+        if current is not None:
+            value = float(h["buy_price"]) * float(h["quantity"])
+            total_value += value
+            enriched.append({
+                "code": h["code"], "name": h.get("name", ""),
+                "buy_price": float(h["buy_price"]), "current_price": current,
+                "pnl_pct": round((current - float(h["buy_price"])) / float(h["buy_price"]) * 100, 2),
+                "quantity": float(h["quantity"]),
+                "current_value": round(current * float(h["quantity"]), 2),
+                "status": "active",
+            })
+
+    # Run scanner for scores + regime
+    scan_compare = []
+    regime_coef = 1.0
+    try:
+        rc, stdout, stderr = _run_script("etf_scanner.py", "--output", "compact", timeout=120)
+        if rc == 0:
+            scan_data = json.loads(stdout)
+            regime_coef = scan_data.get("meta", {}).get("regime_coefficient", 1.0)
+            rankings = scan_data.get("combined_ranking", [])
+            ranking_map = {r["code"]: r for r in rankings}
+            for h in active:
+                code = h["code"]
+                if code in ranking_map:
+                    r = ranking_map[code]
+                    scan_compare.append({
+                        "code": code, "name": h.get("name", ""),
+                        "scan_score": r.get("quick_score", 0),
+                        "combined_score": r.get("combined_score") or r.get("quick_score", 0),
+                        "score_direction": r.get("score_direction", ""),
+                    })
+    except Exception:
+        pass
+
+    kelly_analysis = portfolio_kelly_analysis(
+        enriched, scan_compare, total_value, regime_coef,
+    )
+
+    result = {
+        "meta": {
+            "command": "kelly",
+            "timestamp": datetime.now().isoformat(),
+            "regime_coefficient": regime_coef,
+        },
+        "holdings": kelly_analysis.get("holdings", []),
+        "summary": {
+            "total_value": round(total_value, 2),
+            "total_optimal_pct": kelly_analysis.get("total_optimal_pct", 0),
+            "total_scaled_pct": kelly_analysis.get("total_scaled_pct", 0),
+            "cash_reserve_pct": kelly_analysis.get("cash_reserve_pct", 0),
+            "over_limit": kelly_analysis.get("total_over_limit", False),
         },
     }
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
@@ -705,6 +959,9 @@ def main():
     p_st = sub.add_parser("status", help="持仓总览 + 预警 + etf-scan 对比")
     p_st.add_argument("--skip-scan", action="store_true", help="跳过 etf-scan 排名对比（省时）")
 
+    # kelly
+    sub.add_parser("kelly", help="凯利公式仓位分析")
+
     args = parser.parse_args()
 
     commands = {
@@ -714,6 +971,7 @@ def main():
         "update": cmd_update,
         "alerts": cmd_alerts,
         "status": cmd_status,
+        "kelly": cmd_kelly,
     }
     commands[args.command](args)
 
