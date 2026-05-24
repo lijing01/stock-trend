@@ -19,6 +19,8 @@ import argparse
 import json
 import math
 import sys
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 
@@ -93,6 +95,151 @@ def score_iopv_capital_flow(iopv_premium_pct):
     capital_flow dimension score (which is on the [-3, +3] scale).
     """
     return round(_piecewise_linear(float(iopv_premium_pct), IOPV_CAPITAL_FLOW_ANCHORS), 2)
+
+
+def score_shares_trend_from_etf_data(etf_data: dict) -> float | None:
+    """Compute shares trend score from etf_data (same logic as etf_scanner.py).
+
+    Returns 0-100 score or None if insufficient data.
+    """
+    if not etf_data:
+        return None
+    recent_flows = etf_data.get("recent_flows")
+    if not isinstance(recent_flows, list) or len(recent_flows) < 2:
+        return None
+    valid = [r for r in recent_flows if isinstance(r, dict) and r.get("shares_billion") is not None]
+    if len(valid) < 2:
+        return None
+    first = float(valid[0]["shares_billion"])
+    last = float(valid[-1]["shares_billion"])
+    if first == 0:
+        return None
+    change_pct = (last - first) / abs(first) * 100
+    SHARES_TREND_ANCHORS = [
+        (-20, 0.0), (-10, 10.0), (-3, 20.0), (0, 40.0),
+        (3, 65.0), (10, 85.0), (30, 100.0),
+    ]
+    return round(_piecewise_linear(change_pct, SHARES_TREND_ANCHORS), 1)
+
+
+# ── IOPV history cache (P2 #9: historical percentile + trend) ──────────────
+
+IOPV_HISTORY_CACHE_FILENAME = "iopv_history.json"
+
+
+def load_iopv_history():
+    """Load IOPV history cache {code: [{date, premium}]}."""
+    from cache_utils import CACHE_DIR
+    path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_iopv_history(history: dict, code: str, premium: float):
+    """Append today's IOPV for code and persist."""
+    from cache_utils import CACHE_DIR
+    path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
+    today = date.today().isoformat()
+    entries = history.setdefault(code, [])
+    # Deduplicate: replace if today's entry exists, else append
+    found = False
+    for e in entries:
+        if e.get("date") == today:
+            e["premium"] = round(premium, 4)
+            found = True
+            break
+    if not found:
+        entries.append({"date": today, "premium": round(premium, 4)})
+        # Keep max 60 entries (60 trading days ~ 3 months)
+        if len(entries) > 60:
+            entries[:] = entries[-60:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def score_iopv_capital_flow_enhanced(
+    iopv_premium_pct: float, history: list | None = None, shares_trend_dir: int = 0
+) -> dict:
+    """Enhanced IOPV scoring with historical percentile + trend + shares linkage.
+
+    Args:
+        iopv_premium_pct: Current IOPV premium % (+=premium, -=discount).
+        history: List of {date, premium} dicts, newest last. None = no history.
+        shares_trend_dir: +1 shares growing, -1 shrinking, 0 flat/unknown.
+
+    Returns dict with components and combined score in [-1.5, +1.5].
+    """
+    base_score = score_iopv_capital_flow(iopv_premium_pct)
+
+    # Component 1: absolute premium/discount (existing anchor mapping)
+    abs_component = base_score * 0.5  # weight 50%
+
+    # Component 2: historical percentile (if history available)
+    percentile_component = 0.0
+    percentile_info = None
+    if history and len(history) >= 5:
+        premiums = sorted([float(e["premium"]) for e in history])
+        n = len(premiums)
+        rank = sum(1 for p in premiums if p < iopv_premium_pct)
+        pct_rank = rank / n  # 0.0 = cheapest, 1.0 = most expensive
+        # Score: cheap percentile (0.0-0.3) → positive, expensive (0.7-1.0) → negative
+        if pct_rank < 0.3:
+            percentile_component = 0.6 * (1 - pct_rank / 0.3)  # 0 → 0.6
+        elif pct_rank > 0.7:
+            percentile_component = -0.6 * (pct_rank - 0.7) / 0.3  # 0 → -0.6
+        percentile_info = round(pct_rank * 100, 0)
+
+    # Component 3: 3-day premium trend
+    trend_component = 0.0
+    trend_info = None
+    if history and len(history) >= 3:
+        recent = history[-3:]
+        if all(isinstance(e, dict) and "premium" in e for e in recent):
+            p0 = float(recent[0]["premium"])
+            p2 = float(recent[-1]["premium"])
+            # Narrowing premium (negative delta = improving) → positive
+            delta = p2 - p0  # positive = premium widening (bad)
+            if abs(delta) > 0.05:  # > 0.05% change is meaningful
+                trend_component = -delta * 0.3  # capped implicitly
+                trend_component = max(-0.4, min(0.4, trend_component))
+                trend_info = "收窄" if delta < 0 else "扩大"
+
+    # Component 4: premium × shares linkage
+    shares_component = 0.0
+    shares_info = None
+    if abs(iopv_premium_pct) > 0.3:  # meaningful premium/discount
+        if iopv_premium_pct > 0.3 and shares_trend_dir == 1:
+            # Premium + shares growing → fund recognized, mild positive adjustment
+            shares_component = 0.3
+            shares_info = "溢价+份额增长=资金认可"
+        elif iopv_premium_pct > 0.3 and shares_trend_dir == -1:
+            # Premium + shares shrinking → speculative, extra negative
+            shares_component = -0.5
+            shares_info = "溢价+份额缩水=纯炒作风险"
+        elif iopv_premium_pct < -0.3 and shares_trend_dir == 1:
+            # Discount + shares growing → accumulation signal
+            shares_component = 0.2
+            shares_info = "折价+份额增长=资金吸筹"
+
+    combined = abs_component + percentile_component + trend_component + shares_component
+    combined = max(-1.5, min(1.5, combined))
+
+    return {
+        "score": round(combined, 2),
+        "components": {
+            "absolute": base_score,
+            "percentile": round(percentile_component, 2),
+            "trend": round(trend_component, 2),
+            "shares_linkage": round(shares_component, 2),
+        },
+        "percentile_rank": percentile_info,
+        "trend_direction": trend_info,
+        "shares_signal": shares_info,
+    }
 
 
 # Data quality weight adjustments
@@ -753,7 +900,8 @@ def main():
         with open(args.futures_data, "r", encoding="utf-8") as f:
             futures_data = json.load(f)
 
-    # Automated IOPV premium scoring for ETFs (contributes to capital_flow)
+    # Automated IOPV premium scoring for ETFs — P2 #9: enhanced with history + trend + shares linkage
+    iopv_enhanced_info = None
     if args.asset_type == "etf" and args.capital_flow_score is None:
         iopv_premium = None
         if etf_data and isinstance(etf_data, dict):
@@ -762,11 +910,32 @@ def main():
                 iopv_premium = nav.get("iopv_premium_pct")
         if iopv_premium is not None:
             try:
-                iopv_score = score_iopv_capital_flow(iopv_premium)
+                # Determine shares_trend direction from etf_data
+                shares_dir = 0
+                st = score_shares_trend_from_etf_data(etf_data)
+                if st is not None:
+                    if st >= 60:
+                        shares_dir = 1
+                    elif st <= 40:
+                        shares_dir = -1
+
+                # Load history and compute enhanced score
+                iopv_history = load_iopv_history()
+                code_history = iopv_history.get(args.code, []) if args.code else []
+                enhanced = score_iopv_capital_flow_enhanced(
+                    float(iopv_premium), history=code_history, shares_trend_dir=shares_dir
+                )
+                iopv_score = enhanced["score"]
                 if iopv_score != 0:
                     scores["capital_flow"] = round(scores.get("capital_flow", 0) + iopv_score, 2)
                     scores["capital_flow"] = max(-3, min(3, scores["capital_flow"]))
-                    automated_sources["capital_flow_iopv"] = round(float(iopv_premium), 4)
+                automated_sources["capital_flow_iopv"] = round(float(iopv_premium), 4)
+                automated_sources["iopv_enhanced"] = enhanced["components"]
+                iopv_enhanced_info = enhanced
+
+                # Persist to history cache
+                if args.code:
+                    save_iopv_history(iopv_history, args.code, float(iopv_premium))
             except Exception:
                 pass
 

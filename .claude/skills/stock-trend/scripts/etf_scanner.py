@@ -25,12 +25,13 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from resolve_code import code_to_ts_code
 
 import yaml
+from collections import defaultdict
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -39,6 +40,7 @@ DEFAULT_WATCHLIST = SCRIPT_DIR / "watchlist.yaml"
 CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 ASSETS_DIR = SKILL_DIR / "assets"
+SECTOR_HISTORY_CACHE = CACHE_DIR / "sector_history.json"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +150,7 @@ def build_report_context(output: dict) -> dict:
             entry["has_trading_plan"] = True
             entry["entry_strategy"] = tp.get("entry_strategy", "")
             entry["entry_detail"] = tp.get("entry_detail", "")
+            entry["entry_signals"] = " ".join(tp.get("entry_signals", []))
             ez = tp.get("entry_zone", {})
             entry["entry_low"] = ez.get("low", "")
             entry["entry_high"] = ez.get("high", "")
@@ -165,6 +168,7 @@ def build_report_context(output: dict) -> dict:
             pos = tp.get("position", {})
             entry["position_pct"] = pos.get("pct", "")
             entry["position_range"] = pos.get("range", [])
+            entry["kelly_detail"] = pos.get("kelly_detail", "")
             entry["position_reason"] = pos.get("reason", "")
             timing = tp.get("timing", {})
             entry["timing_hint"] = timing.get("hint", "")
@@ -219,6 +223,7 @@ def build_report_context(output: dict) -> dict:
         "sector_weak_summary": " | ".join(
             f"{w['name']}({w['avg_score']}↓)" for w in weak_list
         ) if weak_list else "",
+        "sector_top_warning": output.get("sector_summary", {}).get("top_warning", ""),
     }
 
 
@@ -375,6 +380,27 @@ def _macd_direction(prices: list) -> float:
     for p in prices[26:]:
         ema26 = ema26 * (1 - alpha26) + p * alpha26
     return ema12 - ema26
+
+
+def _bollinger_bands(prices: list, period: int = 20, std_mult: float = 2.0) -> dict:
+    """Bollinger Bands: middle (SMA), upper, lower, bandwidth_pct."""
+    if len(prices) < period:
+        last = prices[-1] if prices else 0
+        return {"middle": last, "upper": last, "lower": last, "bandwidth_pct": 0}
+    middle = sum(prices[-period:]) / period
+    variance = sum((p - middle) ** 2 for p in prices[-period:]) / period
+    std = math.sqrt(variance) if variance > 0 else 0
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    bandwidth_pct = (upper - lower) / middle * 100 if middle > 0 else 0
+    return {"middle": round(middle, 4), "upper": round(upper, 4),
+            "lower": round(lower, 4), "bandwidth_pct": round(bandwidth_pct, 2)}
+
+
+def _volume_ma(kline: list, period: int = 20) -> float:
+    """Average volume over given period."""
+    volumes = [r.get("vol", 0) or 0 for r in kline[-period:]]
+    return sum(volumes) / len(volumes) if volumes else 0
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +613,6 @@ def compute_sector_ranking(scored: list[dict]) -> list[dict]:
 
     Adds sector_rank, sector_count, sector_percentile to scored entries.
     """
-    from collections import defaultdict
     groups: dict[str, list[tuple[int, float]]] = defaultdict(list)
     for i, s in enumerate(scored):
         cat = s.get("category", "其他")
@@ -612,13 +637,20 @@ def compute_sector_ranking(scored: list[dict]) -> list[dict]:
 def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
                        combined_score: float, score_stars: int,
                        regime_coef: float = 1.0) -> dict:
-    """Build actionable trading plan: entry zone, stop loss, targets, position."""
+    """Build actionable trading plan: entry zone, stop loss, targets, position.
+
+    P2 #7: Enhanced entry signals — volume confirmation, RSI inflection,
+           Bollinger squeeze, volume-shrinking pullback.
+    P2 #8: Kelly position sizing + anti-martingale advisory.
+    """
     closes = [r["close"] for r in kline]
     close_price = closes[-1]
     ma20 = _ma(closes, 20)
+    ma60 = _ma(closes, 60) if len(closes) >= 60 else ma20
     atr_val = compute_atr(kline)
     risk = compute_risk_penalty(kline)
     volatility = risk["volatility"]
+    rsi_val = _rsi(closes, 14)
 
     # Support and resistance
     lows = [r.get("low", r["close"]) for r in kline[-20:]]
@@ -626,22 +658,76 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
     low_20 = min(lows) if len(kline) >= 20 else close_price * 0.95
     high_20 = max(highs) if len(kline) >= 20 else close_price * 1.05
 
-    # Entry zone
+    # ── P2 #7: Enhanced entry signals ──────────────────────────────────
+    volume_ma20 = _volume_ma(kline, 20)
+    recent_vol = _volume_ma(kline, 5)
+    vol_ratio = recent_vol / volume_ma20 if volume_ma20 > 0 else 1.0
+    bb = _bollinger_bands(closes, 20)
+
+    # 1) Volume breakout confirmation (价格突破 + 放量 > 1.3x)
+    volume_breakout = False
+    if vol_ratio > 1.3 and close_price > ma20 and close_price > bb["upper"] * 0.98:
+        volume_breakout = True
+
+    # 2) RSI inflection from oversold
+    rsi_inflection = False
+    if len(closes) >= 20:
+        rsi_5d_ago = _rsi(closes[:-5], 14) if len(closes) > 5 else 50
+        rsi_10d_ago = _rsi(closes[:-10], 14) if len(closes) > 10 else 50
+        if rsi_10d_ago < 30 and rsi_val > rsi_10d_ago and rsi_val > 35:
+            rsi_inflection = True
+
+    # 3) Bollinger squeeze + breakout
+    bb_squeeze = False
+    if bb["bandwidth_pct"] < 5:  # very narrow bands
+        bb_squeeze = close_price > bb["upper"] or close_price < bb["lower"]
+
+    # 4) Volume-shrinking pullback to MA20
+    vol_shrink_pullback = False
+    if vol_ratio < 0.8 and abs(close_price - ma20) / ma20 < 0.015:
+        vol_shrink_pullback = True
+
+    # ── Entry zone (enhanced with confirmation signals) ─────────────────
+    entry_signals = []
+    if volume_breakout:
+        entry_signals.append("放量突破")
+    if rsi_inflection:
+        entry_signals.append("RSI拐头")
+    if bb_squeeze:
+        entry_signals.append("布林变盘")
+    if vol_shrink_pullback:
+        entry_signals.append("缩量回踩")
+
     if trend_stage == "early":
-        entry_strategy = "immediate"
+        if volume_breakout:
+            entry_strategy = "immediate"
+            entry_detail = "趋势初期+放量突破确认，可立即入场" if not rsi_inflection else "趋势初期+放量+RSI拐头，强烈入场信号"
+        else:
+            entry_strategy = "immediate"
+            entry_detail = "趋势初期，可立即入场"
         entry_low = round(max(low_20, close_price * 0.97), 3)
         entry_high = round(min(ma20, close_price), 3)
-        entry_detail = "趋势初期，可立即入场"
     elif trend_stage == "mid":
-        entry_strategy = "pullback"
+        if vol_shrink_pullback:
+            entry_strategy = "pullback"
+            entry_detail = "缩量回踩MA20，加仓信号确认"
+        elif rsi_inflection:
+            entry_strategy = "pullback"
+            entry_detail = "RSI拐头+趋势中期，回调结束信号"
+        else:
+            entry_strategy = "pullback"
+            entry_detail = "趋势中期，等回踩均线入场"
         entry_low = round(ma20 * 0.98, 3)
         entry_high = round(min(ma20 * 1.02, close_price), 3)
-        entry_detail = "趋势中期，等回踩均线入场"
     elif trend_stage == "decline":
-        entry_strategy = "avoid"
+        if rsi_inflection:
+            entry_strategy = "watch"
+            entry_detail = "下跌趋势中RSI拐头，可能企稳，继续观察"
+        else:
+            entry_strategy = "avoid"
+            entry_detail = "下跌趋势，不建议入场，等待企稳信号"
         entry_low = round(low_20, 3)
         entry_high = round(close_price * 0.97, 3)
-        entry_detail = "下跌趋势，不建议入场，等待企稳信号"
     else:
         entry_strategy = "avoid"
         entry_low = round(low_20, 3)
@@ -661,32 +747,61 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
     tp1 = min(close_price + 2 * risk_amount, high_20)
     tp2 = min(close_price + 3 * risk_amount, high_20 * 1.05)
 
-    # Position sizing
-    base_pct = 20.0
-    cf = 1.2 if combined_score >= 80 else (1.0 if combined_score >= 65 else 0.8)
-    vf = 1.1 if volatility < 0.1 else (1.0 if volatility < 0.2 else 0.8)
-    position_pct = round(base_pct * cf * vf * regime_coef, 0)
-    position_reason = "三星+低波动" if score_stars >= 3 else (
-        "两星+中波动" if score_stars >= 2 else "一星+高波动"
-    )
+    # ── P2 #8: Kelly position sizing ────────────────────────────────────
+    f_val = 0.25  # half-Kelly default: 25% (assumes 55% win rate, 1.5:1 avg win/loss)
+    try:
+        win_rate = 0.55  # backtest baseline
+        avg_win_loss_ratio = 1.5
+        # f = (bp - q) / b, where b = avg_win_loss, p = win_rate, q = 1-p
+        kelly_f = (avg_win_loss_ratio * win_rate - (1 - win_rate)) / avg_win_loss_ratio
+        f_val = max(0.05, min(0.4, kelly_f / 2))  # half-Kelly, clamp 5%-40%
+    except ZeroDivisionError:
+        pass
 
-    # Timing hint
-    rsi_val = _rsi(closes, 14)
+    # Kelly-adjusted position
+    base_kelly_pct = f_val * 100  # 25%
+    score_mult = 1.2 if combined_score >= 80 else (1.0 if combined_score >= 65 else 0.8)
+    vol_mult = 1.1 if volatility < 0.1 else (1.0 if volatility < 0.2 else 0.8)
+    anti_martingale_mult = 1.2 if trend_stage == "early" else (1.0 if trend_stage == "mid" else 0.6)
+    position_pct = round(base_kelly_pct * score_mult * vol_mult * regime_coef * anti_martingale_mult, 0)
+    position_reason_parts = []
+    if f_val < 0.15:
+        position_reason_parts.append("半凯利")
+    if score_stars >= 3:
+        position_reason_parts.append("三星")
+    if volatility < 0.1:
+        position_reason_parts.append("低波动")
+    if anti_martingale_mult > 1.0:
+        position_reason_parts.append("反马丁格尔(早盘加仓)")
+    elif anti_martingale_mult < 1.0:
+        position_reason_parts.append("趋势弱/末缩减")
+    if regime_coef < 1.0:
+        position_reason_parts.append(f"市况系数{regime_coef}")
+    position_reason = "+".join(position_reason_parts) if position_reason_parts else "基准仓位"
+    kelly_detail = f"f={f_val:.2f}(半凯利)" if f_val != 0.25 else "默认凯利"
+
+    # Timing hint (enhanced with entry signals)
     if trend_stage == "early" and rsi_val < 55:
         timing_action = "immediate"
         timing_hint = "可立即入场，趋势刚启动"
+        if volume_breakout:
+            timing_hint = "放量突破确认，立即入场"
     elif trend_stage == "early":
         timing_action = "pullback"
         timing_hint = "关注回踩MA20入场机会"
     elif trend_stage == "mid" and rsi_val < 65:
         timing_action = "add"
         timing_hint = "持仓可加仓，注意仓位管理"
+        if vol_shrink_pullback:
+            timing_hint = "缩量回踩MA20，加仓时机"
     elif trend_stage == "mid":
         timing_action = "hold"
         timing_hint = "持仓不动，不加仓"
     elif trend_stage == "decline":
         timing_action = "exit"
         timing_hint = "趋势走坏，持币观望或减仓"
+        if rsi_inflection:
+            timing_hint = "RSI拐头可能止跌，密切观察"
     elif trend_stage == "late" and rsi_val >= 70:
         timing_action = "reduce"
         timing_hint = "减仓或设置跟踪止损"
@@ -700,6 +815,7 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
         },
         "entry_strategy": entry_strategy,
         "entry_detail": entry_detail,
+        "entry_signals": entry_signals,
         "stop_loss": {"price": round(stop_price, 3), "method": stop_method, "risk_pct": risk_pct},
         "targets": {
             "tp1": {"price": round(tp1, 3), "method": "2R", "pct": round((tp1 - close_price) / close_price * 100, 1)},
@@ -709,6 +825,7 @@ def build_trading_plan(code: str, name: str, kline: list, trend_stage: str,
             "pct": int(position_pct),
             "range": [int(max(10, position_pct - 4)), int(min(30, position_pct + 4))],
             "reason": position_reason,
+            "kelly_detail": kelly_detail,
             "regime_coef": regime_coef,
         },
         "timing": {"action": timing_action, "hint": timing_hint},
@@ -1553,40 +1670,150 @@ def build_excluded(scored_all: list[dict]) -> list[dict]:
     return excluded
 
 
-def build_sector_summary(combined: list[dict]) -> dict:
-    """Build sector-level strength summary."""
-    from collections import defaultdict
+# ── Sector rotation helpers (P2 #6) ──────────────────────────────────────
+
+
+def load_sector_history() -> dict:
+    """Load sector score history {records: [{date, sectors:{name:score}}]}."""
+    if SECTOR_HISTORY_CACHE.exists():
+        try:
+            return json.loads(SECTOR_HISTORY_CACHE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"records": []}
+    return {"records": []}
+
+
+def save_sector_history(sectors: dict[str, float]):
+    """Append today's sector scores to history."""
+    today = date.today().isoformat()
+    history = load_sector_history()
+    history.setdefault("records", [])
+    history["records"] = [r for r in history["records"] if r.get("date") != today]
+    history["records"].append({"date": today, "sectors": sectors})
+    if len(history["records"]) > 60:
+        history["records"] = history["records"][-60:]
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    SECTOR_HISTORY_CACHE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def compute_sector_momentum(sector: str, history_records: list[dict]) -> dict:
+    """Compute sector momentum: 5/10/20-day score trend."""
+    scores_by_date = []
+    for rec in history_records:
+        s = rec.get("sectors", {})
+        if sector in s:
+            scores_by_date.append((rec["date"], s[sector]))
+    if len(scores_by_date) < 2:
+        return {"delta_5d": 0, "delta_10d": 0, "delta_20d": 0, "direction": "flat"}
+    latest = scores_by_date[-1][1]
+    deltas = {}
+    for label, lookback in [("5d", 5), ("10d", 10), ("20d", 20)]:
+        idx = max(0, len(scores_by_date) - lookback - 1)
+        target = scores_by_date[idx][1] if idx < len(scores_by_date) else None
+        deltas[label] = round(latest - target, 1) if target is not None else 0
+    if deltas["5d"] > 3 and deltas["10d"] > 2:
+        direction = "rising"
+    elif deltas["5d"] < -3 and deltas["10d"] < -2:
+        direction = "falling"
+    elif deltas["5d"] > 0:
+        direction = "slight_up"
+    elif deltas["5d"] < 0:
+        direction = "slight_down"
+    else:
+        direction = "flat"
+    return {"delta_5d": deltas["5d"], "delta_10d": deltas["10d"],
+            "delta_20d": deltas["20d"], "direction": direction}
+
+
+def compute_sector_linkage(combined: list[dict], sector: str) -> dict:
+    """Compute ETF correlation strength within a sector."""
+    members = [c for c in combined if c.get("category", "其他") == sector]
+    if len(members) < 3:
+        return {"etf_count": len(members), "same_direction_ratio": 0, "signal": "insufficient"}
+    up_count = sum(1 for m in members if (m.get("combined_score") or 0) >= 50)
+    ratio = up_count / len(members)
+    if ratio >= 0.7:
+        signal = "strong_consensus"
+    elif ratio >= 0.5:
+        signal = "mixed"
+    elif ratio <= 0.3:
+        signal = "strong_divergence"
+    else:
+        signal = "weak_divergence"
+    return {"etf_count": len(members), "same_direction_ratio": round(ratio, 2), "signal": signal}
+
+
+def build_sector_summary(combined: list[dict], history_records: Optional[list] = None) -> dict:
+    """Build sector-level strength summary with P2 #6: momentum + linkage + top warning."""
     sector_scores: dict[str, list[float]] = defaultdict(list)
     for c in combined:
         cat = c.get("category", "其他")
         sector_scores[cat].append(c.get("combined_score") or 0)
 
     strong, neutral, weak = [], [], []
+    top_sector_name = None
+    top_sector_score = -1
+
     for sector, scores in sector_scores.items():
         avg = sum(scores) / len(scores) if scores else 0
+        entry = {"name": sector, "avg_score": round(avg, 1)}
+
+        # Sector momentum
+        if history_records:
+            entry["momentum"] = compute_sector_momentum(sector, history_records)
+
+        # Sector linkage
+        entry["linkage"] = compute_sector_linkage(combined, sector)
+
         if avg >= 60:
-            strong.append({"name": sector, "avg_score": round(avg, 1)})
+            strong.append(entry)
         elif avg >= 50:
-            neutral.append({"name": sector, "avg_score": round(avg, 1)})
+            neutral.append(entry)
         else:
-            weak.append({"name": sector, "avg_score": round(avg, 1)})
+            weak.append(entry)
+
+        if avg > top_sector_score:
+            top_sector_score = avg
+            top_sector_name = sector
+
+    strong.sort(key=lambda x: x["avg_score"], reverse=True)
+    neutral.sort(key=lambda x: x["avg_score"], reverse=True)
+    weak.sort(key=lambda x: x["avg_score"])
+
+    # Leading sector top warning
+    top_warning = None
+    if top_sector_name and history_records:
+        top_momentum = compute_sector_momentum(top_sector_name, history_records)
+        if top_momentum.get("delta_5d", 0) < -3 and top_momentum.get("delta_10d", 0) < -2:
+            top_warning = f"领先板块{top_sector_name}连续评分下降(delta_5d={top_momentum['delta_5d']:.1f})，关注调整风险"
 
     return {
-        "strong": sorted(strong, key=lambda x: x["avg_score"], reverse=True),
-        "neutral": sorted(neutral, key=lambda x: x["avg_score"], reverse=True),
-        "weak": sorted(weak, key=lambda x: x["avg_score"]),
+        "strong": strong,
+        "neutral": neutral,
+        "weak": weak,
+        "top_warning": top_warning,
     }
 
 
 def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dict[str, dict],
                  settings: dict, args: argparse.Namespace, elapsed: float,
-                 regime: Optional[dict] = None) -> dict:
+                 regime: Optional[dict] = None,
+                 sector_history: Optional[dict] = None) -> dict:
     """Build final JSON output."""
     if regime is None:
         regime = {"regime": "unknown", "coefficient": 1.0}
     combined = build_combined_ranking(phase1_ranked, phase2_results, settings,
                                       regime.get("coefficient", 1.0))
     combined = _cleanup_combined(combined)
+
+    history_records = sector_history.get("records", []) if sector_history else None
+
+    # Save today's sector scores for future momentum calculation
+    sector_scores_raw: dict[str, list[float]] = defaultdict(list)
+    for c in combined:
+        sector_scores_raw[c.get("category", "其他")].append(c.get("combined_score") or 0)
+    today_sectors = {s: round(sum(sc) / len(sc), 1) for s, sc in sector_scores_raw.items() if sc}
+    save_sector_history(today_sectors)
 
     valid_count = len(phase1_ranked)
     total_count = sum(len(c["etfs"]) for c in watchlist["categories"])
@@ -1605,7 +1832,7 @@ def build_output(watchlist: dict, phase1_ranked: list[dict], phase2_results: dic
         "combined_ranking": combined,
         "top_picks": build_top_picks(combined),
         "excluded": build_excluded(phase1_ranked),
-        "sector_summary": build_sector_summary(combined),
+        "sector_summary": build_sector_summary(combined, history_records),
     }
 
 
@@ -1648,6 +1875,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     hs300_kline = fetch_hs300_kline()
     regime = detect_market_regime(hs300_kline) if hs300_kline else {"regime": "unknown", "coefficient": 1.0}
 
+    # Load sector history for P2 #6 rotation tracking
+    sector_history = load_sector_history()
+
     # Phase 1
     _, phase1_ranked = run_phase1(watchlist, settings, args.focus)
 
@@ -1661,7 +1891,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     # Phase 3
     elapsed = time.time() - start
     output = build_output(watchlist, phase1_ranked, phase2_results, settings, args, elapsed,
-                          regime=regime)
+                          regime=regime, sector_history=sector_history)
 
     if args.output_html:
         report_path, report_html = generate_report(output)

@@ -64,6 +64,22 @@ def find_holding(holdings: list, code: str) -> Optional[dict]:
 
 def fetch_current_price(ts_code: str) -> Optional[float]:
     """Get latest close price via fetch_kline_eastmoney.py subprocess."""
+    kline = _fetch_kline(ts_code)
+    if kline:
+        return float(kline[-1].get("close", 0))
+    return None
+
+
+def fetch_kline_with_price(ts_code: str) -> tuple[Optional[float], Optional[list]]:
+    """Fetch kline data and return (current_price, kline_list)."""
+    kline = _fetch_kline(ts_code)
+    if kline:
+        return float(kline[-1].get("close", 0)), kline
+    return None, None
+
+
+def _fetch_kline(ts_code: str) -> Optional[list]:
+    """Fetch raw kline data from eastmoney."""
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             out_path = f.name
@@ -75,11 +91,8 @@ def fetch_current_price(ts_code: str) -> Optional[float]:
         with open(out_path, "r") as f:
             raw = json.load(f)
         os.unlink(out_path)
-        # fetch_kline_eastmoney.py -o wraps in {"meta":..., "data":[...]}
         records = raw if isinstance(raw, list) else raw.get("data", [])
-        if records:
-            return float(records[-1].get("close", 0))
-        return None
+        return records if records else None
     except Exception:
         return None
 
@@ -110,16 +123,45 @@ def calc_pnl(holding: dict, current_price: float) -> dict:
 
 
 def check_alerts(holdings: list[dict], settings: dict) -> list[dict]:
-    """Check all active holdings for stop-loss / target proximity alerts."""
+    """Check all active holdings for stop-loss / target proximity / time-stop / trailing-stop alerts.
+
+    P2 #5a: 移动止损 advisory (price up 5% → stop to MA20, up 10% → trailing 8%)
+    P2 #5b: 分批止盈 tp1/tp2 separate alerts with partial/full sell advice
+    P2 #5c: 时间止损 (hold > 90d + loss > 5%, hold > 30d + profit < 2%)
+    """
     alerts: list[dict] = []
     threshold = float(settings.get("alert_threshold_pct", 3.0))
+    today = date.today()
     for h in holdings:
         if h.get("status") != "active":
             continue
         code = h["code"]
-        current = fetch_current_price(code_to_ts_code(code))
+        ts_code = code_to_ts_code(code)
+        current, kline = fetch_kline_with_price(ts_code)
         if current is None:
             continue
+        buy_price = float(h.get("buy_price", 0))
+        pnl_pct = round((current - buy_price) / buy_price * 100, 2) if buy_price > 0 else 0.0
+        buy_date_str = h.get("buy_date", "")
+        hold_days = (today - date.fromisoformat(buy_date_str)).days if buy_date_str else 0
+
+        # ── 5c: 时间止损 ──────────────────────────────────────────────
+        if hold_days > 90 and pnl_pct < -5:
+            alerts.append({
+                "code": code, "name": h.get("name", ""),
+                "type": "time_stop",
+                "detail": f"持仓{hold_days}天浮亏{pnl_pct:.1f}%，时间成本过高，建议止损",
+                "severity": "warning",
+            })
+        elif hold_days > 30 and pnl_pct < 2:
+            alerts.append({
+                "code": code, "name": h.get("name", ""),
+                "type": "low_efficiency",
+                "detail": f"持仓{hold_days}天仅浮盈{pnl_pct:.1f}%，资金效率低下，关注机会成本",
+                "severity": "info",
+            })
+
+        # ── Static stop-loss ────────────────────────────────────────────
         sl = h.get("stop_loss")
         if sl:
             sl = float(sl)
@@ -130,16 +172,82 @@ def check_alerts(holdings: list[dict], settings: dict) -> list[dict]:
             elif dist_pct < threshold:
                 alerts.append({"code": code, "name": h.get("name", ""), "type": "stop_loss_approaching",
                                "detail": f"现价{current:.4f}距止损{sl:.4f}仅{dist_pct:.1f}%", "severity": "warning"})
+
+        # ── 5a: 移动止损 advisory (requires kline for MA20) ──────────
+        if kline and len(kline) >= 20 and buy_price > 0:
+            closes = [r["close"] for r in kline]
+            ma20 = sum(closes[-20:]) / 20
+            # Price up 5% from cost: suggest trailing stop to MA20
+            if current >= buy_price * 1.05:
+                trailing_ma = ma20
+                if current < trailing_ma:
+                    # Price already below trailing stop level → alert
+                    alerts.append({
+                        "code": code, "name": h.get("name", ""),
+                        "type": "trailing_stop_hit",
+                        "detail": f"盈利{pnl_pct:.1f}%但已跌破MA20{trailing_ma:.4f}，建议止盈",
+                        "severity": "warning",
+                    })
+                else:
+                    alerts.append({
+                        "code": code, "name": h.get("name", ""),
+                        "type": "trailing_stop_ready",
+                        "detail": f"盈利{pnl_pct:.1f}%，建议将止损上移至MA20({trailing_ma:.4f})",
+                        "severity": "info",
+                    })
+            # Price up 10% from cost: suggest trailing 8% from high
+            if current >= buy_price * 1.10:
+                high_since_buy = max(r.get("high", r["close"]) for r in kline)
+                trail_price = high_since_buy * 0.92
+                if current < trail_price:
+                    alerts.append({
+                        "code": code, "name": h.get("name", ""),
+                        "type": "profit_trailing_hit",
+                        "detail": f"最高回撤已超8%，建议止盈锁定利润",
+                        "severity": "warning",
+                    })
+                else:
+                    alerts.append({
+                        "code": code, "name": h.get("name", ""),
+                        "type": "profit_trailing_ready",
+                        "detail": f"盈利{pnl_pct:.1f}%超过10%，建议设置回撤8%止盈({trail_price:.4f})",
+                        "severity": "info",
+                    })
+
+        # ── 5b: 分批止盈 tp1/tp2 ─────────────────────────────────────
         targets = h.get("targets", [])
         if targets:
             t1 = float(targets[0]) if isinstance(targets[0], (int, float)) else float(targets[0])
-            dist_to_target = (t1 - current) / current * 100
-            if dist_to_target < threshold and dist_to_target > 0:
+            dist_to_t1 = (t1 - current) / current * 100
+            if current >= t1:
+                alerts.append({
+                    "code": code, "name": h.get("name", ""),
+                    "type": "tp1_hit",
+                    "detail": f"已到达目标1({t1:.4f})，建议卖出1/3仓位锁定利润",
+                    "severity": "info",
+                })
+                # Check tp2
+                if len(targets) >= 2:
+                    t2 = float(targets[1]) if isinstance(targets[1], (int, float)) else float(targets[1])
+                    if current >= t2:
+                        alerts.append({
+                            "code": code, "name": h.get("name", ""),
+                            "type": "tp2_hit",
+                            "detail": f"已到达目标2({t2:.4f})，建议全部卖出或移动止损持有",
+                            "severity": "success" if hasattr(str, "success") else "info",
+                        })
+                    else:
+                        dist_to_t2 = (t2 - current) / current * 100
+                        if dist_to_t2 < threshold:
+                            alerts.append({
+                                "code": code, "name": h.get("name", ""),
+                                "type": "tp2_approaching",
+                                "detail": f"距目标2({t2:.4f})仅{dist_to_t2:.1f}%，剩余仓位可继续持有",
+                                "severity": "info",
+                            })
+            elif dist_to_t1 < threshold and dist_to_t1 > 0:
                 alerts.append({"code": code, "name": h.get("name", ""), "type": "target_approaching",
-                               "detail": f"现价{current:.4f}距目标{t1:.4f}仅{dist_to_target:.1f}%", "severity": "info"})
-            elif current >= t1:
-                alerts.append({"code": code, "name": h.get("name", ""), "type": "target_hit",
-                               "detail": f"现价{current:.4f}已达目标{t1:.4f}", "severity": "info"})
+                               "detail": f"现价{current:.4f}距目标{t1:.4f}仅{dist_to_t1:.1f}%", "severity": "info"})
     return alerts
 
 
