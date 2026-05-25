@@ -968,6 +968,42 @@ def calc_atr(df, period=14):
     }
 
 
+# --- Volatility regime detection ---
+
+
+def _volatility_regime_multiplier(df, atr_pct=None):
+    """Detect volatility clustering for adaptive stop-loss ATR multiplier.
+
+    Returns adjustment to atr_mult:
+      expanding vol (ratio>1.2) → +0.5~+1.0  (avoid whipsaw)
+      contracting vol (ratio<0.8) → -0.3      (tighter stop)
+    """
+    if len(df) < 25:
+        return 0.0
+
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift(1)).abs(),
+        (df["low"] - df["close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+
+    recent_atr = tr.tail(5).mean()
+    medium_atr = tr.tail(20).mean()
+
+    if not medium_atr or medium_atr == 0:
+        return 0.0
+
+    vol_ratio = recent_atr / medium_atr
+    adj = 0.0
+
+    if vol_ratio > 1.2:
+        adj = min(1.0, (vol_ratio - 1.2) * 3.0)
+    elif vol_ratio < 0.8:
+        adj = -0.3
+
+    return round(adj, 1)
+
+
 # --- Max Drawdown ---
 
 
@@ -1011,7 +1047,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
     support_prices = [item["price"] for item in levels.get("support", []) if item["price"]]
     resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
 
-    # --- Adaptive stop-loss ---
+    # --- Adaptive stop-loss with volatility regime awareness ---
     # ATR multiplier: wider in bearish (avoid whipsaw), tighter in bullish low-vol
     if direction == "bearish":
         atr_mult = 2.5
@@ -1019,8 +1055,11 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
         atr_mult = 2.0
     else:
         atr_mult = 2.0
-    # Extra width for high volatility
-    if atr_pct > 3.0:
+    # Volatility regime adjustment (expanding → wider, contracting → tighter)
+    regime_adj = _volatility_regime_multiplier(df, atr_pct)
+    atr_mult += regime_adj
+    # Extra width for extreme volatility
+    if atr_pct > 4.0 and regime_adj < 0.5:
         atr_mult += 0.5
 
     if support_prices and atr:

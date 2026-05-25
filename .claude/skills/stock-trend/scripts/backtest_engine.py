@@ -38,6 +38,7 @@ import yaml
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
+CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 DEFAULT_WATCHLIST = SCRIPT_DIR / "watchlist.yaml"
 ASSETS_DIR = SKILL_DIR / "assets"
 
@@ -479,11 +480,37 @@ def _compute_summary(
         else:
             spread[f"window_{w}"] = None
 
+    # --- Strategy stats for Kelly feedback ---
+    primary_window = eval_windows[0]
+    all_top_rets = []
+    for pd in per_date_results:
+        for item in pd["top_n"]:
+            r = item["returns"].get(str(primary_window))
+            if r is not None:
+                all_top_rets.append(r)
+
+    strategy_stats = {"sample_count": 0}
+    if len(all_top_rets) >= 30:
+        wins = [r for r in all_top_rets if r > 0]
+        losses = [r for r in all_top_rets if r < 0]
+        win_rate = len(wins) / len(all_top_rets) if all_top_rets else 0
+        avg_win = sum(wins) / len(wins) if wins else 0
+        avg_loss = abs(sum(losses) / len(losses)) if losses else 0
+        strategy_stats = {
+            "win_rate": round(win_rate, 4),
+            "avg_win": round(avg_win, 6),
+            "avg_loss": round(avg_loss, 6),
+            "avg_win_loss_ratio": round(avg_win / avg_loss, 4) if avg_loss > 0 else 1.5,
+            "sample_count": len(all_top_rets),
+            "eval_window": primary_window,
+        }
+
     return {
         "ic_by_dimension": dim_ic_result,
         "hit_rate": hit_rate,
         "return_distribution": ret_dist,
         "top_vs_bottom_spread": spread,
+        "strategy_stats": strategy_stats,
     }
 
 
@@ -555,6 +582,7 @@ def main():
     parser.add_argument("--focus", help="只回测指定板块")
     parser.add_argument("--etf", help="只回测单只 ETF")
     parser.add_argument("--output", help="输出文件路径")
+    parser.add_argument("--cache-stats", action="store_true", help="将策略统计写入缓存供凯利公式使用")
     args = parser.parse_args()
 
     eval_windows = [int(w) for w in args.eval_windows.split(",")]
@@ -580,6 +608,21 @@ def main():
     else:
         sys.stdout.write(output)
         sys.stdout.write("\n")
+
+    # Cache strategy stats for Kelly formula feedback
+    if args.cache_stats and "summary" in result:
+        stats = result["summary"].get("strategy_stats", {})
+        if stats.get("sample_count", 0) >= 30:
+            stats_path = CACHE_DIR / "backtest_stats.json"
+            stats_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(stats_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "updated": datetime.now().isoformat(),
+                    "strategy_stats": stats,
+                }, f, indent=2, ensure_ascii=False)
+            print(f"Strategy stats cached to {stats_path}", file=sys.stderr)
+        else:
+            print("Insufficient samples for caching strategy stats", file=sys.stderr)
 
 
 if __name__ == "__main__":

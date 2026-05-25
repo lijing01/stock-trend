@@ -31,6 +31,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 DATA_DIR = SCRIPT_DIR.parent / "data"
 PORTFOLIO_PATH = Path(os.environ.get("STOCK_TREND_PORTFOLIO", str(DATA_DIR / "portfolio.yaml")))
 EXAMPLE_PATH = DATA_DIR / "portfolio.example.yaml"
+BACKTEST_STATS_CACHE = PROJECT_ROOT / ".cache" / "stock-trend" / "backtest_stats.json"
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────
@@ -397,20 +398,45 @@ def cash_ratio_suggestion(regime: str, total_value: float, total_cost: float) ->
 # ── Kelly position sizing (mirrors etf_scanner.py P2 #8) ──────────────────
 
 
+def _load_backtest_stats() -> dict:
+    """Load strategy stats from backtest cache, return empty dict if stale or missing."""
+    path = BACKTEST_STATS_CACHE
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        updated = data.get("updated", "")
+        if updated:
+            age = (datetime.now() - datetime.fromisoformat(updated)).days
+            if age > 7:
+                return {}
+        return data.get("strategy_stats", {})
+    except Exception:
+        return {}
+
+
 def calc_kelly_position_pct(
     combined_score: float,
     volatility: float,
     regime_coef: float,
     trend_stage: str = "mid",
+    stats_override: dict = None,
 ) -> dict:
     """Kelly-optimal position % for a single holding.
 
     Mirrors etf_scanner.py Phase 2 #8 logic:
       half-Kelly baseline f=25% → score/vol/regime/trend multipliers.
+
+    stats_override: backtest-derived win_rate and avg_win_loss_ratio.
     """
-    # Half-Kelly baseline
-    win_rate = 0.55
-    avg_win_loss = 1.5
+    # Use backtest stats if available and reliable (>=30 samples)
+    if stats_override and stats_override.get("sample_count", 0) >= 30:
+        win_rate = stats_override.get("win_rate", 0.55)
+        avg_win_loss = stats_override.get("avg_win_loss_ratio", 1.5)
+    else:
+        win_rate = 0.55
+        avg_win_loss = 1.5
     kelly_f = (avg_win_loss * win_rate - (1 - win_rate)) / avg_win_loss
     f_val = max(0.05, min(0.4, kelly_f / 2))
     base_kelly_pct = f_val * 100
@@ -471,6 +497,7 @@ def portfolio_kelly_analysis(
     if not holdings or total_value <= 0:
         return {"holdings": [], "summary": "no_data"}
 
+    stats = _load_backtest_stats()
     scan_map: dict[str, dict] = {}
     for r in scan_compare:
         if "code" in r:
@@ -505,7 +532,7 @@ def portfolio_kelly_analysis(
         else:
             trend = "late"
 
-        kelly = calc_kelly_position_pct(score, vol, regime_coef, trend)
+        kelly = calc_kelly_position_pct(score, vol, regime_coef, trend, stats_override=stats)
 
         diff = round(current_alloc_pct - kelly["kelly_pct"], 1)
         abs_diff_pct = abs(diff) / max(kelly["kelly_pct"], 1) * 100 if kelly["kelly_pct"] > 0 else 0

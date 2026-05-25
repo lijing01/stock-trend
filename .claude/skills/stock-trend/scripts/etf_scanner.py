@@ -962,7 +962,7 @@ def score_momentum(kline: list) -> float:
     ma60 = _ma(closes, 60)
     rsi_val = _rsi(closes, 14)
     macd_val = _macd_direction(closes)
-    _, trend_dir = _trend_strength(closes)
+    trend_strength, trend_dir = _trend_strength(closes)
 
     score = 50.0
     # --- MA alignment: symmetric ±15 ---
@@ -992,24 +992,29 @@ def score_momentum(kline: list) -> float:
 
     # --- Price extension: penalize overextended moves ---
     # Price far above MA20 = high risk of mean reversion /追涨陷阱
+    # ADX-aware: strong trend reduces penalty (trend is your friend)
     if ma20 > 0:
         deviation_pct = (closes[-1] - ma20) / ma20 * 100
+        is_strong_trend = trend_strength > 25 and trend_dir != 0
+        is_trend_up = is_strong_trend and trend_dir > 0
+        is_trend_down = is_strong_trend and trend_dir < 0
+
         if deviation_pct > 12:
-            score -= 20
+            score -= 5 if is_trend_up else 20
         elif deviation_pct > 8:
-            score -= 15
+            score -= 3 if is_trend_up else 15
         elif deviation_pct > 5:
-            score -= 8
+            score -= 2 if is_trend_up else 8
         elif deviation_pct > 3:
-            score -= 3
+            score -= 1 if is_trend_up else 3
         elif deviation_pct < -12:
-            score -= 20
+            score -= 5 if is_trend_down else 20
         elif deviation_pct < -8:
-            score -= 15
+            score -= 3 if is_trend_down else 15
         elif deviation_pct < -5:
-            score -= 8
+            score -= 2 if is_trend_down else 8
         elif deviation_pct < -3:
-            score -= 3
+            score -= 1 if is_trend_down else 3
 
     return max(0.0, min(100.0, score))
 
