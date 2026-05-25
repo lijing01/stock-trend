@@ -257,6 +257,16 @@ def build_context(args):
     elif favorable_rr is False:
         rr_display += " ✗"
 
+    # Three-tier R:R
+    rr_conservative = summary.get("rr_conservative")
+    rr_moderate = summary.get("rr_moderate") or rr_ratio
+    rr_aggressive = summary.get("rr_aggressive")
+
+    def fmt_rr(val):
+        if val is None:
+            return "—"
+        return str(val)
+
     # Monitor signals (use partial matching to handle "震荡偏多", "震荡偏空" etc.)
     monitor_signals = []
     dir_lower = direction.lower()
@@ -388,6 +398,12 @@ def build_context(args):
         "止损位": stop_loss,
         "目标位": target_display,
         "风险收益比": rr_display,
+        "保守目标价": target_conservative or "—",
+        "主目标价": target_moderate or "—",
+        "激进目标价": target_aggressive or "—",
+        "保守RR": fmt_rr(rr_conservative),
+        "主目标RR": fmt_rr(rr_moderate),
+        "激进RR": fmt_rr(rr_aggressive),
         "仓位建议": position_sizing,
         "最大回撤": f"{max_drawdown}%" if max_drawdown != "—" and max_drawdown is not None else "—",
         # Risks

@@ -998,27 +998,52 @@ def calc_max_drawdown(df):
 # --- Stop-loss and Risk:Reward ---
 
 
-def calc_risk_reward(df, atr_result, levels):
-    """Calculate stop-loss price and risk:reward ratio with three-tier targets."""
+def calc_risk_reward(df, atr_result, levels, direction="neutral"):
+    """Calculate stop-loss price and risk:reward ratio with three-tier targets.
+
+    Stop-loss uses adaptive ATR multiplier based on trend direction and volatility.
+    Position sizing factors in R:R quality and trend direction.
+    """
     curr_close = df["close"].iloc[-1]
     atr = atr_result.get("atr")
+    atr_pct = atr_result.get("atr_pct", 0)
 
-    # Stop-loss: max(nearest_support - 1*ATR, current - 2*ATR)
     support_prices = [item["price"] for item in levels.get("support", []) if item["price"]]
+    resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
+
+    # --- Adaptive stop-loss ---
+    # ATR multiplier: wider in bearish (avoid whipsaw), tighter in bullish low-vol
+    if direction == "bearish":
+        atr_mult = 2.5
+    elif direction == "bullish" and atr_pct < 2.0:
+        atr_mult = 2.0
+    else:
+        atr_mult = 2.0
+    # Extra width for high volatility
+    if atr_pct > 3.0:
+        atr_mult += 0.5
+
     if support_prices and atr:
         nearest_support = max(support_prices)
-        stop_loss = round(max(nearest_support - atr, curr_close - 2 * atr), 2)
+        atr_stop = curr_close - atr_mult * atr
+        # Take the higher of support level and ATR-based stop (don't go below support)
+        stop_loss = round(max(nearest_support, atr_stop), 2)
     elif support_prices:
         nearest_support = max(support_prices)
         stop_loss = round(nearest_support, 2)
     elif atr:
-        stop_loss = round(curr_close - 2 * atr, 2)
+        stop_loss = round(curr_close - atr_mult * atr, 2)
     else:
         stop_loss = None
 
-    # Three-tier target system
-    resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
+    # Stop-loss too close warning
+    stop_loss_warning = None
+    if stop_loss and curr_close > 0:
+        stop_pct = (curr_close - stop_loss) / curr_close
+        if stop_pct < 0.015:
+            stop_loss_warning = f"止损距现价仅{round(stop_pct*100, 1)}%，易被正常波动扫掉，建议放宽止损或等待更确认信号"
 
+    # --- Three-tier target system ---
     target_conservative = None
     target_moderate = None
     target_aggressive = None
@@ -1027,7 +1052,7 @@ def calc_risk_reward(df, atr_result, levels):
     risk = (curr_close - stop_loss) if stop_loss else None
 
     if resistance_prices:
-        # Conservative: nearest resistance (original behavior)
+        # Conservative: nearest resistance
         target_conservative = round(resistance_prices[0], 2)
 
         if risk and risk > 0:
@@ -1067,28 +1092,63 @@ def calc_risk_reward(df, atr_result, levels):
     # Primary target = moderate
     target = target_moderate
 
-    # R:R ratio based on moderate target
+    # --- R:R ratios for all three targets ---
     reward = (target - curr_close) if target else None
 
     rr_ratio = None
+    rr_conservative = None
+    rr_moderate = None
+    rr_aggressive = None
     favorable_rr = None
-    if risk and reward and risk > 0:
-        rr_ratio = round(reward / risk, 2)
-        favorable_rr = rr_ratio >= 1.5
 
-    if rr_ratio is not None and rr_ratio < 0.5 and not warning:
-        warning = f"风险收益比过低(R:R={rr_ratio})，支撑/压力位过近，参考价值有限"
+    if risk and risk > 0:
+        if target:
+            reward = target - curr_close
+            rr_ratio = round(reward / risk, 2)
+            favorable_rr = rr_ratio >= 1.5
+        if target_conservative:
+            rr_conservative = round((target_conservative - curr_close) / risk, 2)
+        if target_moderate:
+            rr_moderate = round((target_moderate - curr_close) / risk, 2)
+        if target_aggressive:
+            rr_aggressive = round((target_aggressive - curr_close) / risk, 2)
 
-    # Position sizing based on volatility
-    atr_pct = atr_result.get("atr_pct", 0)
+    # Combine warnings
+    if not warning:
+        if rr_ratio is not None and rr_ratio < 0.5:
+            warning = f"风险收益比过低(R:R={rr_ratio})，支撑/压力位过近，参考价值有限"
+        elif stop_loss_warning:
+            warning = stop_loss_warning
+
+    # --- Position sizing: ATR% + R:R quality + trend direction ---
+    POS_TIERS = ["轻仓(20-30%)", "半仓(40-50%)", "标准仓位(50-70%)", "可重仓(70-80%)"]
     if atr_pct > 4:
-        position = "轻仓(20-30%)"
+        base_tier = 0
     elif atr_pct > 2.5:
-        position = "半仓(40-50%)"
+        base_tier = 1
     elif atr_pct > 1.5:
-        position = "标准仓位(50-70%)"
+        base_tier = 2
     else:
-        position = "可重仓(70-80%)"
+        base_tier = 3
+
+    # R:R adjustment
+    if rr_ratio is not None:
+        if rr_ratio < 1.0:
+            rr_adj = -2
+        elif rr_ratio < 1.5:
+            rr_adj = -1
+        elif rr_ratio > 2.5:
+            rr_adj = 1
+        else:
+            rr_adj = 0
+    else:
+        rr_adj = 0
+
+    # Trend adjustment: bearish → reduce one tier
+    trend_adj = -1 if direction == "bearish" else 0
+
+    final_tier = max(0, min(3, base_tier + rr_adj + trend_adj))
+    position = POS_TIERS[final_tier]
 
     return {
         "stop_loss": stop_loss,
@@ -1097,10 +1157,14 @@ def calc_risk_reward(df, atr_result, levels):
         "target_aggressive": target_aggressive,
         "target": target,
         "risk_reward_ratio": rr_ratio,
+        "rr_conservative": rr_conservative,
+        "rr_moderate": rr_moderate,
+        "rr_aggressive": rr_aggressive,
         "favorable_rr": favorable_rr,
         "risk": round(risk, 2) if risk else 0,
         "reward": round(reward, 2) if reward else 0,
         "position_sizing": position,
+        "position_tier": final_tier,
         "warning": warning,
     }
 
@@ -1132,7 +1196,7 @@ def _calc_rsi_at(df, offset, period=14):
     return round(100 - 100 / (1 + rs), 1)
 
 
-def calc_entry_signals(df, indicator_results) -> dict:
+def calc_entry_signals(df, indicator_results, rr_ratio=None) -> dict:
     """Fuse multi-indicator signals into entry timing advice.
 
     Checks 4 confirmation signals:
@@ -1140,6 +1204,8 @@ def calc_entry_signals(df, indicator_results) -> dict:
     2. RSI inflection: RSI was < 30 5-10d ago, now > 35
     3. Bollinger squeeze breakout: bandwidth < 5% + close breaks band
     4. Volume-shrinking pullback: vol_ratio < 0.8 + close near MA20 (±1.5%)
+
+    Also considers R:R quality: R:R < 1.0 demotes verdict priority.
 
     Returns dict with signal_count, signals list, and verdict (ready/watch/wait/avoid).
     """
@@ -1213,6 +1279,14 @@ def calc_entry_signals(df, indicator_results) -> dict:
         verdict = "avoid"
     else:
         verdict = "wait"
+
+    # R:R filter: poor R:R demotes entry priority
+    if rr_ratio is not None and rr_ratio < 1.0:
+        if verdict == "ready":
+            verdict = "watch"
+            signals_found.append("R:R偏低(建议观望)")
+        elif verdict == "watch":
+            verdict = "wait"
 
     return {
         "signal_count": count,
@@ -1432,11 +1506,13 @@ def main():
         atr_pct=atr_result.get("atr_pct"),
     )
 
-    # Risk:Reward and stop-loss
-    risk_reward = calc_risk_reward(df, atr_result, levels)
-
-    # Summary
+    # Summary (need direction before risk_reward)
     summary = build_summary(indicator_results, patterns, data_points=len(df))
+    direction = summary.get("direction", "neutral")
+
+    # Risk:Reward and stop-loss (uses direction for adaptive stop)
+    risk_reward = calc_risk_reward(df, atr_result, levels, direction=direction)
+
     summary["support_levels"] = [item["price"] for item in levels["support"]]
     summary["resistance_levels"] = [item["price"] for item in levels["resistance"]]
     summary["stop_loss"] = risk_reward.get("stop_loss")
@@ -1445,13 +1521,18 @@ def main():
     summary["target_aggressive"] = risk_reward.get("target_aggressive")
     summary["target"] = risk_reward.get("target")
     summary["risk_reward_ratio"] = risk_reward.get("risk_reward_ratio")
+    summary["rr_conservative"] = risk_reward.get("rr_conservative")
+    summary["rr_moderate"] = risk_reward.get("rr_moderate")
+    summary["rr_aggressive"] = risk_reward.get("rr_aggressive")
     summary["favorable_rr"] = risk_reward.get("favorable_rr")
     summary["position_sizing"] = risk_reward.get("position_sizing")
+    summary["position_tier"] = risk_reward.get("position_tier")
     summary["risk_reward_warning"] = risk_reward.get("warning")
     summary["max_drawdown_pct"] = drawdown_result.get("max_drawdown_pct")
 
-    # Entry signal fusion
-    summary["entry_signals"] = calc_entry_signals(df, indicator_results)
+    # Entry signal fusion (with R:R filter)
+    rr_ratio = risk_reward.get("risk_reward_ratio")
+    summary["entry_signals"] = calc_entry_signals(df, indicator_results, rr_ratio=rr_ratio)
 
     # Latest data point
     last = df.iloc[-1]
