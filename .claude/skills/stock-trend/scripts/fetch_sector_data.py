@@ -170,20 +170,46 @@ def compute_hot_score(sector: dict) -> float:
     return round(change_score * 0.40 + capital_score * 0.30 + ratio_score * 0.30, 1)
 
 
-def rank_hot_sectors(rankings: dict, top_n: int = 10) -> list[dict]:
+def rank_hot_sectors(rankings: dict, top_n: int = 10,
+                     min_stocks: int = 8) -> list[dict]:
     """Rank sectors by composite hot score.
+
+    Filters out tiny sectors (fewer than min_stocks constituents),
+    then min-max normalizes scores to 0-100 range.
 
     Args:
         rankings: output from get_sector_rankings().
         top_n: number of top sectors to return.
+        min_stocks: minimum constituent stocks. 0 disables.
 
     Returns:
         Sorted list with score added to each sector dict.
     """
     sectors = rankings.get("sectors", [])
+
+    if min_stocks > 0:
+        before = len(sectors)
+        sectors = [
+            s for s in sectors
+            if (s.get("up_count", 0) + s.get("down_count", 0)) >= min_stocks
+        ]
+        dropped = before - len(sectors)
+
     for s in sectors:
         s["hot_score"] = compute_hot_score(s)
+
     sectors.sort(key=lambda x: x.get("hot_score", 0), reverse=True)
+
+    # Min-max normalize to 0-100 for consistent differentiation
+    if sectors:
+        scores = [s["hot_score"] for s in sectors]
+        lo, hi = min(scores), max(scores)
+        if hi > lo:
+            for s in sectors:
+                s["hot_score"] = round(
+                    (s["hot_score"] - lo) / (hi - lo) * 100, 1
+                )
+
     return sectors[:top_n]
 
 
@@ -311,13 +337,14 @@ def main():
     parser.add_argument("--stocks", type=str, help="获取板块成分股, 参数: BK代码")
     parser.add_argument("--list", action="store_true", help="列出所有板块")
     parser.add_argument("--top", type=int, default=10, help="排行数量")
+    parser.add_argument("--min-stocks", type=int, default=8, help="最小成分股数")
     parser.add_argument("-o", "--output", type=str, help="输出JSON文件")
 
     args = parser.parse_args()
 
     if args.rankings:
         rankings = get_sector_rankings()
-        hot = rank_hot_sectors(rankings, args.top)
+        hot = rank_hot_sectors(rankings, args.top, min_stocks=args.min_stocks)
         output = {
             "meta": rankings["meta"],
             "hot_sectors": hot,

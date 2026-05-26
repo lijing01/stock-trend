@@ -58,7 +58,7 @@ def scan_hot_sectors(top_n: int = 10) -> list[dict]:
     print(f"[Phase 1/3] Scanning top {top_n} hot sectors...")
     rankings = get_sector_rankings()
     total = rankings["meta"]["total_sectors"]
-    hot = rank_hot_sectors(rankings, top_n)
+    hot = rank_hot_sectors(rankings, top_n, min_stocks=8)
     print(f"  Scanned {total} sectors, top {len(hot)} hot sectors identified")
     return hot
 
@@ -97,6 +97,10 @@ def analyze_sector(sector: dict, leader_n: int = 3, core_n: int = 3) -> dict:
 
     leaders = filter_leaders(stocks, top_n=leader_n)
     cores = filter_core_stocks(stocks, top_n=core_n)
+
+    # Dedup: remove from cores any stock already in leaders
+    leader_codes = {s["code"] for s in leaders}
+    cores = [s for s in cores if s["code"] not in leader_codes]
 
     print(f"    {len(stocks)} stocks, {len(leaders)} leaders, {len(cores)} core")
     return {
@@ -252,11 +256,11 @@ def run_phase3(candidates: list[dict], roles: list[str],
 def _score_to_stars(score: float) -> str:
     if score is None:
         return "N/A"
-    if score >= 80:
+    if score >= 0.7:
         return "★★★"
-    if score >= 65:
+    if score >= 0.5:
         return "★★☆"
-    if score >= 50:
+    if score >= 0.3:
         return "★☆☆"
     return "☆☆☆"
 
@@ -273,6 +277,52 @@ def _signal_str(score: float) -> str:
     if score >= -2.0:
         return "↘"
     return "↓"
+
+
+def _fallback_score(stock: dict) -> dict:
+    """Compute basic score from Phase 2 data when pipeline unavailable.
+
+    Score range 0-1, matching pipeline composite_score convention.
+    """
+    change = stock.get("change_pct") or 0
+    amount = stock.get("amount") or 0
+
+    # change: -10% → 0, 0% → 0.5, +10% → 1.0
+    change_norm = max(0, min(1, (change + 10) / 20))
+    # amount: normalize relative to 10亿
+    amount_norm = max(0, min(1, amount / 1e9))
+
+    composite = round(change_norm * 0.6 + amount_norm * 0.4, 3)
+
+    if composite > 0.5:
+        direction = "偏多"
+        confidence = "低"
+    elif composite > 0.35:
+        direction = "震荡偏多"
+        confidence = "低"
+    elif composite > 0.2:
+        direction = "震荡偏空"
+        confidence = "低"
+    else:
+        direction = "偏空"
+        confidence = "低"
+
+    return {
+        "composite_score": composite,
+        "direction": direction,
+        "confidence": confidence,
+        "dimension_scores": {
+            "technical": round(change_norm, 2),
+            "capital_flow": 0,
+            "fundamental": 0,
+            "sentiment": 0,
+            "macro": 0,
+        },
+        "risks": ["深度分析数据获取失败, 使用基础评分"],
+        "stop_loss": None,
+        "targets": {},
+        "trend_stage": None,
+    }
 
 
 def generate_report(output: dict, compact: bool = False) -> str:
@@ -441,7 +491,8 @@ def main():
         matched = [s for s in rankings["sectors"] if s["code"] == sector["code"]]
         if matched:
             hot_sectors = rank_hot_sectors(
-                {"meta": rankings["meta"], "sectors": matched}, 1
+                {"meta": rankings["meta"], "sectors": matched}, 1,
+                min_stocks=0  # skip filter, user explicitly requested
             )
         else:
             hot_sectors[0]["hot_score"] = 50
@@ -472,6 +523,14 @@ def main():
     pipeline_results = {}
     if candidates:
         pipeline_results = run_phase3(candidates, roles, max_workers=4)
+
+    # Fallback: Phase 2 data when pipeline yields no score
+    for sec in sectors_analyzed:
+        for s in sec.get("leaders", []) + sec.get("core_stocks", []):
+            da = pipeline_results.get(s["code"], {})
+            if da.get("composite_score") is None:
+                pipeline_results[s["code"]] = _fallback_score(s)
+
     output["pipeline_summary"] = pipeline_results
 
     # Attach deep analysis to each sector
