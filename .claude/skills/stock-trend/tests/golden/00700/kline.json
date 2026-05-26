@@ -4,8 +4,8 @@
     "asset": "E",
     "freq": "D",
     "adj": "none",
-    "record_count": 250,
-    "data_points": 250,
+    "record_count": 251,
+    "data_points": 251,
     "data_source": "tencent_hk",
     "warnings": []
   },
@@ -3006,6 +3006,18 @@
       "amount": 0,
       "pre_close": 439.0,
       "pct_chg": 0.5467,
+      "ts_code": "00700.HK"
+    },
+    {
+      "trade_date": "20260526",
+      "open": 438.0,
+      "close": 438.4,
+      "high": 441.0,
+      "low": 432.0,
+      "vol": 17731978.0,
+      "amount": 0,
+      "pre_close": 441.4,
+      "pct_chg": -0.6797,
       "ts_code": "00700.HK"
     }
   ]

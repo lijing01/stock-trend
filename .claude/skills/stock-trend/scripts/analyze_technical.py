@@ -1075,6 +1075,14 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
     else:
         stop_loss = None
 
+    # Guard: stop_loss must stay below current price
+    # (support level rounding can push it above for low-price ETFs)
+    if stop_loss and stop_loss >= curr_close:
+        if atr:
+            stop_loss = round(curr_close - atr_mult * atr, 2)
+        else:
+            stop_loss = round(curr_close * 0.99, 2)
+
     # Stop-loss too close warning
     stop_loss_warning = None
     if stop_loss and curr_close > 0:

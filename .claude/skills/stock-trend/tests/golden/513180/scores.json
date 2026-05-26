@@ -1,7 +1,7 @@
 {
   "scores": {
-    "technical": -0.19,
-    "capital_flow": -1.5,
+    "technical": -0.39,
+    "capital_flow": -0.75,
     "fundamental": 0,
     "sentiment": 0,
     "macro": 1
@@ -13,25 +13,31 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": -0.341,
+  "composite_score": -0.224,
   "direction": "震荡偏空",
   "direction_detail": "震荡",
   "direction_modifier": "偏空",
   "confidence": "低",
   "consistency": 0.25,
   "risks": [
-    "RSI=44.7，中性区间；顶背离",
-    "OBV在20日均线下方，资金净流出"
+    "空头排列",
+    "RSI=45.8，中性区间；顶背离"
   ],
   "special": {
     "type": "etf",
     "title": "ETF 特殊分析",
-    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: +2.00%（溢价）；最新净值: 0.6107"
+    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: +1.83%（溢价）；最新净值: 0.6231"
   },
   "data_quality": "good",
   "automated_sources": {
     "macro": "good",
-    "capital_flow_iopv": 1.9977
+    "capital_flow_iopv": 1.8296,
+    "iopv_enhanced": {
+      "absolute": -1.5,
+      "percentile": 0.0,
+      "trend": 0.0,
+      "shares_linkage": 0.0
+    }
   },
   "validation_warnings": [],
   "confidence_penalty": 1.0,
@@ -44,25 +50,33 @@
   "analysis": null,
   "report_params": {
     "direction": "震荡偏空",
-    "score": -0.341,
+    "score": -0.224,
     "confidence": "低",
     "ts_code": "513180.SH",
     "stop_loss": 0.6,
-    "target_conservative": 0.62,
-    "target_moderate": 0.67,
-    "target_aggressive": 0.7,
-    "risk_reward_ratio": 2.89,
+    "target_conservative": 0.63,
+    "target_moderate": 0.68,
+    "target_aggressive": 0.72,
+    "risk_reward_ratio": 1.86,
+    "rr_conservative": 0.07,
+    "rr_moderate": 1.86,
+    "rr_aggressive": 3.29,
     "favorable_rr": true,
     "position_sizing": "标准仓位(50-70%)",
-    "max_drawdown_pct": -23.18,
+    "position_tier": 2,
+    "max_drawdown_pct": -31.51,
     "support_levels": [
-      0.616
+      0.626,
+      0.604
     ],
     "resistance_levels": [
-      0.62,
-      0.642,
-      0.667,
-      0.6955
-    ]
+      0.629,
+      0.652,
+      0.677,
+      0.7183
+    ],
+    "entry_verdict": "wait",
+    "entry_signals": [],
+    "entry_signal_count": 0
   }
 }

@@ -1,8 +1,8 @@
 {
   "meta": {
     "ts_code": "513180.SH",
-    "analysis_date": "20260523",
-    "data_points": 118,
+    "analysis_date": "20260526",
+    "data_points": 243,
     "indicators_computed": [
       "ma",
       "macd",
@@ -15,26 +15,26 @@
     ]
   },
   "latest": {
-    "date": "20260522",
-    "close": 0.618,
+    "date": "20260526",
+    "close": 0.628,
     "ma": {
       "values": {
-        "ma5": 0.62,
-        "ma10": 0.63,
-        "ma20": 0.63,
-        "ma60": 0.64
+        "ma5": 0.6184,
+        "ma10": 0.625,
+        "ma20": 0.6312,
+        "ma60": 0.6331
       },
-      "alignment": "mixed",
+      "alignment": "bearish",
       "signal": {
-        "type": "mixed",
-        "description": "均线缠绕，方向不明",
-        "score": 0
+        "type": "bearish_align",
+        "description": "空头排列",
+        "score": -2
       }
     },
     "macd": {
-      "dif": -0.0046,
-      "dea": -0.0017,
-      "histogram": -0.0058,
+      "dif": -0.0044,
+      "dea": -0.0028,
+      "histogram": -0.0033,
       "signal": {
         "type": "neutral",
         "description": "绿柱缩窄",
@@ -42,121 +42,131 @@
       }
     },
     "rsi": {
-      "rsi14": 44.68,
+      "rsi14": 45.83,
       "signal": {
         "type": "neutral",
-        "description": "RSI=44.7，中性区间；顶背离",
+        "description": "RSI=45.8，中性区间；顶背离",
         "score": -2
       }
     },
     "kdj": {
-      "k": 17.25,
-      "d": 26.84,
-      "j": -1.91,
+      "k": 23.04,
+      "d": 23.4,
+      "j": 22.32,
       "signal": {
         "type": "neutral",
-        "description": "超卖区",
-        "score": 1
+        "description": "KDJ中性区域(K=23.0,D=23.4,J=22.3)",
+        "score": 0
       }
     },
     "bollinger": {
-      "upper": 0.659,
-      "middle": 0.6322,
-      "lower": 0.6054,
+      "upper": 0.6586,
+      "middle": 0.6312,
+      "lower": 0.6039,
       "signal": {
         "type": "middle_support",
-        "description": "中轨下方运行；布林带收口(35%分位)",
+        "description": "中轨下方运行",
         "score": 0
       }
     },
     "volume": {
-      "vol": 59697743.0,
-      "vol_ma20": 65485380.0,
-      "vol_ratio": 0.91,
+      "vol": 64330501.0,
+      "vol_ma20": 64595162.0,
+      "vol_ratio": 1.0,
       "signal": {
         "type": "neutral",
-        "description": "量价中性(量比0.91)",
+        "description": "量价中性(量比1.00)",
         "score": 0
       }
     },
     "adx": {
-      "adx": 8.51,
-      "plus_di": 23.56,
-      "minus_di": 25.65,
+      "adx": 7.11,
+      "plus_di": 24.06,
+      "minus_di": 24.6,
       "signal": {
         "type": "trend_strength",
-        "description": "ADX=8.5，震荡市",
+        "description": "ADX=7.1，震荡市",
         "score": 0
       }
     },
     "obv": {
-      "obv": -451820640.0,
+      "obv": 80121999.0,
       "signal": {
         "type": "money_flow",
-        "description": "OBV在20日均线下方，资金净流出",
-        "score": -1
+        "description": "OBV在20日均线上方，资金净流入",
+        "score": 1
       }
     },
     "atr": {
-      "atr": 0.0136,
-      "atr_pct": 2.21,
+      "atr": 0.0134,
+      "atr_pct": 2.13,
       "volatility_level": "normal",
       "signal": {
         "type": "volatility",
-        "description": "ATR=0.01(2.2%)，正常波动",
+        "description": "ATR=0.01(2.1%)，正常波动",
         "score": 0
       }
     },
     "max_drawdown": {
-      "max_drawdown_pct": -23.18,
-      "drawdown_days": 51
+      "max_drawdown_pct": -31.51,
+      "drawdown_days": 119
     }
   },
   "patterns": [],
   "summary": {
-    "total_score": -0.19,
+    "total_score": -0.39,
     "direction": "neutral",
     "confidence": "low",
     "consistency": 0.25,
     "key_signals": [
-      "均线缠绕，方向不明",
+      "空头排列",
       "绿柱缩窄",
-      "RSI=44.7，中性区间；顶背离",
-      "超卖区",
-      "中轨下方运行；布林带收口(35%分位)",
-      "量价中性(量比0.91)",
-      "ADX=8.5，震荡市",
-      "OBV在20日均线下方，资金净流出"
+      "RSI=45.8，中性区间；顶背离",
+      "KDJ中性区域(K=23.0,D=23.4,J=22.3)",
+      "中轨下方运行",
+      "量价中性(量比1.00)",
+      "ADX=7.1，震荡市",
+      "OBV在20日均线上方，资金净流入"
     ],
     "data_quality": "good",
     "dimension_scores": {
-      "ma": 0,
+      "ma": -2,
       "macd": 0,
       "rsi": -2,
-      "kdj": 1,
+      "kdj": 0,
       "bollinger": 0,
       "volume": 0,
       "adx": 0,
-      "obv": -1
+      "obv": 1
     },
     "support_levels": [
-      0.616
+      0.626,
+      0.604
     ],
     "resistance_levels": [
-      0.62,
-      0.642,
-      0.667,
-      0.6955
+      0.629,
+      0.652,
+      0.677,
+      0.7183
     ],
     "stop_loss": 0.6,
-    "target_conservative": 0.62,
-    "target_moderate": 0.67,
-    "target_aggressive": 0.7,
-    "target": 0.67,
-    "risk_reward_ratio": 2.89,
+    "target_conservative": 0.63,
+    "target_moderate": 0.68,
+    "target_aggressive": 0.72,
+    "target": 0.68,
+    "risk_reward_ratio": 1.86,
+    "rr_conservative": 0.07,
+    "rr_moderate": 1.86,
+    "rr_aggressive": 3.29,
     "favorable_rr": true,
     "position_sizing": "标准仓位(50-70%)",
+    "position_tier": 2,
     "risk_reward_warning": null,
-    "max_drawdown_pct": -23.18
+    "max_drawdown_pct": -31.51,
+    "entry_signals": {
+      "signal_count": 0,
+      "signals": [],
+      "verdict": "wait"
+    }
   }
 }

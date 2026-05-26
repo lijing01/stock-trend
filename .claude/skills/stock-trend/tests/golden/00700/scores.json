@@ -1,6 +1,6 @@
 {
   "scores": {
-    "technical": -0.63,
+    "technical": -0.74,
     "capital_flow": 0,
     "fundamental": 0,
     "sentiment": 0,
@@ -13,16 +13,18 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": -0.12,
+  "composite_score": -0.159,
   "direction": "震荡偏空",
   "direction_detail": "震荡",
   "direction_modifier": "偏空",
   "confidence": "低",
-  "consistency": 0.5,
+  "consistency": 0.62,
   "risks": [
     "空头排列",
+    "缩量下跌(量比0.60)",
     "ADX=43.3，强趋势；-DI>+DI确认空头",
-    "OBV在20日均线下方，资金净流出"
+    "OBV在20日均线下方，资金净流出",
+    "止损距现价仅0.4%，易被正常波动扫掉，建议放宽止损或等待更确认信号"
   ],
   "special": null,
   "data_quality": "good",
@@ -41,30 +43,37 @@
   "analysis": null,
   "report_params": {
     "direction": "震荡偏空",
-    "score": -0.12,
+    "score": -0.159,
     "confidence": "低",
     "ts_code": "00700.HK",
-    "stop_loss": 426.07,
-    "target_conservative": 445.0,
-    "target_moderate": 464.77,
-    "target_aggressive": 491.0,
-    "risk_reward_ratio": 1.52,
+    "stop_loss": 436.54,
+    "target_conservative": 441.0,
+    "target_moderate": 462.02,
+    "target_aggressive": 487.5,
+    "risk_reward_ratio": 12.7,
+    "rr_conservative": 1.4,
+    "rr_moderate": 12.7,
+    "rr_aggressive": 26.4,
     "favorable_rr": true,
-    "position_sizing": "半仓(40-50%)",
-    "max_drawdown_pct": -35.2,
+    "position_sizing": "标准仓位(50-70%)",
+    "position_tier": 2,
+    "max_drawdown_pct": -35.29,
     "support_levels": [
-      438.8,
+      436.5394,
       190,
       180,
       170,
       160
     ],
     "resistance_levels": [
-      445.0,
-      464.77,
-      491.0,
-      514.5,
-      538.7
-    ]
+      441.0,
+      462.02,
+      487.5006,
+      511.074,
+      535.5
+    ],
+    "entry_verdict": "wait",
+    "entry_signals": [],
+    "entry_signal_count": 0
   }
 }
