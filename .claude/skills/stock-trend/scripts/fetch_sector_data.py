@@ -26,7 +26,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ──────────────────────── East Money API Helpers ────────────────────────
 
 
-def _fetch_json(url: str, timeout: int = 15, retries: int = 2) -> dict:
+import random as _random
+
+
+def _fetch_json(url: str, timeout: int = 15, retries: int = 3) -> dict:
     """Fetch JSON from East Money API with host rotation and no-proxy fallback."""
     last_error = None
     for attempt in range(retries + 1):
@@ -52,7 +55,9 @@ def _fetch_json(url: str, timeout: int = 15, retries: int = 2) -> dict:
                 except Exception:
                     pass  # fall through to retry + host rotation
             if attempt < retries:
-                time.sleep(1 * (attempt + 1))
+                # Exponential backoff with random jitter: 1.5^attempt * (1-2s)
+                sleep_sec = 1.5 ** attempt + _random.uniform(0.5, 1.5)
+                time.sleep(sleep_sec)
     raise RuntimeError(f"东方财富API请求失败(重试{retries}次): {last_error}")
 
 
@@ -77,7 +82,10 @@ def get_sector_list() -> list[dict]:
     today = datetime.now().strftime("%Y%m%d")
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
 
-    for stype, sname in [("2", "industry"), ("3", "concept")]:
+    for idx, (stype, sname) in enumerate([("2", "industry"), ("3", "concept")]):
+        # Stagger concurrent requests to avoid rate limiting
+        if idx > 0:
+            time.sleep(_random.uniform(0.3, 0.8))
         url = (
             f"{base_url}?fs=m:90+t:{stype}&fields=f12,f14"
             f"&pn=1&pz=500&po=0&np=1&fltt=2"
@@ -111,7 +119,10 @@ def get_sector_rankings() -> dict:
     today = datetime.now().strftime("%Y%m%d")
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
 
-    for stype, sname in [("2", "industry"), ("3", "concept")]:
+    for idx, (stype, sname) in enumerate([("2", "industry"), ("3", "concept")]):
+        # Stagger concurrent requests to avoid rate limiting
+        if idx > 0:
+            time.sleep(_random.uniform(0.3, 0.8))
         # f2=最新价, f3=涨跌幅, f4=涨跌额, f8=换手率/成交额,
         # f12=代码, f14=名称, f20=总市值,
         # f104=涨家数, f105=跌家数, f62=主力净流入
