@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from eastmoney_utils import EM_HEADERS, rotate_em_host
+from eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -27,25 +27,30 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def _fetch_json(url: str, timeout: int = 15, retries: int = 2) -> dict:
-    """Fetch JSON from East Money API with retry and no-proxy fallback."""
+    """Fetch JSON from East Money API with host rotation and no-proxy fallback."""
     last_error = None
     for attempt in range(retries + 1):
+        host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
+        actual_url = url
+        if host != "push2.eastmoney.com":
+            actual_url = url.replace("https://push2.eastmoney.com",
+                                     f"https://{host}", 1)
         try:
-            req = urllib.request.Request(url, headers=EM_HEADERS)
+            req = urllib.request.Request(actual_url, headers=EM_HEADERS)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             last_error = e
-            # Try without proxy (corporate proxy often blocks East Money)
+            # Try without proxy on first attempt (corporate proxy often blocks)
             if attempt == 0:
                 try:
                     proxyless = urllib.request.ProxyHandler({})
                     opener = urllib.request.build_opener(proxyless)
-                    req = urllib.request.Request(url, headers=EM_HEADERS)
+                    req = urllib.request.Request(actual_url, headers=EM_HEADERS)
                     with opener.open(req, timeout=timeout) as resp:
                         return json.loads(resp.read().decode("utf-8"))
                 except Exception:
-                    pass  # fall through to retry
+                    pass  # fall through to retry + host rotation
             if attempt < retries:
                 time.sleep(1 * (attempt + 1))
     raise RuntimeError(f"东方财富API请求失败(重试{retries}次): {last_error}")

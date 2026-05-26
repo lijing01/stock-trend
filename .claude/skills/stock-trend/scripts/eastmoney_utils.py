@@ -11,6 +11,12 @@ EM_API_HOSTS = [
     "48.push2his.eastmoney.com",
 ]
 
+EM_PUSH2_HOSTS = [
+    "push2.eastmoney.com",
+    "38.push2.eastmoney.com",
+    "48.push2.eastmoney.com",
+]
+
 EM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://quote.eastmoney.com/",
