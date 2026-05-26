@@ -32,6 +32,7 @@ allowed-tools:
   - mcp__web-search__bing_search
   - mcp__web-search__crawl_webpage
   - Bash(open *)
+  - Bash(open -a "Google Chrome" *)
 ---
 
 # 股票趋势判断 Skill
@@ -203,14 +204,15 @@ Top10 平均收益: 5日 +1.2%, 10日 +1.8%, 20日 +2.5%
 参数：
 - `--top N`    热点板块数量，默认 10
 - `--sector <板块名>`  只分析指定板块（如"半导体"），跳过板块扫描
-- `--compact`  精简输出
+- `--compact`  精简输出（跳过 HTML 生成）
+- `--no-html`  跳过 HTML 报告生成
 
 ### /longtou 执行步骤
 
 1. **运行扫描脚本**
 
 ```bash
-python3 .claude/skills/stock-trend/scripts/market_leader.py [--top N] [--sector <板块名>] [--compact] [--output-html]
+python3 .claude/skills/stock-trend/scripts/market_leader.py [--top N] [--sector <板块名>] [--compact] --output-html
 ```
 
 脚本执行三阶段：
@@ -220,9 +222,17 @@ python3 .claude/skills/stock-trend/scripts/market_leader.py [--top N] [--sector 
   - 中军筛选：市值(40%) + PE合理性(40%) + 走势稳定性(20%)
 - Phase 3（深度分析）：对候选标的调 run_pipeline + compute_scores，获取综合评分
 
-配合 `--output-html` 生成 HTML 报告到 `reports/lists/longtou-{时间}.html`。
+默认生成 HTML 报告到 `reports/lists/longtou-{时间}.html`（`--compact` 或 `--no-html` 跳过）。
 
-2. **解析输出并呈现结果**
+2. **打开 HTML 报告**
+
+```bash
+open -a "Google Chrome" reports/lists/longtou-{时间}.html
+```
+
+> 用 Chrome 打开 HTML 报告。跳过条件：`--compact` 或 `--no-html`。
+
+3. **解析输出并呈现结果**
 
 脚本输出包含两部分：结构化 JSON（`<!--JSON_OUTPUT-->` 注释包裹）和 Markdown 报告。
 
@@ -263,7 +273,7 @@ python3 .claude/skills/stock-trend/scripts/market_leader.py [--top N] [--sector 
 ...
 ```
 
-3. **补充分析**（可选）
+4. **补充分析**（可选）
 
 对 `best_picks` 中 Top 3 标的，可补充搜索消息面信息（政策/行业新闻）增强研判：
 
@@ -271,7 +281,7 @@ python3 .claude/skills/stock-trend/scripts/market_leader.py [--top N] [--sector 
 WebSearch("北方华创 半导体设备 2026年5月 政策")
 ```
 
-4. **综合研判**
+5. **综合研判**
 
 基于 pipeline 评分和搜索信息，给出最终建议。信号方向映射同 `/stock-trend`（≥ +2.0 看多，≤ -2.0 看空）。
 
