@@ -798,7 +798,7 @@ def scan_patterns(df, lookback=10):
 # --- Support/Resistance levels ---
 
 
-def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None):
+def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_value=None):
     """Calculate key support and resistance levels with strength ranking.
 
     Args:
@@ -889,9 +889,17 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None):
     for direction in ["support", "resistance"]:
         if not levels[direction]:
             continue
-        # Dynamic clustering threshold: max(0.5%, 1.5 * ATR%)
-        # For low-priced ETFs, ATR-based threshold avoids over-clustering
-        cluster_threshold = max(0.005, 1.5 * (atr_pct or 0) / 100) if atr_pct else 0.005
+        # Dynamic clustering threshold: adapt to market regime via ADX
+        # Trending (ADX>=25): relaxed, transition (ADX 20-25): moderate, ranging (ADX<20): tight
+        if adx_value is not None:
+            if adx_value >= 25:
+                cluster_threshold = max(0.005, 2.0 * (atr_pct or 0) / 100) if atr_pct else 0.005
+            elif adx_value >= 20:
+                cluster_threshold = max(0.003, 1.0 * (atr_pct or 0) / 100) if atr_pct else 0.003
+            else:
+                cluster_threshold = max(0.0015, 0.4 * (atr_pct or 0) / 100) if atr_pct else 0.0015
+        else:
+            cluster_threshold = max(0.005, 1.5 * (atr_pct or 0) / 100) if atr_pct else 0.005
         sorted_items = sorted(levels[direction], key=lambda x: x["price"], reverse=(direction == "support"))
         clustered = []
         for item in sorted_items:
@@ -1562,6 +1570,7 @@ def main():
         indicator_results.get("ma", {}),
         indicator_results.get("bollinger", {}),
         atr_pct=atr_result.get("atr_pct"),
+        adx_value=indicator_results.get("adx", {}).get("adx"),
     )
 
     # Summary (need direction before risk_reward)
