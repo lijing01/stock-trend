@@ -1,7 +1,7 @@
 {
   "scores": {
     "technical": -0.39,
-    "capital_flow": -0.75,
+    "capital_flow": 0.08,
     "fundamental": 0,
     "sentiment": 0,
     "macro": 1
@@ -13,7 +13,7 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": -0.224,
+  "composite_score": -0.016,
   "direction": "震荡偏空",
   "direction_detail": "震荡",
   "direction_modifier": "偏空",
@@ -26,14 +26,14 @@
   "special": {
     "type": "etf",
     "title": "ETF 特殊分析",
-    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: +1.83%（溢价）；最新净值: 0.6231"
+    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: -0.02%（折价）；最新净值: 0.6327"
   },
   "data_quality": "good",
   "automated_sources": {
     "macro": "good",
-    "capital_flow_iopv": 1.8296,
+    "capital_flow_iopv": -0.0158,
     "iopv_enhanced": {
-      "absolute": -1.5,
+      "absolute": 0.16,
       "percentile": 0.0,
       "trend": 0.0,
       "shares_linkage": 0.0
@@ -50,7 +50,7 @@
   "analysis": null,
   "report_params": {
     "direction": "震荡偏空",
-    "score": -0.224,
+    "score": -0.016,
     "confidence": "低",
     "ts_code": "513180.SH",
     "stop_loss": 0.6,

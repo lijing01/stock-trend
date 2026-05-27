@@ -9,12 +9,12 @@
   "tracking_index": "513180",
   "fund_type": "ETF",
   "nav": {
-    "nav": 0.6231,
-    "nav_date": "2026-05-25",
-    "iopv": 0.6345,
-    "iopv_time": "2026-05-26 11:14",
-    "iopv_chg_pct": 1.83,
-    "iopv_premium_pct": 1.8296
+    "nav": 0.6327,
+    "nav_date": "2026-05-26",
+    "iopv": 0.6326,
+    "iopv_time": "2026-05-27 11:19",
+    "iopv_chg_pct": -0.02,
+    "iopv_premium_pct": -0.0158
   },
   "errors": null
 }
