@@ -860,6 +860,36 @@ def _generate_html_report(output: dict, markdown: str) -> str:
     for r in risk_tips:
         risks_html += f"<li>{r}</li>\n"
 
+    # Sector ranking table
+    rank_rows = ""
+    for i, sec in enumerate(sectors, 1):
+        name = sec.get("name", "?")
+        hot = sec.get("hot_score", 0)
+        change = sec.get("change_pct", 0)
+        mf = sec.get("main_force_net", 0)
+        mf_str = f"{mf/1e8:.1f}亿" if mf else "N/A"
+        up = sec.get("up_count", "?")
+        dn = sec.get("down_count", "?")
+        total = sec.get("total_count", "?")
+        rank_rows += (
+            f"<tr>"
+            f"<td>{i}</td>"
+            f"<td>{name}</td>"
+            f"<td>{hot:.0f}</td>"
+            f"<td class=\"{'sp' if change > 0 else 'sn' if change < 0 else 'neut'}\">{change:+.1f}%</td>"
+            f"<td>{mf_str}</td>"
+            f"<td>{up}/{dn}/{total}</td>"
+            f"</tr>"
+        )
+
+    rank_table = f"""<div class="rank">
+    <h2>板块热度排名</h2>
+    <table>
+        <thead><tr><th>#</th><th>板块</th><th>热度</th><th>涨幅</th><th>主力净流入</th><th>涨/跌/总</th></tr></thead>
+        <tbody>{rank_rows}</tbody>
+    </table>
+    </div>"""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -887,12 +917,12 @@ tr:nth-child(even) td{{background:#f9fafb}}
 .neut{{color:#6b7280}}
 .sp{{color:#dc2626;font-weight:600}}
 .sn{{color:#16a34a;font-weight:600}}
-.sec{{background:#fafafa;border-radius:8px;padding:16px 20px;margin:20px 0;border:1px solid #e5e7eb}}
+.sec,.rank,.bp{{background:#fafafa;border-radius:8px;padding:16px 20px;margin:20px 0;border:1px solid #e5e7eb}}
+.rank h2,.bp h2{{margin-top:0}}
+.rank table{{margin-bottom:0}}
 ul.risks{{list-style:none;margin-bottom:16px}}
 ul.risks li{{padding:8px 0 8px 20px;position:relative;border-bottom:1px solid #f5f5f5;font-size:14px}}
 ul.risks li::before{{content:"⚠";color:#dc2626;position:absolute;left:0;font-size:13px}}
-.bp{{background:#f0f8ff;border-radius:8px;padding:16px 20px;margin:20px 0;border:1px solid #b3d4fc}}
-.bp h2{{margin-top:0}}
 .bp ol{{padding-left:20px;font-size:14px;line-height:1.8}}
 footer{{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}}
 .disc{{color:#a1a1a6;font-size:12px;font-style:italic;text-align:center}}
@@ -906,12 +936,14 @@ footer{{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}}
 <p class="meta">扫描板块: {output['meta'].get('total_sectors',0)} 个 | 候选标的: {output['meta'].get('total_candidates',0)} 只</p>
 </header>
 
-{sections_html}
-
 <div class="bp">
 <h2>🏆 综合推荐</h2>
 <ol>{picks_html}</ol>
 </div>
+
+{rank_table}
+
+{sections_html}
 
 <h2>⚠️ 风险提示</h2>
 <ul class="risks">{risks_html}</ul>
