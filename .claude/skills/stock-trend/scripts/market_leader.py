@@ -505,6 +505,33 @@ def main():
     # ── Phase 2: Filter leaders + core stocks ──
     sectors_analyzed = run_phase2(hot_sectors, leader_n=3, core_n=3)
 
+    # ── DDX Enhancement: fetch DDX data and rescore leaders ──
+    try:
+        from fetch_ddx import fetch_ddx_data
+        from fetch_sector_data import rescore_leaders_with_ddx
+
+        all_codes = list(dict.fromkeys(
+            s["code"]
+            for sec in sectors_analyzed
+            for s in sec.get("leaders", []) + sec.get("core_stocks", [])
+        ))
+
+        if all_codes:
+            print(f"[DDX] Fetching DDX data for {len(all_codes)} candidates...")
+            ddx_data = fetch_ddx_data(all_codes)
+            if ddx_data:
+                print(f"  Found DDX data for {len(ddx_data)} stocks")
+                for sec in sectors_analyzed:
+                    leaders = sec.get("leaders", [])
+                    if leaders:
+                        rescored = rescore_leaders_with_ddx(leaders, ddx_data)
+                        sec["leaders"] = rescored
+                        sec["has_ddx_enhanced"] = True
+            else:
+                print("  No DDX data available (degraded)")
+    except Exception as e:
+        print(f"  [DDX] Enhancement skipped: {e}")
+
     # ── Phase 3: Deep analysis ──
     candidates = []
     roles = []
@@ -517,6 +544,39 @@ def main():
             candidates.append({"code": s["code"], "name": s.get("name",""),
                                "sector": sec.get("name","")})
             roles.append("core")
+
+    # ── 龙虎榜 Enhancement: fetch and cache per-stock ──
+    try:
+        from fetch_longhubang import fetch_longhubang_data
+
+        all_codes = [c["code"] for c in candidates]
+        if all_codes:
+            print(f"[LHB] Fetching 龙虎榜 data for {len(all_codes)} candidates...")
+            lhb_data = fetch_longhubang_data(all_codes)
+            if lhb_data:
+                print(f"  Found 龙虎榜 data for {len(lhb_data)} stocks")
+                for code, lhb in lhb_data.items():
+                    code_cache = CACHE_DIR / code
+                    code_cache.mkdir(parents=True, exist_ok=True)
+                    (code_cache / "longhubang.json").write_text(
+                        json.dumps(lhb, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                for code, lhb in lhb_data.items():
+                    if lhb.get("risk_level") == "high":
+                        name = ""
+                        for sec in sectors_analyzed:
+                            for s in sec.get("leaders", []) + sec.get("core_stocks", []):
+                                if s["code"] == code:
+                                    name = s.get("name", "")
+                                    break
+                        tip = f"{name}({code}): 龙虎榜风险 — 散户主导买入"
+                        if tip not in output["risk_tips"]:
+                            output["risk_tips"].append(tip)
+            else:
+                print("  No 龙虎榜 data available (degraded)")
+    except Exception as e:
+        print(f"  [LHB] Enhancement skipped: {e}")
 
     output["meta"]["total_candidates"] = len(candidates)
 
