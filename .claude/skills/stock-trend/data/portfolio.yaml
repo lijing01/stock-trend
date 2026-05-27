@@ -61,6 +61,30 @@ holdings:
   status: active
   close_price: null
   close_date: null
+- code: '601166'
+  ts_code: 601166.SH
+  name: 兴业银行
+  buy_price: 17.703
+  buy_date: '2026-05-26'
+  quantity: 1500.0
+  stop_loss: null
+  targets: []
+  notes: ''
+  status: active
+  close_price: null
+  close_date: null
+- code: '516160'
+  ts_code: 516160.SH
+  name: 新能源ETF南方
+  buy_price: 3.19
+  buy_date: '2026-05-22'
+  quantity: 8000.0
+  stop_loss: null
+  targets: []
+  notes: ''
+  status: active
+  close_price: null
+  close_date: null
 settings:
   alert_threshold_pct: 3.0
   default_stop_loss_pct: 5.0
