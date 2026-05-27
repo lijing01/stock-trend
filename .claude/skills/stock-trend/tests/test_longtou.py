@@ -654,6 +654,140 @@ def _run_script(script_name, *args, timeout=30):
 # ──────────────────────── Main ────────────────────────
 
 
+# ──────────────────────── DDX Score Tests ────────────────────────
+
+
+def test_ddx_score_computation():
+    """Test compute_ddx_score() and compute_super_order_score()."""
+    from fetch_ddx import compute_ddx_score, compute_super_order_score
+
+    test("DDX-01: ddx>=0.5 + ddx_days>=3 -> 100",
+         compute_ddx_score({"ddx": 0.6, "ddx_days": 5}) == 100)
+    test("DDX-02: ddx>=0.5 alone -> 90",
+         compute_ddx_score({"ddx": 0.5, "ddx_days": 1}) == 90)
+    test("DDX-03: ddx=0.2 -> 80",
+         compute_ddx_score({"ddx": 0.2, "ddx_days": 0}) == 80)
+    score = compute_ddx_score({"ddx": 0.1, "ddx_days": 0})
+    test("DDX-04: ddx=0.1 interpolated 50-80",
+         50 < score < 80, f"score={score}")
+    test("DDX-05: ddx=0 -> 50",
+         compute_ddx_score({"ddx": 0, "ddx_days": 0}) == 50)
+    test("DDX-06: ddx=-0.3 -> max(0,20)=20",
+         compute_ddx_score({"ddx": -0.3, "ddx_days": 0}) == 20)
+    test("DDX-07: ddx=-0.6 -> clamped to 0",
+         compute_ddx_score({"ddx": -0.6, "ddx_days": 0}) == 0)
+    test("DDX-08: empty dict -> 50",
+         compute_ddx_score({}) == 50)
+
+    test("DSO-01: ratio>=15% -> 100",
+         compute_super_order_score({"super_order_ratio": 0.15}) == 100)
+    test("DSO-02: ratio>=8% -> 80",
+         compute_super_order_score({"super_order_ratio": 0.08}) == 80)
+    test("DSO-03: ratio=6% -> 60",
+         compute_super_order_score({"super_order_ratio": 0.06}) == 60)
+    test("DSO-04: ratio=3% -> 50",
+         compute_super_order_score({"super_order_ratio": 0.03}) == 50)
+    test("DSO-05: ratio=25% -> 100",
+         compute_super_order_score({"super_order_ratio": 0.25}) == 100)
+    test("DSO-06: empty -> 50",
+         compute_super_order_score({}) == 50)
+
+
+def test_rescore_leaders_with_ddx():
+    """Test rescore_leaders_with_ddx() DDX-enhanced leader scoring."""
+    from fetch_sector_data import rescore_leaders_with_ddx
+
+    stocks = [
+        {"code": "600001", "name": "高DDX龙头", "change_pct": 9.5, "amount": 5e8},
+        {"code": "600002", "name": "低DDX龙头", "change_pct": 7.2, "amount": 3e8},
+        {"code": "600003", "name": "负DDX跟风", "change_pct": 6.0, "amount": 2e8},
+    ]
+    ddx_data = {
+        "600001": {"ddx": 0.8, "ddx_days": 5, "super_order_ratio": 0.18},
+        "600002": {"ddx": 0.1, "ddx_days": 1, "super_order_ratio": 0.04},
+        "600003": {"ddx": -0.4, "ddx_days": 0, "super_order_ratio": 0.02},
+    }
+
+    rescored = rescore_leaders_with_ddx(stocks, ddx_data)
+    test("RS-01: 高DDX股排首位", rescored[0]["code"] == "600001",
+         f"top={rescored[0]['name']} score={rescored[0]['leader_score']}")
+    test("RS-02: 负DDX排最后", rescored[-1]["code"] == "600003",
+         f"last={rescored[-1]['name']} score={rescored[-1]['leader_score']}")
+
+    no_ddx = rescore_leaders_with_ddx(stocks, {})
+    test("RS-03: 无DDX数据保持排序", no_ddx[0]["code"] == "600001")
+
+    empty = rescore_leaders_with_ddx([], {"600001": {}})
+    test("RS-04: 空列表不抛异常", len(empty) == 0)
+
+    partial = rescore_leaders_with_ddx(stocks[:2], {"600001": ddx_data["600001"]})
+    test("RS-05: 部分DDX覆盖正常工作", len(partial) == 2, f"count={len(partial)}")
+
+
+def test_longhubang_risk_analysis():
+    """Test 龙虎榜 risk level classification."""
+    from fetch_longhubang import _classify_risk_level
+
+    inst_buy = {
+        "is_on_board": True, "has_institution_buy": True,
+        "has_institution_sell": False, "retail_dominated": False,
+        "has_floating_capital": False,
+    }
+    test("LHB-01: 机构净买入->low",
+         _classify_risk_level(inst_buy) == "low",
+         f"risk={_classify_risk_level(inst_buy)}")
+
+    retail = {
+        "is_on_board": True, "has_institution_buy": False,
+        "has_institution_sell": False, "retail_dominated": True,
+        "has_floating_capital": False,
+    }
+    test("LHB-02: 散户主导->high",
+         _classify_risk_level(retail) == "high")
+
+    mixed = {
+        "is_on_board": True, "has_institution_buy": True,
+        "has_institution_sell": True, "retail_dominated": False,
+        "has_floating_capital": True, "floating_capital_net_buy": False,
+    }
+    test("LHB-03: 机构+游资分歧->medium",
+         _classify_risk_level(mixed) == "medium")
+
+    youzi = {
+        "is_on_board": True, "has_institution_buy": False,
+        "has_institution_sell": False, "retail_dominated": False,
+        "has_floating_capital": True, "floating_capital_net_buy": True,
+    }
+    test("LHB-04: 纯游资->medium",
+         _classify_risk_level(youzi) == "medium")
+
+    test("LHB-05: 未上榜->low",
+         _classify_risk_level({"is_on_board": False}) == "low")
+    test("LHB-06: 空数据->low",
+         _classify_risk_level({}) == "low")
+
+
+def test_ddx_degradation():
+    """Test graceful degradation when DDX fetch fails."""
+    from fetch_ddx import fetch_ddx_data, compute_ddx_score, compute_super_order_score
+
+    empty = fetch_ddx_data([])
+    test("DG-01: DDX空列表返回空", len(empty) == 0)
+
+    test("DG-02: DDX空数据分=50", compute_ddx_score({}) == 50)
+    test("DG-03: 超级资金空数据分=50", compute_super_order_score({}) == 50)
+
+
+def test_longhubang_degradation():
+    """Test graceful degradation when 龙虎榜 fetch fails."""
+    from fetch_longhubang import fetch_longhubang_data, _classify_risk_level
+
+    empty = fetch_longhubang_data([])
+    test("LHG-01: 龙虎榜空列表返回空", len(empty) == 0)
+
+    test("LHG-02: 龙虎榜空数据风险=low", _classify_risk_level({}) == "low")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Longtou test suite")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -693,6 +827,23 @@ def main():
     print("\n🛡️ 兜底评分测试")
     print("=" * 40)
     test_fallback_score()
+
+    print("\n📐 DDX评分计算测试")
+    print("=" * 40)
+    test_ddx_score_computation()
+
+    print("\n🏆 DDX龙头重评分测试")
+    print("=" * 40)
+    test_rescore_leaders_with_ddx()
+
+    print("\n📋 龙虎榜风险分类测试")
+    print("=" * 40)
+    test_longhubang_risk_analysis()
+
+    print("\n🛡️ 降级测试")
+    print("=" * 40)
+    test_ddx_degradation()
+    test_longhubang_degradation()
 
     print("\n⭐ 星级转换测试")
     print("=" * 40)
