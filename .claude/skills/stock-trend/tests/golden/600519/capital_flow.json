@@ -2,17 +2,12 @@
   "meta": {
     "ts_code": "600519.SH",
     "asset": "E",
-    "secid": "1.600519",
-    "data_source": "eastmoney",
-    "record_count": 0
+    "data_source": "error",
+    "error": "资金流向获取失败: Remote end closed connection without response"
   },
   "data": [],
   "data_extended": {
     "northbound_market": [
-      {
-        "date": "20260512",
-        "net_buy_billion": 0
-      },
       {
         "date": "20260513",
         "net_buy_billion": 0
@@ -47,6 +42,10 @@
       },
       {
         "date": "20260526",
+        "net_buy_billion": 0
+      },
+      {
+        "date": "20260527",
         "net_buy_billion": 0
       }
     ],

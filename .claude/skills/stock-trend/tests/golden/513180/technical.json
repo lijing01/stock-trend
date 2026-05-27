@@ -1,8 +1,8 @@
 {
   "meta": {
     "ts_code": "513180.SH",
-    "analysis_date": "20260526",
-    "data_points": 243,
+    "analysis_date": "20260527",
+    "data_points": 117,
     "indicators_computed": [
       "ma",
       "macd",
@@ -15,26 +15,26 @@
     ]
   },
   "latest": {
-    "date": "20260526",
-    "close": 0.628,
+    "date": "20260527",
+    "close": 0.62,
     "ma": {
       "values": {
-        "ma5": 0.6184,
-        "ma10": 0.625,
-        "ma20": 0.6312,
-        "ma60": 0.6331
+        "ma5": 0.62,
+        "ma10": 0.62,
+        "ma20": 0.63,
+        "ma60": 0.63
       },
-      "alignment": "bearish",
+      "alignment": "mixed",
       "signal": {
-        "type": "bearish_align",
-        "description": "空头排列",
-        "score": -2
+        "type": "mixed",
+        "description": "均线缠绕，方向不明",
+        "score": 0
       }
     },
     "macd": {
       "dif": -0.0044,
-      "dea": -0.0028,
-      "histogram": -0.0033,
+      "dea": -0.0031,
+      "histogram": -0.0027,
       "signal": {
         "type": "neutral",
         "description": "绿柱缩窄",
@@ -42,64 +42,64 @@
       }
     },
     "rsi": {
-      "rsi14": 45.83,
+      "rsi14": 31.11,
       "signal": {
         "type": "neutral",
-        "description": "RSI=45.8，中性区间；顶背离",
+        "description": "RSI=31.1，中性区间；顶背离",
         "score": -2
       }
     },
     "kdj": {
-      "k": 23.04,
-      "d": 23.4,
-      "j": 22.32,
+      "k": 27.81,
+      "d": 25.12,
+      "j": 33.2,
       "signal": {
         "type": "neutral",
-        "description": "KDJ中性区域(K=23.0,D=23.4,J=22.3)",
+        "description": "KDJ中性区域(K=27.8,D=25.1,J=33.2)",
         "score": 0
       }
     },
     "bollinger": {
-      "upper": 0.6586,
-      "middle": 0.6312,
-      "lower": 0.6039,
+      "upper": 0.6587,
+      "middle": 0.631,
+      "lower": 0.6032,
       "signal": {
         "type": "middle_support",
-        "description": "中轨下方运行",
+        "description": "中轨下方运行；布林带收口(38%分位)",
         "score": 0
       }
     },
     "volume": {
-      "vol": 64330501.0,
-      "vol_ma20": 64595162.0,
-      "vol_ratio": 1.0,
+      "vol": 55969777.0,
+      "vol_ma20": 65595035.0,
+      "vol_ratio": 0.85,
       "signal": {
         "type": "neutral",
-        "description": "量价中性(量比1.00)",
+        "description": "量价中性(量比0.85)",
         "score": 0
       }
     },
     "adx": {
-      "adx": 7.11,
-      "plus_di": 24.06,
-      "minus_di": 24.6,
+      "adx": 6.9,
+      "plus_di": 19.02,
+      "minus_di": 25.0,
       "signal": {
         "type": "trend_strength",
-        "description": "ADX=7.1，震荡市",
+        "description": "ADX=6.9，震荡市",
         "score": 0
       }
     },
     "obv": {
-      "obv": 80121999.0,
+      "obv": -538474649.0,
       "signal": {
         "type": "money_flow",
-        "description": "OBV在20日均线上方，资金净流入",
-        "score": 1
+        "description": "OBV在20日均线下方，资金净流出",
+        "score": -1
       }
     },
     "atr": {
-      "atr": 0.0134,
-      "atr_pct": 2.13,
+      "atr": 0.0131,
+      "atr_pct": 2.12,
       "volatility_level": "normal",
       "signal": {
         "type": "volatility",
@@ -108,61 +108,61 @@
       }
     },
     "max_drawdown": {
-      "max_drawdown_pct": -31.51,
-      "drawdown_days": 119
+      "max_drawdown_pct": -23.18,
+      "drawdown_days": 51
     }
   },
   "patterns": [],
   "summary": {
-    "total_score": -0.39,
+    "total_score": -0.28,
     "direction": "neutral",
     "confidence": "low",
     "consistency": 0.25,
     "key_signals": [
-      "空头排列",
+      "均线缠绕，方向不明",
       "绿柱缩窄",
-      "RSI=45.8，中性区间；顶背离",
-      "KDJ中性区域(K=23.0,D=23.4,J=22.3)",
-      "中轨下方运行",
-      "量价中性(量比1.00)",
-      "ADX=7.1，震荡市",
-      "OBV在20日均线上方，资金净流入"
+      "RSI=31.1，中性区间；顶背离",
+      "KDJ中性区域(K=27.8,D=25.1,J=33.2)",
+      "中轨下方运行；布林带收口(38%分位)",
+      "量价中性(量比0.85)",
+      "ADX=6.9，震荡市",
+      "OBV在20日均线下方，资金净流出"
     ],
     "data_quality": "good",
     "dimension_scores": {
-      "ma": -2,
+      "ma": 0,
       "macd": 0,
       "rsi": -2,
       "kdj": 0,
       "bollinger": 0,
       "volume": 0,
       "adx": 0,
-      "obv": 1
+      "obv": -1
     },
     "support_levels": [
-      0.626,
-      0.604
+      0.618
     ],
     "resistance_levels": [
-      0.629,
-      0.652,
-      0.677,
+      0.621,
+      0.642,
+      0.667,
+      0.6955,
       0.7183
     ],
-    "stop_loss": 0.6,
-    "target_conservative": 0.63,
-    "target_moderate": 0.68,
-    "target_aggressive": 0.72,
-    "target": 0.68,
-    "risk_reward_ratio": 1.86,
-    "rr_conservative": 0.07,
-    "rr_moderate": 1.86,
-    "rr_aggressive": 3.29,
+    "stop_loss": 0.59,
+    "target_conservative": 0.62,
+    "target_moderate": 0.67,
+    "target_aggressive": 0.7,
+    "target": 0.67,
+    "risk_reward_ratio": 1.67,
+    "rr_conservative": 0.0,
+    "rr_moderate": 1.67,
+    "rr_aggressive": 2.67,
     "favorable_rr": true,
     "position_sizing": "标准仓位(50-70%)",
     "position_tier": 2,
     "risk_reward_warning": null,
-    "max_drawdown_pct": -31.51,
+    "max_drawdown_pct": -23.18,
     "entry_signals": {
       "signal_count": 0,
       "signals": [],

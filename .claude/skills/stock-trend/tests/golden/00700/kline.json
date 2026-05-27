@@ -4,22 +4,12 @@
     "asset": "E",
     "freq": "D",
     "adj": "none",
-    "record_count": 251,
-    "data_points": 251,
+    "record_count": 250,
+    "data_points": 250,
     "data_source": "tencent_hk",
     "warnings": []
   },
   "data": [
-    {
-      "trade_date": "20250521",
-      "open": 519.0,
-      "close": 520.5,
-      "high": 524.5,
-      "low": 515.5,
-      "vol": 18924042.0,
-      "amount": 0,
-      "ts_code": "00700.HK"
-    },
     {
       "trade_date": "20250522",
       "open": 520.0,
@@ -28,8 +18,6 @@
       "low": 513.0,
       "vol": 14281176.0,
       "amount": 0,
-      "pre_close": 520.5,
-      "pct_chg": -0.7685,
       "ts_code": "00700.HK"
     },
     {
@@ -3011,13 +2999,13 @@
     {
       "trade_date": "20260527",
       "open": 435.8,
-      "close": 434.0,
+      "close": 434.4,
       "high": 442.6,
-      "low": 433.8,
-      "vol": 11388629.0,
+      "low": 433.6,
+      "vol": 24863984.0,
       "amount": 0,
       "pre_close": 439.0,
-      "pct_chg": -1.139,
+      "pct_chg": -1.0478,
       "ts_code": "00700.HK"
     }
   ]

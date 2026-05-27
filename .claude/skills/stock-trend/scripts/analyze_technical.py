@@ -1044,7 +1044,9 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
     atr = atr_result.get("atr")
     atr_pct = atr_result.get("atr_pct", 0)
 
-    support_prices = [item["price"] for item in levels.get("support", []) if item["price"]]
+    # Exclude boll_upper from stop-loss support: upper band is volatility ceiling, not floor
+    support_items = [item for item in levels.get("support", []) if item["price"] and item.get("source") != "boll_upper"]
+    support_prices = [item["price"] for item in support_items]
     resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
 
     # --- Adaptive stop-loss with volatility regime awareness ---
@@ -1082,6 +1084,15 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
             stop_loss = round(curr_close - atr_mult * atr, 2)
         else:
             stop_loss = round(curr_close * 0.99, 2)
+
+    # Safety net: if stop-loss too close (< 0.5x ATR%), prefer ATR-based distance
+    # NOTE: atr_pct is percentage (4.07 = 4.07%), stop_pct is decimal (0.0646 = 6.46%)
+    if stop_loss and atr and atr_pct > 0:
+        stop_pct = (curr_close - stop_loss) / curr_close
+        if stop_pct < (atr_pct / 100.0) * 0.5:
+            atr_stop = round(curr_close - atr_mult * atr, 2)
+            if atr_stop < stop_loss:
+                stop_loss = atr_stop
 
     # Stop-loss too close warning
     stop_loss_warning = None
