@@ -798,6 +798,88 @@ def scan_patterns(df, lookback=10):
 # --- Support/Resistance levels ---
 
 
+def calc_vwap(df, period=20):
+    """Approximate VWAP using daily OHLCV data."""
+    if len(df) < period:
+        return None
+    recent = df.tail(period)
+    typ_price = (recent["high"] + recent["low"] + recent["close"]) / 3
+    if recent["vol"].sum() == 0:
+        return None
+    vwap = (typ_price * recent["vol"]).sum() / recent["vol"].sum()
+    return round(vwap, 4)
+
+
+def calc_quantile_levels(df, lookback=60):
+    """Calculate price quantile levels for S/R."""
+    if len(df) < 20:
+        return {}
+    prices = df["close"].tail(min(lookback, len(df)))
+    return {
+        "q05": round(prices.quantile(0.05), 4),
+        "q10": round(prices.quantile(0.10), 4),
+        "q90": round(prices.quantile(0.90), 4),
+        "q95": round(prices.quantile(0.95), 4),
+    }
+
+
+def calc_pivot_points(df):
+    """Classic pivot points from previous complete bar."""
+    if len(df) < 2:
+        return {"support": [], "resistance": []}
+    prev = df.iloc[-2]
+    H, L, C = prev["high"], prev["low"], prev["close"]
+    P = (H + L + C) / 3
+    return {
+        "support": [round(2 * P - H, 4), round(P - (H - L), 4)],
+        "resistance": [round(2 * P - L, 4), round(P + (H - L), 4)],
+    }
+
+
+def calc_volume_profile(df, lookback=60, num_buckets=20):
+    """Approximate volume profile from daily data: high-volume nodes as S/R."""
+    if len(df) < 20:
+        return {"support": [], "resistance": []}
+    recent = df.tail(min(lookback, len(df)))
+    price_min, price_max = recent["low"].min(), recent["high"].max()
+    bucket_width = (price_max - price_min) / num_buckets
+    if bucket_width <= 0:
+        return {"support": [], "resistance": []}
+
+    buckets = {i: 0.0 for i in range(num_buckets)}
+    for _, row in recent.iterrows():
+        low_b = int((row["low"] - price_min) / bucket_width)
+        high_b = int((row["high"] - price_min) / bucket_width)
+        low_b = max(0, min(low_b, num_buckets - 1))
+        high_b = max(0, min(high_b, num_buckets - 1))
+        vol = row["vol"]
+        if high_b == low_b:
+            buckets[low_b] += vol
+        else:
+            mid_b = (low_b + high_b) // 2
+            buckets[low_b] += vol * 0.3
+            buckets[high_b] += vol * 0.3
+            buckets[mid_b] += vol * 0.4
+
+    avg_vol = sum(buckets.values()) / num_buckets
+    if avg_vol == 0:
+        return {"support": [], "resistance": []}
+    threshold = avg_vol * 1.5
+
+    curr_close = df["close"].iloc[-1]
+    support, resistance = [], []
+    for i, total_vol in buckets.items():
+        if total_vol > threshold:
+            price = price_min + (i + 0.5) * bucket_width
+            if price < curr_close:
+                support.append({"price": round(price, 4), "source": "volume_profile",
+                                "strength": "medium", "vol_ratio": round(total_vol / avg_vol, 1)})
+            elif price > curr_close:
+                resistance.append({"price": round(price, 4), "source": "volume_profile",
+                                   "strength": "medium", "vol_ratio": round(total_vol / avg_vol, 1)})
+    return {"support": support, "resistance": resistance}
+
+
 def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_value=None):
     """Calculate key support and resistance levels with strength ranking.
 
@@ -884,6 +966,42 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
                 levels["resistance"].append({"price": round_level, "source": "round_number", "strength": "low"})
             elif round_level < curr_close:
                 levels["support"].append({"price": round_level, "source": "round_number", "strength": "low"})
+
+    # VWAP level
+    vwap = calc_vwap(df)
+    if vwap is not None:
+        if vwap < curr_close:
+            levels["support"].append({"price": vwap, "source": "vwap", "strength": "medium"})
+        elif vwap > curr_close:
+            levels["resistance"].append({"price": vwap, "source": "vwap", "strength": "medium"})
+
+    # Quantile levels
+    quantiles = calc_quantile_levels(df)
+    if quantiles:
+        if "q05" in quantiles and quantiles["q05"] < curr_close:
+            levels["support"].append({"price": quantiles["q05"], "source": "quantile_q05", "strength": "medium"})
+        if "q10" in quantiles and quantiles["q10"] < curr_close:
+            levels["support"].append({"price": quantiles["q10"], "source": "quantile_q10", "strength": "medium"})
+        if "q90" in quantiles and quantiles["q90"] > curr_close:
+            levels["resistance"].append({"price": quantiles["q90"], "source": "quantile_q90", "strength": "medium"})
+        if "q95" in quantiles and quantiles["q95"] > curr_close:
+            levels["resistance"].append({"price": quantiles["q95"], "source": "quantile_q95", "strength": "medium"})
+
+    # Pivot points
+    pivots = calc_pivot_points(df)
+    for p in pivots["support"]:
+        if p < curr_close:
+            levels["support"].append({"price": p, "source": "pivot", "strength": "medium"})
+    for p in pivots["resistance"]:
+        if p > curr_close:
+            levels["resistance"].append({"price": p, "source": "pivot", "strength": "medium"})
+
+    # Volume profile (high-volume nodes)
+    vp = calc_volume_profile(df)
+    for item in vp["support"]:
+        levels["support"].append(item)
+    for item in vp["resistance"]:
+        levels["resistance"].append(item)
 
     # Cluster nearby levels and sort by strength
     for direction in ["support", "resistance"]:
