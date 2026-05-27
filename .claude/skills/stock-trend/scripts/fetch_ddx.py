@@ -18,11 +18,11 @@ import urllib.request
 from datetime import datetime
 
 # 同花顺 DDE 排行页面 — shows DDX/DDY/DDZ for actively traded stocks
-THS_DDX_URL = "http://data.10jqka.com.cn/financial/ddx/opendata/"
+THS_DDX_URL = "https://data.10jqka.com.cn/financial/ddx/opendata/"
 
 THS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "http://data.10jqka.com.cn/financial/ddx/",
+    "Referer": "https://data.10jqka.com.cn/financial/ddx/",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
 }

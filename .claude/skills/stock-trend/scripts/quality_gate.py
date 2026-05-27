@@ -49,8 +49,8 @@ def check_signal_consistency(direction: str, risks: list[str]) -> dict:
           - penalty: float (0 if consistent, 0.10-0.20 if conflicting)
           - conflict_detail: str (human-readable explanation)
     """
-    is_bullish_direction = "偏多" in direction or direction in ("多头", "bullish")
-    is_bearish_direction = "偏空" in direction or direction in ("空头", "bearish")
+    is_bullish_direction = "偏多" in direction or direction in ("多头", "bullish", "看多")
+    is_bearish_direction = "偏空" in direction or direction in ("空头", "bearish", "看空")
 
     risk_text = " ".join(risks)
 

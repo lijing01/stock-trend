@@ -375,6 +375,8 @@ def validate_event_cap(dim, score, signal_count):
     cap = EVENT_CAPS.get(dim)
     if not cap:
         return score, []
+    if score is None:
+        return score, []
     adjusted = score
     warnings = []
     if signal_count < cap["high_score_min_signals"] and abs(score) > cap["single_event_max"]:
@@ -456,7 +458,7 @@ def extract_risks(technical_data, score_data):
 
     # Risk keywords for signal classification
     risk_keywords = ["背离", "死叉", "极度收口", "超买", "压力", "空头", "下跌", "减仓", "止损",
-                     "净流出", "净流出"]
+                     "净流出"]
 
     # Track extracted risk topics to avoid redundancy
     # e.g. "RSI顶背离" and "RSI=46.3...顶背离" both talk about RSI divergence
@@ -614,9 +616,9 @@ def validate_input(technical_data, dimension_scores, data_dir=None):
                 errors.append(
                     f"dimension_scores['{dim}'] must be numeric, got {type(score).__name__}={score!r}"
                 )
-            elif score < -100 or score > 100:
+            elif score < -3 or score > 3:
                 errors.append(
-                    f"dimension_scores['{dim}'] out of range [-100, 100]: {score}"
+                    f"dimension_scores['{dim}'] out of range [-3, +3]: {score}"
                 )
 
     # Check e: if data_dir is provided and exists, check dimension data files
