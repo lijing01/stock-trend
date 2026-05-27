@@ -41,6 +41,7 @@ from fetch_sector_data import (
     filter_core_stocks,
 )
 from resolve_code import code_to_ts_code
+from quality_gate import check_signal_consistency
 
 
 # ──────────────────────── Phase 1: Sector Scanning ────────────────────────
@@ -291,11 +292,6 @@ def _apply_quality_penalties(candidates: list[dict]) -> list[dict]:
     Returns:
         Same list sorted by adjusted_score descending.
     """
-    try:
-        from quality_gate import check_signal_consistency
-    except ImportError:
-        check_signal_consistency = None
-
     for c in candidates:
         penalty = 0.0
         score = c.get("composite_score") or 0

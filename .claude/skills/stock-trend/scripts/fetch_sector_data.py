@@ -303,7 +303,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
     return stocks
 
 
-def _parse_amount(val: Any) -> float:
+def _to_float(val: Any) -> float:
     """Parse amount/成交额 value, return in yuan."""
     if val is None:
         return 0.0
@@ -325,11 +325,11 @@ def filter_leaders(stocks: list[dict], top_n: int = 3) -> list[dict]:
     scored = []
     for s in stocks:
         change = s.get("change_pct") or 0
-        amount = _parse_amount(s.get("amount"))
+        amount = _to_float(s.get("amount"))
 
         # Leader score: today's change proxies phase return + volume
         change_score = min(100, max(0, 50 + change * 5))    # 0%→50, +10%→100
-        amount_score = min(100, _parse_amount(amount) / 1e7) # scaled
+        amount_score = min(100, _to_float(amount) / 1e7) # scaled
         leader_score = change_score * 0.50 + amount_score * 0.30
 
         s["leader_score"] = round(leader_score, 1)
@@ -358,7 +358,7 @@ def filter_core_stocks(stocks: list[dict], top_n: int = 3) -> list[dict]:
         change = s.get("change_pct") or 0
 
         # Market cap: >1000亿 → 100, >500亿 → 80, >100亿 → 60
-        cap_score = min(100, max(0, _parse_amount(mcap) / 1e8 * 5))
+        cap_score = min(100, max(0, _to_float(mcap) / 1e8 * 5))
         # PE reasonableness: 10-30 ideal, very high or negative penalized
         if pe is not None and pe > 0:
             pe_score = max(0, 100 - abs(pe - 20) * 1.5)
@@ -398,7 +398,7 @@ def rescore_leaders_with_ddx(leaders: list[dict],
         ddx = ddx_data.get(s["code"])
         if ddx:
             change_score = min(100, max(0, 50 + (s.get("change_pct") or 0) * 5))
-            amount_score = min(100, _parse_amount(s.get("amount")) / 1e7)
+            amount_score = min(100, _to_float(s.get("amount")) / 1e7)
             ddx_s = compute_ddx_score(ddx)
             super_s = compute_super_order_score(ddx)
 

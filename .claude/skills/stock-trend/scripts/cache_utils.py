@@ -29,10 +29,15 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR))))
-# .claude/skills/stock-trend/scripts/ -> project root (4 levels up)
-_DEFAULT_CACHE_DIR = os.path.join(_PROJECT_ROOT, ".cache", "stock-trend")
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_WALK = _SCRIPT_DIR
+_PROJECT_ROOT = _WALK
+for _ in range(10):
+    if (_WALK / ".claude").exists() or (_WALK / "CLAUDE.md").exists():
+        _PROJECT_ROOT = _WALK
+        break
+    _WALK = _WALK.parent
+_DEFAULT_CACHE_DIR = os.path.join(str(_PROJECT_ROOT), ".cache", "stock-trend")
 CACHE_DIR = os.environ.get("STOCK_TREND_CACHE_DIR", _DEFAULT_CACHE_DIR)
 
 

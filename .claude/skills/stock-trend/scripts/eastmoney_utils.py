@@ -5,6 +5,8 @@ Consolidates headers, secid mapping, and node rotation logic
 that was duplicated across fetch_kline_eastmoney.py and fetch_capital_flow.py.
 """
 
+import time
+
 EM_API_HOSTS = [
     "push2his.eastmoney.com",
     "38.push2his.eastmoney.com",
@@ -121,7 +123,6 @@ def rotate_em_host(fetch_fn, max_retries=3):
     Raises:
         RuntimeError: if all hosts fail.
     """
-    import time
     last_error = None
     for attempt in range(max_retries):
         host = EM_API_HOSTS[attempt % len(EM_API_HOSTS)]

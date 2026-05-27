@@ -23,6 +23,8 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
+from cache_utils import CACHE_DIR
+
 
 # --- Default weights ---
 
@@ -174,7 +176,6 @@ IOPV_HISTORY_CACHE_FILENAME = "iopv_history.json"
 
 def load_iopv_history():
     """Load IOPV history cache {code: [{date, premium}]}."""
-    from cache_utils import CACHE_DIR
     path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
     if path.exists():
         try:
@@ -186,7 +187,6 @@ def load_iopv_history():
 
 def save_iopv_history(history: dict, code: str, premium: float):
     """Append today's IOPV for code and persist."""
-    from cache_utils import CACHE_DIR
     path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
     today = date.today().isoformat()
     entries = history.setdefault(code, [])
@@ -535,11 +535,7 @@ def build_special_section(asset_type, technical_data, etf_data=None, capital_flo
         }
 
     elif asset_type == "hk":
-        return {
-            "type": "hk",
-            "title": "港股特殊分析",
-            "content": "需补充恒指联动、卖空占比、南向资金、AH溢价数据",
-        }
+        return None
 
     elif asset_type == "st":
         return {
@@ -700,7 +696,6 @@ def main():
     # Resolve data directory from --code
     data_dir = None
     if args.code:
-        from cache_utils import CACHE_DIR
         data_dir = Path(args.data_dir) if args.data_dir else Path(CACHE_DIR) / args.code
         if not data_dir.exists():
             print(f"Error: data directory not found: {data_dir}", file=sys.stderr)
