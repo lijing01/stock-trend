@@ -122,6 +122,51 @@ def score_shares_trend_from_etf_data(etf_data: dict) -> float | None:
     return round(_piecewise_linear(change_pct, SHARES_TREND_ANCHORS), 1)
 
 
+def _compute_lhb_sentiment(lhb_data: dict) -> float:
+    """Compute sentiment adjustment from 龙虎榜 data.
+
+    Returns adjustment in [-1.0, +0.8] range on sentiment score scale.
+
+    Adjustments:
+        机构净买入 ≥ 2家                    → +0.8
+        机构净卖出 ≥ 2家                    → -1.0
+        纯游资主导, 无机构                   → -0.3
+        散户主导买入                         → -1.0
+        游资净买入 + 机构净卖出              → -0.5 (分歧)
+        上榜但机构交易额 < 20%               → -0.3
+    """
+    adjustment = 0.0
+
+    if not lhb_data.get("is_on_board"):
+        return 0.0
+
+    has_inst_buy = lhb_data.get("has_institution_buy", False)
+    has_inst_sell = lhb_data.get("has_institution_sell", False)
+    retail = lhb_data.get("retail_dominated", False)
+    youzi = lhb_data.get("has_floating_capital", False)
+    risk_level = lhb_data.get("risk_level", "low")
+
+    if retail:
+        adjustment -= 1.0
+
+    if has_inst_sell and not has_inst_buy:
+        adjustment -= 1.0
+
+    if has_inst_buy and not has_inst_sell:
+        adjustment += 0.8
+
+    if has_inst_buy and has_inst_sell:
+        adjustment -= 0.5
+    if has_inst_buy and youzi:
+        adjustment -= 0.3
+
+    if youzi and not has_inst_buy and not has_inst_sell:
+        adjustment -= 0.3
+
+    adjustment = max(-1.0, min(0.8, adjustment))
+    return round(adjustment, 2)
+
+
 # ── IOPV history cache (P2 #9: historical percentile + trend) ──────────────
 
 IOPV_HISTORY_CACHE_FILENAME = "iopv_history.json"
@@ -913,6 +958,16 @@ def main():
                     automated_sources["sentiment"] = "+".join(auto_src)
         except Exception:
             pass
+
+    # ── 龙虎榜 sentiment adjustment ──────────────────────────────────
+    if data_dir and args.sentiment_score is None:
+        lhb_data, _ = find_data_file(data_dir, "longhubang.json")
+        if lhb_data and isinstance(lhb_data, dict):
+            lhb_adjustment = _compute_lhb_sentiment(lhb_data)
+            if lhb_adjustment != 0:
+                scores["sentiment"] = round(scores["sentiment"] + lhb_adjustment, 2)
+                scores["sentiment"] = max(-3, min(3, scores["sentiment"]))
+                automated_sources["sentiment_longhubang"] = lhb_adjustment
 
     # Automated futures scoring (ETF only, when futures data is available)
     if args.futures_data and args.asset_type == "etf":
