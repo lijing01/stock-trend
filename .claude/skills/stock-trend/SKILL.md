@@ -5,6 +5,7 @@ triggers:
   - /stock-trend
   - /etf-scan
   - /longtou
+  - /market-theme
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
@@ -27,6 +28,8 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/backtest_engine.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/market_leader.py *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetch_sector_data.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/analyze_market_theme.py *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetch_sector_kline.py *)
   - WebSearch
   - WebFetch
   - mcp__web-search__bing_search
@@ -38,8 +41,9 @@ allowed-tools:
 # 股票趋势判断 Skill
 
 > **分支选择**：根据触发命令执行对应流程。
-> - 触发 `/etf-scan` → 仅执行「/etf-scan 流程」，**跳过** `/stock-trend` 和 `/longtou` 的所有步骤
-> - 触发 `/longtou` → 仅执行「/longtou 流程」，**跳过** `/stock-trend` 和 `/etf-scan` 的所有步骤
+> - 触发 `/etf-scan` → 仅执行「/etf-scan 流程」，**跳过**其余所有流程
+> - 触发 `/longtou` → 仅执行「/longtou 流程」，**跳过**其余所有流程
+> - 触发 `/market-theme` → 仅执行「/market-theme 流程」，**跳过**其余所有流程
 > - 触发 `/stock-trend` → 从「Step 1: 解析输入」开始执行
 
 ---
@@ -200,6 +204,68 @@ WebSearch("北方华创 半导体设备 2026年5月 政策")
 5. **综合研判**
 
 基于 pipeline 评分和搜索信息，给出最终建议。信号方向映射同 `/stock-trend`（≥ +2.0 看多，≤ -2.0 看空）。
+
+---
+
+## /market-theme [--top N] [--days N] [--min-score N]
+
+> ⚠️ 当触发 `/market-theme` 时，只执行本节的 3 个阶段，**不得**执行 `/stock-trend`、`/etf-scan` 或 `/longtou` 流程。
+
+扫描全市场板块，结合板块指数 K 线分析过去 N 个交易日的持续性和趋势强度，识别当前市场主线。
+
+参数：
+- `--top N`    扫描板块数量，默认 15
+- `--days N`   回溯交易日数（分析周期），默认 10
+- `--min-score N`  最低持续性分，默认 30
+- `--no-html`  跳过 HTML 报告生成
+
+### /market-theme 执行步骤
+
+1. **运行分析脚本**
+
+```bash
+python3 .claude/skills/stock-trend/scripts/analyze_market_theme.py [--top 15] [--days 10] [--min-score 30] [--output-html]
+```
+
+脚本执行三阶段：
+- Phase 1（板块扫描）：通过东方财富 API 获取全市场板块排行，取 Top N
+- Phase 2（K 线获取）：对 Top N 板块抓取 BK 指数 K 线（复权），分析周期可配
+- Phase 3（持续性分析）：计算每板块的 5 日/10 日涨幅、上涨天数比、近期加速度、波动率 → 综合持续性分
+
+**持续性评分权重**：5 日涨幅 30% + 上涨天数比 25% + 10 日涨幅 20% + 加速度 15% + 稳定性 10%
+
+默认生成 HTML 报告到 `reports/lists/market-theme-{时间}.html`（`--no-html` 跳过）。
+
+2. **打开 HTML 报告**
+
+```bash
+open -a "Google Chrome" reports/lists/market-theme-{时间}.html
+```
+
+> 使用 `--no-html` 时跳过（无 HTML 文件）。
+
+3. **解析输出并呈现结果**
+
+脚本输出 结构化 JSON + Markdown 报告：
+
+**完整模式**：分析概览（板块数/周期/耗时）→ 板块持续性排名表 → 按分类展开
+- **阶段强势（主线确认）**：持续性分 ≥ 70，完整表格（板块/今日涨幅/5 日涨/10 日涨/上涨比/持续性分/趋势）
+- **稳步上行（候选主线）**：持续性分 50-70，精简表格
+- **新兴主题**：持续性分 40-50，新冒头方向
+- **脉冲热点**：今日热度高但持续性不足 50，需警惕追高
+- **退潮板块**：持续性分 < 40，正在降温
+
+4. **补充分析**（可选）
+
+对 `strong` 中的 Top 3 主线板块，搜索政策/消息面验证：
+
+```bash
+WebSearch("{板块名} {YYYY}年{M}月 政策 行业 新闻")
+```
+
+4. **综合研判**
+
+基于持续性分析和搜索信息，给出主线判断与操作建议。
 
 ---
 
