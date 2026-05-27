@@ -344,6 +344,44 @@ def filter_core_stocks(stocks: list[dict], top_n: int = 3) -> list[dict]:
     return scored[:top_n]
 
 
+def rescore_leaders_with_ddx(leaders: list[dict],
+                              ddx_data: dict[str, dict]) -> list[dict]:
+    """Re-score leader stocks with DDX data enhancement.
+
+    Uses new formula: change*30% + amount*20% + ddx_score*30% + super_order_score*20%.
+    Stocks without DDX data keep their existing leader_score.
+
+    Args:
+        leaders: list of stock dicts with leader_score.
+        ddx_data: dict mapping code -> {ddx, ddx_days, super_order_ratio, ...}.
+
+    Returns:
+        Re-sorted leaders list with updated leader_score.
+    """
+    if not leaders:
+        return []
+
+    from fetch_ddx import compute_ddx_score, compute_super_order_score
+
+    for s in leaders:
+        ddx = ddx_data.get(s["code"])
+        if ddx:
+            change_score = min(100, max(0, 50 + (s.get("change_pct") or 0) * 5))
+            amount_score = min(100, _parse_amount(s.get("amount")) / 1e7)
+            ddx_s = compute_ddx_score(ddx)
+            super_s = compute_super_order_score(ddx)
+
+            s["leader_score"] = round(
+                change_score * 0.30 + amount_score * 0.20
+                + ddx_s * 0.30 + super_s * 0.20,
+                1,
+            )
+            s["ddx_data"] = ddx
+
+    leaders.sort(key=lambda x: x.get("leader_score", 0), reverse=True)
+    return leaders
+
+
 # ──────────────────────── Main CLI ────────────────────────
 
 
