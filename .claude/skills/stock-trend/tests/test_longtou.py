@@ -16,9 +16,11 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).parent
 SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
@@ -143,19 +145,19 @@ def test_rank_hot_sectors():
     from fetch_sector_data import rank_hot_sectors
 
     # Normal: top 2
-    top2 = rank_hot_sectors(MOCK_RANKINGS, top_n=2, min_stocks=8)
+    top2 = rank_hot_sectors(MOCK_RANKINGS, top_n=2, min_stocks=8, min_up_ratio=0)
     test("RK-01: top_n=2返回2个", len(top2) == 2, f"count={len(top2)}")
     if len(top2) >= 2:
         test("RK-02: 热度降序排列", top2[0]["hot_score"] >= top2[1]["hot_score"],
              f"{top2[0]['hot_score']} >= {top2[1]['hot_score']}")
 
     # min_stocks filter: sector with 5 stocks should be excluded
-    with_filter = rank_hot_sectors(MOCK_RANKINGS, top_n=10, min_stocks=8)
+    with_filter = rank_hot_sectors(MOCK_RANKINGS, top_n=10, min_stocks=8, min_up_ratio=0)
     test("RK-03: 微型板块(<8只)被过滤", all(s["name"] != "微型板块" for s in with_filter),
          f"sectors={[s['name'] for s in with_filter]}")
 
     # No filter
-    no_filter = rank_hot_sectors(MOCK_RANKINGS, top_n=10, min_stocks=0)
+    no_filter = rank_hot_sectors(MOCK_RANKINGS, top_n=10, min_stocks=0, min_up_ratio=0)
     test("RK-04: min_stocks=0不过滤", len(no_filter) == 3, f"count={len(no_filter)}")
 
     # Min-max normalization: scores in range 0-100
@@ -291,6 +293,230 @@ def test_fallback_score():
     # Dimension scores structure
     dims = r1["dimension_scores"]
     test("FB-06: 含5维度评分", len(dims) == 5, f"dims={list(dims.keys())}")
+
+
+def test_apply_quality_penalties():
+    """Test quality penalties affect ranking and adjusted scores."""
+    try:
+        from market_leader import _apply_quality_penalties
+    except ImportError as e:
+        test("QP-00: 质量惩罚函数存在", False, str(e))
+        return
+
+    candidates = [
+        {
+            "code": "600002",
+            "name": "紧止损",
+            "sector": "测试板块",
+            "direction": "偏多",
+            "composite_score": 0.85,
+            "stop_loss": 9.85,
+            "current_price": 10.0,
+            "risks": [],
+        },
+        {
+            "code": "600003",
+            "name": "信号冲突",
+            "sector": "测试板块",
+            "direction": "震荡偏多",
+            "composite_score": 0.9,
+            "stop_loss": None,
+            "current_price": 10.0,
+            "risks": ["深度分析数据获取失败, 使用基础评分", "空头排列", "MA5下穿MA10死叉", "MACD死叉；绿柱放大"],
+        },
+        {
+            "code": "600001",
+            "name": "优质股",
+            "sector": "测试板块",
+            "direction": "偏多",
+            "composite_score": 0.8,
+            "stop_loss": 9.5,
+            "current_price": 10.0,
+            "risks": [],
+        },
+    ]
+
+    ranked = _apply_quality_penalties(candidates)
+    ranked_codes = [item["code"] for item in ranked]
+    by_code = {item["code"]: item for item in ranked}
+
+    test("QP-01: adjusted_score降序排序", ranked_codes == ["600001", "600002", "600003"],
+         f"codes={ranked_codes}")
+    test("QP-02: 紧止损扣0.15", by_code["600002"]["quality_penalty"] == 0.15,
+         f"penalty={by_code['600002']['quality_penalty']}")
+    test("QP-03: 紧止损调整后分数正确", by_code["600002"]["adjusted_score"] == 0.7,
+         f"adjusted={by_code['600002']['adjusted_score']}")
+    # QP-04 = 缺止损0.05 + 兜底0.10 + 3个看空信号冲突0.20
+    test("QP-04: 兜底+缺止损+冲突叠加扣分", by_code["600003"]["quality_penalty"] == 0.35,
+         f"penalty={by_code['600003']['quality_penalty']}")
+    test("QP-05: 信号冲突写入说明", "signal_conflict" in by_code["600003"],
+         f"conflict={by_code['600003'].get('signal_conflict')}")
+    test("QP-06: 优质股不扣分", by_code["600001"]["adjusted_score"] == 0.8,
+         f"adjusted={by_code['600001']['adjusted_score']}")
+
+    invalid_candidates = [
+        {
+            "code": "600004",
+            "name": "错误止损",
+            "sector": "测试板块",
+            "direction": "偏多",
+            "composite_score": 0.7,
+            "stop_loss": 11.0,
+            "current_price": 10.0,
+            "risks": [],
+        },
+        {
+            "code": "600005",
+            "name": "零止损",
+            "sector": "测试板块",
+            "direction": "偏多",
+            "composite_score": 0.7,
+            "stop_loss": 0,
+            "current_price": 10.0,
+            "risks": [],
+        },
+    ]
+    invalid_ranked = _apply_quality_penalties(invalid_candidates)
+    invalid_by_code = {item["code"]: item for item in invalid_ranked}
+
+    test("QP-07: 止损高于现价不视为过近止损", invalid_by_code["600004"]["quality_penalty"] == 0.0,
+         f"penalty={invalid_by_code['600004']['quality_penalty']}")
+    test("QP-08: 零止损按缺失止损处理", invalid_by_code["600005"]["quality_penalty"] == 0.05,
+         f"penalty={invalid_by_code['600005']['quality_penalty']}")
+
+
+def test_run_deep_analysis_retries_pipeline():
+    """Test run_deep_analysis() retries pipeline once and keeps diagnosis info."""
+    import market_leader
+
+    code = "UT_LONGTOU_RETRY"
+    cache_root = market_leader.PROJECT_ROOT / ".cache" / "stock-trend-test"
+    code_dir = cache_root / code
+    code_dir.mkdir(parents=True, exist_ok=True)
+    (code_dir / "scores.json").write_text(json.dumps({
+        "composite_score": 0.81,
+        "direction": "偏多",
+        "confidence": "高",
+        "scores": {
+            "technical": 1.0,
+            "capital_flow": 0.5,
+            "fundamental": 0.5,
+            "sentiment": 0.0,
+            "macro": 0.0,
+        },
+        "risks": ["波动风险"],
+        "report_params": {
+            "stop_loss": 9.8,
+            "target_conservative": 11.0,
+            "target_moderate": 12.0,
+        },
+    }), encoding="utf-8")
+    (code_dir / "technical.json").write_text(json.dumps({
+        "summary": {"trend_stage": "上涨初期"},
+    }), encoding="utf-8")
+    (code_dir / "pipeline_output.json").write_text(json.dumps({
+        "errors": ["first attempt failed"],
+    }), encoding="utf-8")
+
+    calls = []
+    responses = [
+        subprocess.CompletedProcess(["pipeline"], 1, stdout="", stderr="first pipeline failure"),
+        subprocess.CompletedProcess(["pipeline"], 0, stdout="", stderr=""),
+        subprocess.CompletedProcess(["scores"], 0, stdout="", stderr=""),
+    ]
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return responses[len(calls) - 1]
+
+    try:
+        with patch.object(market_leader, "code_to_ts_code", return_value="000001.SZ"), \
+             patch.object(market_leader, "CACHE_DIR", cache_root), \
+             patch.object(market_leader.subprocess, "run", side_effect=fake_run), \
+             patch.object(market_leader.time, "sleep") as sleep_mock:
+            result = market_leader.run_deep_analysis(code, timeout=5, max_retries=1)
+
+        test("DA-01: pipeline失败后重试成功", len(calls) == 3, f"calls={len(calls)}")
+        test("DA-02: 重试前短暂sleep一次", sleep_mock.call_count == 1,
+             f"sleep_calls={sleep_mock.call_count}")
+        test("DA-03: 记录pipeline stderr用于诊断",
+             result.get("pipeline_stderr") == "first pipeline failure",
+             f"stderr={result.get('pipeline_stderr')}")
+        test("DA-04: 重试成功后继续读取评分结果",
+             result.get("composite_score") == 0.81 and result.get("trend_stage") == "上涨初期",
+             f"score={result.get('composite_score')} stage={result.get('trend_stage')}")
+    except Exception as e:
+        test("DA-01~04: pipeline重试链路", False, f"exception={e}")
+
+
+def test_run_deep_analysis_pipeline_failure():
+    """Test run_deep_analysis() reports pipeline exhaustion after retry."""
+    import market_leader
+
+    code = "UT_LONGTOU_PIPE_FAIL"
+    cache_root = market_leader.PROJECT_ROOT / ".cache" / "stock-trend-test"
+    calls = []
+    responses = [
+        subprocess.CompletedProcess(["pipeline"], 2, stdout="", stderr="first failure"),
+        subprocess.CompletedProcess(["pipeline"], 3, stdout="", stderr="second failure"),
+    ]
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return responses[len(calls) - 1]
+
+    try:
+        with patch.object(market_leader, "code_to_ts_code", return_value="000002.SZ"), \
+             patch.object(market_leader, "CACHE_DIR", cache_root), \
+             patch.object(market_leader.subprocess, "run", side_effect=fake_run), \
+             patch.object(market_leader.time, "sleep") as sleep_mock:
+            result = market_leader.run_deep_analysis(code, timeout=5, max_retries=1)
+
+        test("DA-05: pipeline重试耗尽返回明确错误",
+             result.get("error") == "pipeline_failed_after_2_attempts",
+             f"error={result.get('error')}")
+        test("DA-06: pipeline最终stderr保留用于诊断",
+             result.get("pipeline_stderr") == "second failure",
+             f"stderr={result.get('pipeline_stderr')}")
+        test("DA-07: pipeline失败时不进入评分阶段", len(calls) == 2,
+             f"calls={len(calls)}")
+        test("DA-08: pipeline连续失败只sleep一次", sleep_mock.call_count == 1,
+             f"sleep_calls={sleep_mock.call_count}")
+    except Exception as e:
+        test("DA-05~08: pipeline失败诊断", False, f"exception={e}")
+
+
+
+def test_run_deep_analysis_scoring_failure():
+    """Test run_deep_analysis() surfaces scoring subprocess failures."""
+    import market_leader
+
+    code = "UT_LONGTOU_SCORE_FAIL"
+    cache_root = market_leader.PROJECT_ROOT / ".cache" / "stock-trend-test"
+    calls = []
+    responses = [
+        subprocess.CompletedProcess(["pipeline"], 0, stdout="", stderr=""),
+        subprocess.CompletedProcess(["scores"], 7, stdout="", stderr="scoring exploded"),
+    ]
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return responses[len(calls) - 1]
+
+    try:
+        with patch.object(market_leader, "code_to_ts_code", return_value="000003.SZ"), \
+             patch.object(market_leader, "CACHE_DIR", cache_root), \
+             patch.object(market_leader.subprocess, "run", side_effect=fake_run):
+            result = market_leader.run_deep_analysis(code, timeout=5)
+
+        test("DA-09: scoring非零退出返回错误",
+             result.get("error") == "scoring_failed: scoring exploded",
+             f"error={result.get('error')}")
+        test("DA-10: scoring失败前已执行pipeline和评分", len(calls) == 2,
+             f"calls={len(calls)}")
+    except Exception as e:
+        test("DA-09~10: scoring失败诊断", False, f"exception={e}")
+
 
 
 def test_score_to_stars():
@@ -788,6 +1014,63 @@ def test_longhubang_degradation():
     test("LHG-02: 龙虎榜空数据风险=low", _classify_risk_level({}) == "low")
 
 
+def test_sector_dedup():
+    """Sectors with identical constituent stats should be deduplicated."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from fetch_sector_data import rank_hot_sectors
+
+    rankings = {
+        "meta": {"total_sectors": 4},
+        "sectors": [
+            {"code": "BK0001", "name": "工程咨询服务Ⅱ", "type": "concept",
+             "change_pct": -3.1, "up_count": 5, "down_count": 42,
+             "main_force_net": -1e8},
+            {"code": "BK0002", "name": "工程咨询服务Ⅲ", "type": "concept",
+             "change_pct": -3.1, "up_count": 5, "down_count": 42,
+             "main_force_net": -1e8},
+            {"code": "BK0003", "name": "半导体", "type": "industry",
+             "change_pct": 2.0, "up_count": 30, "down_count": 10,
+             "main_force_net": 5e8},
+            {"code": "BK0004", "name": "新能源", "type": "industry",
+             "change_pct": 1.5, "up_count": 20, "down_count": 15,
+             "main_force_net": 3e8},
+        ],
+    }
+    result = rank_hot_sectors(rankings, top_n=10, min_stocks=0, min_up_ratio=0)
+    eng_sectors = [s for s in result if "工程咨询" in s["name"]]
+    test("sector_dedup_removes_duplicates", len(eng_sectors) <= 1,
+         f"Expected ≤1 工程咨询 sector, got {len(eng_sectors)}")
+
+
+def test_sector_up_ratio_filter():
+    """Sectors with <15% up ratio should be excluded."""
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from fetch_sector_data import rank_hot_sectors
+
+    rankings = {
+        "meta": {"total_sectors": 3},
+        "sectors": [
+            {"code": "BK0010", "name": "公交", "type": "concept",
+             "change_pct": -3.6, "up_count": 0, "down_count": 8,
+             "main_force_net": -0.5e8},
+            {"code": "BK0011", "name": "弱势板块", "type": "concept",
+             "change_pct": -3.1, "up_count": 5, "down_count": 42,
+             "main_force_net": -1e8},
+            {"code": "BK0012", "name": "强势板块", "type": "industry",
+             "change_pct": 2.0, "up_count": 20, "down_count": 10,
+             "main_force_net": 3e8},
+        ],
+    }
+    result = rank_hot_sectors(rankings, top_n=10, min_stocks=0, min_up_ratio=0.15)
+    names = [s["name"] for s in result]
+    test("up_ratio_filter_excludes_weak",
+         "公交" not in names and "弱势板块" not in names,
+         f"Got: {names}")
+    test("up_ratio_filter_keeps_strong",
+         "强势板块" in names,
+         f"Got: {names}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Longtou test suite")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -811,6 +1094,8 @@ def main():
     print("\n📊 板块排行测试")
     print("=" * 40)
     test_rank_hot_sectors()
+    test_sector_dedup()
+    test_sector_up_ratio_filter()
 
     print("\n🏆 龙头筛选测试")
     print("=" * 40)
@@ -827,6 +1112,16 @@ def main():
     print("\n🛡️ 兜底评分测试")
     print("=" * 40)
     test_fallback_score()
+
+    print("\n🚦 质量惩罚测试")
+    print("=" * 40)
+    test_apply_quality_penalties()
+
+    print("\n🔁 深度分析重试测试")
+    print("=" * 40)
+    test_run_deep_analysis_retries_pipeline()
+    test_run_deep_analysis_pipeline_failure()
+    test_run_deep_analysis_scoring_failure()
 
     print("\n📐 DDX评分计算测试")
     print("=" * 40)

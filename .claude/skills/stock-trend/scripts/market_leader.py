@@ -135,8 +135,10 @@ def run_phase2(hot_sectors: list[dict], leader_n: int = 3, core_n: int = 3,
 # ──────────────────────── Phase 3: Deep Analysis ────────────────────────
 
 
-def run_deep_analysis(code: str, timeout: int = 60) -> dict:
+def run_deep_analysis(code: str, timeout: int = 60, max_retries: int = 1) -> dict:
     """Run full pipeline + scoring for one stock code.
+
+    Retries once on non-timeout failures. Logs failure reasons for diagnosis.
 
     Returns analysis result dict.
     """
@@ -144,25 +146,42 @@ def run_deep_analysis(code: str, timeout: int = 60) -> dict:
     ts_code = code_to_ts_code(code)
     result["ts_code"] = ts_code
 
-    # Run pipeline
+    # Run pipeline with retry
     pipeline_cmd = [sys.executable, str(SCRIPT_DIR / "run_pipeline.py"),
                     "--code", code]
-    try:
-        subprocess.run(pipeline_cmd, capture_output=True, text=True,
-                       timeout=timeout)
-    except subprocess.TimeoutExpired:
-        result["error"] = "pipeline_timeout"
-        return result
-    except Exception as e:
-        result["error"] = str(e)
+    pipeline_ok = False
+    for attempt in range(max_retries + 1):
+        try:
+            proc = subprocess.run(pipeline_cmd, capture_output=True, text=True,
+                                  timeout=timeout)
+            if proc.returncode == 0:
+                pipeline_ok = True
+                break
+            result["pipeline_stderr"] = proc.stderr[-200:] if proc.stderr else ""
+            if attempt < max_retries:
+                time.sleep(1)
+        except subprocess.TimeoutExpired:
+            result["error"] = "pipeline_timeout"
+            return result
+        except Exception as e:
+            result["error"] = str(e)
+            if attempt >= max_retries:
+                return result
+
+    if not pipeline_ok:
+        result["error"] = f"pipeline_failed_after_{max_retries + 1}_attempts"
         return result
 
-    # Run scoring
+    # Run scoring (no retry — local computation)
     scores_cmd = [sys.executable, str(SCRIPT_DIR / "compute_scores.py"),
                   "--code", code]
     try:
-        subprocess.run(scores_cmd, capture_output=True, text=True,
-                       timeout=30)
+        proc = subprocess.run(scores_cmd, capture_output=True, text=True,
+                              timeout=30)
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr[-100:] if proc.stderr else "unknown"
+            result["error"] = f"scoring_failed: {stderr_tail}"
+            return result
     except subprocess.TimeoutExpired:
         result["error"] = "scores_timeout"
         return result
@@ -248,6 +267,67 @@ def run_phase3(candidates: list[dict], roles: list[str],
                 results[c["code"]] = {"code": c["code"], "error": str(e)}
 
     return results
+
+
+# ──────────────────────── Quality Gate: Penalties ────────────────────────
+
+# Minimum useful stop-loss distance for mid-term holding (1-6 months)
+MIN_STOP_LOSS_PCT = 0.02  # 2%
+
+
+def _apply_quality_penalties(candidates: list[dict]) -> list[dict]:
+    """Apply quality penalties to candidate scores for ranking.
+
+    Penalties:
+      - stop_loss too close (<2%): -0.15
+      - stop_loss missing when direction is bullish: -0.05
+      - deep analysis failed (fallback scoring): -0.10
+      - signal consistency conflict: -0.10 to -0.20
+
+    Args:
+        candidates: list of dicts with composite_score, stop_loss, current_price,
+                    direction, risks.
+
+    Returns:
+        Same list sorted by adjusted_score descending.
+    """
+    try:
+        from quality_gate import check_signal_consistency
+    except ImportError:
+        check_signal_consistency = None
+
+    for c in candidates:
+        penalty = 0.0
+        score = c.get("composite_score") or 0
+
+        # Stop-loss distance penalty
+        stop = c.get("stop_loss")
+        price = c.get("current_price") or 0
+        if stop and price > 0:
+            stop_pct = (price - stop) / price
+            if 0 < stop_pct < MIN_STOP_LOSS_PCT:
+                penalty += 0.15
+        elif not stop and "偏多" in (c.get("direction") or ""):
+            penalty += 0.05
+
+        # Fallback scoring penalty
+        risks = c.get("risks") or []
+        if any("深度分析数据获取失败" in r for r in risks):
+            penalty += 0.10
+
+        # Signal consistency penalty
+        direction = c.get("direction") or ""
+        if check_signal_consistency and risks:
+            consistency = check_signal_consistency(direction, risks)
+            if consistency["has_conflict"]:
+                penalty += consistency["penalty"]
+                c["signal_conflict"] = consistency["conflict_detail"]
+
+        c["quality_penalty"] = round(penalty, 3)
+        c["adjusted_score"] = round(score - penalty, 3)
+
+    candidates.sort(key=lambda x: x.get("adjusted_score", 0), reverse=True)
+    return candidates
 
 
 # ──────────────────────── Report Generation ────────────────────────
@@ -616,26 +696,36 @@ def main():
 
     output["sectors_analyzed"] = sectors_analyzed
 
-    # ── Best picks & risk tips ──
+    # ── Best picks & risk tips (with quality penalties) ──
     all_rated = []
     for sec in sectors_analyzed:
-        for s in sec.get("leaders", []):
+        for s in sec.get("leaders", []) + sec.get("core_stocks", []):
             da = pipeline_results.get(s["code"], {})
             score = da.get("composite_score")
             if score is not None:
-                all_rated.append((score, s.get("name",""), s["code"],
-                                  sec.get("name",""), da.get("direction","")))
-        for s in sec.get("core_stocks", []):
-            da = pipeline_results.get(s["code"], {})
-            score = da.get("composite_score")
-            if score is not None:
-                all_rated.append((score, s.get("name",""), s["code"],
-                                  sec.get("name",""), da.get("direction","")))
+                all_rated.append({
+                    "code": s["code"],
+                    "name": s.get("name", ""),
+                    "sector": sec.get("name", ""),
+                    "direction": da.get("direction", ""),
+                    "composite_score": score,
+                    "stop_loss": da.get("stop_loss"),
+                    "current_price": s.get("current_price") or s.get("close"),
+                    "risks": da.get("risks", []),
+                })
 
-    all_rated.sort(key=lambda x: x[0], reverse=True)
-    for score, name, code, sector, direction in all_rated[:5]:
+    all_rated = _apply_quality_penalties(all_rated)
+
+    # Only recommend bullish-direction stocks for mid-term holding
+    all_rated = [c for c in all_rated if "偏多" in c.get("direction", "")]
+
+    for item in all_rated[:5]:
+        penalty_note = ""
+        if item.get("quality_penalty", 0) > 0:
+            penalty_note = f" (质量惩罚:-{item['quality_penalty']})"
         output["best_picks"].append(
-            f"{name}({code}) [{sector}] {direction} 综合分:{score}"
+            f"{item['name']}({item['code']}) [{item['sector']}] "
+            f"{item['direction']} 综合分:{item['adjusted_score']}{penalty_note}"
         )
 
     for sec in sectors_analyzed:

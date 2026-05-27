@@ -186,30 +186,61 @@ def compute_hot_score(sector: dict) -> float:
     return round(change_score * 0.40 + capital_score * 0.30 + ratio_score * 0.30, 1)
 
 
+def _up_ratio(sector: dict) -> float:
+    """Calculate up/(up+down) ratio for a sector."""
+    up = sector.get("up_count", 0) or 0
+    down = sector.get("down_count", 0) or 0
+    total = up + down
+    return up / total if total > 0 else 0
+
+
 def rank_hot_sectors(rankings: dict, top_n: int = 10,
-                     min_stocks: int = 8) -> list[dict]:
+                     min_stocks: int = 8,
+                     min_up_ratio: float = 0.15) -> list[dict]:
     """Rank sectors by composite hot score.
 
-    Filters out tiny sectors (fewer than min_stocks constituents),
-    then min-max normalizes scores to 0-100 range.
+    Filters:
+      - Tiny sectors (fewer than min_stocks constituents)
+      - Weak sectors (up_count / total < min_up_ratio)
+      - Duplicate child-level sectors (same base name + identical stats)
 
     Args:
         rankings: output from get_sector_rankings().
         top_n: number of top sectors to return.
         min_stocks: minimum constituent stocks. 0 disables.
+        min_up_ratio: minimum up/(up+down) ratio. 0 disables.
 
     Returns:
         Sorted list with score added to each sector dict.
     """
+    import re
+
     sectors = rankings.get("sectors", [])
 
     if min_stocks > 0:
-        before = len(sectors)
         sectors = [
             s for s in sectors
             if (s.get("up_count", 0) + s.get("down_count", 0)) >= min_stocks
         ]
-        dropped = before - len(sectors)
+
+    # Filter by up/down ratio — exclude boards that are overwhelmingly red
+    if min_up_ratio > 0:
+        sectors = [s for s in sectors if _up_ratio(s) >= min_up_ratio]
+
+    # Dedup: sectors with same base name (stripping Ⅰ/Ⅱ/Ⅲ/Ⅳ) and identical
+    # (up_count, down_count, change_pct) are parent/child duplicates; keep first.
+    seen_signatures = set()
+    deduped = []
+    for s in sectors:
+        base_name = re.sub(r'[ⅠⅡⅢⅣ\u2160-\u2163]$', '', s.get("name", ""))
+        sig = (base_name,
+               s.get("up_count", 0),
+               s.get("down_count", 0),
+               round(s.get("change_pct", 0) or 0, 2))
+        if sig not in seen_signatures:
+            seen_signatures.add(sig)
+            deduped.append(s)
+    sectors = deduped
 
     for s in sectors:
         s["hot_score"] = compute_hot_score(s)

@@ -1087,7 +1087,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
     stop_loss_warning = None
     if stop_loss and curr_close > 0:
         stop_pct = (curr_close - stop_loss) / curr_close
-        if stop_pct < 0.015:
+        if stop_pct < 0.02:
             stop_loss_warning = f"止损距现价仅{round(stop_pct*100, 1)}%，易被正常波动扫掉，建议放宽止损或等待更确认信号"
 
     # --- Three-tier target system ---
