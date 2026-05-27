@@ -43,8 +43,11 @@ holdings:
   buy_price: 7.508
   buy_date: '2026-05-27'
   quantity: 16000.0
-  stop_loss: null
-  targets: []
+  stop_loss: 6.65
+  targets:
+  - 7.68
+  - 8.28
+  - 9.0
   notes: ''
   status: active
   close_price: null
@@ -55,8 +58,11 @@ holdings:
   buy_price: 0.647
   buy_date: '2026-05-27'
   quantity: 290700.0
-  stop_loss: null
-  targets: []
+  stop_loss: 0.59
+  targets:
+  - 0.634
+  - 0.66
+  - 0.683
   notes: ''
   status: active
   close_price: null
@@ -67,8 +73,11 @@ holdings:
   buy_price: 17.703
   buy_date: '2026-05-26'
   quantity: 1500.0
-  stop_loss: null
-  targets: []
+  stop_loss: 17.0
+  targets:
+  - 18.04
+  - 18.41
+  - 18.79
   notes: ''
   status: active
   close_price: null
@@ -79,8 +88,11 @@ holdings:
   buy_price: 3.19
   buy_date: '2026-05-22'
   quantity: 8000.0
-  stop_loss: null
-  targets: []
+  stop_loss: 3.0
+  targets:
+  - 3.18
+  - 3.33
+  - 4.0
   notes: ''
   status: active
   close_price: null
