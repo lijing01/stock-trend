@@ -251,7 +251,7 @@ def calc_pnl(holding: dict, current_price: float) -> dict:
     value = current_price * qty
     pnl_amount = round(value - cost, 2)
     pnl_pct = round((current_price - buy_price) / buy_price * 100, 2) if buy_price > 0 else 0.0
-    return {"cost": round(cost, 2), "market_value": round(value, 2), "pnl_amount": pnl_pct, "pnl_pct": pnl_pct}
+    return {"cost": round(cost, 2), "market_value": round(value, 2), "pnl_amount": pnl_amount, "pnl_pct": pnl_pct}
 
 
 # ── Alert logic ────────────────────────────────────────────────────────────

@@ -35,7 +35,7 @@ holdings:
   targets: []
   notes: ''
   status: closed
-  close_price: null
+  close_price: 7.55
   close_date: '2026-05-27'
 - code: '300241'
   ts_code: 300241.SZ
