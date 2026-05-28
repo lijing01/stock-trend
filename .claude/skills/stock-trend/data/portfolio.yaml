@@ -52,6 +52,7 @@ holdings:
   status: active
   close_price: null
   close_date: null
+  current_price: 7.46
 - code: '159740'
   ts_code: 159740.SZ
   name: 恒生科技ETF大成
@@ -67,6 +68,7 @@ holdings:
   status: active
   close_price: null
   close_date: null
+  current_price: 0.612
 - code: '601166'
   ts_code: 601166.SH
   name: 兴业银行
@@ -97,6 +99,7 @@ holdings:
   status: active
   close_price: null
   close_date: null
+  current_price: 3.147
 settings:
   alert_threshold_pct: 3.0
   default_stop_loss_pct: 5.0

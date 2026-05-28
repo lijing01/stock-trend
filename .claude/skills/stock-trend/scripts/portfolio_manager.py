@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import math
+import urllib.request
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Optional
@@ -60,11 +61,86 @@ def find_holding(holdings: list, code: str) -> Optional[dict]:
     return None
 
 
+def update_current_prices(holdings: list[dict], enriched: list[dict]):
+    """Write current_price from enriched list back to portfolio YAML for next query."""
+    price_map = {e["code"]: e["current_price"] for e in enriched if e.get("current_price") is not None}
+    changed = False
+    for h in holdings:
+        if h.get("status") == "active" and h["code"] in price_map:
+            new_p = price_map[h["code"]]
+            if h.get("current_price") != new_p:
+                h["current_price"] = new_p
+                changed = True
+    if changed:
+        save_portfolio({"holdings": holdings, "settings": load_portfolio().get("settings", {})})
+
+
 # ── Fetch helpers ─────────────────────────────────────────────────────
 
 
+def _read_url(req, timeout=10):
+    """Read URL with proxyless fallback (same pattern as fetch_kline_eastmoney)."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except Exception:
+        try:
+            proxyless = urllib.request.ProxyHandler({})
+            opener = urllib.request.build_opener(proxyless)
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except Exception:
+            return None
+
+
+def _fetch_realtime_raw(ts_code: str) -> Optional[float]:
+    """Hit push2.eastmoney.com real-time API, return raw f43 integer or None."""
+    suffix = ts_code.rsplit(".", 1)[-1]
+    code = ts_code.split(".")[0]
+    market = {"SH": "1", "SZ": "0"}.get(suffix)
+    if market is None:
+        return None
+    secid = f"{market}.{code}"
+    url = (f"https://push2.eastmoney.com/api/qt/stock/get"
+           f"?secid={secid}&fields=f43,f57,f58")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://quote.eastmoney.com/",
+    }
+    body = _read_url(urllib.request.Request(url, headers=headers))
+    if body is None:
+        return None
+    try:
+        return json.loads(body).get("data", {}).get("f43")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def fetch_realtime_price(ts_code: str) -> Optional[float]:
+    """Get real-time price from eastmoney push2 API.
+
+    Uses kline close as reference to determine correct price scaling
+    (stocks: 分/100, sub-1-yuan ETFs: 厘/1000).
+    """
+    price_raw = _fetch_realtime_raw(ts_code)
+    if price_raw is None:
+        return None
+    # Use kline close to pick correct divisor
+    kline = _fetch_kline(ts_code)
+    if kline:
+        kline_close = float(kline[-1].get("close", 0))
+        for divisor in (100, 1000):
+            scaled = price_raw / divisor
+            if kline_close > 0 and abs(scaled - kline_close) / kline_close < 0.3:
+                return round(scaled, 4)
+    return round(price_raw / 100, 4)
+
+
 def fetch_current_price(ts_code: str) -> Optional[float]:
-    """Get latest close price via fetch_kline_eastmoney.py subprocess."""
+    """Get latest price. Real-time API first (more current), kline fallback."""
+    price = fetch_realtime_price(ts_code)
+    if price is not None:
+        return price
     kline = _fetch_kline(ts_code)
     if kline:
         return float(kline[-1].get("close", 0))
@@ -641,6 +717,8 @@ def cmd_list(args):
                 "notes": h.get("notes", ""),
             })
 
+    update_current_prices(holdings, enriched)
+
     result = {
         "meta": {"command": "list", "timestamp": datetime.now().isoformat()},
         "holdings": enriched,
@@ -807,6 +885,7 @@ def cmd_status(args):
             })
 
     # Alerts
+    update_current_prices(holdings, enriched)
     alerts = check_alerts(holdings, settings)
 
     # Scan comparison — run etf_scanner quick phase only
