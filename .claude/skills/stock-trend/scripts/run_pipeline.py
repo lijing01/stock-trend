@@ -226,11 +226,13 @@ def main():
     technical_path = str(output_dir / "technical.json")
     if kline_data and kline_data.get("meta", {}).get("data_source") != "error":
         print(f"[3/5] Running technical analysis...")
-        tech_result = run_script(
-            [
-                sys.executable, str(SCRIPT_DIR / "analyze_technical.py"),
-                kline_path, "-o", technical_path,
-            ],
+        tech_cmd = [
+            sys.executable, str(SCRIPT_DIR / "analyze_technical.py"),
+            kline_path, "-o", technical_path,
+        ]
+        if is_etf:
+            tech_cmd.append("--etf")
+        tech_result = run_script(tech_cmd,
             label="analyze_technical",
         )
         if tech_result.get("timeout"):

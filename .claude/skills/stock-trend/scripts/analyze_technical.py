@@ -1160,11 +1160,12 @@ def calc_max_drawdown(df):
 # --- Stop-loss and Risk:Reward ---
 
 
-def calc_risk_reward(df, atr_result, levels, direction="neutral"):
+def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     """Calculate stop-loss price and risk:reward ratio with three-tier targets.
 
     Stop-loss uses adaptive ATR multiplier based on trend direction and volatility.
     Position sizing factors in R:R quality and trend direction.
+    ETF vs stock: ETFs get tighter ATR multipliers (smoother action) + higher R:R threshold.
     """
     curr_close = df["close"].iloc[-1]
     atr = atr_result.get("atr")
@@ -1177,12 +1178,21 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
 
     # --- Adaptive stop-loss with volatility regime awareness ---
     # ATR multiplier: wider in bearish (avoid whipsaw), tighter in bullish low-vol
-    if direction == "bearish":
-        atr_mult = 2.5
-    elif direction == "bullish" and atr_pct < 2.0:
-        atr_mult = 2.0
+    # ETF: tighter stops (smoother price action, less gap risk)
+    if is_etf:
+        if direction == "bearish":
+            atr_mult = 1.8
+        elif direction == "bullish" and atr_pct < 2.0:
+            atr_mult = 1.5
+        else:
+            atr_mult = 1.5
     else:
-        atr_mult = 2.0
+        if direction == "bearish":
+            atr_mult = 2.5
+        elif direction == "bullish" and atr_pct < 2.0:
+            atr_mult = 2.0
+        else:
+            atr_mult = 2.0
     # Volatility regime adjustment (expanding → wider, contracting → tighter)
     regime_adj = _volatility_regime_multiplier(df, atr_pct)
     atr_mult += regime_adj
@@ -1240,13 +1250,17 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
         target_conservative = round(resistance_prices[0], 2)
 
         if risk and risk > 0:
-            # Moderate: first resistance where R:R >= 1.5
+            # R:R threshold for target selection: higher for ETFs (tighter stop → need wider target)
+            target_rr_threshold = 2.0 if is_etf else 1.5
+            # Moderate: first resistance where R:R >= target_rr_threshold
             for rp in resistance_prices:
-                if (rp - curr_close) / risk >= 1.5:
+                if (rp - curr_close) / risk >= target_rr_threshold:
                     target_moderate = round(rp, 2)
                     break
             if target_moderate is None and atr:
-                target_moderate = round(curr_close + 2 * atr, 2)
+                # ETF tight stop means 2*atr gives ~1.33R, need more — use 3*atr for ~2.0R
+                atr_target_mult = 3 if is_etf else 2
+                target_moderate = round(curr_close + atr_target_mult * atr, 2)
             elif target_moderate is None:
                 target_moderate = target_conservative
 
@@ -1259,7 +1273,8 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
             if moderate_idx is not None and moderate_idx + 1 < len(resistance_prices):
                 target_aggressive = round(resistance_prices[moderate_idx + 1], 2)
             elif atr:
-                target_aggressive = round(curr_close + 3 * atr, 2)
+                etf_agg_mult = 4 if is_etf else 3
+                target_aggressive = round(curr_close + etf_agg_mult * atr, 2)
             else:
                 target_aggressive = target_moderate
         else:
@@ -1267,14 +1282,20 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
             target_aggressive = target_conservative
     elif atr:
         target_conservative = round(curr_close + 1 * atr, 2)
-        target_moderate = round(curr_close + 2 * atr, 2)
-        target_aggressive = round(curr_close + 3 * atr, 2)
+        # ETF: wider ATR multipliers to compensate for tighter stop
+        mod_mult = 3 if is_etf else 2
+        agg_mult = 4 if is_etf else 3
+        target_moderate = round(curr_close + mod_mult * atr, 2)
+        target_aggressive = round(curr_close + agg_mult * atr, 2)
         warning = "支撑/压力位数据不足，止损/目标价仅供参考"
     else:
         warning = "ATR数据不足，无法计算止损/目标价"
 
     # Primary target = moderate
     target = target_moderate
+
+    # R:R favorable threshold: higher for ETFs (smoother → require more edge)
+    rr_favorable_threshold = 2.0 if is_etf else 1.5
 
     # --- R:R ratios for all three targets ---
     reward = (target - curr_close) if target else None
@@ -1289,7 +1310,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
         if target:
             reward = target - curr_close
             rr_ratio = round(reward / risk, 2)
-            favorable_rr = rr_ratio >= 1.5
+            favorable_rr = rr_ratio >= rr_favorable_threshold
         if target_conservative:
             rr_conservative = round((target_conservative - curr_close) / risk, 2)
         if target_moderate:
@@ -1315,18 +1336,23 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral"):
     else:
         base_tier = 3
 
-    # R:R adjustment
+    # R:R adjustment (ETF thresholds shifted +0.5: smoother price needs more edge)
+    rr_adj = 0
     if rr_ratio is not None:
-        if rr_ratio < 1.0:
-            rr_adj = -2
-        elif rr_ratio < 1.5:
-            rr_adj = -1
-        elif rr_ratio > 2.5:
-            rr_adj = 1
+        if is_etf:
+            if rr_ratio < 1.5:
+                rr_adj = -2
+            elif rr_ratio < 2.0:
+                rr_adj = -1
+            elif rr_ratio > 3.0:
+                rr_adj = 1
         else:
-            rr_adj = 0
-    else:
-        rr_adj = 0
+            if rr_ratio < 1.0:
+                rr_adj = -2
+            elif rr_ratio < 1.5:
+                rr_adj = -1
+            elif rr_ratio > 2.5:
+                rr_adj = 1
 
     # Trend adjustment: bearish → reduce one tier
     trend_adj = -1 if direction == "bearish" else 0
@@ -1380,7 +1406,7 @@ def _calc_rsi_at(df, offset, period=14):
     return round(100 - 100 / (1 + rs), 1)
 
 
-def calc_entry_signals(df, indicator_results, rr_ratio=None) -> dict:
+def calc_entry_signals(df, indicator_results, rr_ratio=None, is_etf=False) -> dict:
     """Fuse multi-indicator signals into entry timing advice.
 
     Checks 4 confirmation signals:
@@ -1389,9 +1415,8 @@ def calc_entry_signals(df, indicator_results, rr_ratio=None) -> dict:
     3. Bollinger squeeze breakout: bandwidth < 5% + close breaks band
     4. Volume-shrinking pullback: vol_ratio < 0.8 + close near MA20 (±1.5%)
 
-    Also considers R:R quality: R:R < 1.0 demotes verdict priority.
-
-    Returns dict with signal_count, signals list, and verdict (ready/watch/wait/avoid).
+    Also considers R:R quality: R:R < threshold demotes verdict priority.
+    ETF threshold higher (1.5R) than stock (1.0R).
     """
     close_price = float(df["close"].iloc[-1])
 
@@ -1465,7 +1490,9 @@ def calc_entry_signals(df, indicator_results, rr_ratio=None) -> dict:
         verdict = "wait"
 
     # R:R filter: poor R:R demotes entry priority
-    if rr_ratio is not None and rr_ratio < 1.0:
+    # ETF: stricter threshold (1.5R vs 1.0R for stocks)
+    rr_entry_threshold = 1.5 if is_etf else 1.0
+    if rr_ratio is not None and rr_ratio < rr_entry_threshold:
         if verdict == "ready":
             verdict = "watch"
             signals_found.append("R:R偏低(建议观望)")
@@ -1597,6 +1624,7 @@ def main():
     parser.add_argument("--ma-periods", default="5,10,20,60", help="MA periods (default: 5,10,20,60)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--compact", action="store_true", help="Output only summary section")
+    parser.add_argument("--etf", action="store_true", help="Treat as ETF (tighter stop, higher R:R threshold)")
 
     args = parser.parse_args()
 
@@ -1696,7 +1724,7 @@ def main():
     direction = summary.get("direction", "neutral")
 
     # Risk:Reward and stop-loss (uses direction for adaptive stop)
-    risk_reward = calc_risk_reward(df, atr_result, levels, direction=direction)
+    risk_reward = calc_risk_reward(df, atr_result, levels, direction=direction, is_etf=args.etf)
 
     summary["support_levels"] = [item["price"] for item in levels["support"]]
     summary["resistance_levels"] = [item["price"] for item in levels["resistance"]]
@@ -1717,7 +1745,7 @@ def main():
 
     # Entry signal fusion (with R:R filter)
     rr_ratio = risk_reward.get("risk_reward_ratio")
-    summary["entry_signals"] = calc_entry_signals(df, indicator_results, rr_ratio=rr_ratio)
+    summary["entry_signals"] = calc_entry_signals(df, indicator_results, rr_ratio=rr_ratio, is_etf=args.etf)
 
     # Latest data point
     last = df.iloc[-1]
@@ -1733,6 +1761,7 @@ def main():
     result = {
         "meta": {
             "ts_code": ts_code,
+            "is_etf": args.etf,
             "analysis_date": datetime.now().strftime("%Y%m%d"),
             "data_points": len(df),
             "indicators_computed": list(indicator_results.keys()) + (["patterns"] if patterns else []),
