@@ -42,7 +42,7 @@ holdings:
   name: 瑞丰光电
   buy_price: 7.508
   buy_date: '2026-05-27'
-  quantity: 16000.0
+  quantity: 8000.0
   stop_loss: 6.65
   targets:
   - 7.68
