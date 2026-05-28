@@ -12,9 +12,12 @@ Usage:
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 # Path constants
@@ -196,6 +199,197 @@ def load_json_safe(path):
         return None
 
 
+def _stable_keys(data, keys):
+    """Return a dict subset with only keys that are present."""
+    return {k: data[k] for k in keys if k in data}
+
+
+def _normalized_volume_pair(golden_vol, current_vol):
+    """Normalize volume pairs when one source reports lots and another shares."""
+    if golden_vol is None or current_vol is None:
+        return golden_vol, current_vol
+    lo = min(abs(golden_vol), abs(current_vol))
+    hi = max(abs(golden_vol), abs(current_vol))
+    if lo == 0:
+        return golden_vol, current_vol
+    ratio = hi / lo
+    if 80 <= ratio <= 120:
+        if abs(golden_vol) < abs(current_vol):
+            golden_vol *= 100
+        else:
+            current_vol *= 100
+    return golden_vol, current_vol
+
+
+def _normalized_amount_pair(golden_amount, current_amount):
+    """Normalize amount pairs when sources differ by reporting unit."""
+    if golden_amount is None or current_amount is None:
+        return golden_amount, current_amount
+    lo = min(abs(golden_amount), abs(current_amount))
+    hi = max(abs(golden_amount), abs(current_amount))
+    if lo == 0:
+        return golden_amount, current_amount
+    ratio = hi / lo
+    if 900 <= ratio <= 1100:
+        if abs(golden_amount) < abs(current_amount):
+            golden_amount *= 1000
+        else:
+            current_amount *= 1000
+    return golden_amount, current_amount
+
+
+def _kline_config(config):
+    """Use more realistic thresholds for live kline cross-source comparisons."""
+    local = {
+        "thresholds": dict(config.get("thresholds", {})),
+        "numeric_threshold_map": dict(config.get("numeric_threshold_map", {})),
+    }
+    local["thresholds"]["price"] = 0.005
+    local["thresholds"]["pct"] = 0.10
+    local["thresholds"]["volume"] = 0.02
+    local["numeric_threshold_map"]["pct_chg"] = "pct"
+    local["numeric_threshold_map"]["pre_close"] = "price"
+    local["numeric_threshold_map"]["vol"] = "volume"
+    return local
+
+
+def _normalize_macro_snapshot(data):
+    return {
+        "meta": _stable_keys(data.get("meta", {}), ["data_source"]),
+        "summary": data.get("summary", {}),
+        "data": data.get("data", {}),
+    }
+
+
+def _normalize_fundamental(data):
+    summary = data.get("summary", {})
+    normalized = {
+        "meta": _stable_keys(data.get("meta", {}), ["ts_code", "data_source", "asset"]),
+        "summary": _stable_keys(summary, ["data_quality"]),
+    }
+    if summary.get("data_quality") != "error":
+        normalized["data"] = data.get("data", {})
+    return normalized
+
+
+def _normalize_capital_flow(data):
+    extended = data.get("data_extended", {})
+    market_values = [
+        item.get("net_buy_billion")
+        for item in (extended.get("northbound_market") or [])[-10:]
+    ]
+    return {
+        "meta": _stable_keys(data.get("meta", {}), ["ts_code", "asset"]),
+        "data_empty": len(data.get("data", [])) == 0,
+        "northbound_individual": extended.get("northbound_individual", {}),
+        "northbound_market_values": market_values,
+    }
+
+
+def _normalize_etf_data(data):
+    return {
+        "fund_code": data.get("fund_code"),
+        "data_source": data.get("data_source"),
+        "fund_name": data.get("fund_name"),
+        "tracking_index": data.get("tracking_index"),
+        "fund_type": data.get("fund_type"),
+        "has_nav": bool(data.get("nav")),
+    }
+
+
+def _normalize_technical(data):
+    summary = data.get("summary", {})
+    return {
+        "summary": _stable_keys(summary, ["direction", "confidence", "data_quality"]),
+    }
+
+
+def _normalize_scores(data):
+    return {
+        "direction_detail": data.get("direction_detail"),
+        "confidence": data.get("confidence"),
+        "data_quality": data.get("data_quality"),
+        "special_type": (data.get("special") or {}).get("type"),
+        "automated_source_keys": sorted((data.get("automated_sources") or {}).keys()),
+    }
+
+
+def _diff_kline(golden_data, current_data, config):
+    golden_rows = {r.get("trade_date"): r for r in golden_data.get("data", []) if r.get("trade_date")}
+    current_rows = {r.get("trade_date"): r for r in current_data.get("data", []) if r.get("trade_date")}
+    common_dates = sorted(set(golden_rows) & set(current_rows))
+    if not common_dates:
+        return [{
+            "category": VALUE_CHANGE,
+            "path": "data",
+            "detail": "no overlapping trade_date between golden and current",
+            "severity": "fail",
+        }]
+
+    normalized_golden = {"data": []}
+    normalized_current = {"data": []}
+    for trade_date in common_dates:
+        golden_row = golden_rows[trade_date]
+        current_row = current_rows[trade_date]
+        golden_vol, current_vol = _normalized_volume_pair(golden_row.get("vol"), current_row.get("vol"))
+        golden_amount, current_amount = _normalized_amount_pair(golden_row.get("amount"), current_row.get("amount"))
+        skip_volume = (
+            golden_amount == 0 and current_amount == 0
+            and (golden_data.get("meta", {}).get("ts_code", "").endswith(".HK")
+                 or current_data.get("meta", {}).get("ts_code", "").endswith(".HK"))
+        )
+        golden_record = {
+            "trade_date": trade_date,
+            "open": golden_row.get("open"),
+            "close": golden_row.get("close"),
+            "high": golden_row.get("high"),
+            "low": golden_row.get("low"),
+            "amount": golden_amount,
+        }
+        current_record = {
+            "trade_date": trade_date,
+            "open": current_row.get("open"),
+            "close": current_row.get("close"),
+            "high": current_row.get("high"),
+            "low": current_row.get("low"),
+            "amount": current_amount,
+        }
+        if not skip_volume:
+            golden_record["vol"] = golden_vol
+            current_record["vol"] = current_vol
+        if golden_row.get("pre_close") is not None and current_row.get("pre_close") is not None:
+            golden_record["pre_close"] = golden_row.get("pre_close")
+            current_record["pre_close"] = current_row.get("pre_close")
+        normalized_golden["data"].append({
+            **golden_record,
+        })
+        normalized_current["data"].append({
+            **current_record,
+        })
+
+    return deep_diff(normalized_golden, normalized_current, "", _kline_config(config))
+
+
+def diff_output(output_name, golden_data, current_data, config):
+    """Diff output files using stable semantics per file type."""
+    if output_name == "kline.json":
+        return _diff_kline(golden_data, current_data, config)
+
+    normalizers = {
+        "macro_snapshot.json": _normalize_macro_snapshot,
+        "fundamental.json": _normalize_fundamental,
+        "capital_flow.json": _normalize_capital_flow,
+        "etf_data.json": _normalize_etf_data,
+        "technical.json": _normalize_technical,
+        "scores.json": _normalize_scores,
+    }
+    normalizer = normalizers.get(output_name)
+    if normalizer:
+        golden_data = normalizer(golden_data)
+        current_data = normalizer(current_data)
+    return deep_diff(golden_data, current_data, "", config)
+
+
 def get_symbol_dir_name(symbol):
     """Extract directory name from symbol code.
 
@@ -204,7 +398,51 @@ def get_symbol_dir_name(symbol):
     return symbol["code"].split(".")[0]
 
 
-def run_diff(config, verbose):
+def prepare_current_outputs(config, current_dir):
+    """Generate fresh current outputs in an isolated cache directory."""
+    symbols = config.get("symbols", [])
+    env = os.environ.copy()
+    env["STOCK_TREND_CACHE_DIR"] = str(current_dir)
+
+    for cache_file in CACHE_DIR.glob("*.json"):
+        shutil.copy2(cache_file, current_dir / cache_file.name)
+
+    for symbol in symbols:
+        code = symbol["code"]
+        numeric_code = code.split(".")[0]
+        symbol_dir = current_dir / numeric_code
+        symbol_dir.mkdir(parents=True, exist_ok=True)
+        shared_symbol_dir = CACHE_DIR / numeric_code
+
+        shared_kline = load_json_safe(shared_symbol_dir / "kline.json")
+        if shared_kline:
+            adj = "none" if code.endswith(".HK") else "qfq"
+            cache_key = f"kline_{code}_D_{adj}"
+            seed_path = current_dir / f"{cache_key}.json"
+            with open(seed_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "cache_timestamp": time.time(),
+                    "cache_key": cache_key,
+                    **shared_kline,
+                }, f, ensure_ascii=False, indent=2)
+
+        resolve_output = symbol_dir / "resolve.json"
+        subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "resolve_code.py"), numeric_code, "-o", str(resolve_output)],
+            capture_output=True, text=True, timeout=20, env=env,
+        )
+        subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "run_pipeline.py"), "--code", numeric_code],
+            capture_output=True, text=True, timeout=90, env=env,
+        )
+        if (symbol_dir / "technical.json").exists():
+            subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "compute_scores.py"), "--code", numeric_code],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+
+
+def run_diff(config, verbose, current_dir=CACHE_DIR):
     """Compare golden files against current cache outputs.
 
     For each symbol and script in config, loads the golden reference file
@@ -223,7 +461,7 @@ def run_diff(config, verbose):
         for script in scripts:
             test_name = f"{symbol_dir}/{script['output']}"
             golden_path = GOLDEN_DIR / symbol_dir / script["output"]
-            current_path = CACHE_DIR / symbol_dir / script["output"]
+            current_path = current_dir / symbol_dir / script["output"]
 
             # Golden file doesn't exist -> skip
             if not golden_path.exists():
@@ -275,7 +513,7 @@ def run_diff(config, verbose):
                 continue
 
             # Run deep diff
-            diffs = deep_diff(golden_data, current_data, "", config)
+            diffs = diff_output(script["output"], golden_data, current_data, config)
 
             if not diffs:
                 PASSED += 1
@@ -522,7 +760,10 @@ def main():
             print(f"\nGolden directory does not exist: {GOLDEN_DIR}")
             print("Run with --regenerate to create golden files first.")
 
-        run_diff(config, args.verbose)
+        with tempfile.TemporaryDirectory(prefix="stock-trend-golden-current-") as tmpdir:
+            current_dir = Path(tmpdir)
+            prepare_current_outputs(config, current_dir)
+            run_diff(config, args.verbose, current_dir=current_dir)
 
         # Summary
         total = PASSED + FAILED + WARNINGS

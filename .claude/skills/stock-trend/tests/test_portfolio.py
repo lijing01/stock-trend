@@ -116,11 +116,10 @@ def test_alert_stop_loss_approaching():
     """Alert when price approaches stop loss."""
     portfolio = _make_test_portfolio()
     import portfolio_manager as pm
-    # Save original fetch function, replace with mock
-    orig_fetch = pm.fetch_current_price
-    pm.fetch_current_price = lambda _: 0.97  # close to 0.95 stop loss
+    orig_fetch = pm.fetch_kline_with_price
+    pm.fetch_kline_with_price = lambda _: (0.97, [{"close": 0.97}])  # close to 0.95 stop loss
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
-    pm.fetch_current_price = orig_fetch
+    pm.fetch_kline_with_price = orig_fetch
     test("TPF-05: stop loss approaching alert",
          any(a["type"] == "stop_loss_approaching" for a in alerts))
 
@@ -129,10 +128,10 @@ def test_alert_stop_loss_hit():
     """Critical alert when price breaks stop loss."""
     portfolio = _make_test_portfolio()
     import portfolio_manager as pm
-    orig_fetch = pm.fetch_current_price
-    pm.fetch_current_price = lambda _: 0.94  # below 0.95
+    orig_fetch = pm.fetch_kline_with_price
+    pm.fetch_kline_with_price = lambda _: (0.94, [{"close": 0.94}])  # below 0.95
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
-    pm.fetch_current_price = orig_fetch
+    pm.fetch_kline_with_price = orig_fetch
     test("TPF-06: stop loss hit alert",
          any(a["type"] == "stop_loss_hit" and a["severity"] == "critical" for a in alerts))
 
@@ -141,24 +140,24 @@ def test_alert_target_approaching():
     """Info alert when price approaches target."""
     portfolio = _make_test_portfolio()
     import portfolio_manager as pm
-    orig_fetch = pm.fetch_current_price
-    pm.fetch_current_price = lambda _: 1.13  # close to 1.15 target
+    orig_fetch = pm.fetch_kline_with_price
+    pm.fetch_kline_with_price = lambda _: (1.13, [{"close": 1.13}])  # close to 1.15 target
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
-    pm.fetch_current_price = orig_fetch
+    pm.fetch_kline_with_price = orig_fetch
     test("TPF-07: target approaching alert",
          any(a["type"] == "target_approaching" for a in alerts))
 
 
 def test_alert_target_hit():
-    """Info alert when price reaches target."""
+    """Info alert when price reaches first target."""
     portfolio = _make_test_portfolio()
     import portfolio_manager as pm
-    orig_fetch = pm.fetch_current_price
-    pm.fetch_current_price = lambda _: 1.16  # above 1.15 target
+    orig_fetch = pm.fetch_kline_with_price
+    pm.fetch_kline_with_price = lambda _: (1.16, [{"close": 1.16}])  # above 1.15 target
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
-    pm.fetch_current_price = orig_fetch
-    test("TPF-08: target hit alert",
-         any(a["type"] == "target_hit" for a in alerts))
+    pm.fetch_kline_with_price = orig_fetch
+    test("TPF-08: target1 hit alert",
+         any(a["type"] == "tp1_hit" for a in alerts))
 
 
 def test_empty_portfolio_load():

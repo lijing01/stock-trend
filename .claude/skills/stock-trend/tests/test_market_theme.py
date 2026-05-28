@@ -265,6 +265,42 @@ def test_all_sectors_fading():
     test("all fading: fading has all", len(classified["fading"]) == 2)
 
 
+def test_generate_report_uses_lookback_days_for_up_day_count():
+    """Markdown report should not hardcode 10 when rendering up-day count."""
+    classified = {
+        "strong": [{
+            "name": "主题A",
+            "hot_score": 80,
+            "momentum_5d": 5.0,
+            "momentum_10d": 8.0,
+            "up_days_ratio": round(10 / 15, 2),
+            "persistence": 72.3,
+            "trend_label": "↗ (延续)",
+        }],
+        "moderate": [{
+            "name": "主题B",
+            "hot_score": 65,
+            "momentum_5d": 3.0,
+            "momentum_10d": 4.5,
+            "up_days_ratio": round(10 / 15, 2),
+            "persistence": 55.0,
+            "trend_label": "→ (走平)",
+        }],
+        "emerging": [],
+        "fading": [],
+        "one_day_wonders": [],
+    }
+    report = amt.generate_report(classified, {"scan_time": "20260528-160000"}, 15)
+    test("report uses 10/15 for strong up-day count", "| 主题A | 80 | +5.0% | +8.0% | 10/15 | **72.3** | ↗ (延续) |" in report)
+    test("report uses 10/15 for moderate up-day count", "| 主题B | 65 | +3.0% | 10/15 | 55.0 | → (走平) |" in report)
+
+
+def test_generate_html_report_persistence_cell_has_closed_class_quote():
+    """HTML report should render valid class attribute for persistence cell."""
+    cell = amt._COL_RENDERERS["persistence"]({"persistence": 72.3})
+    test("persistence cell has valid class attribute", cell == '<td class="ml-strong">72.3</td>', f"got {cell}")
+
+
 # ──────────────────────── Main ────────────────────────
 
 
@@ -299,6 +335,11 @@ def main():
     test_kline_exactly_3()
     test_classification_boundaries()
     test_all_sectors_fading()
+
+    # ── Report rendering ──
+    print("\n--- Report rendering (P0) ---")
+    test_generate_report_uses_lookback_days_for_up_day_count()
+    test_generate_html_report_persistence_cell_has_closed_class_quote()
 
     # ── Summary ──
     total = PASSED + FAILED + SKIPPED

@@ -39,6 +39,21 @@ def calc_beg_date(freq):
     return start.strftime("%Y%m%d")
 
 
+def _read_url(req, timeout=15):
+    """Read URL with standard request first, then proxyless fallback."""
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except Exception as first_error:
+        try:
+            proxyless = urllib.request.ProxyHandler({})
+            opener = urllib.request.build_opener(proxyless)
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except Exception:
+            raise first_error
+
+
 def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
     """Fetch K-line data from East Money API.
 
@@ -65,8 +80,7 @@ def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
 
     req = urllib.request.Request(url, headers=EM_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+        result = json.loads(_read_url(req, timeout=15))
     except Exception as e:
         raise RuntimeError(f"东方财富API请求失败({host}): {e}")
 

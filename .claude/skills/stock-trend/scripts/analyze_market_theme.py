@@ -149,6 +149,7 @@ def compute_persistence(sector: dict, kline: list[dict], lookback_days: int = 10
 
     mom5 = _compute_momentum(window, 5)
     mom10 = _compute_momentum(window, 10) if len(window) >= 10 else mom5
+    up_days = sum(1 for r in window if (r.get("pct_chg") or 0) > 0)
     up_ratio = _up_days_ratio(window)
     vol = _compute_volatility(window)
     accel = _compute_acceleration(window) if len(window) >= 10 else 0.0
@@ -186,6 +187,7 @@ def compute_persistence(sector: dict, kline: list[dict], lookback_days: int = 10
         "persistence": round(composite, 1),
         "momentum_5d": round(mom5, 2),
         "momentum_10d": round(mom10, 2),
+        "up_days": up_days,
         "up_days_ratio": round(up_ratio, 2),
         "volatility": round(vol, 2),
         "acceleration": round(accel, 2),
@@ -260,7 +262,8 @@ def generate_report(classified: dict, meta: dict, lookback_days: int) -> str:
         lines.append(f"| 板块 | 今日热度 | 5日涨幅 | 10日涨幅 | 上涨天数 | 持续性分 | 趋势 |")
         lines.append(f"|------|---------|---------|----------|---------|---------|------|")
         for r in strong:
-            up_str = f"{r['up_days_ratio']*10:.0f}/{lookback_days}"
+            up_days = r.get("up_days", round(r["up_days_ratio"] * lookback_days))
+            up_str = f"{up_days}/{lookback_days}"
             lines.append(
                 f"| {r['name']} | {r['hot_score']:.0f} | "
                 f"{r['momentum_5d']:+.1f}% | {r['momentum_10d']:+.1f}% | "
@@ -275,7 +278,8 @@ def generate_report(classified: dict, meta: dict, lookback_days: int) -> str:
         lines.append(f"| 板块 | 今日热度 | 5日涨幅 | 上涨天数 | 持续性分 | 趋势 |")
         lines.append(f"|------|---------|---------|---------|---------|------|")
         for r in moderate:
-            up_str = f"{r['up_days_ratio']*10:.0f}/{lookback_days}"
+            up_days = r.get("up_days", round(r["up_days_ratio"] * lookback_days))
+            up_str = f"{up_days}/{lookback_days}"
             lines.append(
                 f"| {r['name']} | {r['hot_score']:.0f} | "
                 f"{r['momentum_5d']:+.1f}% | "
@@ -356,7 +360,7 @@ _COL_RENDERERS = {
     "momentum_5d":  lambda r: f"<td>{r['momentum_5d']:+.1f}%</td>",
     "momentum_10d": lambda r: f"<td>{r['momentum_10d']:+.1f}%</td>",
     "up_days_ratio":lambda r: f"<td>{r['up_days_ratio']*100:.0f}%</td>",
-    "persistence":  lambda r: f'<td class="ml-{_css_cls(r["persistence"])}>{r["persistence"]:.1f}</td>',
+    "persistence":  lambda r: f'<td class="ml-{_css_cls(r["persistence"])}">{r["persistence"]:.1f}</td>',
     "trend_label":  lambda r: f"<td>{r['trend_label']}</td>",
     "hot_score":    lambda r: f"<td>{r['hot_score']:.0f}</td>",
 }

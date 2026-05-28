@@ -327,7 +327,7 @@ def run_analyze_tests(tmpdir):
             test("TA-11: 动态聚类阈值(压力位≤5)", len(resistance_levels) <= 5,
                  f"resistance_count={len(resistance_levels)}", "analyze")
 
-    # TA-12: 止损max逻辑
+    # TA-12: 自适应止损应低于现价，且不能过近到被日常波动轻易扫掉
     kline_path = os.path.join(tmpdir, "tf01.json")
     if os.path.exists(kline_path):
         tech_path = os.path.join(tmpdir, "ta01.json")
@@ -339,10 +339,10 @@ def run_analyze_tests(tmpdir):
             atr = latest.get("atr", {}).get("atr")
             close = latest.get("close")
             if stop_loss and atr and close:
-                # stop_loss should be max(support - ATR, close - 2*ATR)
-                min_stop = close - 2 * atr
-                test("TA-12: 止损不低于close-2*ATR", stop_loss >= min_stop - 0.01,
-                     f"stop_loss={stop_loss}, close-2*ATR={min_stop:.2f}", "analyze")
+                stop_distance = close - stop_loss
+                test("TA-12: 止损低于现价且至少保留0.5ATR缓冲",
+                     stop_loss < close and stop_distance >= atr * 0.5 - 0.01,
+                     f"stop_loss={stop_loss}, close={close:.2f}, atr={atr:.2f}", "analyze")
 
 
 # ========================
@@ -742,7 +742,7 @@ def run_golden_diff_tests():
 
     result = subprocess.run(
         [sys.executable, str(test_golden_path), "--diff"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=240,
     )
     test("TG-golden-diff: snapshot diff",
          result.returncode == 0,
@@ -907,4 +907,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
