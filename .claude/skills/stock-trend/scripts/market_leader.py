@@ -484,6 +484,7 @@ def generate_report(output: dict, compact: bool = False) -> str:
                 else:
                     line = (
                         f"- {s.get('name','?')}({code}) "
+                        f"涨跌幅:{s.get('change_pct','?')}% "
                         f"市值:{s.get('market_cap','?')} "
                         f"PE:{s.get('pe','?')}"
                         f" {signal}{direction} {stars}"
@@ -825,10 +826,14 @@ def _generate_html_report(output: dict, markdown: str) -> str:
             pe_str = f"{pe:.1f}" if isinstance(pe, (int, float)) and pe > 0 else "N/A"
             sc = score_color(score)
             dc = dir_css(direction)
+            cp = s.get('change_pct')
+            cp_str = f"{cp:+.1f}%" if isinstance(cp, (int, float)) else "?"
+            cp_cls = 'sp' if isinstance(cp, (int, float)) and cp > 0 else 'sn' if isinstance(cp, (int, float)) and cp < 0 else 'neut'
             cores_rows += (
                 f"<tr>"
                 f"<td>{s.get('name','?')}</td>"
                 f"<td class=\"{dc}\">{s['code']}</td>"
+                f"<td class=\"{cp_cls}\">{cp_str}</td>"
                 f"<td>{mcap_str}</td>"
                 f"<td>{pe_str}</td>"
                 f"<td class=\"{sc}\">{score_str}</td>"
@@ -847,7 +852,7 @@ def _generate_html_report(output: dict, markdown: str) -> str:
             </table>
             <h3>中军股</h3>
             <table>
-                <thead><tr><th>名称</th><th>代码</th><th>市值</th><th>PE</th><th>评分</th><th>方向</th></tr></thead>
+                <thead><tr><th>名称</th><th>代码</th><th>涨跌幅</th><th>市值</th><th>PE</th><th>评分</th><th>方向</th></tr></thead>
                 <tbody>{cores_rows}</tbody>
             </table>
         </div>"""
