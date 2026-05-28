@@ -32,9 +32,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
-sys.path.insert(0, str(SCRIPT_DIR))
-from fetch_sector_data import get_sector_rankings, rank_hot_sectors
-from fetch_sector_kline import batch_fetch_kline
+# Support both direct invocation (python3 script.py) and -m / package import
+if __package__:
+    # Running as package (python -m scripts.analyze_market_theme)
+    from .fetch_sector_data import get_sector_rankings, rank_hot_sectors
+    from .fetch_sector_kline import batch_fetch_kline
+else:
+    # Direct invocation or test import via sys.path
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from fetch_sector_data import get_sector_rankings, rank_hot_sectors
+    from fetch_sector_kline import batch_fetch_kline
 
 
 # ──────────────────────── Phase 1: Sector Scan ────────────────────────
@@ -342,6 +349,55 @@ def _pct_cls(val: float) -> str:
     return "sp" if val > 0 else "sn" if val < 0 else "neut"
 
 
+# ── Column renderers for HTML table cells ──
+_COL_RENDERERS = {
+    "name":         lambda r: f"<td>{r['name']}</td>",
+    "today_change": lambda r: f'<td class="{_pct_cls(r.get("today_change"))}">{r["today_change"]:+.1f}%</td>',
+    "momentum_5d":  lambda r: f"<td>{r['momentum_5d']:+.1f}%</td>",
+    "momentum_10d": lambda r: f"<td>{r['momentum_10d']:+.1f}%</td>",
+    "up_days_ratio":lambda r: f"<td>{r['up_days_ratio']*100:.0f}%</td>",
+    "persistence":  lambda r: f'<td class="ml-{_css_cls(r["persistence"])}>{r["persistence"]:.1f}</td>',
+    "trend_label":  lambda r: f"<td>{r['trend_label']}</td>",
+    "hot_score":    lambda r: f"<td>{r['hot_score']:.0f}</td>",
+}
+
+
+def _html_rows(items: list[dict], col_keys: list[str], *, show_idx: bool = False) -> str:
+    """Build HTML table rows from items given ordered column keys."""
+    rows = ""
+    for i, r in enumerate(items, 1):
+        cells = f"<td>{i}</td>" if show_idx else ""
+        cells += "".join(_COL_RENDERERS[k](r) for k in col_keys)
+        rows += f"<tr>{cells}</tr>"
+    return rows
+
+
+def _sec_table(title: str, desc: str, css_cls: str, items: list[dict],
+               col_keys: list[str], thead_html: str) -> str:
+    if not items:
+        return ""
+    return f"""<div class="sec sec-{css_cls}">
+    <h2>{title}</h2>
+    <p class="sec-desc">{desc}</p>
+    <table>
+        <thead>{thead_html}</thead>
+        <tbody>{_html_rows(items, col_keys)}</tbody>
+    </table>
+    </div>"""
+
+
+def _sec_list(title: str, desc: str, css_cls: str, items: list[dict],
+              item_fn) -> str:
+    if not items:
+        return ""
+    items_html = "".join(item_fn(r) for r in items)
+    return f"""<div class="sec sec-{css_cls}">
+    <h2>{title}</h2>
+    <p class="sec-desc">{desc}</p>
+    <ul>{items_html}</ul>
+    </div>"""
+
+
 def _generate_html_report(classified: dict, meta: dict, results: list[dict],
                           lookback_days: int) -> str:
     """Generate HTML report matching stock-trend report-template style."""
@@ -352,22 +408,9 @@ def _generate_html_report(classified: dict, meta: dict, results: list[dict],
     fading = classified["fading"]
     one_day = classified.get("one_day_wonders", [])
 
-    # Ranking table
-    rank_rows = ""
-    for i, r in enumerate(results, 1):
-        pc = _pct_cls(r.get("today_change"))
-        rank_rows += (
-            f"<tr>"
-            f"<td>{i}</td>"
-            f"<td>{r['name']}</td>"
-            f"<td class=\"{pc}\">{r['today_change']:+.1f}%</td>"
-            f"<td>{r['momentum_5d']:+.1f}%</td>"
-            f"<td>{r['momentum_10d']:+.1f}%</td>"
-            f"<td>{r['up_days_ratio']*100:.0f}%</td>"
-            f"<td class=\"ml-{_css_cls(r['persistence'])}\">{r['persistence']:.1f}</td>"
-            f"<td>{r['trend_label']}</td>"
-            f"</tr>"
-        )
+    rank_cols = ["name", "today_change", "momentum_5d", "momentum_10d",
+                 "up_days_ratio", "persistence", "trend_label"]
+    rank_rows = _html_rows(results, rank_cols, show_idx=True)
     rank_table = f"""<div class="rank">
     <h2>板块持续性排名</h2>
     <table>
@@ -376,100 +419,20 @@ def _generate_html_report(classified: dict, meta: dict, results: list[dict],
     </table>
     </div>"""
 
-    # Sections: strong, moderate, emerging, one-day, fading
-    sections_html = ""
-
-    if strong:
-        rows = ""
-        for r in strong:
-            pc = _pct_cls(r.get("today_change"))
-            rows += (
-                f"<tr>"
-                f"<td>{r['name']}</td>"
-                f"<td class=\"{pc}\">{r['today_change']:+.1f}%</td>"
-                f"<td>{r['momentum_5d']:+.1f}%</td>"
-                f"<td>{r['momentum_10d']:+.1f}%</td>"
-                f"<td>{r['up_days_ratio']*100:.0f}%</td>"
-                f"<td class=\"ml-strong\">{r['persistence']:.1f}</td>"
-                f"<td>{r['trend_label']}</td>"
-                f"</tr>"
-            )
-        sections_html += f"""<div class="sec sec-strong">
-        <h2>阶段强势（主线确认）</h2>
-        <p class="sec-desc">持续性分 ≥ 70，趋势明确且持续</p>
-        <table>
-            <thead><tr><th>板块</th><th>今日涨幅</th><th>5日涨幅</th><th>10日涨幅</th><th>上涨比</th><th>持续性</th><th>趋势</th></tr></thead>
-            <tbody>{rows}</tbody>
-        </table>
-        </div>"""
-
-    if moderate:
-        rows = ""
-        for r in moderate:
-            pc = _pct_cls(r.get("today_change"))
-            rows += (
-                f"<tr>"
-                f"<td>{r['name']}</td>"
-                f"<td class=\"{pc}\">{r['today_change']:+.1f}%</td>"
-                f"<td>{r['momentum_5d']:+.1f}%</td>"
-                f"<td>{r['up_days_ratio']*100:.0f}%</td>"
-                f"<td class=\"ml-moderate\">{r['persistence']:.1f}</td>"
-                f"<td>{r['trend_label']}</td>"
-                f"</tr>"
-            )
-        sections_html += f"""<div class="sec sec-moderate">
-        <h2>稳步上行（候选主线）</h2>
-        <p class="sec-desc">持续性分 50-70，具备主线潜力</p>
-        <table>
-            <thead><tr><th>板块</th><th>今日涨幅</th><th>5日涨幅</th><th>上涨比</th><th>持续性</th><th>趋势</th></tr></thead>
-            <tbody>{rows}</tbody>
-        </table>
-        </div>"""
-
-    if emerging:
-        items = ""
-        for r in emerging:
-            items += (
-                f"<li><strong>{r['name']}</strong> — "
-                f"持续性 {r['persistence']:.1f}, "
-                f"5日涨幅 {r['momentum_5d']:+.1f}%, "
-                f"{r['trend_label']}</li>"
-            )
-        sections_html += f"""<div class="sec sec-emerging">
-        <h2>新兴主题</h2>
-        <p class="sec-desc">持续性分 40-50，新冒头方向，需验证</p>
-        <ul>{items}</ul>
-        </div>"""
-
-    if one_day:
-        items = ""
-        for r in one_day:
-            items += (
-                f"<li><strong>{r['name']}</strong> — "
-                f"今日热度 {r['hot_score']:.0f}, "
-                f"持续性 {r['persistence']:.1f}, "
-                f"5日涨幅 {r['momentum_5d']:+.1f}%</li>"
-            )
-        sections_html += f"""<div class="sec sec-warn">
-        <h2>⚠️ 脉冲热点</h2>
-        <p class="sec-desc">今日热度高但持续性不足 50，警惕追高</p>
-        <ul>{items}</ul>
-        </div>"""
-
-    if fading:
-        items = ""
-        for r in fading[:5]:
-            items += (
-                f"<li><strong>{r['name']}</strong> — "
-                f"持续性 {r['persistence']:.1f}, "
-                f"10日涨幅 {r['momentum_10d']:+.1f}%, "
-                f"{r['trend_label']}</li>"
-            )
-        sections_html += f"""<div class="sec sec-fading">
-        <h2>退潮板块</h2>
-        <p class="sec-desc">持续性分 &lt; 40，趋势走弱</p>
-        <ul>{items}</ul>
-        </div>"""
+    sections_html = (
+        _sec_table("阶段强势（主线确认）", "持续性分 ≥ 70，趋势明确且持续", "strong", strong,
+                   ["name", "today_change", "momentum_5d", "momentum_10d", "up_days_ratio", "persistence", "trend_label"],
+                   "<tr><th>板块</th><th>今日涨幅</th><th>5日涨幅</th><th>10日涨幅</th><th>上涨比</th><th>持续性</th><th>趋势</th></tr>")
+        + _sec_table("稳步上行（候选主线）", "持续性分 50-70，具备主线潜力", "moderate", moderate,
+                     ["name", "today_change", "momentum_5d", "up_days_ratio", "persistence", "trend_label"],
+                     "<tr><th>板块</th><th>今日涨幅</th><th>5日涨幅</th><th>上涨比</th><th>持续性</th><th>趋势</th></tr>")
+        + _sec_list("新兴主题", "持续性分 40-50，新冒头方向，需验证", "emerging", emerging,
+                    lambda r: f"<li><strong>{r['name']}</strong> — 持续性 {r['persistence']:.1f}, 5日涨幅 {r['momentum_5d']:+.1f}%, {r['trend_label']}</li>")
+        + _sec_list("⚠️ 脉冲热点", "今日热度高但持续性不足 50，警惕追高", "warn", one_day,
+                    lambda r: f"<li><strong>{r['name']}</strong> — 今日热度 {r['hot_score']:.0f}, 持续性 {r['persistence']:.1f}, 5日涨幅 {r['momentum_5d']:+.1f}%</li>")
+        + _sec_list("退潮板块", "持续性分 < 40，趋势走弱", "fading", fading[:5],
+                    lambda r: f"<li><strong>{r['name']}</strong> — 持续性 {r['persistence']:.1f}, 10日涨幅 {r['momentum_10d']:+.1f}%, {r['trend_label']}</li>")
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
