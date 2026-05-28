@@ -17,9 +17,9 @@
 - `volatility` 跨 3 个月数据计算，不能反映近 N 天真实波动
 - `acceleration` 最近 3 天 vs 前 7 天，同样基于全量而非窗口
 
-**修复方案**: 所有计算函数增加 `lookback` 参数，fetch 后先 `records[-lookback:]` 截断再计算。
+**修复方案** ✅ 2026-05-28: `compute_persistence` 增加 `lookback_days` 参数，函数入口先截断 `kline[-lookback_days:]`，所有子计算共用同一窗口。
 
-### 2. `min_score=30` 制造不可见空白
+### 2. `min_score=30` 制造不可见空白 (已修复)
 
 **问题**: `main()` 过滤 `persistence >= 30`，但 `classify_themes` 将 `< 40` 定义为"退潮"。导致:
 
@@ -27,13 +27,13 @@
 - 0-29 分的板块被静默丢弃
 - 退潮板块列表不完整，用户低估退潮规模
 
-**修复方案**: `min_score` 默认为 0 或彻底移除该过滤，让 `classify_themes` 全权负责分类。
+**修复方案** ✅ 2026-05-28: `--min-score` 默认值从 30 改为 0，让 `classify_themes` 全权负责分类，退潮板块完整展示。
 
-### 3. `hot_threshold = max(results) * 0.7` 不稳定
+### 3. `hot_threshold = max(results) * 0.7` 不稳定 (已修复)
 
 **问题**: 脉冲热点判别阈值依赖全局最高值。弱市普跌时所有板块热度偏低，阈值过低导致标记失效；个别板块极高时正常板块也被标记为一日期游。
 
-**修复方案**: 改用固定百分位（如 top 20% 且 persistence < 50）或绝对阈值。
+**修复方案** ✅ 2026-05-28: 双阈值 `max(60, max_hot * 0.6)` — 绝对下限 60 防弱市误报，相对 60% 防单 outlier 拖拽。
 
 ---
 
@@ -84,11 +84,11 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 ## 修复优先级
 
-| 优先级 | 项 | 预期工时 |
-|--------|----|---------|
-| **P0** | `--days` 窗口截断 + up_days_ratio 显示修正 | ~1h |
-| **P0** | `min_score` 过滤逻辑重设计 | ~15min |
-| **P0** | `hot_threshold` 判别改进 | ~15min |
+| 优先级 | 项 | 状态 |
+|--------|----|------|
+| **P0** | `--days` 窗口截断 + up_days_ratio 显示修正 | ✅ 已修复 |
+| **P0** | `min_score` 过滤逻辑重设计 | ✅ 已修复 |
+| **P0** | `hot_threshold` 判别改进 | ✅ 已修复 |
 | **P1** | HTML 模板去重（提取行渲染函数） | ~30min |
 | **P1** | 添加测试 `test_market_theme.py` | ~1h |
 | **P2** | 引入缓存 | ~30min |

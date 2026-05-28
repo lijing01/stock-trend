@@ -116,7 +116,7 @@ def _compute_acceleration(records: list[dict]) -> float:
     return recent - prior
 
 
-def compute_persistence(sector: dict, kline: list[dict]) -> Optional[dict]:
+def compute_persistence(sector: dict, kline: list[dict], lookback_days: int = 10) -> Optional[dict]:
     """Compute persistence score for one sector.
 
     Score components:
@@ -129,6 +129,7 @@ def compute_persistence(sector: dict, kline: list[dict]) -> Optional[dict]:
     Args:
         sector: sector dict with hot_score.
         kline: list of daily K-line records, sorted ascending.
+        lookback_days: analysis window length.
 
     Returns:
         Dict with persistence metrics, or None if insufficient data.
@@ -136,11 +137,14 @@ def compute_persistence(sector: dict, kline: list[dict]) -> Optional[dict]:
     if not kline or len(kline) < 3:
         return None
 
-    mom5 = _compute_momentum(kline, 5)
-    mom10 = _compute_momentum(kline, 10) if len(kline) >= 10 else mom5
-    up_ratio = _up_days_ratio(kline)
-    vol = _compute_volatility(kline)
-    accel = _compute_acceleration(kline) if len(kline) >= 10 else 0.0
+    # Truncate to analysis window so all metrics use same period
+    window = kline[-lookback_days:] if len(kline) >= lookback_days else kline
+
+    mom5 = _compute_momentum(window, 5)
+    mom10 = _compute_momentum(window, 10) if len(window) >= 10 else mom5
+    up_ratio = _up_days_ratio(window)
+    vol = _compute_volatility(window)
+    accel = _compute_acceleration(window) if len(window) >= 10 else 0.0
     hot_score = sector.get("hot_score", 0)
 
     # Normalize to 0-100 per component
@@ -204,9 +208,12 @@ def classify_themes(results: list[dict]) -> dict:
     fading = [r for r in results if r["persistence"] < 40]
 
     # One-day wonder: hot today but low persistence
+    # Uses both relative (top 40% of hot scores) and absolute (≥ 60) thresholds
+    # to avoid false flags in weak markets or single-outlier scenarios
     one_day = []
     if results:
-        hot_threshold = max(r["hot_score"] for r in results) * 0.7
+        max_hot = max(r["hot_score"] for r in results)
+        hot_threshold = max(60, max_hot * 0.6)
         for r in results:
             if r["hot_score"] >= hot_threshold and r["persistence"] < 50:
                 one_day.append(r)
@@ -539,7 +546,7 @@ def main():
     parser = argparse.ArgumentParser(description="市场主线分析 (/market-theme)")
     parser.add_argument("--top", type=int, default=15, help="扫描板块数量, 默认15")
     parser.add_argument("--days", type=int, default=10, help="K线回溯天数, 默认10")
-    parser.add_argument("--min-score", type=float, default=30, help="最低持续性分, 默认30")
+    parser.add_argument("--min-score", type=float, default=0, help="最低持续性分(过滤噪声), 默认0")
     parser.add_argument("--no-html", action="store_true", help="跳过HTML报告生成")
     args = parser.parse_args()
 
@@ -556,7 +563,7 @@ def main():
     results = []
     for s in sectors:
         k = klines.get(s["code"], [])
-        score = compute_persistence(s, k)
+        score = compute_persistence(s, k, lookback_days=args.days)
         if score and score["persistence"] >= args.min_score:
             results.append(score)
 
