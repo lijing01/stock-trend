@@ -96,7 +96,7 @@ def fetch_via_http(token, ts_code, asset, freq, start_date, end_date):
 
     url = "https://api.tushare.pro"
 
-    api_name = "fund_daily" if asset == "FD" else "daily"
+    api_name = "daily"
 
     payload = {
         "api_name": api_name,

@@ -174,6 +174,9 @@ def build_context(args):
     kline_meta = kline.get("meta", {})
     patterns = technical.get("patterns", [])
 
+    # Latest close price
+    latest_close = technical.get("latest", {}).get("close", None)
+
     # Parse entry signals JSON
     entry_signals_list = []
     if args.entry_signals:
@@ -395,6 +398,7 @@ def build_context(args):
         # Risk/reward
         "支撑位": support_str,
         "压力位": resistance_str,
+        "当前价": latest_close if latest_close is not None else "—",
         "止损位": stop_loss,
         "目标位": target_display,
         "风险收益比": rr_display,
