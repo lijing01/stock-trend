@@ -116,24 +116,57 @@ def _fetch_realtime_raw(ts_code: str) -> Optional[float]:
         return None
 
 
-def fetch_realtime_price(ts_code: str) -> Optional[float]:
-    """Get real-time price from eastmoney push2 API.
+def fetch_realtime_price_tencent(ts_code: str) -> Optional[float]:
+    """Get real-time price from Tencent qt.gtimg.cn API.
 
-    Uses kline close as reference to determine correct price scaling
+    Covers A-shares, ETFs (SH/SZ), and HK stocks.
+    Returns scaled float price or None on failure.
+    Standalone method — usable directly by other modules.
+    """
+    suffix = ts_code.rsplit(".", 1)[-1]
+    code = ts_code.split(".")[0]
+    prefix_map = {"SH": "sh", "SZ": "sz", "HK": "hk"}
+    prefix = prefix_map.get(suffix)
+    if prefix is None:
+        return None
+    url = f"https://qt.gtimg.cn/q={prefix}{code}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        body = urllib.request.urlopen(req, timeout=10).read()
+        # Tencent API uses GBK encoding
+        text = body.decode("gbk")
+        start = text.index('"') + 1
+        end = text.rindex('"')
+        fields = text[start:end].split("~")
+        if len(fields) < 4:
+            return None
+        return round(float(fields[3]), 4)
+    except Exception:
+        return None
+
+
+def fetch_realtime_price(ts_code: str) -> Optional[float]:
+    """Get real-time price.
+
+    Priority: Eastmoney push2 (integer, need divisor) → Tencent (float).
+    Uses kline close to determine correct divisor for Eastmoney data
     (stocks: 分/100, sub-1-yuan ETFs: 厘/1000).
     """
     price_raw = _fetch_realtime_raw(ts_code)
-    if price_raw is None:
-        return None
-    # Use kline close to pick correct divisor
-    kline = _fetch_kline(ts_code)
-    if kline:
-        kline_close = float(kline[-1].get("close", 0))
-        for divisor in (100, 1000):
-            scaled = price_raw / divisor
-            if kline_close > 0 and abs(scaled - kline_close) / kline_close < 0.3:
-                return round(scaled, 4)
-    return round(price_raw / 100, 4)
+    if price_raw is not None:
+        kline = _fetch_kline(ts_code)
+        if kline:
+            kline_close = float(kline[-1].get("close", 0))
+            for divisor in (100, 1000):
+                scaled = price_raw / divisor
+                if kline_close > 0 and abs(scaled - kline_close) / kline_close < 0.3:
+                    return round(scaled, 4)
+        return round(price_raw / 100, 4)
+    # Fallback: Tencent API
+    return fetch_realtime_price_tencent(ts_code)
 
 
 def fetch_current_price(ts_code: str) -> Optional[float]:
