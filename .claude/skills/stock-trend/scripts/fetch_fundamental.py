@@ -142,44 +142,89 @@ def fetch_a_share_fundamentals(code):
     return result
 
 
-def fetch_hk_fundamentals(code):
-    """Fetch fundamental data for HK stocks using AKShare."""
+def fetch_hk_fundamentals(code, full_code=None):
+    """Fetch fundamental data for HK stocks. AKShare first, yfinance fallback.
+
+    Args:
+        code: HK stock code with leading zeros (e.g. "00700")
+        full_code: Same as code, kept for backwards compat with yfinance fallback
+    """
     import akshare as ak
     result = {"data_quality": "error"}
     errors = []
+    yf_tried = False
 
-    # HK financial indicators
+    # 1. AKShare financial indicators
     try:
-        # AKShare uses format like "00700" for HK
-        hk_code = code
-        df_hk = ak.stock_hk_financial_indicator_em(symbol=hk_code)
+        df_hk = ak.stock_hk_financial_indicator_em(symbol=code)
         if df_hk is not None and not df_hk.empty:
             latest = df_hk.iloc[-1]
             result["pe_ttm"] = _sf(latest.get("市盈率"))
             result["pb"] = _sf(latest.get("市净率"))
-            result["roe"] = _sf(latest.get("净资产收益率"))
-            result["eps"] = _sf(latest.get("每股收益"))
-            result["market_cap_billion"] = _sf(latest.get("总市值"))
-            mc = result["market_cap_billion"]
-            if mc is not None and mc > 1e6:
-                result["market_cap_billion"] = round(mc / 1e8, 2)
+            # HK column names differ from A-share
+            result["roe"] = _sf(latest.get("股东权益回报率(%)")) or _sf(latest.get("净资产收益率"))
+            result["eps"] = _sf(latest.get("基本每股收益(元)")) or _sf(latest.get("每股收益"))
+            mc_raw = _sf(latest.get("总市值(港元)")) or _sf(latest.get("总市值"))
+            if mc_raw is not None:
+                result["market_cap_billion"] = mc_raw if mc_raw < 1e6 else round(mc_raw / 1e8, 2)
+            if _sf(latest.get("股息率TTM(%)")):
+                result["dividend_yield_pct"] = _sf(latest.get("股息率TTM(%)"))
     except Exception as e:
         errors.append(f"stock_hk_financial_indicator_em: {e}")
 
-    # HK valuation percentile
-    try:
-        import akshare as ak
-        df_hk_val = ak.stock_hk_valuation_baidu(symbol=hk_code, indicator="市盈率", period="近三年")
-        if df_hk_val is not None and not df_hk_val.empty:
-            pe_values = df_hk_val.iloc[:, 0].dropna().astype(float)
-            if not pe_values.empty and result.get("pe_ttm"):
-                below = (pe_values < result["pe_ttm"]).sum()
-                result["pe_percentile_3y"] = round(float(below) / len(pe_values) * 100, 1)
-    except Exception as e:
-        errors.append(f"stock_hk_valuation_baidu(pe): {e}")
+    # 2. yfinance fallback if AKShare failed (< 2 core fields)
+    filled_ak = sum(1 for k in ["pe_ttm", "pb", "roe", "eps"] if result.get(k) is not None)
+    if filled_ak < 2:
+        try:
+            import yfinance as yf
+            yf_code = f"{full_code or code}.HK"
+            ticker = yf.Ticker(yf_code)
+            info = ticker.info or {}
+            yf_tried = True
 
-    # Estimate dividend yield for HK stocks
-    if result.get("pe_ttm") and result["pe_ttm"] > 0:
+            if result.get("pe_ttm") is None and info.get("trailingPE"):
+                result["pe_ttm"] = _sf(info["trailingPE"])
+            if result.get("pb") is None and info.get("priceToBook"):
+                result["pb"] = _sf(info["priceToBook"])
+            if result.get("roe") is None and info.get("returnOnEquity") is not None:
+                result["roe"] = _sf(info["returnOnEquity"] * 100)  # yfinance returns decimal
+            if result.get("eps") is None and info.get("earningsPerShare"):
+                result["eps"] = _sf(info["earningsPerShare"])
+            if info.get("marketCap"):
+                mc = _sf(info["marketCap"])
+                if mc and mc > 1e6:
+                    result["market_cap_billion"] = round(mc / 1e8, 2)
+            if info.get("dividendYield") is not None:
+                result["dividend_yield_pct"] = _sf(info["dividendYield"] * 100)
+
+            # 3-year PE percentile from yfinance history (proxy: price/eps)
+            if result.get("pe_ttm") and result.get("eps"):
+                eps_val = result["eps"]
+                if eps_val > 0:
+                    hist = ticker.history(period="3y")
+                    if hist is not None and not hist.empty:
+                        hist_prices = hist["Close"].dropna()
+                        if len(hist_prices) > 20:
+                            hist_pe = hist_prices / eps_val
+                            below = (hist_pe < result["pe_ttm"]).sum()
+                            result["pe_percentile_3y"] = round(float(below) / len(hist_pe) * 100, 1)
+        except Exception as e:
+            errors.append(f"yfinance_fallback: {e}")
+
+    # 3. AKShare valuation percentile (skip if yfinance already gave one)
+    if result.get("pe_percentile_3y") is None:
+        try:
+            df_hk_val = ak.stock_hk_valuation_baidu(symbol=code, indicator="市盈率", period="近三年")
+            if df_hk_val is not None and not df_hk_val.empty:
+                pe_values = df_hk_val.iloc[:, 0].dropna().astype(float)
+                if not pe_values.empty and result.get("pe_ttm"):
+                    below = (pe_values < result["pe_ttm"]).sum()
+                    result["pe_percentile_3y"] = round(float(below) / len(pe_values) * 100, 1)
+        except Exception as e:
+            errors.append(f"stock_hk_valuation_baidu(pe): {e}")
+
+    # 4. Dividend yield (fallback estimate if yfinance didn't provide)
+    if result.get("dividend_yield_pct") is None and result.get("pe_ttm") and result["pe_ttm"] > 0:
         est_div_yield = (0.35 / result["pe_ttm"]) * 100
         result["dividend_yield_pct"] = round(est_div_yield, 2)
 
@@ -191,6 +236,8 @@ def fetch_hk_fundamentals(code):
     else:
         result["data_quality"] = "error"
 
+    if yf_tried:
+        result["yfinance_fallback"] = True
     if errors:
         result["_errors"] = errors
 
@@ -241,8 +288,8 @@ def main():
             "errors": [],
         }
     elif is_hk:
-        hk_code = code.lstrip("0")
-        fund_data = fetch_hk_fundamentals(hk_code)
+        # AKShare HK functions require full code with leading zero (e.g. "00700"), not stripped
+        fund_data = fetch_hk_fundamentals(code, full_code=code)
         errors = fund_data.pop("_errors", [])
         result = {
             "meta": {

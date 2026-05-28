@@ -1,7 +1,8 @@
 {
   "meta": {
     "ts_code": "600519.SH",
-    "analysis_date": "20260527",
+    "is_etf": false,
+    "analysis_date": "20260528",
     "data_points": 243,
     "indicators_computed": [
       "ma",
@@ -11,19 +12,18 @@
       "bollinger",
       "volume",
       "adx",
-      "obv",
-      "patterns"
+      "obv"
     ]
   },
   "latest": {
-    "date": "20260527",
-    "close": 1303.0,
+    "date": "20260528",
+    "close": 1275.98,
     "ma": {
       "values": {
-        "ma5": 1292.692,
-        "ma10": 1310.088,
-        "ma20": 1343.7025,
-        "ma60": 1402.722
+        "ma5": 1285.688,
+        "ma10": 1303.469,
+        "ma20": 1337.3415,
+        "ma60": 1399.738
       },
       "alignment": "bearish",
       "signal": {
@@ -33,9 +33,9 @@
       }
     },
     "macd": {
-      "dif": -33.8644,
-      "dea": -29.8009,
-      "histogram": -8.127,
+      "dif": -34.6138,
+      "dea": -30.7634,
+      "histogram": -7.7006,
       "signal": {
         "type": "neutral",
         "description": "绿柱缩窄",
@@ -43,27 +43,27 @@
       }
     },
     "rsi": {
-      "rsi14": 24.56,
+      "rsi14": 19.46,
       "signal": {
         "type": "oversold",
-        "description": "RSI=24.6，超卖",
-        "score": 1
+        "description": "RSI=19.5，超卖",
+        "score": 2
       }
     },
     "kdj": {
-      "k": 21.99,
-      "d": 10.52,
-      "j": 44.94,
+      "k": 23.98,
+      "d": 15.0,
+      "j": 41.93,
       "signal": {
-        "type": "golden_cross",
-        "description": "金叉(K=22.0)",
-        "score": 1
+        "type": "neutral",
+        "description": "KDJ中性区域(K=24.0,D=15.0,J=41.9)",
+        "score": 0
       }
     },
     "bollinger": {
-      "upper": 1424.3916,
-      "middle": 1343.7025,
-      "lower": 1263.0134,
+      "upper": 1418.3394,
+      "middle": 1337.3415,
+      "lower": 1256.3436,
       "signal": {
         "type": "middle_support",
         "description": "中轨下方运行",
@@ -71,27 +71,27 @@
       }
     },
     "volume": {
-      "vol": 8272791.0,
-      "vol_ma20": 4989066.0,
-      "vol_ratio": 1.66,
+      "vol": 4588998.0,
+      "vol_ma20": 4854527.0,
+      "vol_ratio": 0.95,
       "signal": {
-        "type": "volume_confirms",
-        "description": "放量上涨(量比1.66)",
-        "score": 2
+        "type": "neutral",
+        "description": "量价中性(量比0.95)",
+        "score": 0
       }
     },
     "adx": {
-      "adx": 44.99,
-      "plus_di": 12.67,
-      "minus_di": 31.12,
+      "adx": 45.76,
+      "plus_di": 11.9,
+      "minus_di": 29.22,
       "signal": {
         "type": "trend_strength",
-        "description": "ADX=45.0，强趋势；-DI>+DI确认空头",
+        "description": "ADX=45.8，强趋势；-DI>+DI确认空头",
         "score": -1
       }
     },
     "obv": {
-      "obv": -99053840.0,
+      "obv": -102016270.0,
       "signal": {
         "type": "money_flow",
         "description": "OBV在20日均线下方，资金净流出",
@@ -99,12 +99,12 @@
       }
     },
     "atr": {
-      "atr": 22.3079,
-      "atr_pct": 1.71,
+      "atr": 23.7529,
+      "atr_pct": 1.86,
       "volatility_level": "normal",
       "signal": {
         "type": "volatility",
-        "description": "ATR=22.31(1.7%)，正常波动",
+        "description": "ATR=23.75(1.9%)，正常波动",
         "score": 0
       }
     },
@@ -113,74 +113,56 @@
       "drawdown_days": 68
     }
   },
-  "patterns": [
-    {
-      "name": "看涨吞没",
-      "name_en": "Bullish Engulfing",
-      "direction": "bullish",
-      "position": "downtrend",
-      "score": 2,
-      "candles": 2
-    },
-    {
-      "name": "刺透形态",
-      "name_en": "Piercing Line",
-      "direction": "bullish",
-      "position": "downtrend",
-      "score": 1,
-      "candles": 2
-    }
-  ],
+  "patterns": [],
   "summary": {
-    "total_score": -0.01,
+    "total_score": -0.39,
     "direction": "neutral",
     "confidence": "low",
     "consistency": 0.38,
     "key_signals": [
       "空头排列",
       "绿柱缩窄",
-      "RSI=24.6，超卖",
-      "金叉(K=22.0)",
+      "RSI=19.5，超卖",
+      "KDJ中性区域(K=24.0,D=15.0,J=41.9)",
       "中轨下方运行",
-      "放量上涨(量比1.66)",
-      "ADX=45.0，强趋势；-DI>+DI确认空头",
+      "量价中性(量比0.95)",
+      "ADX=45.8，强趋势；-DI>+DI确认空头",
       "OBV在20日均线下方，资金净流出"
     ],
     "data_quality": "good",
     "dimension_scores": {
       "ma": -2,
       "macd": 0,
-      "rsi": 1,
-      "kdj": 1,
+      "rsi": 2,
+      "kdj": 0,
       "bollinger": 0,
-      "volume": 2,
+      "volume": 0,
       "adx": -1,
-      "obv": -1,
-      "patterns": 3
+      "obv": -1
     },
     "support_levels": [
-      1300,
-      1263.0134,
-      1200,
+      1271.0,
+      1221.8,
       1100,
-      1000
+      1000,
+      900
     ],
     "resistance_levels": [
-      1304.79,
-      1339.28,
-      1379.0,
-      1420.0,
-      1458.88
+      1285.688,
+      1336.6583,
+      1388.0,
+      1446.5622,
+      1600
     ],
-    "stop_loss": 1249.46,
-    "target_conservative": 1304.79,
-    "target_moderate": 1420.0,
-    "target_aggressive": 1458.88,
-    "target": 1420.0,
-    "risk_reward_ratio": 2.19,
-    "rr_conservative": 0.03,
-    "rr_moderate": 2.19,
-    "rr_aggressive": 2.91,
+    "stop_loss": 1204.72,
+    "target_conservative": 1285.69,
+    "target_moderate": 1388.0,
+    "target_aggressive": 1446.56,
+    "target": 1388.0,
+    "risk_reward_ratio": 1.57,
+    "rr_conservative": 0.14,
+    "rr_moderate": 1.57,
+    "rr_aggressive": 2.39,
     "favorable_rr": true,
     "position_sizing": "标准仓位(50-70%)",
     "position_tier": 2,

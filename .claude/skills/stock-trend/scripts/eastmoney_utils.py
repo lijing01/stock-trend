@@ -110,6 +110,25 @@ def build_secid(ts_code):
     return f"{prefix}.{code}"
 
 
+def rotate_push2_host(fetch_fn, max_retries=3):
+    """Try fetch_fn with each EM_PUSH2_HOSTS node until success.
+
+    Same pattern as rotate_em_host but for EM_PUSH2_HOSTS (push2 endpoints
+    for capital flow, sector data, etc.).
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
+        try:
+            data = fetch_fn(host)
+            return data, host
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(1)
+    raise RuntimeError(f"East Money push2全节点失败: {last_error}")
+
+
 def rotate_em_host(fetch_fn, max_retries=3):
     """Try fetch_fn with each EM_API_HOSTS node until success.
 

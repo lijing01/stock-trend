@@ -1,6 +1,6 @@
 {
   "scores": {
-    "technical": -0.63,
+    "technical": -0.71,
     "capital_flow": 0,
     "fundamental": 0,
     "sentiment": 0,
@@ -13,21 +13,21 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": -0.12,
+  "composite_score": -0.148,
   "direction": "震荡偏空",
   "direction_detail": "震荡",
   "direction_modifier": "偏空",
   "confidence": "低",
-  "consistency": 0.5,
+  "consistency": 0.62,
   "risks": [
     "空头排列",
-    "ADX=41.1，强趋势；-DI>+DI确认空头",
+    "ADX=40.6，强趋势；-DI>+DI确认空头",
     "OBV在20日均线下方，资金净流出"
   ],
   "special": null,
   "data_quality": "good",
   "automated_sources": {
-    "fundamental": "error",
+    "fundamental": "good",
     "macro": "good"
   },
   "validation_warnings": [],
@@ -41,39 +41,37 @@
   "analysis": null,
   "report_params": {
     "direction": "震荡偏空",
-    "score": -0.12,
+    "score": -0.148,
     "confidence": "低",
     "ts_code": "00700.HK",
-    "stop_loss": 409.26,
-    "target_conservative": 441.0,
-    "target_moderate": 486.79,
-    "target_aggressive": 511.07,
-    "risk_reward_ratio": 2.08,
-    "rr_conservative": 0.26,
-    "rr_moderate": 2.08,
-    "rr_aggressive": 3.05,
+    "stop_loss": 400.43,
+    "target_conservative": 427.14,
+    "target_moderate": 487.66,
+    "target_aggressive": 518.9,
+    "risk_reward_ratio": 2.55,
+    "rr_conservative": 0.09,
+    "rr_moderate": 2.55,
+    "rr_aggressive": 3.82,
     "favorable_rr": true,
-    "position_sizing": "半仓(40-50%)",
-    "position_tier": 1,
-    "max_drawdown_pct": -35.88,
+    "position_sizing": "标准仓位(50-70%)",
+    "position_tier": 2,
+    "max_drawdown_pct": -37.27,
     "support_levels": [
-      433.6,
+      420.4,
       190,
-      180,
       170,
-      160
+      160,
+      150
     ],
     "resistance_levels": [
-      441.0,
-      462.6,
-      486.7861,
-      511.074,
-      535.5
+      427.1422,
+      457.4,
+      487.6578,
+      518.9,
+      550.575
     ],
     "entry_verdict": "wait",
-    "entry_signals": [
-      "RSI拐头"
-    ],
-    "entry_signal_count": 1
+    "entry_signals": [],
+    "entry_signal_count": 0
   }
 }
