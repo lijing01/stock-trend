@@ -1268,6 +1268,17 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     atr = atr_result.get("atr")
     atr_pct = atr_result.get("atr_pct", 0)
 
+    # Adaptive price rounding: low-price assets (<1) need 4 decimals,
+    # mid-price (<10) use 3, normal stocks use 2.
+    def _round_price(p):
+        if p is None:
+            return None
+        if curr_close < 1:
+            return round(p, 4)
+        elif curr_close < 10:
+            return round(p, 3)
+        return round(p, 2)
+
     # Exclude boll_upper from stop-loss support: upper band is volatility ceiling, not floor
     support_items = [item for item in levels.get("support", []) if item["price"] and item.get("source") != "boll_upper"]
     support_prices = [item["price"] for item in support_items]
@@ -1301,12 +1312,12 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
         nearest_support = max(support_prices)
         atr_stop = curr_close - atr_mult * atr
         # Take the higher of support level and ATR-based stop (don't go below support)
-        stop_loss = round(max(nearest_support, atr_stop), 2)
+        stop_loss = _round_price(max(nearest_support, atr_stop))
     elif support_prices:
         nearest_support = max(support_prices)
-        stop_loss = round(nearest_support, 2)
+        stop_loss = _round_price(nearest_support)
     elif atr:
-        stop_loss = round(curr_close - atr_mult * atr, 2)
+        stop_loss = _round_price(curr_close - atr_mult * atr)
     else:
         stop_loss = None
 
@@ -1314,16 +1325,16 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     # (support level rounding can push it above for low-price ETFs)
     if stop_loss and stop_loss >= curr_close:
         if atr:
-            stop_loss = round(curr_close - atr_mult * atr, 2)
+            stop_loss = _round_price(curr_close - atr_mult * atr)
         else:
-            stop_loss = round(curr_close * 0.99, 2)
+            stop_loss = _round_price(curr_close * 0.99)
 
     # Safety net: if stop-loss too close (< 0.5x ATR%), prefer ATR-based distance
     # NOTE: atr_pct is percentage (4.07 = 4.07%), stop_pct is decimal (0.0646 = 6.46%)
     if stop_loss and atr and atr_pct > 0:
         stop_pct = (curr_close - stop_loss) / curr_close
         if stop_pct < (atr_pct / 100.0) * 0.5:
-            atr_stop = round(curr_close - atr_mult * atr, 2)
+            atr_stop = _round_price(curr_close - atr_mult * atr)
             if atr_stop < stop_loss:
                 stop_loss = atr_stop
 
@@ -1344,7 +1355,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
 
     if resistance_prices:
         # Conservative: nearest resistance
-        target_conservative = round(resistance_prices[0], 2)
+        target_conservative = _round_price(resistance_prices[0])
 
         if risk and risk > 0:
             # R:R threshold for target selection: higher for ETFs (tighter stop → need wider target)
@@ -1352,38 +1363,38 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
             # Moderate: first resistance where R:R >= target_rr_threshold
             for rp in resistance_prices:
                 if (rp - curr_close) / risk >= target_rr_threshold:
-                    target_moderate = round(rp, 2)
+                    target_moderate = _round_price(rp)
                     break
             if target_moderate is None and atr:
                 # ETF tight stop means 2*atr gives ~1.33R, need more — use 3*atr for ~2.0R
                 atr_target_mult = 3 if is_etf else 2
-                target_moderate = round(curr_close + atr_target_mult * atr, 2)
+                target_moderate = _round_price(curr_close + atr_target_mult * atr)
             elif target_moderate is None:
                 target_moderate = target_conservative
 
             # Aggressive: next resistance after moderate
             moderate_idx = None
             for i, rp in enumerate(resistance_prices):
-                if round(rp, 2) == target_moderate:
+                if _round_price(rp) == target_moderate:
                     moderate_idx = i
                     break
             if moderate_idx is not None and moderate_idx + 1 < len(resistance_prices):
-                target_aggressive = round(resistance_prices[moderate_idx + 1], 2)
+                target_aggressive = _round_price(resistance_prices[moderate_idx + 1])
             elif atr:
                 etf_agg_mult = 4 if is_etf else 3
-                target_aggressive = round(curr_close + etf_agg_mult * atr, 2)
+                target_aggressive = _round_price(curr_close + etf_agg_mult * atr)
             else:
                 target_aggressive = target_moderate
         else:
             target_moderate = target_conservative
             target_aggressive = target_conservative
     elif atr:
-        target_conservative = round(curr_close + 1 * atr, 2)
+        target_conservative = _round_price(curr_close + 1 * atr)
         # ETF: wider ATR multipliers to compensate for tighter stop
         mod_mult = 3 if is_etf else 2
         agg_mult = 4 if is_etf else 3
-        target_moderate = round(curr_close + mod_mult * atr, 2)
-        target_aggressive = round(curr_close + agg_mult * atr, 2)
+        target_moderate = _round_price(curr_close + mod_mult * atr)
+        target_aggressive = _round_price(curr_close + agg_mult * atr)
         warning = "支撑/压力位数据不足，止损/目标价仅供参考"
     else:
         warning = "ATR数据不足，无法计算止损/目标价"
@@ -1835,8 +1846,8 @@ def main():
     # Risk:Reward and stop-loss (uses direction for adaptive stop)
     risk_reward = calc_risk_reward(df, atr_result, levels, direction=direction, is_etf=args.etf)
 
-    summary["support_levels"] = [item["price"] for item in levels["support"]]
-    summary["resistance_levels"] = [item["price"] for item in levels["resistance"]]
+    summary["support_levels"] = sorted([item["price"] for item in levels["support"]])
+    summary["resistance_levels"] = sorted([item["price"] for item in levels["resistance"]])
     summary["stop_loss"] = risk_reward.get("stop_loss")
     summary["target_conservative"] = risk_reward.get("target_conservative")
     summary["target_moderate"] = risk_reward.get("target_moderate")

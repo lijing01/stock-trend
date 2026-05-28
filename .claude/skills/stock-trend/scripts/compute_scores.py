@@ -348,14 +348,55 @@ def determine_direction_modifier(score):
     return ""
 
 
-def determine_confidence(abs_score, consistency):
-    """Determine confidence level based on score magnitude and consistency."""
-    if abs_score >= 2.5 and consistency >= 0.7:
+def determine_confidence(abs_score, consistency, atr_pct=None):
+    """Determine confidence level based on score magnitude and consistency.
+
+    Thresholds adapt to volatility:
+        low-vol (ATR<2%):  high≥2.0&0.6, mid≥1.5&0.4
+        normal  (ATR2-4%): high≥2.5&0.7, mid≥2.0&0.5  (default)
+        high-vol(ATR>4%):  high≥3.0&0.8, mid≥2.5&0.6
+    """
+    if atr_pct is not None:
+        if atr_pct < 2.0:
+            high_t, high_c, mid_t, mid_c = 2.0, 0.6, 1.5, 0.4
+        elif atr_pct > 4.0:
+            high_t, high_c, mid_t, mid_c = 3.0, 0.8, 2.5, 0.6
+        else:
+            high_t, high_c, mid_t, mid_c = 2.5, 0.7, 2.0, 0.5
+    else:
+        high_t, high_c, mid_t, mid_c = 2.5, 0.7, 2.0, 0.5
+
+    if abs_score >= high_t and consistency >= high_c:
         return "高"
-    elif abs_score >= 2.0 and consistency >= 0.5:
+    elif abs_score >= mid_t and consistency >= mid_c:
         return "中"
     else:
         return "低"
+
+
+def calc_inter_dim_consistency(scores):
+    """Compute cross-dimension directional consistency.
+
+    Measures agreement across all 5 dimensions (technical, capital_flow,
+    fundamental, sentiment, macro). Neutral dims (score=0) excluded from
+    count — they neither agree nor disagree.
+
+    Returns:
+        float: 0.0 (all against) ~ 1.0 (all agree), 1.0 if all neutral.
+    """
+    directions = []
+    for dim in ["technical", "capital_flow", "fundamental", "sentiment", "macro"]:
+        s = scores.get(dim, 0)
+        if s > 0.3:
+            directions.append(1)
+        elif s < -0.3:
+            directions.append(-1)
+
+    if not directions:
+        return 1.0  # all neutral = no disagreement
+
+    majority = max(directions.count(1), directions.count(-1))
+    return round(majority / len(directions), 2)
 
 
 def apply_coverage_penalty(dim, covered_items, raw_score):
@@ -422,10 +463,20 @@ def validate_dimension_scores(scores, signals_info, self_check):
         if w:
             warnings.append(w)
 
-        # 3. Bullish/bearish balance: missing counter-signal reduces consistency
-        if not has_counter:
-            penalty_factors.append(0.6)
-            warnings.append(f"{dim}缺少反向信号，一致性因子×0.6")
+        # 3. Data availability: skip counter-signal penalty if no real data exists
+        #    (capital_flow=0 records, covered_items < min, or data_quality=skip)
+        has_data = covered_items >= 2 or signal_count >= 2
+        if not has_data:
+            warnings.append(f"{dim}数据不足(条目={signal_count}, 已检={covered_items})，跳过信心惩罚")
+        else:
+            # Fall back to self_check counter_found (from skill agent's manual research)
+            if not has_counter:
+                has_counter = check.get("counter_found", False)
+
+            # 3. Bullish/bearish balance: missing counter-signal reduces consistency
+            if not has_counter:
+                penalty_factors.append(0.6)
+                warnings.append(f"{dim}缺少反向信号，一致性因子×0.6")
 
         # 4. Self-check adjustments
         if check.get("adjusted") and check.get("revised") is not None:
@@ -1129,10 +1180,21 @@ def main():
     # Determine direction and confidence
     direction = determine_direction(composite)
     direction_modifier = determine_direction_modifier(composite)
+
+    # Extract ATR for volatility-adaptive confidence thresholds
+    atr_pct = technical_data.get("latest", {}).get("atr", {}).get("atr_pct")
+    if atr_pct is None:
+        atr_pct = summary.get("atr_pct")
     consistency = summary.get("consistency", 0)
-    # Apply validation penalty to consistency before confidence determination
-    adjusted_consistency = consistency * confidence_penalty if confidence_penalty < 1.0 else consistency
-    confidence = determine_confidence(abs(composite), adjusted_consistency)
+    # Blend with inter-dimension directional consistency
+    # Technical consistency measures indicator agreement within price action.
+    # Inter-dim consistency measures cross-factor directional agreement.
+    # Weight: 40% technical (indicator-level), 60% cross-dim (strategic-level)
+    inter_consistency = calc_inter_dim_consistency(scores)
+    blended_consistency = round(0.4 * consistency + 0.6 * inter_consistency, 2)
+    # Apply validation penalty to blended consistency before confidence determination
+    adjusted_consistency = blended_consistency * confidence_penalty if confidence_penalty < 1.0 else blended_consistency
+    confidence = determine_confidence(abs(composite), adjusted_consistency, atr_pct=atr_pct)
 
     # If self-check resulted in score adjustments, downgrade confidence one level
     any_adjusted = any(v.get("adjusted") for v in self_check.values()) if self_check else False
