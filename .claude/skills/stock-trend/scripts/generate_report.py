@@ -144,6 +144,15 @@ def build_context(args):
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Load chip distribution data
+    chip_dist = {}
+    if args.chip_distribution:
+        try:
+            with open(args.chip_distribution, "r", encoding="utf-8") as f:
+                chip_dist = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+
     # Parse scores JSON
     scores = {}
     if args.scores:
@@ -444,6 +453,16 @@ def build_context(args):
         "entry_signals": entry_signals_list,
         "entry_signals_text": " + ".join(entry_signals_list) if entry_signals_list else "",
         "entry_signal_count": len(entry_signals_list),
+        # Chip distribution
+        "chip_distribution": chip_dist and "error" not in chip_dist,
+        "chip_avg_cost": chip_dist.get("avg_cost", "—") if chip_dist else "",
+        "chip_current_price": chip_dist.get("current_price", "—") if chip_dist else "",
+        "chip_profit_ratio": f"{chip_dist['profit_ratio']:.1%}" if chip_dist and chip_dist.get("profit_ratio") is not None else "",
+        "chip_concentration": f"{chip_dist['concentration']:.1%}" if chip_dist and chip_dist.get("concentration") is not None else "",
+        "chip_high_volume_nodes": [
+            {"node_price": n["price"], "node_vol_ratio": f"{n['vol_ratio']:.1%}"}
+            for n in chip_dist.get("high_volume_nodes", [])
+        ] if chip_dist else [],
     }
 
     # Load fundamental data flag
@@ -566,6 +585,7 @@ def main():
     parser.add_argument("--fundamental-data", help="Path to fundamental data JSON")
     parser.add_argument("--macro-data", help="Path to macro snapshot JSON")
     parser.add_argument("--futures-data", help="Path to futures data JSON (ETF only)")
+    parser.add_argument("--chip-distribution", help="Path to chip distribution JSON")
     # Output paths
     parser.add_argument("--output-md", help="Output Markdown file path")
     parser.add_argument("--output-html", help="Output HTML file path")
@@ -620,6 +640,8 @@ def main():
                 args.capital_flow = output_files["capital_flow"]
             if not args.fundamental_data and output_files.get("fundamental"):
                 args.fundamental_data = output_files["fundamental"]
+            if not args.chip_distribution and output_files.get("chip_distribution"):
+                args.chip_distribution = output_files["chip_distribution"]
             if not args.macro_data and output_files.get("macro_snapshot"):
                 args.macro_data = output_files["macro_snapshot"]
         except (OSError, json.JSONDecodeError):

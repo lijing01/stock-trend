@@ -27,6 +27,13 @@ def load_technical(path):
         return json.load(f)
 
 
+def load_chip_distribution(path):
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def compute_ma_series(records, periods=(5, 10, 20, 60)):
     """Compute full MA series from close prices. Used when fetch source doesn't provide MAs."""
     closes = [r.get("close") for r in records]
@@ -44,7 +51,7 @@ def compute_ma_series(records, periods=(5, 10, 20, 60)):
     return ma_data
 
 
-def transform_for_echarts(kline_data, technical_data=None, max_bars=120):
+def transform_for_echarts(kline_data, technical_data=None, max_bars=120, chip_data=None):
     """Transform kline JSON into ECharts-compatible data arrays."""
     records = kline_data.get("data", [])
     if not records:
@@ -119,6 +126,13 @@ def transform_for_echarts(kline_data, technical_data=None, max_bars=120):
                     "lineStyle": {"color": "#ef5350", "type": "dashed", "width": 1},
                 })
 
+    # Build chip distribution grid/series if data available
+    chip_dist = None
+    if chip_data and "distribution" in chip_data and not chip_data.get("error"):
+        chip_dist = chip_data
+
+    right_margin = "14%" if chip_dist else "4%"
+
     # Build ECharts option
     ma_colors = {"ma5": "#e6a23c", "ma10": "#409eff", "ma20": "#f56c6c", "ma60": "#909399"}
     ma_line_series = []
@@ -135,54 +149,161 @@ def transform_for_echarts(kline_data, technical_data=None, max_bars=120):
             "yAxisIndex": 0,
         })
 
+    grids = [
+        {"left": "8%", "right": right_margin, "top": "6%", "height": "58%"},
+        {"left": "8%", "right": right_margin, "top": "70%", "height": "18%"},
+    ]
+    xAxes = [
+        {
+            "type": "category",
+            "data": dates,
+            "boundaryGap": True,
+            "axisLine": {"lineStyle": {"color": "#777"}},
+            "axisLabel": {"color": "#ccc", "fontSize": 10},
+            "splitLine": {"show": False},
+        },
+        {
+            "type": "category",
+            "gridIndex": 1,
+            "data": dates,
+            "boundaryGap": True,
+            "axisLine": {"lineStyle": {"color": "#777"}},
+            "axisLabel": {"show": False},
+            "splitLine": {"show": False},
+        },
+    ]
+    yAxes = [
+        {
+            "scale": True,
+            "splitArea": {"show": True, "areaStyle": {"color": ["#1a1a2e", "#16213e"]}},
+            "axisLine": {"lineStyle": {"color": "#777"}},
+            "axisLabel": {"color": "#ccc", "fontSize": 10},
+            "splitLine": {"lineStyle": {"color": "#2a2a3e"}},
+        },
+        {
+            "scale": True,
+            "gridIndex": 1,
+            "splitNumber": 2,
+            "axisLine": {"lineStyle": {"color": "#777"}},
+            "axisLabel": {"color": "#ccc", "fontSize": 10, "formatter": "{value}"},
+            "splitLine": {"lineStyle": {"color": "#2a2a3e"}},
+        },
+    ]
+
+    # Add chip distribution grid, axis, and series
+    if chip_dist:
+        dist_data = chip_dist["distribution"]
+        curr_price = chip_dist.get("current_price")
+        meta = chip_dist.get("meta", {})
+        price_min = meta.get("price_min", min(r.get("low") for r in records))
+        price_max = meta.get("price_max", max(r.get("high") for r in records))
+
+        vols = [d["volume"] for d in dist_data]
+        max_vol = max(vols) if vols else 1
+
+        dist_grid = {
+            "left": "88%", "right": "2%",
+            "top": "6%", "height": "58%",
+        }
+        dist_xAxis = {
+            "type": "value",
+            "gridIndex": 2,
+            "splitLine": {"show": False},
+            "axisLabel": {"show": False},
+            "axisTick": {"show": False},
+            "axisLine": {"show": False},
+        }
+        dist_yAxis = {
+            "type": "value",
+            "gridIndex": 2,
+            "min": price_min,
+            "max": price_max,
+            "splitLine": {"show": False},
+            "axisLabel": {"show": True, "color": "#999", "fontSize": 9},
+            "axisTick": {"show": False},
+            "axisLine": {"show": False},
+            "scale": False,
+        }
+
+        grids.append(dist_grid)
+        xAxes.append(dist_xAxis)
+        yAxes.append(dist_yAxis)
+
+    # Build series list
+    dist_series_data = None
+    if chip_dist:
+        dist_data = chip_dist["distribution"]
+        curr_price = chip_dist.get("current_price")
+        vols = [d["volume"] for d in dist_data]
+        max_vol = max(vols) if vols else 1
+        dist_series_data = []
+        for d in dist_data:
+            p = d["price"]
+            v = (d["volume"] / max_vol) * 100 if max_vol > 0 else 0
+            dist_series_data.append([v, p])
+
+    base_series = [
+        {
+            "name": "K线",
+            "type": "candlestick",
+            "data": ohlc,
+            "itemStyle": {
+                "color": "#ef5350",
+                "color0": "#26a69a",
+                "borderColor": "#ef5350",
+                "borderColor0": "#26a69a",
+            },
+            "xAxisIndex": 0,
+            "yAxisIndex": 0,
+        }
+    ] + ma_line_series + [
+        {
+            "name": "成交量",
+            "type": "bar",
+            "xAxisIndex": 1,
+            "yAxisIndex": 1,
+            "data": volumes,
+            "itemStyle": {
+                "color": "#ef5350",
+                "color0": "#26a69a",
+            },
+        },
+    ]
+
+    # Add chip distribution bar series
+    if dist_series_data:
+        base_series.append({
+            "name": "筹码分布",
+            "type": "bar",
+            "xAxisIndex": 2,
+            "yAxisIndex": 2,
+            "data": dist_series_data,
+            "barWidth": "100%",
+            "barGap": 0,
+            "itemStyle": {
+                "color": {
+                    "type": "linear",
+                    "x": 0, "y": 0, "x2": 1, "y2": 0,
+                    "colorStops": [
+                        {"offset": 0, "color": "#26a69a"},
+                        {"offset": 1, "color": "#ef5350"},
+                    ],
+                }
+            },
+            "z": 2,
+        })
+
     option = {
         "animation": False,
         "tooltip": {
             "trigger": "axis",
             "axisPointer": {"type": "cross", "crossStyle": {"color": "#999"}},
-            "formatter": None,  # Will use JS-side formatter
+            "formatter": None,
         },
         "axisPointer": {"link": [{"xAxisIndex": "all"}]},
-        "grid": [
-            {"left": "8%", "right": "4%", "top": "6%", "height": "58%"},
-            {"left": "8%", "right": "4%", "top": "70%", "height": "18%"},
-        ],
-        "xAxis": [
-            {
-                "type": "category",
-                "data": dates,
-                "boundaryGap": True,
-                "axisLine": {"lineStyle": {"color": "#777"}},
-                "axisLabel": {"color": "#ccc", "fontSize": 10},
-                "splitLine": {"show": False},
-            },
-            {
-                "type": "category",
-                "gridIndex": 1,
-                "data": dates,
-                "boundaryGap": True,
-                "axisLine": {"lineStyle": {"color": "#777"}},
-                "axisLabel": {"show": False},
-                "splitLine": {"show": False},
-            },
-        ],
-        "yAxis": [
-            {
-                "scale": True,
-                "splitArea": {"show": True, "areaStyle": {"color": ["#1a1a2e", "#16213e"]}},
-                "axisLine": {"lineStyle": {"color": "#777"}},
-                "axisLabel": {"color": "#ccc", "fontSize": 10},
-                "splitLine": {"lineStyle": {"color": "#2a2a3e"}},
-            },
-            {
-                "scale": True,
-                "gridIndex": 1,
-                "splitNumber": 2,
-                "axisLine": {"lineStyle": {"color": "#777"}},
-                "axisLabel": {"color": "#ccc", "fontSize": 10, "formatter": "{value}"},
-                "splitLine": {"lineStyle": {"color": "#2a2a3e"}},
-            },
-        ],
+        "grid": grids,
+        "xAxis": xAxes,
+        "yAxis": yAxes,
         "dataZoom": [
             {
                 "type": "inside",
@@ -203,33 +324,7 @@ def transform_for_echarts(kline_data, technical_data=None, max_bars=120):
                 "end": 100,
             },
         ],
-        "series": [
-            {
-                "name": "K线",
-                "type": "candlestick",
-                "data": ohlc,
-                "itemStyle": {
-                    "color": "#ef5350",       # up candle fill (red=up, Chinese convention)
-                    "color0": "#26a69a",      # down candle fill (green=down)
-                    "borderColor": "#ef5350", # up candle border
-                    "borderColor0": "#26a69a", # down candle border
-                },
-                "xAxisIndex": 0,
-                "yAxisIndex": 0,
-            }
-        ] + ma_line_series + [
-            {
-                "name": "成交量",
-                "type": "bar",
-                "xAxisIndex": 1,
-                "yAxisIndex": 1,
-                "data": volumes,
-                "itemStyle": {
-                    "color": "#ef5350",  # red for up days
-                    "color0": "#26a69a", # green for down days
-                },
-            },
-        ],
+        "series": base_series,
     }
 
     # Add markLines for support/resistance on the candlestick series
@@ -328,6 +423,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate ECharts K-line chart HTML fragment")
     parser.add_argument("kline_file", help="K-line JSON file from fetch_kline.py")
     parser.add_argument("--technical", help="Technical analysis JSON file (optional, for support/resistance levels)")
+    parser.add_argument("--chip-distribution", help="Chip distribution JSON file (optional, for volume profile visualization)")
     parser.add_argument("--max-bars", type=int, default=120, help="Max number of bars to display (default: 120)")
     parser.add_argument("-o", "--output", help="Output HTML file path (default: stdout)")
 
@@ -335,12 +431,13 @@ def main():
 
     kline_data = load_kline(args.kline_file)
     technical_data = load_technical(args.technical)
+    chip_data = load_chip_distribution(args.chip_distribution)
 
     # Check for error
     if kline_data.get("meta", {}).get("data_source") == "error" or not kline_data.get("data"):
         html = '<div id="kline-chart" style="width:100%;padding:20px;text-align:center;color:#999;">K线数据不可用，图表无法生成</div>'
     else:
-        option = transform_for_echarts(kline_data, technical_data, args.max_bars)
+        option = transform_for_echarts(kline_data, technical_data, args.max_bars, chip_data)
         if option is None:
             html = '<div id="kline-chart" style="width:100%;padding:20px;text-align:center;color:#999;">K线数据为空，图表无法生成</div>'
         else:

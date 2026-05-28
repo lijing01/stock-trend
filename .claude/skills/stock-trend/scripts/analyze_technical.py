@@ -880,19 +880,36 @@ def calc_volume_profile(df, lookback=60, num_buckets=20):
     return {"support": support, "resistance": resistance}
 
 
-def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_value=None):
+def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_value=None, atr_absolute=None, chip_peaks=None):
     """Calculate key support and resistance levels with strength ranking.
 
     Args:
         df: DataFrame with OHLCV data
         ma_result: Result from calc_ma_signals()
         bollinger_result: Result from calc_bollinger()
-        atr_pct: ATR as percentage of price (for dynamic clustering threshold).
+        atr_pct: ATR as percentage of price (for convergence check).
                  If None, falls back to 0.5% fixed threshold.
+        atr_absolute: Absolute ATR value (for clustering distance threshold).
+                      If None, falls back to percentage-based estimate.
+        chip_peaks: List of {price, vol_ratio} from chip distribution high_volume_nodes.
+                    Added as S/R levels with "chip_peak" source, strength="high".
     """
     close = df["close"]
     curr_close = close.iloc[-1]
     levels = {"support": [], "resistance": []}
+
+    # Recency tiers for sort tiebreaking: lower = more recent = higher priority.
+    # 0=today, 1=yesterday/pivot, 2=this week, 3=older swing points, 4=timeless
+    def _recency(source):
+        if source in ("today_low", "today_high", "today_open"):
+            return 0
+        if source == "pivot":
+            return 1
+        if source in ("recent_low", "recent_high"):
+            return 2
+        if source in ("swing_low", "swing_high"):
+            return 3
+        return 4  # MA, bollinger, fib, round_number, vwap, quantile, volume_profile, chip_peak
 
     # From MA values
     ma_vals = ma_result.get("values", {})
@@ -924,6 +941,22 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
             if high > curr_close:
                 levels["resistance"].append({"price": round(high, 4), "source": "recent_high", "strength": "low"})
 
+    # Today's OHLC — the most immediate and actionable reference levels.
+    # Force high strength so they survive clustering regardless of other sources.
+    today = df.iloc[-1]
+    today_low = round(today["low"], 4)
+    today_high = round(today["high"], 4)
+    today_open = round(today["open"], 4)
+    if today_low < curr_close:
+        levels["support"].append({"price": today_low, "source": "today_low", "strength": "high"})
+    if today_high > curr_close:
+        levels["resistance"].append({"price": today_high, "source": "today_high", "strength": "high"})
+    # Today's open as medium reference — often acts as intraday support/resistance flip
+    if today_open < curr_close:
+        levels["support"].append({"price": today_open, "source": "today_open", "strength": "medium"})
+    elif today_open > curr_close:
+        levels["resistance"].append({"price": today_open, "source": "today_open", "strength": "medium"})
+
     # From structural highs/lows (previous swing points)
     if len(df) >= 20:
         swing_lookback = min(60, len(df))
@@ -933,11 +966,11 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
             if swing_df["high"].iloc[i] == swing_df["high"].iloc[i - 3:i + 4].max():
                 val = round(swing_df["high"].iloc[i], 4)
                 if val > curr_close:
-                    levels["resistance"].append({"price": val, "source": "swing_high", "strength": "high"})
+                    levels["resistance"].append({"price": val, "source": "swing_high", "strength": "medium"})
             if swing_df["low"].iloc[i] == swing_df["low"].iloc[i - 3:i + 4].min():
                 val = round(swing_df["low"].iloc[i], 4)
                 if val < curr_close:
-                    levels["support"].append({"price": val, "source": "swing_low", "strength": "high"})
+                    levels["support"].append({"price": val, "source": "swing_low", "strength": "medium"})
 
     # Fibonacci retracement levels
     if len(df) >= 30:
@@ -951,9 +984,9 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
             fib_level = high_price - (high_price - low_price) * ratio
             fib_rounded = round(fib_level, 4)
             if fib_level > curr_close:
-                levels["resistance"].append({"price": fib_rounded, "source": f"fib_{name}", "strength": "high"})
+                levels["resistance"].append({"price": fib_rounded, "source": f"fib_{name}", "strength": "medium"})
             elif fib_level < curr_close:
-                levels["support"].append({"price": fib_rounded, "source": f"fib_{name}", "strength": "high"})
+                levels["support"].append({"price": fib_rounded, "source": f"fib_{name}", "strength": "medium"})
 
     # Round number levels (psychological levels)
     if curr_close > 0:
@@ -1003,31 +1036,73 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
     for item in vp["resistance"]:
         levels["resistance"].append(item)
 
+    # Chip distribution peaks (high-volume price nodes from longer lookback)
+    # These represent real traded volume zones — strong S/R levels.
+    if chip_peaks:
+        for peak in chip_peaks:
+            price = peak.get("price")
+            if price is None:
+                continue
+            if price < curr_close:
+                levels["support"].append({"price": round(price, 4), "source": "chip_peak", "strength": "high"})
+            elif price > curr_close:
+                levels["resistance"].append({"price": round(price, 4), "source": "chip_peak", "strength": "high"})
+
+    # Stamp recency on every level for tiebreaking in sort.
+    # Lower recency = more recent = higher priority when strength is equal.
+    for direction in ["support", "resistance"]:
+        for item in levels[direction]:
+            item["recency"] = _recency(item.get("source", ""))
+
+    # Round number filter: drop round_number levels without nearby confirmation
+    # A round number is "anchored" if at least one non-round-number level
+    # from another source exists within 1.0×ATR distance.
+    if atr_absolute is not None:
+        round_validation_range = 1.0 * atr_absolute
+        all_non_round_prices = [item["price"] for item in levels["support"] + levels["resistance"]
+                                if item.get("source") != "round_number"]
+        for direction in ["support", "resistance"]:
+            filtered = []
+            for item in levels[direction]:
+                if item.get("source") == "round_number":
+                    anchored = any(abs(item["price"] - p) < round_validation_range
+                                   for p in all_non_round_prices)
+                    if not anchored:
+                        continue
+                filtered.append(item)
+            levels[direction] = filtered
+
     # Cluster nearby levels and sort by strength
     for direction in ["support", "resistance"]:
         if not levels[direction]:
             continue
-        # Dynamic clustering threshold: adapt to market regime via ADX
-        # Trending (ADX>=25): relaxed, transition (ADX 20-25): moderate, ranging (ADX<20): tight
-        if adx_value is not None:
-            if adx_value >= 25:
-                cluster_threshold = max(0.005, 2.0 * (atr_pct or 0) / 100) if atr_pct else 0.005
-            elif adx_value >= 20:
-                cluster_threshold = max(0.003, 1.0 * (atr_pct or 0) / 100) if atr_pct else 0.003
+        # Clustering threshold: use absolute ATR-based distance instead of percentage.
+        # Semi-ATR adapts to market regime via ADX:
+        #   trending (ADX>=25): 0.5×ATR  — wider zones in strong trends
+        #   transition (20-25): 0.35×ATR
+        #   ranging (ADX<20):   0.2×ATR  — tight zones, every level matters
+        # Falls back to 0.5% of price if ATR unavailable.
+        if atr_absolute is not None:
+            if adx_value is not None and adx_value >= 25:
+                cluster_dist = 0.5 * atr_absolute
+            elif adx_value is not None and adx_value >= 20:
+                cluster_dist = 0.35 * atr_absolute
             else:
-                cluster_threshold = max(0.0015, 0.4 * (atr_pct or 0) / 100) if atr_pct else 0.0015
+                cluster_dist = 0.2 * atr_absolute
         else:
-            cluster_threshold = max(0.005, 1.5 * (atr_pct or 0) / 100) if atr_pct else 0.005
+            cluster_dist = curr_close * 0.005  # fallback: 0.5% of price
+
         sorted_items = sorted(levels[direction], key=lambda x: x["price"], reverse=(direction == "support"))
         clustered = []
         for item in sorted_items:
             merged = False
             for cluster in clustered:
-                if abs(item["price"] - cluster["price"]) / cluster["price"] < cluster_threshold:
-                    # Merge: keep stronger strength, combine sources
+                if abs(item["price"] - cluster["price"]) < cluster_dist:
+                    # Merge: keep stronger strength, minimum recency, combine sources
                     strength_rank = {"high": 3, "medium": 2, "low": 1}
                     if strength_rank.get(item.get("strength", "low"), 0) > strength_rank.get(cluster.get("strength", "low"), 0):
                         cluster["strength"] = item["strength"]
+                    cluster["recency"] = min(cluster.get("recency", 4), item.get("recency", 4))
                     cluster["sources"] = cluster.get("sources", [cluster["source"]]) + [item["source"]]
                     cluster["test_count"] = cluster.get("test_count", 1) + 1
                     merged = True
@@ -1043,35 +1118,31 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
             elif item.get("test_count", 1) >= 2 and strength_rank.get(item.get("strength", "low"), 0) < 2:
                 item["strength"] = "medium"
 
-        # Sort: strength (high→low), then distance from price (close→far)
-        # Strength-first prevents weak noise levels (e.g. boll_upper barely below price)
-        # from ranking above major support like MA60.
+        # Sort: strength (high→low), recency (recent→old), distance (close→far)
+        # Recency tiebreaker: when two levels have equal strength, prefer the one
+        # anchored by more recent price action over a stale historical swing point.
         clustered.sort(key=lambda x: (
             -strength_rank.get(x.get("strength", "low"), 0),
+            x.get("recency", 4),
             abs(x["price"] - curr_close)
         ))
 
         levels[direction] = clustered[:5]  # Top 5 per side
 
     # S/R convergence check: if nearest support and resistance are within 0.5×ATR,
-    # they're the same price zone, not distinct levels. Drop the weaker side.
+    # they form a convergence zone — a battleground where price is deciding direction.
+    # Tag the return value instead of deleting either level.
+    levels["convergence_zone"] = None
     atr_ratio = atr_pct / 100 if atr_pct else 0.005
     min_sr_gap = curr_close * atr_ratio * 0.5
     if levels["support"] and levels["resistance"]:
         s, r = levels["support"][0], levels["resistance"][0]
         if abs(r["price"] - s["price"]) < min_sr_gap:
-            s_str = strength_rank.get(s.get("strength", "low"), 0)
-            r_str = strength_rank.get(r.get("strength", "low"), 0)
-            if r_str < s_str and len(levels["resistance"]) > 1:
-                levels["resistance"].pop(0)
-            elif s_str < r_str and len(levels["support"]) > 1:
-                levels["support"].pop(0)
-            else:
-                # Equal strength: fewer confirmations = weaker
-                if s.get("test_count", 0) < r.get("test_count", 0) and len(levels["support"]) > 1:
-                    levels["support"].pop(0)
-                elif len(levels["resistance"]) > 1:
-                    levels["resistance"].pop(0)
+            levels["convergence_zone"] = {
+                "support": s["price"],
+                "resistance": r["price"],
+                "gap_pct": round(abs(r["price"] - s["price"]) / curr_close * 100, 2),
+            }
 
     return levels
 
@@ -1651,6 +1722,7 @@ def main():
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--compact", action="store_true", help="Output only summary section")
     parser.add_argument("--etf", action="store_true", help="Treat as ETF (tighter stop, higher R:R threshold)")
+    parser.add_argument("--chip-distribution", help="Path to chip_distribution.json for chip peak S/R levels")
 
     args = parser.parse_args()
 
@@ -1737,12 +1809,23 @@ def main():
     drawdown_result = calc_max_drawdown(df)
 
     # Support/Resistance
+    chip_peaks = None
+    if getattr(args, "chip_distribution", None):
+        try:
+            with open(args.chip_distribution, "r", encoding="utf-8") as f:
+                chip_data = json.load(f)
+            chip_peaks = chip_data.get("high_volume_nodes", [])
+        except (OSError, json.JSONDecodeError):
+            pass
+
     levels = calc_support_resistance(
         df,
         indicator_results.get("ma", {}),
         indicator_results.get("bollinger", {}),
         atr_pct=atr_result.get("atr_pct"),
         adx_value=indicator_results.get("adx", {}).get("adx"),
+        atr_absolute=atr_result.get("atr"),
+        chip_peaks=chip_peaks,
     )
 
     # Summary (need direction before risk_reward)

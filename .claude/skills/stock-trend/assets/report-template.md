@@ -69,14 +69,32 @@
 *K线走势图: 详见 HTML 版本报告*
 {{/has_chart}}
 
+{{#chip_distribution}}
+## 六、筹码分布
+
+| 指标 | 数值 |
+|---|---|
+| 加权平均成本 | {{chip_avg_cost}} |
+| 当前价 | {{chip_current_price}} |
+| 获利盘比例 | {{chip_profit_ratio}} |
+| 筹码集中度 | {{chip_concentration}} |
+
+**量能峰值**:
+| 价格 | 量比 |
+|---|---|
+{{#chip_high_volume_nodes}}
+| {{node_price}} | {{node_vol_ratio}} |
+{{/chip_high_volume_nodes}}
+{{/chip_distribution}}
+
 {{#特殊标记}}
-## 六、{{特殊标记标题}}
+## 七、{{特殊标记标题}}
 
 {{特殊标记内容}}
 {{/特殊标记}}
 
 {{#综合研判}}
-## 七、综合研判
+## 八、综合研判
 
 ### 核心矛盾
 

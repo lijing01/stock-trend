@@ -222,16 +222,50 @@ def main():
         errors.append("K-line data unavailable")
         results["kline"] = {"data_source": "error", "record_count": 0}
 
-    # --- Step 3: Technical analysis (depends on kline) ---
+    # --- Step 3: Chip distribution analysis (depends on kline, runs before technical) ---
+    chip_distribution_path = str(output_dir / "chip_distribution.json")
+    if kline_data and kline_data.get("meta", {}).get("data_source") != "error":
+        print(f"[3/5] Computing chip distribution...")
+        chip_cmd = [
+            sys.executable, str(SCRIPT_DIR / "compute_chip_distribution.py"),
+            kline_path, "-o", chip_distribution_path,
+        ]
+        chip_result = run_script(chip_cmd, label="compute_chip_distribution", timeout=15)
+        if chip_result.get("timeout"):
+            timeouts.append("compute_chip_distribution")
+        if chip_result["success"]:
+            chip_data = read_json(chip_distribution_path)
+            if chip_data and "error" not in chip_data:
+                avg_cost = chip_data.get("avg_cost")
+                profit_ratio = chip_data.get("profit_ratio")
+                concentration = chip_data.get("concentration")
+                print(f"  Chip distribution: avg_cost={avg_cost}, "
+                      f"profit_ratio={profit_ratio:.1%}, concentration={concentration:.1%}")
+                results["chip_distribution"] = {
+                    "avg_cost": avg_cost,
+                    "profit_ratio": profit_ratio,
+                    "concentration": concentration,
+                }
+            else:
+                print(f"  Chip distribution skipped: {chip_data.get('detail', 'unknown') if chip_data else 'no output'}")
+        else:
+            print(f"  Chip distribution failed: {chip_result['stderr']}")
+    else:
+        print(f"[3/5] Skipping chip distribution (no K-line data)")
+
+    # --- Step 3.5: Technical analysis (depends on kline, optionally chip distribution) ---
     technical_path = str(output_dir / "technical.json")
     if kline_data and kline_data.get("meta", {}).get("data_source") != "error":
-        print(f"[3/5] Running technical analysis...")
+        print(f"[3.5/5] Running technical analysis...")
         tech_cmd = [
             sys.executable, str(SCRIPT_DIR / "analyze_technical.py"),
             kline_path, "-o", technical_path,
         ]
         if is_etf:
             tech_cmd.append("--etf")
+        # Pass chip distribution for S/R enrichment
+        if chip_result["success"] and read_json(chip_distribution_path):
+            tech_cmd.extend(["--chip-distribution", chip_distribution_path])
         tech_result = run_script(tech_cmd,
             label="analyze_technical",
         )
@@ -253,7 +287,7 @@ def main():
                   f"direction={summary.get('direction')}, "
                   f"confidence={summary.get('confidence')}")
     else:
-        print(f"[3/5] Skipping technical analysis (no K-line data)")
+        print(f"[3.5/5] Skipping technical analysis (no K-line data)")
 
     # --- Step 4: ETF data and capital flow (parallel, independent) ---
     print(f"[4/5] Fetching supplementary data...")
@@ -445,6 +479,7 @@ def main():
             "macro_snapshot": str(output_dir / "macro_snapshot.json") if not args.no_macro else None,
             "futures_data": str(output_dir / "futures_data.json") if is_etf and not args.no_futures else None,
             "index_valuation": str(output_dir / "index_valuation.json") if is_etf and not args.no_index_valuation else None,
+            "chip_distribution": chip_distribution_path if kline_data else None,
         },
     }
 

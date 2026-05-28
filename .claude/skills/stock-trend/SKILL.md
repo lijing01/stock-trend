@@ -337,7 +337,7 @@ python3 .claude/skills/stock-trend/scripts/run_pipeline.py --code <code>
 管线完成后可选生成K线图用于报告嵌入：
 
 ```bash
-python3 .claude/skills/stock-trend/scripts/generate_chart_html.py .cache/stock-trend/{code}/kline.json --technical .cache/stock-trend/{code}/technical.json -o .cache/stock-trend/{code}/chart_fragment.html
+python3 .claude/skills/stock-trend/scripts/generate_chart_html.py .cache/stock-trend/{code}/kline.json --technical .cache/stock-trend/{code}/technical.json --chip-distribution .cache/stock-trend/{code}/chip_distribution.json -o .cache/stock-trend/{code}/chart_fragment.html
 ```
 
 使用 `--no-data` 时跳过本步骤。管线失败时各脚本支持 `-h` 查看独立传参。
