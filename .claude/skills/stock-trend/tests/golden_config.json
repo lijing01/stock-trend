@@ -21,6 +21,17 @@
     {"name": "index_valuation", "output": "index_valuation.json", "accepts_stdin": false},
     {"name": "scores", "output": "scores.json", "accepts_stdin": true}
   ],
+  "asset_thresholds": {
+    "etf": {
+      "price": 0.01,
+      "volume": 0.05,
+      "score": 0.02
+    },
+    "hk": {
+      "price": 0.008,
+      "volume": 0.03
+    }
+  },
   "numeric_threshold_map": {
     "total_score": "score",
     "confidence": "score",

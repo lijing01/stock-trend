@@ -238,7 +238,7 @@ def _normalized_amount_pair(golden_amount, current_amount):
     return golden_amount, current_amount
 
 
-def _kline_config(config):
+def _kline_config(config, asset_type=None):
     """Use more realistic thresholds for live kline cross-source comparisons."""
     local = {
         "thresholds": dict(config.get("thresholds", {})),
@@ -247,6 +247,10 @@ def _kline_config(config):
     local["thresholds"]["price"] = 0.005
     local["thresholds"]["pct"] = 0.10
     local["thresholds"]["volume"] = 0.02
+    if asset_type:
+        asset_overrides = config.get("asset_thresholds", {}).get(asset_type, {})
+        for k, v in asset_overrides.items():
+            local["thresholds"][k] = v
     local["numeric_threshold_map"]["pct_chg"] = "pct"
     local["numeric_threshold_map"]["pre_close"] = "price"
     local["numeric_threshold_map"]["vol"] = "volume"
@@ -314,7 +318,7 @@ def _normalize_scores(data):
     }
 
 
-def _diff_kline(golden_data, current_data, config):
+def _diff_kline(golden_data, current_data, config, asset_type=None):
     golden_rows = {r.get("trade_date"): r for r in golden_data.get("data", []) if r.get("trade_date")}
     current_rows = {r.get("trade_date"): r for r in current_data.get("data", []) if r.get("trade_date")}
     common_dates = sorted(set(golden_rows) & set(current_rows))
@@ -367,13 +371,21 @@ def _diff_kline(golden_data, current_data, config):
             **current_record,
         })
 
-    return deep_diff(normalized_golden, normalized_current, "", _kline_config(config))
+    return deep_diff(normalized_golden, normalized_current, "", _kline_config(config, asset_type))
 
 
-def diff_output(output_name, golden_data, current_data, config):
+def diff_output(output_name, golden_data, current_data, config, asset_type=None):
     """Diff output files using stable semantics per file type."""
     if output_name == "kline.json":
-        return _diff_kline(golden_data, current_data, config)
+        return _diff_kline(golden_data, current_data, config, asset_type)
+
+    if asset_type:
+        asset_overrides = config.get("asset_thresholds", {}).get(asset_type, {})
+        if asset_overrides:
+            config = {
+                **config,
+                "thresholds": {**config.get("thresholds", {}), **asset_overrides},
+            }
 
     normalizers = {
         "macro_snapshot.json": _normalize_macro_snapshot,
@@ -513,7 +525,7 @@ def run_diff(config, verbose, current_dir=CACHE_DIR):
                 continue
 
             # Run deep diff
-            diffs = diff_output(script["output"], golden_data, current_data, config)
+            diffs = diff_output(script["output"], golden_data, current_data, config, symbol.get("asset"))
 
             if not diffs:
                 PASSED += 1
