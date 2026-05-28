@@ -1043,9 +1043,35 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
             elif item.get("test_count", 1) >= 2 and strength_rank.get(item.get("strength", "low"), 0) < 2:
                 item["strength"] = "medium"
 
-        # Sort: closest to current price first, then by strength
-        clustered.sort(key=lambda x: (abs(x["price"] - curr_close), -strength_rank.get(x.get("strength", "low"), 0)))
+        # Sort: strength (high→low), then distance from price (close→far)
+        # Strength-first prevents weak noise levels (e.g. boll_upper barely below price)
+        # from ranking above major support like MA60.
+        clustered.sort(key=lambda x: (
+            -strength_rank.get(x.get("strength", "low"), 0),
+            abs(x["price"] - curr_close)
+        ))
+
         levels[direction] = clustered[:5]  # Top 5 per side
+
+    # S/R convergence check: if nearest support and resistance are within 0.5×ATR,
+    # they're the same price zone, not distinct levels. Drop the weaker side.
+    atr_ratio = atr_pct / 100 if atr_pct else 0.005
+    min_sr_gap = curr_close * atr_ratio * 0.5
+    if levels["support"] and levels["resistance"]:
+        s, r = levels["support"][0], levels["resistance"][0]
+        if abs(r["price"] - s["price"]) < min_sr_gap:
+            s_str = strength_rank.get(s.get("strength", "low"), 0)
+            r_str = strength_rank.get(r.get("strength", "low"), 0)
+            if r_str < s_str and len(levels["resistance"]) > 1:
+                levels["resistance"].pop(0)
+            elif s_str < r_str and len(levels["support"]) > 1:
+                levels["support"].pop(0)
+            else:
+                # Equal strength: fewer confirmations = weaker
+                if s.get("test_count", 0) < r.get("test_count", 0) and len(levels["support"]) > 1:
+                    levels["support"].pop(0)
+                elif len(levels["resistance"]) > 1:
+                    levels["resistance"].pop(0)
 
     return levels
 
