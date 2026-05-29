@@ -51,6 +51,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
   <p class="meta">周期: {{周期}}</p>
   {{#侧重}}<p class="meta">侧重: {{侧重}}</p>{{/侧重}}
   <p class="con {{趋势CSS}}">{{趋势符号}} {{趋势方向}} (综合评分: {{综合评分}}, 置信度: {{置信度}})</p>
+  <p class="meta" style="margin-top:8px">今日动作: <strong>{{今日动作摘要}}</strong></p>
 </header>
 
 <h2>一、关键信号</h2>
@@ -87,6 +88,29 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
     <tr><td>激进</td><td>{{激进目标价}}</td><td>{{激进RR}}</td></tr>
   </tbody>
 </table>
+<div class="analysis">
+  <h3>执行摘要</h3>
+  <p><strong>{{今日动作标签}}</strong>：{{今日动作说明}}</p>
+</div>
+
+<table>
+  <thead><tr><th>场景</th><th>触发条件</th><th>执行动作</th></tr></thead>
+  <tbody>
+    <tr><td>{{场景A标题}}</td><td>{{场景A条件}}</td><td>{{场景A动作}}</td></tr>
+    <tr><td>{{场景B标题}}</td><td>{{场景B条件}}</td><td>{{场景B动作}}</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th>退出条件</th><th>执行动作</th></tr></thead>
+  <tbody>
+    <tr><td>{{退出条件1}}</td><td>{{退出动作1}}</td></tr>
+    <tr><td>{{退出条件2}}</td><td>{{退出动作2}}</td></tr>
+    <tr><td>{{退出条件3}}</td><td>{{退出动作3}}</td></tr>
+  </tbody>
+</table>
+
+<p class="meta" style="margin:8px 0">执行时间窗: <strong>{{执行时间窗}}</strong></p>
 <p class="meta" style="margin:8px 0">仓位建议: <strong>{{仓位建议}}</strong> | 区间最大回撤: <strong>{{最大回撤}}</strong></p>
 
 {{#监控信号}}
