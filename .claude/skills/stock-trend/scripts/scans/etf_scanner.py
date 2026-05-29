@@ -18,6 +18,10 @@ Options:
 
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import math
@@ -28,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
-from resolve_code import code_to_ts_code
-from eastmoney_utils import (
+from core.resolve_code import code_to_ts_code
+from core.eastmoney_utils import (
     piecewise_linear_clamped,
     ma as _ma, rsi as _rsi, macd_direction as _macd_direction,
     bollinger_bands as _bollinger_bands, volume_ma as _volume_ma,
@@ -38,7 +42,7 @@ from eastmoney_utils import (
 import yaml
 from collections import defaultdict
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
 DEFAULT_WATCHLIST = SCRIPT_DIR / "watchlist.yaml"
@@ -238,7 +242,7 @@ def generate_report(output: dict) -> tuple[Path, str]:
 
     Returns (output_path, report_content) so callers can embed in JSON.
     """
-    from generate_report import render_template
+    from reporting.report import render_template
 
     template_path = ASSETS_DIR / "etf-scan-report-template.html"
     if not template_path.exists():
@@ -275,7 +279,7 @@ def load_watchlist(path: Optional[Path] = None) -> dict:
 
 def run_script(script_name: str, args: list[str], timeout: int = 30) -> Optional[dict]:
     """Run an existing stock-trend script and return parsed JSON output."""
-    from cache_utils import run_script_file
+    from core.cache_utils import run_script_file
     rc, stdout, _ = run_script_file(script_name, *args, timeout=timeout)
     if rc != 0:
         return None
@@ -288,7 +292,7 @@ def run_script(script_name: str, args: list[str], timeout: int = 30) -> Optional
 def fetch_quick_kline(code: str, days: int = 60) -> Optional[list]:
     """Fetch K-line data for Phase 1 quick score via eastmoney."""
     ts_code = code_to_ts_code(code)
-    raw = run_script("fetch_kline_eastmoney.py", [ts_code], timeout=20)
+    raw = run_script("fetchers/kline_eastmoney.py", [ts_code], timeout=20)
     if raw and raw.get("meta", {}).get("data_source") != "error":
         return raw.get("data", [])
     return None
@@ -319,7 +323,7 @@ def fetch_hs300_kline(days: int = 120) -> list[dict]:
 def fetch_quick_capital_flow(code: str) -> Optional[dict]:
     """Fetch capital flow for Phase 1 (main force net flow)."""
     ts_code = code_to_ts_code(code)
-    raw = run_script("fetch_capital_flow.py", [ts_code], timeout=20)
+    raw = run_script("fetchers/capital_flow.py", [ts_code], timeout=20)
     if raw and raw.get("meta", {}).get("data_source") != "error":
         return raw
     return None
@@ -331,7 +335,7 @@ def fetch_quick_etf_data(code: str) -> Optional[dict]:
     Note: fetch_etf_data.py outputs a flat dict (no meta/data wrapper),
     unlike the other scripts.
     """
-    raw = run_script("fetch_etf_data.py", [code], timeout=20)
+    raw = run_script("fetchers/etf_data.py", [code], timeout=20)
     if raw and isinstance(raw, dict) and raw.get("fund_code"):
         return raw
     return None
@@ -1408,7 +1412,7 @@ def run_deep_analysis(code: str, settings: dict) -> dict:
         result["pipeline_source"] = "cache"
     else:
         result["pipeline_source"] = "fresh"
-        pipeline_cmd = [sys.executable, str(SCRIPT_DIR / "run_pipeline.py"),
+        pipeline_cmd = [sys.executable, str(SCRIPT_DIR / "pipeline/runner.py"),
                         "--code", code]
         try:
             subprocess.run(pipeline_cmd, capture_output=True, text=True,
@@ -1420,7 +1424,7 @@ def run_deep_analysis(code: str, settings: dict) -> dict:
     # Run scoring
     scores_result = get_cached_scores(code)
     if not scores_result:
-        scores_cmd = [sys.executable, str(SCRIPT_DIR / "compute_scores.py"),
+        scores_cmd = [sys.executable, str(SCRIPT_DIR / "analysis/scores.py"),
                       "--code", code]
         try:
             subprocess.run(scores_cmd, capture_output=True, text=True,

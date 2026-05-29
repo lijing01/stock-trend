@@ -12,6 +12,10 @@ Usage:
 Outputs JSON to stdout.
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
@@ -23,11 +27,11 @@ import urllib.request
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Optional
-from resolve_code import code_to_ts_code
+from core.resolve_code import code_to_ts_code
 
 import yaml
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 DATA_DIR = SCRIPT_DIR.parent / "data"
 PORTFOLIO_PATH = Path(os.environ.get("STOCK_TREND_PORTFOLIO", str(DATA_DIR / "portfolio.yaml")))
@@ -194,7 +198,7 @@ def _fetch_kline(ts_code: str) -> Optional[list]:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             out_path = f.name
         rc, stdout, stderr = _run_script(
-            "fetch_kline_eastmoney.py", ts_code, "-o", out_path, timeout=20
+            "fetchers/kline_eastmoney.py", ts_code, "-o", out_path, timeout=20
         )
         if rc != 0:
             return None
@@ -209,7 +213,7 @@ def _fetch_kline(ts_code: str) -> Optional[list]:
 
 def _run_script(script_name: str, *args, timeout: int = 20):
     """Run a script from SCRIPT_DIR, return (rc, stdout, stderr)."""
-    from cache_utils import run_script_file
+    from core.cache_utils import run_script_file
     return run_script_file(script_name, *args, timeout=timeout)
 
 
@@ -219,7 +223,7 @@ def _fetch_technical_stop(ts_code: str) -> dict | None:
     Returns {"stop_loss": float|None, "atr": float|None, "atr_pct": float|None}
     or None if unavailable.
     """
-    from cache_utils import CACHE_DIR
+    from core.cache_utils import CACHE_DIR
     code = ts_code.split(".")[0]
     tech_path = Path(CACHE_DIR) / code / "technical.json"
     if not tech_path.exists():
@@ -927,7 +931,7 @@ def cmd_status(args):
     else:
         try:
             rc, stdout, stderr = _run_script(
-                "etf_scanner.py", "--output", "compact", timeout=120
+                "scans/etf_scanner.py", "--output", "compact", timeout=120
             )
             if rc == 0:
                 scan_data = json.loads(stdout)
@@ -1062,7 +1066,7 @@ def cmd_kelly(args):
     scan_compare = []
     regime_coef = 1.0
     try:
-        rc, stdout, stderr = _run_script("etf_scanner.py", "--output", "compact", timeout=120)
+        rc, stdout, stderr = _run_script("scans/etf_scanner.py", "--output", "compact", timeout=120)
         if rc == 0:
             scan_data = json.loads(stdout)
             regime_coef = scan_data.get("meta", {}).get("regime_coefficient", 1.0)

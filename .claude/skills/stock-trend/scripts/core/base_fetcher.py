@@ -5,13 +5,17 @@ Provides unified argparse, JSON output, error handling, and cache integration.
 Subclasses only need to implement fetch() -> dict.
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
 import sys
 import time
 from pathlib import Path
-from cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
+from core.cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
 
 
 class BaseFetcher:

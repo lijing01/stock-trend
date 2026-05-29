@@ -12,6 +12,10 @@ Examples:
     python3 fetch_capital_flow.py 159740.SZ --asset FD -o /tmp/capital_flow.json
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
@@ -19,9 +23,9 @@ import sys
 import urllib.request
 import logging
 from pathlib import Path
-from cache_utils import CACHE_DIR, load_cache, safe_float, save_cache, get_market_day_ttl, output_json
+from core.cache_utils import CACHE_DIR, load_cache, safe_float, save_cache, get_market_day_ttl, output_json
 from datetime import datetime, timedelta
-from eastmoney_utils import EM_HEADERS, build_secid as resolve_secid
+from core.eastmoney_utils import EM_HEADERS, build_secid as resolve_secid
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
 
@@ -141,7 +145,7 @@ def estimate_capital_flow_from_kline(code, days=5):
 
 def fetch_stock_capital_flow(secid, days=5):
     """Fetch capital flow data for individual stocks from East Money."""
-    from eastmoney_utils import rotate_push2_host
+    from core.eastmoney_utils import rotate_push2_host
 
     def _do_fetch(host):
         url = (

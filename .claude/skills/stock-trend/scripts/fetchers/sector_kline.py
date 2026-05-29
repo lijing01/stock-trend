@@ -9,6 +9,10 @@ Usage:
     python3 fetch_sector_kline.py BK0477 BK0478 BK0479 --days 10 -o /tmp/sector_kline.json
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import sys
@@ -16,9 +20,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, fetch_url, build_em_kline_url, parse_em_kline_line
+from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, fetch_url, build_em_kline_url, parse_em_kline_line
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _parse_kline_response(raw: str, min_records: int) -> list[dict]:

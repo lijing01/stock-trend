@@ -490,16 +490,16 @@ def prepare_current_outputs(config, current_dir):
 
         resolve_output = symbol_dir / "resolve.json"
         subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "resolve_code.py"), numeric_code, "-o", str(resolve_output)],
+            [sys.executable, str(SCRIPTS_DIR / "core/resolve_code.py"), numeric_code, "-o", str(resolve_output)],
             capture_output=True, text=True, timeout=20, env=env,
         )
         subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "run_pipeline.py"), "--code", numeric_code],
+            [sys.executable, str(SCRIPTS_DIR / "pipeline/runner.py"), "--code", numeric_code],
             capture_output=True, text=True, timeout=90, env=env,
         )
         if (symbol_dir / "technical.json").exists():
             subprocess.run(
-                [sys.executable, str(SCRIPTS_DIR / "compute_scores.py"), "--code", numeric_code],
+                [sys.executable, str(SCRIPTS_DIR / "analysis/scores.py"), "--code", numeric_code],
                 capture_output=True, text=True, timeout=30, env=env,
             )
 
@@ -676,7 +676,7 @@ def regenerate_golden(config):
         resolve_output = golden_symbol_dir / "resolve.json"
         try:
             result = subprocess.run(
-                [sys.executable, str(SCRIPTS_DIR / "resolve_code.py"), numeric_code],
+                [sys.executable, str(SCRIPTS_DIR / "core/resolve_code.py"), numeric_code],
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode == 0:
@@ -697,7 +697,7 @@ def regenerate_golden(config):
         try:
             result = subprocess.run(
                 [
-                    sys.executable, str(SCRIPTS_DIR / "run_pipeline.py"),
+                    sys.executable, str(SCRIPTS_DIR / "pipeline/runner.py"),
                     "--code", numeric_code, "--no-cache",
                 ],
                 capture_output=True, text=True, timeout=120,
@@ -753,7 +753,7 @@ def regenerate_golden(config):
             try:
                 result = subprocess.run(
                     [
-                        sys.executable, str(SCRIPTS_DIR / "compute_scores.py"),
+                        sys.executable, str(SCRIPTS_DIR / "analysis/scores.py"),
                         "--code", numeric_code,
                     ],
                     capture_output=True, text=True, timeout=30,

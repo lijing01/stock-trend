@@ -26,7 +26,7 @@ def test(name, condition, detail=""):
 
 def test_signal_consistency_detects_conflict():
     """Direction=bullish but indicators all bearish -> flagged as conflict."""
-    from quality_gate import check_signal_consistency
+    from analysis.quality_gate import check_signal_consistency
 
     risks = [
         "空头排列",
@@ -45,7 +45,7 @@ def test_signal_consistency_detects_conflict():
 
 def test_signal_consistency_no_conflict():
     """Direction=bullish with supporting indicators -> no conflict."""
-    from quality_gate import check_signal_consistency
+    from analysis.quality_gate import check_signal_consistency
 
     risks = ["RSI=55.0，中性区间"]
     result = check_signal_consistency(direction="震荡偏多", risks=risks)
@@ -59,7 +59,7 @@ def test_signal_consistency_no_conflict():
 
 def test_signal_consistency_bearish_direction():
     """Direction=bearish with bearish indicators -> no conflict (consistent)."""
-    from quality_gate import check_signal_consistency
+    from analysis.quality_gate import check_signal_consistency
 
     risks = ["空头排列", "MACD死叉；绿柱放大"]
     result = check_signal_consistency(direction="震荡偏空", risks=risks)
@@ -70,7 +70,7 @@ def test_signal_consistency_bearish_direction():
 
 def test_overbought_with_bearish():
     """Overbought + bearish signal in bullish direction -> conflict."""
-    from quality_gate import check_signal_consistency
+    from analysis.quality_gate import check_signal_consistency
 
     risks = ["RSI=75.0，超买", "OBV在20日均线下方，资金净流出"]
     result = check_signal_consistency(direction="震荡偏多", risks=risks)
@@ -81,7 +81,7 @@ def test_overbought_with_bearish():
 
 def test_bearish_direction_with_bullish_signals():
     """Bearish direction with many bullish signals -> conflict."""
-    from quality_gate import check_signal_consistency
+    from analysis.quality_gate import check_signal_consistency
 
     risks = ["多头排列", "MACD金叉", "红柱放大", "放量上涨"]
     result = check_signal_consistency(direction="偏空", risks=risks)

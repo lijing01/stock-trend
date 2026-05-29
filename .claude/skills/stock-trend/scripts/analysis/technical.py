@@ -11,6 +11,10 @@ Examples:
     python3 analyze_technical.py /tmp/kline.json --compact
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
@@ -19,7 +23,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from cache_utils import output_json
+from core.cache_utils import output_json
 
 
 # --- MA signal analysis ---

@@ -17,6 +17,10 @@ Examples:
     python3 fetch_futures_data.py 159740 --no-cache
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
@@ -24,8 +28,8 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta
 
-from cache_utils import load_cache, save_cache, get_market_day_ttl, safe_float, output_json
-from eastmoney_utils import (
+from core.cache_utils import load_cache, save_cache, get_market_day_ttl, safe_float, output_json
+from core.eastmoney_utils import (
     EM_HEADERS, EM_API_HOSTS, rotate_em_host,
     get_futures_secid, FUTURES_SECID_MAP, INDEX_SECID_MAP,
 )

@@ -20,6 +20,10 @@ Usage:
         --output-html reports/159740.SZ/20260514-2200.html
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
@@ -27,11 +31,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = SCRIPT_DIR.parent / "assets"
 
-from cache_utils import safe_float as _safe_float
-from eastmoney_utils import latest_kline_record
+from core.cache_utils import safe_float as _safe_float
+from core.eastmoney_utils import latest_kline_record
 
 
 def render_template(template_str, context):
@@ -814,7 +818,7 @@ def main():
 
     # Resolve data directory from --code
     if args.code:
-        from cache_utils import CACHE_DIR
+        from core.cache_utils import CACHE_DIR
         data_dir = Path(args.data_dir) if args.data_dir else Path(CACHE_DIR) / args.code
 
         # Auto-fill paths from data directory

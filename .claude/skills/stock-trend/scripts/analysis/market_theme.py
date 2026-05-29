@@ -28,13 +28,13 @@ from pathlib import Path
 from typing import Any, Optional
 from statistics import stdev, mean
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
-from fetch_sector_data import get_sector_rankings, rank_hot_sectors
-from fetch_sector_kline import batch_fetch_kline
+from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
+from fetchers.sector_kline import batch_fetch_kline
 
 
 # ──────────────────────── Phase 1: Sector Scan ────────────────────────

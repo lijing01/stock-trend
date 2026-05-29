@@ -262,7 +262,7 @@ def test_parse_amount():
 
 def test_fallback_score():
     """Test _fallback_score() in market_leader.py."""
-    from market_leader import _fallback_score
+    from scans.market_leader import _fallback_score
 
     # Normal stock with positive change
     s1 = {"code": "600001", "name": "测试", "change_pct": 5.0, "amount": 1e9}
@@ -298,7 +298,7 @@ def test_fallback_score():
 def test_apply_quality_penalties():
     """Test quality penalties affect ranking and adjusted scores."""
     try:
-        from market_leader import _apply_quality_penalties
+        from scans.market_leader import _apply_quality_penalties
     except ImportError as e:
         test("QP-00: 质量惩罚函数存在", False, str(e))
         return
@@ -521,7 +521,7 @@ def test_run_deep_analysis_scoring_failure():
 
 def test_score_to_stars():
     """Test _score_to_stars() conversion."""
-    from market_leader import _score_to_stars
+    from scans.market_leader import _score_to_stars
 
     test("ST-01: score=0.8→★★★", _score_to_stars(0.8) == "★★★")
     test("ST-02: score=0.7→★★★", _score_to_stars(0.7) == "★★★")
@@ -537,7 +537,7 @@ def test_score_to_stars():
 
 def test_signal_str():
     """Test _signal_str() direction arrows."""
-    from market_leader import _signal_str
+    from scans.market_leader import _signal_str
 
     test("SG-01: score=3.0→↑", _signal_str(3.0) == "↑")
     test("SG-02: score=2.0→↑", _signal_str(2.0) == "↑")
@@ -553,7 +553,7 @@ def test_signal_str():
 
 def test_generate_report():
     """Test generate_report() structure and key content."""
-    from market_leader import generate_report
+    from scans.market_leader import generate_report
 
     output = {
         "meta": {
@@ -623,7 +623,7 @@ def test_generate_report():
 
 def test_generate_report_edge_cases():
     """Test generate_report() with various edge case inputs."""
-    from market_leader import generate_report
+    from scans.market_leader import generate_report
 
     base = {
         "meta": {"scan_time": "", "top_n": 0, "total_sectors": 0, "total_candidates": 0, "elapsed_seconds": 0},
@@ -677,7 +677,7 @@ def test_generate_report_edge_cases():
 
 def test_generate_html_report():
     """Test HTML report generation."""
-    from market_leader import _generate_html_report
+    from scans.market_leader import _generate_html_report
 
     output = {
         "meta": {"scan_time": "20260526-120000", "top_n": 1, "total_sectors": 1, "total_candidates": 1, "elapsed_seconds": 10},
@@ -779,7 +779,7 @@ def test_get_sector_stocks(tmpdir):
 def test_main_cli():
     """Test market_leader.py main() with various args via subprocess."""
     # --compact flag
-    rc, stdout, stderr = _run_script("market_leader.py", "--top", "1", "--compact", timeout=180)
+    rc, stdout, stderr = _run_script("scans/market_leader.py", "--top", "1", "--compact", timeout=180)
     if rc == 0:
         test("CLI-01: compact模式退出码0", True, f"rc={rc}")
         test("CLI-02: compact输出含JSON", "JSON_OUTPUT" in stdout)
@@ -789,17 +789,17 @@ def test_main_cli():
         test("CLI-01: compact模式退出码0", False, f"rc={rc}, stderr={stderr[:100]}")
 
     # Invalid sector
-    rc, stdout, stderr = _run_script("market_leader.py", "--sector", "__不存在的板块__", timeout=30)
+    rc, stdout, stderr = _run_script("scans/market_leader.py", "--sector", "__不存在的板块__", timeout=30)
     test("CLI-05: 无效板块名退出码非0", rc != 0, f"rc={rc}")
 
     # --help
-    rc, stdout, stderr = _run_script("market_leader.py", "--help", timeout=15)
+    rc, stdout, stderr = _run_script("scans/market_leader.py", "--help", timeout=15)
     test("CLI-06: --help正常", rc == 0 and "龙头中军扫描" in stdout)
 
 
 def test_find_sector_by_name():
     """Test find_sector_by_name() via real API."""
-    from market_leader import find_sector_by_name
+    from scans.market_leader import find_sector_by_name
 
     # Exact match
     try:
@@ -834,7 +834,7 @@ def test_find_sector_by_name():
 def test_fetch_sector_data_cli(tmpdir):
     """Test fetch_sector_data.py CLI."""
     # --list
-    rc, stdout, stderr = _run_script("fetch_sector_data.py", "--list", timeout=30)
+    rc, stdout, stderr = _run_script("fetchers/sector_data.py", "--list", timeout=30)
     if rc == 0:
         data = json.loads(stdout)
         test("CLI-FS-01: --list返回总数", data.get("total", 0) > 0, f"total={data.get('total')}")
@@ -842,7 +842,7 @@ def test_fetch_sector_data_cli(tmpdir):
         test("CLI-FS-01: --list返回总数", False, f"rc={rc}")
 
     # --rankings
-    rc, stdout, stderr = _run_script("fetch_sector_data.py", "--rankings", "--top", "3", "--min-stocks", "0", timeout=30)
+    rc, stdout, stderr = _run_script("fetchers/sector_data.py", "--rankings", "--top", "3", "--min-stocks", "0", timeout=30)
     if rc == 0:
         data = json.loads(stdout)
         test("CLI-FS-02: --rankings返回排行", len(data.get("hot_sectors", [])) == 3,
@@ -851,7 +851,7 @@ def test_fetch_sector_data_cli(tmpdir):
         test("CLI-FS-02: --rankings返回排行", False, f"rc={rc}")
 
     # --stocks
-    rc, stdout, stderr = _run_script("fetch_sector_data.py", "--stocks", "BK1013", "--top", "5", timeout=30)
+    rc, stdout, stderr = _run_script("fetchers/sector_data.py", "--stocks", "BK1013", "--top", "5", timeout=30)
     if rc == 0:
         data = json.loads(stdout)
         test("CLI-FS-03: --stocks成分股", len(data.get("leaders", [])) > 0,

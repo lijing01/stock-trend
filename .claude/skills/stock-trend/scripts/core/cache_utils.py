@@ -5,7 +5,7 @@ Provides file-based JSON caching with TTL support and market-hours-aware
 TTL calculation. Cache files are stored in .cache/stock-trend/ by default.
 
 Usage in scripts:
-    from cache_utils import load_cache, save_cache, get_market_day_ttl
+    from core.cache_utils import load_cache, save_cache, get_market_day_ttl
 
     # Check cache before fetching
     cache_key = f"kline_{ts_code}_{freq}_{adj}"
@@ -21,6 +21,10 @@ Usage in scripts:
     _output(result, args.output)
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import json
 import os
 import sys
@@ -29,7 +33,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _WALK = _SCRIPT_DIR
 _PROJECT_ROOT = _WALK
 for _ in range(10):

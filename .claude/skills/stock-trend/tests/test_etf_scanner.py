@@ -6,7 +6,7 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from etf_scanner import (
+from scans.etf_scanner import (
     code_to_ts_code, score_momentum, score_volume,
     score_capital_flow, score_shares_trend, score_iopv,
     compute_quick_score, build_combined_ranking,
@@ -249,7 +249,7 @@ def test_score_momentum_flat():
 
 def test_phase1_real_etfs():
     """Integration test: run Phase 1 on first 3 ETFs from watchlist."""
-    from etf_scanner import run_phase1
+    from scans.etf_scanner import run_phase1
 
     test_wl = {
         "categories": [{"name": "测试", "etfs": [{"code": "510050"}, {"code": "512880"}, {"code": "513180"}]}],

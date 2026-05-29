@@ -17,6 +17,10 @@ Examples:
     python3 resolve_code.py 贵州茅台 -o /tmp/resolve.json
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
@@ -289,6 +293,27 @@ def code_to_ts_code(code: str) -> str:
     return code
 
 
+def resolve_and_save(input_str: str, output_path: str | None = None) -> dict:
+    """Resolve code and optionally save to file. Returns result dict.
+
+    Callable directly from pipeline — no subprocess needed.
+    """
+    result = resolve_code(input_str)
+
+    if "error" not in result and result.get("asset") == "FD":
+        from core.eastmoney_utils import get_futures_secid
+        futures_code, futures_secid = get_futures_secid(result.get("code", ""))
+        result["futures_code"] = futures_code
+        result["futures_secid"] = futures_secid
+
+    if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Resolve stock/ETF code from name or code input"
@@ -297,29 +322,16 @@ def main():
     parser.add_argument("-o", "--output", help="Output JSON file path")
     args = parser.parse_args()
 
-    result = resolve_code(args.input)
-
-    # Add futures mapping for ETFs
-    if "error" not in result and result.get("asset") == "FD":
-        from eastmoney_utils import get_futures_secid
-        futures_code, futures_secid = get_futures_secid(result.get("code", ""))
-        result["futures_code"] = futures_code
-        result["futures_secid"] = futures_secid
+    result = resolve_and_save(args.input, output_path=args.output)
 
     if "error" in result:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(1)
 
-    output = json.dumps(result, ensure_ascii=False, indent=2)
-
-    if args.output:
-        from pathlib import Path
-        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output)
-        print(f"Code resolved: {args.input} -> {result['ts_code']}")
+    if not args.output:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        print(output)
+        print(f"Code resolved: {args.input} -> {result['ts_code']}")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from backtest_engine import (
+from backtesting.engine import (
     spearman_rank_correlation, slice_kline_to_date, find_kline_date_index,
     load_watchlist,
 )
@@ -177,7 +177,7 @@ def test_watchlist_single_etf():
 
 def test_degraded_dimensions():
     """Score with capital_flow=None still works (weight redistribution)."""
-    from etf_scanner import score_momentum, score_volume, compute_quick_score
+    from scans.etf_scanner import score_momentum, score_volume, compute_quick_score
     kline = _make_kline([f"202601{str(i).zfill(2)}" for i in range(5, 85)], [100 + i for i in range(80)])
     result = {
         "code": "513180",
@@ -212,7 +212,7 @@ def test_integration_small_backtest():
         },
         "data": kline,
     })
-    script_path = SCRIPTS_DIR / "backtest_engine.py"
+    script_path = SCRIPTS_DIR / "backtesting/engine.py"
     cmd = [sys.executable, str(script_path),
            "--etf", "513180",
            "--lookback-days", "20",

@@ -12,13 +12,17 @@ Examples:
     python3 fetch_fundamental.py 00700.HK -o /tmp/fundamental.json
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
 import sys
 import time
 import logging
-from cache_utils import load_cache, safe_float, save_cache, retry, get_market_day_ttl, output_json
+from core.cache_utils import load_cache, safe_float, save_cache, retry, get_market_day_ttl, output_json
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)

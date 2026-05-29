@@ -205,7 +205,7 @@ def run_fetch_tests():
     try:
         # TF-01: 上交所股票 (茅台)
         path = os.path.join(tmpdir, "tf01.json")
-        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", path)
+        rc, stdout, stderr = run_script("fetchers/kline_eastmoney.py", "600519.SH", "-o", path)
         if rc == 0:
             data = load_json_output(path)
             ds = data.get("meta", {}).get("data_source", "")
@@ -219,7 +219,7 @@ def run_fetch_tests():
 
         # TF-02: 深交所股票 (平安银行)
         path = os.path.join(tmpdir, "tf02.json")
-        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "000001.SZ", "-o", path)
+        rc, stdout, stderr = run_script("fetchers/kline_eastmoney.py", "000001.SZ", "-o", path)
         if rc == 0:
             data = load_json_output(path)
             ds = data.get("meta", {}).get("data_source", "")
@@ -231,7 +231,7 @@ def run_fetch_tests():
 
         # TF-05: 上交所ETF
         path = os.path.join(tmpdir, "tf05.json")
-        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "513180.SH", "--asset", "FD", "-o", path)
+        rc, stdout, stderr = run_script("fetchers/kline_eastmoney.py", "513180.SH", "--asset", "FD", "-o", path)
         if rc == 0:
             data = load_json_output(path)
             ds = data.get("meta", {}).get("data_source", "")
@@ -243,7 +243,7 @@ def run_fetch_tests():
 
         # TF-07: 港股 (腾讯) - 关键测试：Fix 1
         path = os.path.join(tmpdir, "tf07.json")
-        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", path)
+        rc, stdout, stderr = run_script("fetchers/kline_eastmoney.py", "00700.HK", "-o", path)
         if rc == 0:
             data = load_json_output(path)
             ds = data.get("meta", {}).get("data_source", "")
@@ -261,7 +261,7 @@ def run_fetch_tests():
 
         # TF-08: 无效代码
         path = os.path.join(tmpdir, "tf08.json")
-        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "999999.SH", "-o", path)
+        rc, stdout, stderr = run_script("fetchers/kline_eastmoney.py", "999999.SH", "-o", path)
         if rc == 0:
             data = load_json_output(path)
             ds = data.get("meta", {}).get("data_source", "")
@@ -273,7 +273,7 @@ def run_fetch_tests():
 
         # TF-09: 周线数据 (关键测试：Fix 2)
         path = os.path.join(tmpdir, "tf09.json")
-        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", path)
+        rc, stdout, stderr = run_script("fetchers/kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", path)
         if rc == 0:
             data = load_json_output(path)
             ds = data.get("meta", {}).get("data_source", "")
@@ -315,7 +315,7 @@ def run_analyze_tests(tmpdir):
     kline_path = os.path.join(tmpdir, "tf01.json")
     if os.path.exists(kline_path):
         tech_path = os.path.join(tmpdir, "ta01.json")
-        rc, stdout, stderr = run_script("analyze_technical.py", kline_path, "-o", tech_path)
+        rc, stdout, stderr = run_script("analysis/technical.py", kline_path, "-o", tech_path)
         if rc == 0:
             data = load_json_output(tech_path)
             summary = data.get("summary", {})
@@ -365,7 +365,7 @@ def run_analyze_tests(tmpdir):
             json.dump(small_data, f)
 
         tech_path = os.path.join(tmpdir, "ta02.json")
-        rc, stdout, stderr = run_script("analyze_technical.py", small_path, "-o", tech_path)
+        rc, stdout, stderr = run_script("analysis/technical.py", small_path, "-o", tech_path)
         if rc == 0:
             result = load_json_output(tech_path)
             summary = result.get("summary", {})
@@ -387,7 +387,7 @@ def run_analyze_tests(tmpdir):
         json.dump(error_data, f)
 
     tech_path = os.path.join(tmpdir, "ta04.json")
-    rc, stdout, stderr = run_script("analyze_technical.py", error_path, "-o", tech_path)
+    rc, stdout, stderr = run_script("analysis/technical.py", error_path, "-o", tech_path)
     if rc == 0:
         result = load_json_output(tech_path)
         summary = result.get("summary", {})
@@ -408,7 +408,7 @@ def run_analyze_tests(tmpdir):
             json.dump(limited_data, f)
 
         tech_path = os.path.join(tmpdir, "ta03.json")
-        rc, stdout, stderr = run_script("analyze_technical.py", limited_path, "-o", tech_path)
+        rc, stdout, stderr = run_script("analysis/technical.py", limited_path, "-o", tech_path)
         if rc == 0:
             result = load_json_output(tech_path)
             summary = result.get("summary", {})
@@ -425,7 +425,7 @@ def run_analyze_tests(tmpdir):
         with open(kline_path, "r") as f:
             kline_data = f.read()
         result = subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "analyze_technical.py"), "-", "-o", os.path.join(tmpdir, "ta_stdin.json")],
+            [sys.executable, str(SCRIPTS_DIR / "analysis/technical.py"), "-", "-o", os.path.join(tmpdir, "ta_stdin.json")],
             input=kline_data, capture_output=True, text=True, timeout=30
         )
         test("TA-stdin: 支持'-'作为stdin输入", result.returncode == 0,
@@ -578,7 +578,7 @@ def run_new_script_tests(tmpdir):
     # TF-ETF-01: fetch_etf_data.py 基本功能测试
     try:
         etf_path = os.path.join(tmpdir, "tf_etf01.json")
-        rc, stdout, stderr = run_script("fetch_etf_data.py", "513180", "-o", etf_path, timeout=15)
+        rc, stdout, stderr = run_script("fetchers/etf_data.py", "513180", "-o", etf_path, timeout=15)
         if rc == 0 and os.path.exists(etf_path):
             try:
                 data = load_json_output(etf_path)
@@ -595,7 +595,7 @@ def run_new_script_tests(tmpdir):
         # TF-CF-01: fetch_capital_flow.py 股票资金流向测试
         cf_path = os.path.join(tmpdir, "tf_cf01.json")
         try:
-            rc, stdout, stderr = run_script("fetch_capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=5)
+            rc, stdout, stderr = run_script("fetchers/capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=5)
             if rc == 0 and os.path.exists(cf_path):
                 try:
                     data = load_json_output(cf_path)
@@ -620,7 +620,7 @@ def run_new_script_tests(tmpdir):
     md_path = os.path.join(tmpdir, "test_report.md")
     html_path = os.path.join(tmpdir, "test_report.html")
     rc, stdout, stderr = run_script(
-        "generate_report.py",
+        "reporting/report.py",
         "--technical", tech_path,
         "--kline", kline_path,
         "--scores-file", scores_path,
@@ -661,7 +661,7 @@ def run_new_script_tests(tmpdir):
     )
     weak_md_path = os.path.join(tmpdir, "test_report_weak.md")
     rc, stdout, stderr = run_script(
-        "generate_report.py",
+        "reporting/report.py",
         "--technical", weak_tech_path,
         "--kline", weak_kline_path,
         "--scores-file", weak_scores_path,
@@ -684,7 +684,7 @@ def run_new_script_tests(tmpdir):
     _write_json(technical_path, _build_stale_technical_fixture())
     _write_json(error_kline_path, _build_error_kline_fixture())
     rc, stdout, stderr = run_script(
-        "generate_report.py",
+        "reporting/report.py",
         "--technical", technical_path,
         "--kline", error_kline_path,
         "--ts-code", "300241.SZ",
@@ -729,7 +729,7 @@ def run_new_script_tests(tmpdir):
     malformed_md_path = os.path.join(tmpdir, "malformed_report.md")
     _write_json(malformed_kline_path, _build_malformed_kline_fixture())
     rc, stdout, stderr = run_script(
-        "generate_report.py",
+        "reporting/report.py",
         "--technical", technical_path,
         "--kline", malformed_kline_path,
         "--ts-code", "300241.SZ",
@@ -759,7 +759,7 @@ def run_new_script_tests(tmpdir):
     valid_kline["data"][-1]["close"] = 7.80
     _write_json(valid_kline_path, valid_kline)
     rc, stdout, stderr = run_script(
-        "generate_report.py",
+        "reporting/report.py",
         "--technical", technical_path,
         "--kline", valid_kline_path,
         "--ts-code", "300241.SZ",
@@ -780,7 +780,7 @@ def run_new_script_tests(tmpdir):
     )
 
     sys.path.insert(0, str(SCRIPTS_DIR))
-    import generate_report
+    from reporting import report as generate_report
 
     tech_path, kline_path, scores_path = _write_report_fixture(tmpdir, "actionable")
 
@@ -947,8 +947,8 @@ def run_pipeline_tests(tmpdir):
     )
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
-        import run_pipeline
-        from run_pipeline import build_output_files, is_successful_kline
+        from pipeline import runner as run_pipeline
+        from pipeline.runner import build_output_files, is_successful_kline
     except ImportError:
         run_pipeline = None
         build_output_files = None
@@ -1014,7 +1014,7 @@ def run_pipeline_tests(tmpdir):
             run_pipeline.run_script = fake_run_script
             run_pipeline.clean_cache = lambda: 0
             sys.argv = [
-                "run_pipeline.py",
+                "pipeline/runner.py",
                 "300241.SZ",
                 "--asset", "E",
                 "--output-dir", str(stale_flow_dir),
@@ -1043,7 +1043,7 @@ def run_pipeline_tests(tmpdir):
         )
 
     # TP-RC-01: resolve_code.py - 代码输入
-    rc, stdout, stderr = run_script("resolve_code.py", "513180")
+    rc, stdout, stderr = run_script("core/resolve_code.py", "513180")
     if rc == 0:
         try:
             data = json.loads(stdout)
@@ -1062,7 +1062,7 @@ def run_pipeline_tests(tmpdir):
         test("TP-RC-01: 代码解析(513180)", False, f"exit_code={rc}", "resolve")
 
     # TP-RC-02: resolve_code.py - 名称输入
-    rc, stdout, stderr = run_script("resolve_code.py", "恒生科技ETF大成")
+    rc, stdout, stderr = run_script("core/resolve_code.py", "恒生科技ETF大成")
     if rc == 0:
         try:
             data = json.loads(stdout)
@@ -1075,7 +1075,7 @@ def run_pipeline_tests(tmpdir):
         test("TP-RC-02: 名称解析(恒生科技ETF大成)", False, f"exit_code={rc}", "resolve")
 
     # TP-RC-03: resolve_code.py - 港股代码
-    rc, stdout, stderr = run_script("resolve_code.py", "00700.HK")
+    rc, stdout, stderr = run_script("core/resolve_code.py", "00700.HK")
     if rc == 0:
         try:
             data = json.loads(stdout)
@@ -1089,7 +1089,7 @@ def run_pipeline_tests(tmpdir):
 
     # TP-RC-04: resolve_code.py - 输出到文件
     out_path = os.path.join(tmpdir, "resolve_out.json")
-    rc, stdout, stderr = run_script("resolve_code.py", "600519", "-o", out_path)
+    rc, stdout, stderr = run_script("core/resolve_code.py", "600519", "-o", out_path)
     if rc == 0:
         data = load_json_output(out_path)
         test("TP-RC-04: 文件输出",
@@ -1103,7 +1103,7 @@ def run_pipeline_tests(tmpdir):
     if os.path.exists(tech_path):
         scores_path = os.path.join(tmpdir, "scores01.json")
         rc, stdout, stderr = run_script(
-            "compute_scores.py",
+            "analysis/scores.py",
             "--technical", tech_path,
             "--capital-flow-score", "0.5",
             "--fundamental-score", "1",
@@ -1134,7 +1134,7 @@ def run_pipeline_tests(tmpdir):
     if os.path.exists(tech_path) and os.path.exists(etf_path):
         scores_path = os.path.join(tmpdir, "scores02.json")
         rc, stdout, stderr = run_script(
-            "compute_scores.py",
+            "analysis/scores.py",
             "--technical", tech_path,
             "--asset-type", "etf",
             "--etf-data", etf_path,
@@ -1156,7 +1156,7 @@ def run_pipeline_tests(tmpdir):
     if os.path.exists(tech_path):
         scores_path = os.path.join(tmpdir, "scores03.json")
         rc, stdout, stderr = run_script(
-            "compute_scores.py",
+            "analysis/scores.py",
             "--technical", tech_path,
             "--focus", "technical",
             "-o", scores_path,
@@ -1178,7 +1178,7 @@ def run_pipeline_tests(tmpdir):
     os.environ["STOCK_TREND_CACHE_DIR"] = cache_dir
     try:
         rc, stdout, stderr = run_script(
-            "run_pipeline.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
+            "pipeline/runner.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
             "-o", tmpdir, timeout=180,
         )
     finally:
@@ -1206,7 +1206,7 @@ def run_pipeline_tests(tmpdir):
     # TP-PL-02: run_pipeline.py - 股票标的
     pipeline_path = os.path.join(tmpdir, "pipeline02.json")
     rc, stdout, stderr = run_script(
-        "run_pipeline.py", "600519.SH", "--asset", "E", "--adj", "qfq",
+        "pipeline/runner.py", "600519.SH", "--asset", "E", "--adj", "qfq",
         "-o", tmpdir, timeout=180,
     )
     if rc == 0:
@@ -1234,7 +1234,7 @@ def run_validate_tests():
 
     # Import validate_input from compute_scores
     sys.path.insert(0, str(SCRIPTS_DIR))
-    from compute_scores import validate_input
+    from analysis.scores import validate_input
 
     # VI-valid-tech: valid technical data passes (errors == 0)
     valid_tech = {
@@ -1350,7 +1350,7 @@ def run_golden_diff_tests():
 
 def test_eastmoney_utils():
     """Test eastmoney_utils shared module."""
-    from eastmoney_utils import EM_HEADERS, build_secid, EM_API_HOSTS
+    from core.eastmoney_utils import EM_HEADERS, build_secid, EM_API_HOSTS
     assert EM_HEADERS["User-Agent"]
     assert len(EM_API_HOSTS) == 3
     assert build_secid("600519.SH") == "1.600519"
@@ -1362,7 +1362,7 @@ def test_eastmoney_utils():
 
 def test_base_fetcher_subclass():
     """Test BaseFetcher subclass contract."""
-    from base_fetcher import BaseFetcher
+    from core.base_fetcher import BaseFetcher
     class TestFetcher(BaseFetcher):
         def fetch(self):
             return {"meta": {"data_source": "test"}, "data": []}
@@ -1374,7 +1374,7 @@ def test_base_fetcher_subclass():
 
 def test_cache_dir_is_project_relative():
     """Test cache dir migrated from /tmp to project .cache/."""
-    from cache_utils import CACHE_DIR
+    from core.cache_utils import CACHE_DIR
     assert "/tmp/stock-trend-cache" not in CACHE_DIR
     assert ".cache" in CACHE_DIR
     print("  cache dir project-relative: OK")
@@ -1382,12 +1382,12 @@ def test_cache_dir_is_project_relative():
 
 def test_clean_cache():
     """Test clean_cache() handles empty/non-existent dir."""
-    from cache_utils import clean_cache
+    from core.cache_utils import clean_cache
     import os
     old_dir = os.environ.get("STOCK_TREND_CACHE_DIR")
     os.environ["STOCK_TREND_CACHE_DIR"] = "/tmp/__test_cache_nonexistent__"
     import importlib
-    import cache_utils
+    from core import cache_utils
     importlib.reload(cache_utils)
     result = cache_utils.clean_cache(max_size_mb=1)
     assert result == 0

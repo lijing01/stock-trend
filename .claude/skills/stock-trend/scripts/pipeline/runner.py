@@ -15,24 +15,28 @@ Examples:
     python3 run_pipeline.py 00700.HK -o /tmp
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
-import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from cache_utils import clean_cache, safe_float, run_script
-from eastmoney_utils import latest_kline_record
+from core.cache_utils import clean_cache, safe_float, run_script
+from core.eastmoney_utils import latest_kline_record
+from core.resolve_code import resolve_and_save
 
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
 
 def get_data_dir(code):
     """Return data directory path for a given code."""
-    from cache_utils import CACHE_DIR
+    from core.cache_utils import CACHE_DIR
     d = Path(CACHE_DIR) / code
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -134,16 +138,12 @@ def main():
 
     # --code mode: auto-resolve
     if args.code and not args.ts_code:
-        resolve_path = get_data_dir(args.code) / "resolve.json"
-        resolve_result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "resolve_code.py"), args.code, "-o", str(resolve_path)],
-            capture_output=True, text=True, timeout=15,
-        )
-        if resolve_result.returncode != 0:
-            print(f"Error: could not resolve code {args.code}: {resolve_result.stderr}", file=sys.stderr)
+        resolve_path = str(get_data_dir(args.code) / "resolve.json")
+        resolve_data = resolve_and_save(args.code, output_path=resolve_path)
+        if "error" in resolve_data:
+            print(f"Error: could not resolve code {args.code}: {resolve_data['error']}", file=sys.stderr)
             sys.exit(1)
-        resolve_data = read_json(resolve_path)
-        if not resolve_data or not resolve_data.get("ts_code"):
+        if not resolve_data.get("ts_code"):
             print(f"Error: could not resolve code {args.code}", file=sys.stderr)
             sys.exit(1)
         ts_code = resolve_data["ts_code"]
@@ -198,7 +198,7 @@ def main():
 
     # Try Tushare first
     kline_cmd = [
-        sys.executable, str(SCRIPT_DIR / "fetch_kline.py"),
+        sys.executable, str(SCRIPT_DIR / "fetchers/kline.py"),
         ts_code, "--asset", asset, "--freq", args.freq,
         "--adj", adj, "-o", kline_path,
     ]
@@ -225,7 +225,7 @@ def main():
     if need_fallback:
         print(f"  Falling back to East Money...")
         fallback_cmd = [
-                sys.executable, str(SCRIPT_DIR / "fetch_kline_eastmoney.py"),
+                sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"),
                 ts_code, "--asset", asset, "--freq", args.freq,
                 "-o", kline_path,
             ]
@@ -258,7 +258,7 @@ def main():
     if kline_available:
         print(f"[3/5] Computing chip distribution...")
         chip_cmd = [
-            sys.executable, str(SCRIPT_DIR / "compute_chip_distribution.py"),
+            sys.executable, str(SCRIPT_DIR / "analysis/chip_distribution.py"),
             kline_path, "-o", chip_distribution_path,
         ]
         chip_result = run_script(chip_cmd, label="compute_chip_distribution", timeout=15)
@@ -290,7 +290,7 @@ def main():
     if kline_available:
         print(f"[3.5/5] Running technical analysis...")
         tech_cmd = [
-            sys.executable, str(SCRIPT_DIR / "analyze_technical.py"),
+            sys.executable, str(SCRIPT_DIR / "analysis/technical.py"),
             kline_path, "-o", technical_path,
         ]
         if is_etf:
@@ -335,7 +335,7 @@ def main():
         etf_path = str(output_dir / "etf_data.json")
         parallel_tasks.append((
             [
-                sys.executable, str(SCRIPT_DIR / "fetch_etf_data.py"),
+                sys.executable, str(SCRIPT_DIR / "fetchers/etf_data.py"),
                 code, "-o", etf_path,
             ],
             "fetch_etf_data",
@@ -346,7 +346,7 @@ def main():
     if not args.no_capital:
         capital_path = str(output_dir / "capital_flow.json")
         capital_cmd = [
-                sys.executable, str(SCRIPT_DIR / "fetch_capital_flow.py"),
+                sys.executable, str(SCRIPT_DIR / "fetchers/capital_flow.py"),
                 ts_code, "--asset", asset, "-o", capital_path,
             ]
         if args.no_cache:
@@ -361,7 +361,7 @@ def main():
     if not args.no_fundamental and asset != "FD":
         fundamental_path = str(output_dir / "fundamental.json")
         fundamental_cmd = [
-                sys.executable, str(SCRIPT_DIR / "fetch_fundamental.py"),
+                sys.executable, str(SCRIPT_DIR / "fetchers/fundamental.py"),
                 ts_code, "--asset", asset, "-o", fundamental_path,
             ]
         if args.no_cache:
@@ -376,7 +376,7 @@ def main():
     if not args.no_macro:
         macro_path = str(output_dir / "macro_snapshot.json")
         macro_cmd = [
-                sys.executable, str(SCRIPT_DIR / "fetch_macro_snapshot.py"),
+                sys.executable, str(SCRIPT_DIR / "fetchers/macro_snapshot.py"),
                 "-o", macro_path,
             ]
         if args.no_cache:
@@ -391,7 +391,7 @@ def main():
     if is_etf and not args.no_futures:
         futures_path = str(output_dir / "futures_data.json")
         futures_cmd = [
-            sys.executable, str(SCRIPT_DIR / "fetch_futures_data.py"),
+            sys.executable, str(SCRIPT_DIR / "fetchers/futures_data.py"),
             code, "-o", futures_path,
         ]
         if args.no_cache:
@@ -406,7 +406,7 @@ def main():
     if is_etf and not args.no_index_valuation:
         index_valuation_path = str(output_dir / "index_valuation.json")
         index_valuation_cmd = [
-            sys.executable, str(SCRIPT_DIR / "fetch_index_valuation.py"),
+            sys.executable, str(SCRIPT_DIR / "fetchers/index_valuation.py"),
             "--code", code, "-o", index_valuation_path,
         ]
         if args.no_cache:

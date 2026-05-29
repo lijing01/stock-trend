@@ -12,14 +12,18 @@ Examples:
     python3 fetch_etf_data.py 513180 -o /tmp/etf_data.json
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
 import re
 import sys
 import urllib.request
-from cache_utils import safe_float, output_json
-from eastmoney_utils import EM_HEADERS, fetch_url
+from core.cache_utils import safe_float, output_json
+from core.eastmoney_utils import EM_HEADERS, fetch_url
 
 
 def _fetch_fund_url(url, timeout=15):

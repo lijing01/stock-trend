@@ -13,14 +13,18 @@ Examples:
     python3 fetch_kline_eastmoney.py 000001.SZ --freq W
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import os
 import sys
-from cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
-from resolve_code import detect_asset, detect_adj
+from core.cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
+from core.resolve_code import detect_asset, detect_adj
 from datetime import datetime, timedelta
-from eastmoney_utils import (
+from core.eastmoney_utils import (
     EM_HEADERS, EM_API_HOSTS, build_secid,
     fetch_url, build_em_kline_url, parse_em_kline_line,
 )
@@ -266,7 +270,7 @@ def main():
     error_msg = None
     used_host = None
 
-    from eastmoney_utils import rotate_em_host
+    from core.eastmoney_utils import rotate_em_host
     try:
         (records, name), used_host = rotate_em_host(lambda h: fetch_eastmoney(secid, args.freq, args.lmt, host=h))
     except RuntimeError as e:

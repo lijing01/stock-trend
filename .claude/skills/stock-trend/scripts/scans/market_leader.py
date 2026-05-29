@@ -25,14 +25,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
 CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
-from fetch_sector_data import (
+from fetchers.sector_data import (
     get_sector_list,
     get_sector_rankings,
     get_sector_stocks,
@@ -40,8 +40,8 @@ from fetch_sector_data import (
     filter_leaders,
     filter_core_stocks,
 )
-from resolve_code import code_to_ts_code
-from quality_gate import check_signal_consistency
+from core.resolve_code import code_to_ts_code
+from analysis.quality_gate import check_signal_consistency
 
 
 # ──────────────────────── Phase 1: Sector Scanning ────────────────────────
@@ -148,7 +148,7 @@ def run_deep_analysis(code: str, timeout: int = 60, max_retries: int = 1) -> dic
     result["ts_code"] = ts_code
 
     # Run pipeline with retry
-    pipeline_cmd = [sys.executable, str(SCRIPT_DIR / "run_pipeline.py"),
+    pipeline_cmd = [sys.executable, str(SCRIPT_DIR / "pipeline/runner.py"),
                     "--code", code]
     pipeline_ok = False
     for attempt in range(max_retries + 1):
@@ -174,7 +174,7 @@ def run_deep_analysis(code: str, timeout: int = 60, max_retries: int = 1) -> dic
         return result
 
     # Run scoring (no retry — local computation)
-    scores_cmd = [sys.executable, str(SCRIPT_DIR / "compute_scores.py"),
+    scores_cmd = [sys.executable, str(SCRIPT_DIR / "analysis/scores.py"),
                   "--code", code]
     try:
         proc = subprocess.run(scores_cmd, capture_output=True, text=True,
@@ -584,8 +584,8 @@ def main():
 
     # ── DDX Enhancement: fetch DDX data and rescore leaders ──
     try:
-        from fetch_ddx import fetch_ddx_data
-        from fetch_sector_data import rescore_leaders_with_ddx
+        from fetchers.ddx import fetch_ddx_data
+        from fetchers.sector_data import rescore_leaders_with_ddx
 
         all_codes = list(dict.fromkeys(
             s["code"]
@@ -624,7 +624,7 @@ def main():
 
     # ── 龙虎榜 Enhancement: fetch and cache per-stock ──
     try:
-        from fetch_longhubang import fetch_longhubang_data
+        from fetchers.longhubang import fetch_longhubang_data
 
         all_codes = [c["code"] for c in candidates]
         if all_codes:

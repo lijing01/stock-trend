@@ -9,7 +9,7 @@ from pathlib import Path
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from portfolio_manager import (
+from portfolio.manager import (
     load_portfolio, save_portfolio, find_holding,
     code_to_ts_code, check_alerts,
     calc_kelly_position_pct, portfolio_kelly_analysis,
@@ -98,7 +98,7 @@ def test_save_and_load():
     orig_path = Path(tempfile.mktemp(suffix=".yaml"))
     try:
         # Monkey-patch the path
-        import portfolio_manager as pm
+        from portfolio import manager as pm
         orig = pm.PORTFOLIO_PATH
         pm.PORTFOLIO_PATH = orig_path
         save_portfolio(portfolio)
@@ -115,7 +115,7 @@ def test_save_and_load():
 def test_alert_stop_loss_approaching():
     """Alert when price approaches stop loss."""
     portfolio = _make_test_portfolio()
-    import portfolio_manager as pm
+    from portfolio import manager as pm
     orig_fetch = pm.fetch_kline_with_price
     pm.fetch_kline_with_price = lambda _: (0.97, [{"close": 0.97}])  # close to 0.95 stop loss
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
@@ -127,7 +127,7 @@ def test_alert_stop_loss_approaching():
 def test_alert_stop_loss_hit():
     """Critical alert when price breaks stop loss."""
     portfolio = _make_test_portfolio()
-    import portfolio_manager as pm
+    from portfolio import manager as pm
     orig_fetch = pm.fetch_kline_with_price
     pm.fetch_kline_with_price = lambda _: (0.94, [{"close": 0.94}])  # below 0.95
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
@@ -139,7 +139,7 @@ def test_alert_stop_loss_hit():
 def test_alert_target_approaching():
     """Info alert when price approaches target."""
     portfolio = _make_test_portfolio()
-    import portfolio_manager as pm
+    from portfolio import manager as pm
     orig_fetch = pm.fetch_kline_with_price
     pm.fetch_kline_with_price = lambda _: (1.13, [{"close": 1.13}])  # close to 1.15 target
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
@@ -151,7 +151,7 @@ def test_alert_target_approaching():
 def test_alert_target_hit():
     """Info alert when price reaches first target."""
     portfolio = _make_test_portfolio()
-    import portfolio_manager as pm
+    from portfolio import manager as pm
     orig_fetch = pm.fetch_kline_with_price
     pm.fetch_kline_with_price = lambda _: (1.16, [{"close": 1.16}])  # above 1.15 target
     alerts = check_alerts(portfolio["holdings"], portfolio["settings"])
@@ -162,7 +162,7 @@ def test_alert_target_hit():
 
 def test_empty_portfolio_load():
     """Empty file should return empty holdings."""
-    import portfolio_manager as pm
+    from portfolio import manager as pm
     orig_path = pm.PORTFOLIO_PATH
     tmp = Path(tempfile.mktemp(suffix=".yaml"))
     pm.PORTFOLIO_PATH = tmp
@@ -264,7 +264,7 @@ def test_integration_add():
     """Add then list should show the holding."""
     tmp = _make_tmp_portfolio()
     try:
-        rc, out, err = run_script("portfolio_manager.py", "add",
+        rc, out, err = run_script("portfolio/manager.py", "add",
                                    "--code", "513180",
                                    "--name", "恒生科技ETF华夏",
                                    "--price", "1.025",
@@ -276,7 +276,7 @@ def test_integration_add():
         add_result = json.loads(out)
         ok = add_result.get("status") == "ok"
 
-        rc2, out2, err2 = run_script("portfolio_manager.py", "list", portfolio_path=tmp)
+        rc2, out2, err2 = run_script("portfolio/manager.py", "list", portfolio_path=tmp)
         list_result = json.loads(out2)
         has_holding = len(list_result.get("holdings", [])) > 0
 
@@ -290,11 +290,11 @@ def test_integration_remove():
     """Remove marks holding as closed."""
     tmp = _make_tmp_portfolio()
     try:
-        run_script("portfolio_manager.py", "add",
+        run_script("portfolio/manager.py", "add",
                    "--code", "513180", "--price", "1.025",
                    "--date", "2026-04-15", "--qty", "2000",
                    portfolio_path=tmp)
-        rc, out, err = run_script("portfolio_manager.py", "remove", "--code", "513180", portfolio_path=tmp)
+        rc, out, err = run_script("portfolio/manager.py", "remove", "--code", "513180", portfolio_path=tmp)
         rm_result = json.loads(out)
         ok = rm_result.get("status") == "ok" and rm_result.get("holding", {}).get("status") == "closed"
         test("TPF-I02: remove integration", ok)
@@ -307,11 +307,11 @@ def test_integration_update():
     """Update changes stop-loss and targets."""
     tmp = _make_tmp_portfolio()
     try:
-        run_script("portfolio_manager.py", "add",
+        run_script("portfolio/manager.py", "add",
                    "--code", "513180", "--price", "1.025",
                    "--date", "2026-04-15", "--qty", "2000",
                    portfolio_path=tmp)
-        rc, out, err = run_script("portfolio_manager.py", "update",
+        rc, out, err = run_script("portfolio/manager.py", "update",
                                    "--code", "513180",
                                    "--stop-loss", "0.93",
                                    "--targets", "1.12,1.22",

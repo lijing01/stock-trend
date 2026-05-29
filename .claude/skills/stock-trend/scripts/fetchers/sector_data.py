@@ -9,6 +9,10 @@ Usage:
     python3 fetch_sector_data.py --list             # List all sectors
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import sys
@@ -18,9 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
+from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
 
 # ──────────────────────── East Money API Helpers ────────────────────────
@@ -392,7 +396,7 @@ def rescore_leaders_with_ddx(leaders: list[dict],
     if not leaders:
         return []
 
-    from fetch_ddx import compute_ddx_score, compute_super_order_score
+    from fetchers.ddx import compute_ddx_score, compute_super_order_score
 
     for s in leaders:
         ddx = ddx_data.get(s["code"])

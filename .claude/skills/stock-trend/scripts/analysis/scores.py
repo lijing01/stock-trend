@@ -15,6 +15,10 @@ Output JSON includes: scores, weights, composite_score, direction,
 confidence, risks, special section, and all parameters for report generation.
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import json
 import math
@@ -22,8 +26,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from cache_utils import CACHE_DIR, load_iopv_history, save_iopv_history
-from eastmoney_utils import piecewise_linear
+from core.cache_utils import CACHE_DIR, load_iopv_history, save_iopv_history
+from core.eastmoney_utils import piecewise_linear
 
 
 # --- Default weights ---

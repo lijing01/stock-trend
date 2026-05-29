@@ -35,7 +35,7 @@ from typing import Any, Optional
 
 import yaml
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 SKILL_DIR = SCRIPT_DIR.parent
 PROJECT_ROOT = SKILL_DIR.parent.parent.parent
 CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
@@ -44,13 +44,13 @@ ASSETS_DIR = SKILL_DIR / "assets"
 
 # Import scoring functions from etf_scanner
 sys.path.insert(0, str(SCRIPT_DIR))
-from etf_scanner import (
+from scans.etf_scanner import (
     score_momentum, score_volume, score_capital_flow,
     score_shares_trend, score_iopv, compute_quick_score,
     normalize_scores_by_cohort, _piecewise_linear,
     detect_contradictions, detect_trend_stage,
 )
-from cache_utils import load_cache, save_cache, get_market_day_ttl
+from core.cache_utils import load_cache, save_cache, get_market_day_ttl
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ def fetch_kline_for_etf(ts_code: str) -> Optional[list]:
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             out_path = f.name
-        cmd = [sys.executable, str(SCRIPT_DIR / "fetch_kline_eastmoney.py"), ts_code, "-o", out_path]
+        cmd = [sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"), ts_code, "-o", out_path]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         if result.returncode != 0:
             return None

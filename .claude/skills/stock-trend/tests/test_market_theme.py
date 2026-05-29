@@ -22,7 +22,7 @@ SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-import analyze_market_theme as amt
+from analysis import market_theme as amt
 
 PASSED = 0
 FAILED = 0

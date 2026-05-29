@@ -82,7 +82,7 @@ def check_tushare_api():
 
     try:
         tmp = _diag_tmp("tushare")
-        result = _run_script("fetch_kline.py", "600519.SH", "--asset", "E", "-o", tmp)
+        result = _run_script("fetchers/kline.py", "600519.SH", "--asset", "E", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
@@ -104,7 +104,7 @@ def check_eastmoney():
     """Check if EastMoney API is accessible."""
     try:
         tmp = _diag_tmp("eastmoney")
-        result = _run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", tmp)
+        result = _run_script("fetchers/kline_eastmoney.py", "600519.SH", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
@@ -156,7 +156,7 @@ def check_hk_support():
     """Check if HK stock data can be fetched."""
     try:
         tmp = _diag_tmp("hk")
-        result = _run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", tmp)
+        result = _run_script("fetchers/kline_eastmoney.py", "00700.HK", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
@@ -178,7 +178,7 @@ def check_weekly_support():
     """Check if weekly K-line data can be fetched."""
     try:
         tmp = _diag_tmp("weekly")
-        result = _run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", tmp)
+        result = _run_script("fetchers/kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", tmp)
         if result is None:
             return {"status": "error", "detail": "Script execution failed"}
 
@@ -198,7 +198,7 @@ def check_weekly_support():
 
 def _run_script(script_name, *args):
     """Run a fetch script and return the process exit code."""
-    from cache_utils import run_script_file
+    from core.cache_utils import run_script_file
     rc, _, _ = run_script_file(script_name, *args, timeout=30)
     return rc
 
