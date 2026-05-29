@@ -123,6 +123,21 @@ def _first_numeric(values):
     return None
 
 
+def _nearest_support(values, close):
+    numeric_values = [num for num in (_safe_float(value) for value in values or []) if num is not None]
+    if not numeric_values:
+        return None
+
+    close_num = _safe_float(close)
+    if close_num is None:
+        return numeric_values[0]
+
+    below_or_at_close = [value for value in numeric_values if value <= close_num]
+    if below_or_at_close:
+        return max(below_or_at_close)
+    return min(numeric_values, key=lambda value: abs(value - close_num))
+
+
 def _fmt_price(value):
     num = _safe_float(value)
     return "—" if num is None else f"{num:.2f}"
@@ -172,24 +187,27 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
 
     support_levels = report_params.get("support_levels", [])
     resistance_levels = report_params.get("resistance_levels", [])
-    support = _first_numeric(support_levels)
+    close = _safe_float(latest_close)
+    support = _nearest_support(support_levels, close)
     resistance = _first_numeric(resistance_levels)
     stop_loss = _safe_float(report_params.get("stop_loss"))
     tp1 = _safe_float(report_params.get("target_conservative"))
     tp2 = _safe_float(report_params.get("target_moderate") or report_params.get("target"))
     rr_ratio = _safe_float(report_params.get("risk_reward_ratio") or report_params.get("rr_moderate"))
-    close = _safe_float(latest_close)
 
     direction_text = direction or ""
     is_bearish = "看空" in direction_text or "bear" in direction_text.lower()
     low_confidence = confidence in ("低", "low")
     near_tp1 = close is not None and tp1 is not None and close >= tp1 * 0.98
     near_support = close is not None and support is not None and abs(close - support) / support <= 0.015
+    incomplete_decision_levels = any(
+        value is None for value in (support, resistance, stop_loss, tp1, tp2, rr_ratio)
+    )
 
-    if near_tp1:
-        action_label = "分批止盈"
-    elif is_bearish or low_confidence or rr_ratio is None or rr_ratio < 1.5 or support is None or stop_loss is None:
+    if is_bearish or low_confidence or incomplete_decision_levels or rr_ratio < 1.5:
         action_label = "只观察"
+    elif near_tp1:
+        action_label = "分批止盈"
     elif near_support:
         action_label = "可低吸"
     else:
@@ -219,6 +237,27 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
         scenario_b_action = f"回踩 {support_text} 附近且不破 {stop_text} 时分批试仓；跌破止损则放弃。"
 
     events = analysis_data.get("events", [])
+    if incomplete_decision_levels:
+        return {
+            "操作计划": True,
+            "今日动作标签": action_label,
+            "今日动作摘要": summary,
+            "今日动作说明": detail,
+            "场景A标题": "场景 A：继续上冲",
+            "场景A条件": "压力位或目标价缺失，暂不设置突破买入条件。",
+            "场景A动作": "只观察量价变化，等待压力位、目标价与风险收益比补全。",
+            "场景B标题": "场景 B：回调到位",
+            "场景B条件": "关键决策价位不完整，暂不设置低吸条件。",
+            "场景B动作": "不主动试仓，等待支撑、止损、目标与风险收益比重新匹配。",
+            "退出条件1": "关键止损或目标价位不完整",
+            "退出动作1": "不建立新仓位，已有仓位按原风险纪律处理。",
+            "退出条件2": "目标价位补全前出现冲高",
+            "退出动作2": "不追高，等待完整计划后再评估。",
+            "退出条件3": "事件前仍未触发入场条件或量能持续背离",
+            "退出动作3": "取消原计划，重新评估趋势与风险收益比。",
+            "执行时间窗": _build_time_window(events),
+        }
+
     return {
         "操作计划": True,
         "今日动作标签": action_label,

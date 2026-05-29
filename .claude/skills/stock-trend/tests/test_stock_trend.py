@@ -362,7 +362,7 @@ def _write_report_fixture(tmpdir, name, *, confidence="中", rr_ratio=2.2, lates
             "direction": "看多",
             "confidence": confidence,
             "key_signals": ["均线多头排列", "支撑位附近缩量企稳"],
-            "support_levels": [1248.0, 1235.0],
+            "support_levels": [1235.0, 1248.0],
             "resistance_levels": [1288.0, 1315.0],
             "stop_loss": 1236.0,
             "target_conservative": 1288.0,
@@ -403,7 +403,7 @@ def _write_report_fixture(tmpdir, name, *, confidence="中", rr_ratio=2.2, lates
         "report_params": {
             "entry_verdict": "watch",
             "entry_signals": ["回踩支撑不破", "量能回补"],
-            "support_levels": [1248.0, 1235.0],
+            "support_levels": [1235.0, 1248.0],
             "resistance_levels": [1288.0, 1315.0],
             "stop_loss": 1236.0,
             "target_conservative": 1288.0,
@@ -580,6 +580,50 @@ def run_new_script_tests(tmpdir):
     test("TF-RPT-CTX-04: 执行时间窗含事件日期",
          "2026-06-10" in str(context.get("执行时间窗", "")),
          str(context.get("执行时间窗")), "report")
+
+    nearest_plan = generate_report.build_action_plan(
+        "看多",
+        "中",
+        100.8,
+        {
+            "support_levels": [95.0, 100.0],
+            "resistance_levels": [106.0],
+            "stop_loss": 98.0,
+            "target_conservative": 106.0,
+            "target_moderate": 110.0,
+            "risk_reward_ratio": 2.0,
+        },
+        {},
+    )
+    nearest_text = " ".join(str(v) for v in nearest_plan.values())
+    test("TF-RPT-ACT-01: 选择最近支撑位",
+         nearest_plan.get("今日动作标签") == "可低吸" and "100.00" in nearest_text and "95.00" not in nearest_text,
+         f"label={nearest_plan.get('今日动作标签')}, summary={nearest_plan.get('今日动作摘要')}", "report")
+
+    incomplete_plan = generate_report.build_action_plan(
+        "看多",
+        "中",
+        100.8,
+        {
+            "support_levels": [95.0, 100.0],
+            "stop_loss": 98.0,
+            "risk_reward_ratio": 2.0,
+        },
+        {},
+    )
+    executable_text = " ".join(
+        str(incomplete_plan.get(key, ""))
+        for key in (
+            "场景A条件", "场景A动作", "场景B条件", "场景B动作",
+            "退出条件1", "退出动作1", "退出条件2", "退出动作2", "退出条件3", "退出动作3",
+        )
+    )
+    test("TF-RPT-ACT-02: 决策价位不完整时只观察",
+         incomplete_plan.get("今日动作标签") == "只观察",
+         f"label={incomplete_plan.get('今日动作标签')}", "report")
+    test("TF-RPT-ACT-03: 决策价位不完整时不输出占位执行价",
+         "—" not in executable_text,
+         executable_text, "report")
 
 
 # ========================
