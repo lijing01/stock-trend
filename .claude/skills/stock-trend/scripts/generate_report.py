@@ -227,7 +227,7 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
         "场景A标题": "场景 A：继续上冲",
         "场景A条件": f"放量突破或站稳压力位 {resistance_text}",
         "场景A动作": f"不追高满仓；若接近 {tp1_text} 先分批止盈，突破后再看 {tp2_text}。",
-        "场景B标题": "场景 B：回踩支撑",
+        "场景B标题": "场景 B：回调到位",
         "场景B条件": f"回踩支撑位 {support_text} 附近并出现止跌信号",
         "场景B动作": scenario_b_action,
         "退出条件1": f"有效跌破止损位 {stop_text}",

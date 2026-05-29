@@ -507,7 +507,7 @@ def run_new_script_tests(tmpdir):
         "render_weak",
         confidence="低",
         rr_ratio=None,
-        latest_close=1298.0,
+        latest_close=1260.0,
     )
     weak_md_path = os.path.join(tmpdir, "test_report_weak.md")
     rc, stdout, stderr = run_script(
