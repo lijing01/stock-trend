@@ -19,6 +19,7 @@ Examples:
 
 import argparse
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -119,6 +120,11 @@ def resolve_market(ts_code):
     return "未知"
 
 
+# EastMoney search API token (public, exposed in frontend JS)
+# Override via EASTMONEY_TOKEN env var if needed
+EASTMONEY_TOKEN = os.environ.get("EASTMONEY_TOKEN", "D43BF722C8E33BDC906FB84D85E326E8")
+
+
 def search_eastmoney(name):
     """Search stock/ETF name via East Money API.
 
@@ -128,7 +134,7 @@ def search_eastmoney(name):
     url = (
         f"https://searchapi.eastmoney.com/api/suggest/get"
         f"?input={encoded}&type=12"
-        f"&token=D43BF722C8E33BDC906FB84D85E326E8"
+        f"&token={EASTMONEY_TOKEN}"
         f"&count=10"
     )
     headers = {
