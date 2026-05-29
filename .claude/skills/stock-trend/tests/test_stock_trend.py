@@ -502,8 +502,6 @@ def run_new_script_tests(tmpdir):
     import generate_report
 
     tech_path, kline_path, scores_path = _write_report_fixture(tmpdir, "actionable")
-    with open(scores_path, "r", encoding="utf-8") as f:
-        report_params_data = json.load(f)["report_params"]
 
     args = argparse.Namespace(
         technical=tech_path,
@@ -511,7 +509,7 @@ def run_new_script_tests(tmpdir):
         etf_data=None,
         capital_flow=None,
         scores=json.dumps({"technical": 2, "capital_flow": 1, "fundamental": 0, "sentiment": 0, "macro": 0}, ensure_ascii=False),
-        scores_file=None,
+        scores_file=scores_path,
         pipeline=None,
         direction="看多",
         score=2.1,
@@ -543,7 +541,6 @@ def run_new_script_tests(tmpdir):
         output_html=None,
         code=None,
         data_dir=None,
-        report_params_data=report_params_data,
     )
 
     context = generate_report.build_context(args)
