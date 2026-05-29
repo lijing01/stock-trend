@@ -123,6 +123,37 @@ def _first_numeric(values):
     return None
 
 
+def _is_error_data_source(meta):
+    return (meta or {}).get("data_source") == "error"
+
+
+def _latest_valid_kline_close(kline):
+    """Return the latest close only when K-line data is explicitly usable."""
+    meta = kline.get("meta", {}) if isinstance(kline, dict) else {}
+    if not kline or _is_error_data_source(meta):
+        return None
+
+    records = kline.get("data", [])
+    if not isinstance(records, list) or not records:
+        return None
+
+    for record in reversed(records):
+        if not isinstance(record, dict):
+            continue
+        close = _safe_float(record.get("close"))
+        if close is not None:
+            return f"{close:.2f}"
+    return None
+
+
+def _is_kline_unavailable(kline):
+    if not kline:
+        return False
+    meta = kline.get("meta", {}) if isinstance(kline, dict) else {}
+    records = kline.get("data", []) if isinstance(kline, dict) else []
+    return _is_error_data_source(meta) or not records
+
+
 def _nearest_support(values, close):
     numeric_values = [num for num in (_safe_float(value) for value in values or []) if num is not None]
     if not numeric_values:
@@ -378,8 +409,12 @@ def build_context(args):
     patterns = technical.get("patterns", [])
     merged_report_params = {**summary, **report_params}
 
-    # Latest close price
-    latest_close = technical.get("latest", {}).get("close", None)
+    # Latest close price: prefer verified K-line; never reuse stale technical price when K-line failed.
+    kline_latest_close = _latest_valid_kline_close(kline)
+    kline_unavailable = _is_kline_unavailable(kline)
+    latest_close = kline_latest_close
+    if latest_close is None and not kline_unavailable:
+        latest_close = technical.get("latest", {}).get("close", None)
 
     # Parse entry signals JSON
     entry_signals_list = []
@@ -573,6 +608,13 @@ def build_context(args):
             "content": "\n\n".join(content_parts) if content_parts else "ETF数据暂无",
         }
 
+    data_quality_warning = summary.get("risk_reward_warning") or (
+        "⚠️ 数据不足，分析可靠性有限" if meta.get("data_points", 999) < 60 else ""
+    )
+    if kline_unavailable:
+        stale_warning = "⚠️ K线数据不可用，已禁用旧技术分析当前价"
+        data_quality_warning = f"{stale_warning}；{data_quality_warning}" if data_quality_warning else stale_warning
+
     context = {
         "股票名称": stock_name,
         "代码": ts_code,
@@ -639,7 +681,7 @@ def build_context(args):
         "特殊标记标题": special_section.get("title", "") if special_section else "",
         "特殊标记内容": special_section.get("content", "") if special_section else "",
         # Data quality warning
-        "数据质量警告": summary.get("risk_reward_warning") or ("⚠️ 数据不足，分析可靠性有限" if meta.get("data_points", 999) < 60 else ""),
+        "数据质量警告": data_quality_warning,
         # Chart and data source annotations
         "has_chart": args.chart is not None and os.path.exists(args.chart),
         "tech_data_source": data_source if data_source else "Tushare/东方财富",
