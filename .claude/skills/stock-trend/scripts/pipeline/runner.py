@@ -491,6 +491,8 @@ def main():
     print(f"[5/5] Writing pipeline output...")
     elapsed = time.time() - pipeline_start
 
+    primary_data_source = results.get("kline", {}).get("data_source", "unknown")
+
     pipeline_output = {
         "meta": {
             "ts_code": ts_code,
@@ -502,6 +504,7 @@ def main():
             "is_hk": is_hk,
             "pipeline_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "elapsed_seconds": round(elapsed, 1),
+            "primary_data_source": primary_data_source,
         },
         "results": results,
         "errors": errors,

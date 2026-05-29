@@ -31,6 +31,54 @@ logging.getLogger("akshare").setLevel(logging.ERROR)
 _sf = lambda v: safe_float(v, round_to=2)
 
 
+def _fetch_em_quote_fallback(code):
+    """Fallback: fetch basic PE/PB/market cap from eastmoney stock quote API.
+
+    Used when AKShare calls fail entirely. Returns dict with at minimum
+    pe_ttm and pb if successful, empty dict otherwise.
+    """
+    from core.eastmoney_utils import build_secid, rotate_push2_host, EM_HEADERS
+    import urllib.request
+
+    ts_code = f"{code}.SZ" if not code.startswith("6") else f"{code}.SH"
+    secid = build_secid(ts_code)
+    if secid is None:
+        return {}
+
+    def _do_fetch(host):
+        url = (f"https://{host}/api/qt/stock/get"
+               f"?secid={secid}"
+               f"&fields=f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,f55,f57,f58,f60,f115,f116,f117,f162,f167,f168,f169,f170")
+        req = urllib.request.Request(url, headers=EM_HEADERS)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if not result or result.get("rc") != 0 or not result.get("data"):
+            raise RuntimeError(f"EM quote API failed(host={host})")
+        return result["data"]
+
+    try:
+        data, used_host = rotate_push2_host(_do_fetch, max_retries=2)
+    except Exception:
+        return {}
+
+    out = {}
+    pe = safe_float(data.get("f115")) or safe_float(data.get("f116"))
+    if pe is not None:
+        out["pe_ttm"] = _sf(pe)
+    pb = safe_float(data.get("f162")) or safe_float(data.get("f23"))
+    if pb is not None:
+        out["pb"] = _sf(pb)
+    mc = safe_float(data.get("f20")) or safe_float(data.get("f51"))
+    if mc is not None and mc > 0:
+        out["market_cap_billion"] = round(mc / 1e8, 2)
+
+    if out.get("pe_ttm") and out["pe_ttm"] > 0:
+        est_div_yield = (0.30 / out["pe_ttm"]) * 100
+        out["dividend_yield_pct"] = round(est_div_yield, 2)
+
+    return out
+
+
 def fetch_a_share_fundamentals(code):
     """Fetch fundamental data for A-share stocks using AKShare with retries."""
     import akshare as ak
@@ -138,7 +186,18 @@ def fetch_a_share_fundamentals(code):
     elif filled >= 1:
         result["data_quality"] = "partial"
     else:
-        result["data_quality"] = "error"
+        # Fallback: eastmoney quote API for basic PE/PB when AKShare fails entirely
+        fallback = _fetch_em_quote_fallback(code)
+        if fallback:
+            result.setdefault("pe_ttm", fallback.get("pe_ttm"))
+            result.setdefault("pb", fallback.get("pb"))
+            result.setdefault("market_cap_billion", fallback.get("market_cap_billion"))
+            result.setdefault("dividend_yield_pct", fallback.get("dividend_yield_pct"))
+            result["_fallback_source"] = "eastmoney_quote"
+            errors.append("AKShare failed, used eastmoney quote fallback for PE/PB")
+            # Re-evaluate data quality after fallback
+            filled2 = sum(1 for k in ["pe_ttm", "pb", "roe", "eps", "revenue_growth_pct"] if result.get(k) is not None)
+            result["data_quality"] = "partial" if filled2 >= 1 else "error"
 
     if errors:
         result["_errors"] = errors
