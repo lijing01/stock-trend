@@ -253,6 +253,55 @@ def retry(func, max_attempts=2, delay=2):
     return None, str(last_err)
 
 
+# ─── Subprocess helpers ──────────────────────────────────────────────
+
+
+def run_script(cmd, label="", timeout=30):
+    """Run a subprocess command. Returns {success, label, returncode, stdout, stderr, timeout}.
+
+    Args:
+        cmd: list of command + args (e.g. [sys.executable, "script.py", "--flag"]).
+        label: human-readable step name for result dict.
+        timeout: seconds before TimeoutExpired.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return {
+            "success": result.returncode == 0,
+            "label": label,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-500:] if result.stdout else "",
+            "stderr": result.stderr[-500:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "label": label,
+            "returncode": -1,
+            "timeout": True,
+            "stdout": "",
+            "stderr": f"Timeout ({timeout}s)",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "label": label,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": str(e),
+        }
+
+
+def run_script_file(script_name, *args, timeout=30):
+    """Run a stock-trend script by name from SCRIPT_DIR. Returns (returncode, stdout, stderr)."""
+    import subprocess
+    script_path = _SCRIPT_DIR / script_name
+    cmd = [sys.executable, str(script_path)] + list(args)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return result.returncode, result.stdout, result.stderr
+
+
 # ─── IOPV history cache ─────────────────────────────────────────────
 
 IOPV_HISTORY_CACHE_FILENAME = "iopv_history.json"

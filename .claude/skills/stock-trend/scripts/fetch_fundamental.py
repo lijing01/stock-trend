@@ -18,7 +18,7 @@ import os
 import sys
 import time
 import logging
-from cache_utils import load_cache, safe_float, save_cache, retry, get_market_day_ttl
+from cache_utils import load_cache, safe_float, save_cache, retry, get_market_day_ttl, output_json
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
@@ -257,14 +257,7 @@ def main():
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl(trading_ttl=1800, after_hours_ttl=57600))
         if cached:
-            text = json.dumps(cached, ensure_ascii=False, indent=2)
-            if args.output:
-                os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-                with open(args.output, "w", encoding="utf-8") as f:
-                    f.write(text)
-                print(f"Fundamental data (cached) written to {args.output}", file=sys.stderr)
-            else:
-                print(text)
+            output_json(cached, output_path=args.output)
             return
 
     code = args.ts_code.split(".")[0]
@@ -321,14 +314,7 @@ def main():
     if result.get("meta", {}).get("data_source") not in ("error", "skip", None):
         save_cache(cache_key, result)
 
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Fundamental data written to {args.output}", file=sys.stderr)
-    else:
-        print(text)
+    output_json(result, output_path=args.output)
 
 
 if __name__ == "__main__":

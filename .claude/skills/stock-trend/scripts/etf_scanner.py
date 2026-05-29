@@ -275,14 +275,13 @@ def load_watchlist(path: Optional[Path] = None) -> dict:
 
 def run_script(script_name: str, args: list[str], timeout: int = 30) -> Optional[dict]:
     """Run an existing stock-trend script and return parsed JSON output."""
-    script_path = SCRIPT_DIR / script_name
-    cmd = [sys.executable, str(script_path)] + args
+    from cache_utils import run_script_file
+    rc, stdout, _ = run_script_file(script_name, *args, timeout=timeout)
+    if rc != 0:
+        return None
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            return None
-        return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        return json.loads(stdout)
+    except json.JSONDecodeError:
         return None
 
 

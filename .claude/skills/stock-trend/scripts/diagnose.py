@@ -198,11 +198,9 @@ def check_weekly_support():
 
 def _run_script(script_name, *args):
     """Run a fetch script and return the process exit code."""
-    import subprocess
-    script_path = SCRIPT_DIR / script_name
-    cmd = [sys.executable, str(script_path)] + list(args)
-    result = subprocess.run(cmd, capture_output=True, timeout=30)
-    return result.returncode
+    from cache_utils import run_script_file
+    rc, _, _ = run_script_file(script_name, *args, timeout=30)
+    return rc
 
 
 def load_cache():

@@ -24,8 +24,7 @@ import sys
 import urllib.request
 from datetime import datetime, timedelta
 
-from cache_utils import load_cache, save_cache, get_market_day_ttl
-from cache_utils import safe_float
+from cache_utils import load_cache, save_cache, get_market_day_ttl, safe_float, output_json
 from eastmoney_utils import (
     EM_HEADERS, EM_API_HOSTS, rotate_em_host,
     get_futures_secid, FUTURES_SECID_MAP, INDEX_SECID_MAP,
@@ -595,15 +594,7 @@ def main():
     args = parser.parse_args()
 
     result = fetch_futures_data(args.etf_code, days=args.days, no_cache=args.no_cache)
-
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Futures data written to {args.output}", file=sys.stderr)
-    else:
-        print(text)
+    output_json(result, output_path=args.output)
 
 
 if __name__ == "__main__":

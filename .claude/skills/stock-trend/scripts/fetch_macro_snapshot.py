@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import logging
-from cache_utils import load_cache, safe_float, save_cache, get_market_day_ttl
+from cache_utils import load_cache, safe_float, save_cache, get_market_day_ttl, output_json
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
@@ -190,14 +190,7 @@ def main():
     if not args.no_cache:
         cached = load_cache("macro_snapshot", ttl_seconds=get_market_day_ttl(trading_ttl=14400, after_hours_ttl=43200))
         if cached:
-            text = json.dumps(cached, ensure_ascii=False, indent=2)
-            if args.output:
-                os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-                with open(args.output, "w", encoding="utf-8") as f:
-                    f.write(text)
-                print(f"Macro snapshot (cached) written to {args.output}", file=sys.stderr)
-            else:
-                print(text)
+            output_json(cached, output_path=args.output)
             return
 
     summary = {}
@@ -238,14 +231,7 @@ def main():
     # Save to cache
     save_cache("macro_snapshot", result)
 
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Macro snapshot written to {args.output}", file=sys.stderr)
-    else:
-        print(text)
+    output_json(result, output_path=args.output)
 
 
 if __name__ == "__main__":

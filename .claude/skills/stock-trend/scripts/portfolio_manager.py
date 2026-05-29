@@ -209,10 +209,8 @@ def _fetch_kline(ts_code: str) -> Optional[list]:
 
 def _run_script(script_name: str, *args, timeout: int = 20):
     """Run a script from SCRIPT_DIR, return (rc, stdout, stderr)."""
-    script_path = SCRIPT_DIR / script_name
-    cmd = [sys.executable, str(script_path)] + list(args)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return result.returncode, result.stdout, result.stderr
+    from cache_utils import run_script_file
+    return run_script_file(script_name, *args, timeout=timeout)
 
 
 def _fetch_technical_stop(ts_code: str) -> dict | None:

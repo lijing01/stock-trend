@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from cache_utils import clean_cache, safe_float
+from cache_utils import clean_cache, safe_float, run_script
 from eastmoney_utils import latest_kline_record
 
 SCRIPT_DIR = Path(__file__).parent
@@ -36,43 +36,6 @@ def get_data_dir(code):
     d = Path(CACHE_DIR) / code
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def run_script(cmd, label="", timeout=30):
-    """Run a Python script with timeout. Returns result dict.
-
-    Args:
-        cmd: list of command + args
-        label: human-readable step name
-        timeout: seconds before TimeoutExpired (default 30)
-    """
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        success = result.returncode == 0
-        return {
-            "success": success,
-            "label": label,
-            "returncode": result.returncode,
-            "stdout": result.stdout[-500:] if result.stdout else "",
-            "stderr": result.stderr[-500:] if result.stderr else "",
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "label": label,
-            "returncode": -1,
-            "timeout": True,
-            "stdout": "",
-            "stderr": f"Timeout ({timeout}s)",
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "label": label,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(e),
-        }
 
 
 def read_json(path):

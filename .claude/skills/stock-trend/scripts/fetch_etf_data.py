@@ -18,16 +18,14 @@ import os
 import re
 import sys
 import urllib.request
-from cache_utils import safe_float
-from eastmoney_utils import EM_HEADERS
+from cache_utils import safe_float, output_json
+from eastmoney_utils import EM_HEADERS, fetch_url
 
 
-def _fetch_url(url, timeout=15):
-    """Fetch URL content with error handling."""
+def _fetch_fund_url(url, timeout=15):
+    """Fetch fund-specific URL with fund.eastmoney.com Referer."""
     headers = {**EM_HEADERS, "Referer": "http://fund.eastmoney.com/"}
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8")
+    return fetch_url(url, headers=headers, timeout=timeout)
 
 
 def _parse_js_vars(content):
@@ -66,7 +64,7 @@ def fetch_etf_data(fund_code):
     # 1. Fetch pingzhongdata (fund overview + returns + holdings)
     pingzhong_url = f"http://fund.eastmoney.com/pingzhongdata/{fund_code}.js"
     try:
-        pingzhong_content = _fetch_url(pingzhong_url)
+        pingzhong_content = _fetch_fund_url(pingzhong_url)
         vars_dict = _parse_js_vars(pingzhong_content)
 
         # Fund name
@@ -149,7 +147,7 @@ def fetch_etf_data(fund_code):
     # 2. Fetch js/{code}.js for latest NAV and IOPV data
     js_url = f"http://fund.eastmoney.com/js/{fund_code}.js"
     try:
-        js_content = _fetch_url(js_url)
+        js_content = _fetch_fund_url(js_url)
         # Parse: var jsonOpenOrCloseData = {...}
         nav_match = re.search(r'var\s+\w+\s*=\s*(\{.+?\});', js_content, re.DOTALL)
         if nav_match:
@@ -165,7 +163,7 @@ def fetch_etf_data(fund_code):
     # 3. Fetch latest NAV from API
     nav_url = f"https://fundgz.1234567.com.cn/js/{fund_code}.js"
     try:
-        nav_content = _fetch_url(nav_url)
+        nav_content = _fetch_fund_url(nav_url)
         # Format: jsonpgz({...})
         m = re.search(r'jsonpgz\((.+?)\)', nav_content)
         if m:
@@ -212,15 +210,7 @@ def main():
     args = parser.parse_args()
 
     result = fetch_etf_data(args.fund_code)
-
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"ETF data written to {args.output}", file=sys.stderr)
-    else:
-        print(text)
+    output_json(result, output_path=args.output)
 
 
 if __name__ == "__main__":

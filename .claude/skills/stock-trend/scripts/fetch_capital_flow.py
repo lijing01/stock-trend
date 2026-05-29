@@ -19,7 +19,7 @@ import sys
 import urllib.request
 import logging
 from pathlib import Path
-from cache_utils import CACHE_DIR, load_cache, safe_float, save_cache, get_market_day_ttl
+from cache_utils import CACHE_DIR, load_cache, safe_float, save_cache, get_market_day_ttl, output_json
 from datetime import datetime, timedelta
 from eastmoney_utils import EM_HEADERS, build_secid as resolve_secid
 
@@ -310,14 +310,7 @@ def main():
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
         if cached:
-            text = json.dumps(cached, ensure_ascii=False, indent=2)
-            if args.output:
-                os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-                with open(args.output, "w", encoding="utf-8") as f:
-                    f.write(text)
-                print(f"Capital flow data (cached) written to {args.output}", file=sys.stderr)
-            else:
-                print(text)
+            output_json(cached, output_path=args.output)
             return
 
     code = args.ts_code.split(".")[0]
@@ -437,14 +430,7 @@ def main():
     if result.get("meta", {}).get("data_source") not in ("error", None):
         save_cache(cache_key, result)
 
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(text)
-        print(f"Capital flow data written to {args.output}", file=sys.stderr)
-    else:
-        print(text)
+    output_json(result, output_path=args.output)
 
 
 if __name__ == "__main__":

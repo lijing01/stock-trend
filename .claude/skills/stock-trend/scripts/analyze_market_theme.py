@@ -32,16 +32,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
-# Support both direct invocation (python3 script.py) and -m / package import
-if __package__:
-    # Running as package (python -m scripts.analyze_market_theme)
-    from .fetch_sector_data import get_sector_rankings, rank_hot_sectors
-    from .fetch_sector_kline import batch_fetch_kline
-else:
-    # Direct invocation or test import via sys.path
-    sys.path.insert(0, str(SCRIPT_DIR))
-    from fetch_sector_data import get_sector_rankings, rank_hot_sectors
-    from fetch_sector_kline import batch_fetch_kline
+sys.path.insert(0, str(SCRIPT_DIR))
+from fetch_sector_data import get_sector_rankings, rank_hot_sectors
+from fetch_sector_kline import batch_fetch_kline
 
 
 # ──────────────────────── Phase 1: Sector Scan ────────────────────────
