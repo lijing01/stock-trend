@@ -237,24 +237,42 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
         scenario_b_action = f"回踩 {support_text} 附近且不破 {stop_text} 时分批试仓；跌破止损则放弃。"
 
     events = analysis_data.get("events", [])
-    if incomplete_decision_levels:
+    if action_label == "只观察":
+        if incomplete_decision_levels:
+            scenario_a_condition = "压力位或目标价缺失，暂不设置突破买入条件。"
+            scenario_a_action = "只观察量价变化，等待压力位、目标价与风险收益比补全。"
+            scenario_b_condition = "关键决策价位不完整，暂不设置低吸条件。"
+            scenario_b_action = "不主动试仓，等待支撑、止损、目标与风险收益比重新匹配。"
+            exit_condition_1 = "关键止损或目标价位不完整"
+            exit_action_1 = "不新增风险敞口，等待关键价位补全后再评估。"
+            exit_condition_2 = "目标价位补全前出现冲高"
+            exit_action_2 = "不追高，等待完整计划后再评估。"
+        else:
+            scenario_a_condition = f"放量突破或站稳压力位 {resistance_text}"
+            scenario_a_action = "只观察突破后的量价持续性，等待置信度或风险收益比改善后再评估。"
+            scenario_b_condition = f"回踩支撑位 {support_text} 附近并出现止跌信号"
+            scenario_b_action = "继续观察支撑有效性，等待更明确的确认信号后再制定入场计划。"
+            exit_condition_1 = f"有效跌破止损位 {stop_text}"
+            exit_action_1 = "不新增风险敞口，等待止跌确认后重新评估。"
+            exit_condition_2 = f"冲高接近第一目标 {tp1_text}"
+            exit_action_2 = "只观察目标位附近承接与量能，不按目标价执行交易。"
         return {
             "操作计划": True,
             "今日动作标签": action_label,
             "今日动作摘要": summary,
             "今日动作说明": detail,
             "场景A标题": "场景 A：继续上冲",
-            "场景A条件": "压力位或目标价缺失，暂不设置突破买入条件。",
-            "场景A动作": "只观察量价变化，等待压力位、目标价与风险收益比补全。",
+            "场景A条件": scenario_a_condition,
+            "场景A动作": scenario_a_action,
             "场景B标题": "场景 B：回调到位",
-            "场景B条件": "关键决策价位不完整，暂不设置低吸条件。",
-            "场景B动作": "不主动试仓，等待支撑、止损、目标与风险收益比重新匹配。",
-            "退出条件1": "关键止损或目标价位不完整",
-            "退出动作1": "不建立新仓位，已有仓位按原风险纪律处理。",
-            "退出条件2": "目标价位补全前出现冲高",
-            "退出动作2": "不追高，等待完整计划后再评估。",
+            "场景B条件": scenario_b_condition,
+            "场景B动作": scenario_b_action,
+            "退出条件1": exit_condition_1,
+            "退出动作1": exit_action_1,
+            "退出条件2": exit_condition_2,
+            "退出动作2": exit_action_2,
             "退出条件3": "事件前仍未触发入场条件或量能持续背离",
-            "退出动作3": "取消原计划，重新评估趋势与风险收益比。",
+            "退出动作3": "继续观察事件落地后的趋势与风险收益比变化。",
             "执行时间窗": _build_time_window(events),
         }
 

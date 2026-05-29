@@ -625,6 +625,36 @@ def run_new_script_tests(tmpdir):
          "—" not in executable_text,
          executable_text, "report")
 
+    low_confidence_plan = generate_report.build_action_plan(
+        "看多",
+        "低",
+        100.8,
+        {
+            "support_levels": [95.0, 100.0],
+            "resistance_levels": [106.0],
+            "stop_loss": 98.0,
+            "target_conservative": 106.0,
+            "target_moderate": 110.0,
+            "risk_reward_ratio": 2.0,
+        },
+        {},
+    )
+    low_confidence_scenario_text = " ".join(
+        str(low_confidence_plan.get(key, ""))
+        for key in (
+            "场景A动作", "场景B动作", "退出动作1", "退出动作2", "退出动作3",
+        )
+    )
+    test("TF-RPT-ACT-04: 低置信度完整价位只观察",
+         low_confidence_plan.get("今日动作标签") == "只观察",
+         f"label={low_confidence_plan.get('今日动作标签')}", "report")
+    test("TF-RPT-ACT-05: 低置信度只观察动作保持被动",
+         ("分批试仓" not in low_confidence_scenario_text
+          and "分批止盈" not in low_confidence_scenario_text
+          and "追踪" not in low_confidence_scenario_text
+          and ("观察" in low_confidence_scenario_text or "等待" in low_confidence_scenario_text)),
+         low_confidence_scenario_text, "report")
+
 
 # ========================
 # Diagnostic Tests (TD-*)
@@ -1101,7 +1131,7 @@ def main():
                 print(f"  - {r['name']}: {r['detail']}")
 
     # Save results
-    results_dir = Path("/tmp/stock-trend-test-results")
+    results_dir = Path(os.environ.get("TMPDIR", Path.cwd())) / "stock-trend-test-results"
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = str(results_dir / "results.json")
     with open(results_path, "w", encoding="utf-8") as f:
