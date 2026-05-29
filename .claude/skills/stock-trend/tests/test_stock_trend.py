@@ -44,6 +44,12 @@ def load_json_output(path):
         return json.load(f)
 
 
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def _write_cache_entry(cache_dir, cache_key, data):
     """Write a cache_utils-compatible cache entry for subprocess tests."""
     os.makedirs(cache_dir, exist_ok=True)
@@ -94,6 +100,62 @@ def _build_synthetic_kline(ts_code, asset="E", days=90):
             "data_source": "test_cache",
         },
         "data": records,
+    }
+
+
+def _build_stale_technical_fixture(ts_code="300241.SZ", close=7.46):
+    return {
+        "meta": {
+            "ts_code": ts_code,
+            "data_source": "eastmoney",
+            "analysis_date": "20260528",
+            "data_points": 243,
+        },
+        "latest": {
+            "trade_date": "20260528",
+            "close": close,
+        },
+        "summary": {
+            "total_score": 0.76,
+            "direction": "震荡偏多",
+            "confidence": "低",
+            "support_levels": [7.42, 6.76, 6.0],
+            "resistance_levels": [7.5, 8.28, 9.0],
+            "stop_loss": 6.68,
+            "target": 9.0,
+            "risk_reward_ratio": 1.97,
+            "position_sizing": "轻仓(20-30%)",
+        },
+        "patterns": [],
+    }
+
+
+def _build_error_kline_fixture(ts_code="300241.SZ"):
+    return {
+        "meta": {
+            "ts_code": ts_code,
+            "asset": "E",
+            "freq": "D",
+            "adj": "qfq",
+            "data_source": "error",
+            "record_count": 0,
+            "error": "all K-line sources failed",
+        },
+        "data": [],
+    }
+
+
+def _build_malformed_kline_fixture(ts_code="300241.SZ"):
+    return {
+        "meta": {
+            "ts_code": ts_code,
+            "asset": "E",
+            "freq": "D",
+            "adj": "qfq",
+            "data_source": "eastmoney",
+            "record_count": 2,
+        },
+        "data": [{"trade_date": "20260529"}, {"trade_date": "20260528", "close": None}],
     }
 
 
@@ -613,6 +675,107 @@ def run_new_script_tests(tmpdir):
          "只观察" in weak_md_content,
          weak_md_content[:200], "report")
 
+    technical_path = os.path.join(tmpdir, "stale_technical.json")
+    error_kline_path = os.path.join(tmpdir, "error_kline.json")
+    stale_md_path = os.path.join(tmpdir, "stale_report.md")
+    _write_json(technical_path, _build_stale_technical_fixture())
+    _write_json(error_kline_path, _build_error_kline_fixture())
+    rc, stdout, stderr = run_script(
+        "generate_report.py",
+        "--technical", technical_path,
+        "--kline", error_kline_path,
+        "--ts-code", "300241.SZ",
+        "--stock-name", "瑞丰光电",
+        "--date", "2026-05-29",
+        "--entry-verdict", "ready",
+        "--entry-signals", "[\"旧买点\"]",
+        "--output-md", stale_md_path,
+        timeout=15,
+    )
+    if rc != 0 or not os.path.exists(stale_md_path):
+        test("TF-RPT-STALE-01: K线失败不复用旧当前价", False, f"exit_code={rc}, stderr={stderr[:200]}", "report")
+    else:
+        with open(stale_md_path, "r", encoding="utf-8") as f:
+            stale_content = f.read()
+        current_idx = stale_content.find("| 当前价 |")
+        test(
+            "TF-RPT-STALE-01: K线失败不复用旧当前价",
+            "| 当前价 | — |" in stale_content and "| 当前价 | 7.46 |" not in stale_content,
+            stale_content[current_idx:current_idx + 80],
+            "report",
+        )
+        test(
+            "TF-RPT-STALE-02: K线失败报告提示数据不可用",
+            "K线数据不可用" in stale_content or "技术分析数据可能过期" in stale_content,
+            stale_content[:500],
+            "report",
+        )
+        test(
+            "TF-RPT-STALE-03: K线失败不复用旧技术价位",
+            "| 支撑位 | — |" in stale_content
+            and "| 压力位 | — |" in stale_content
+            and "| 目标价位 | — |" in stale_content
+            and "跌破支撑位—" not in stale_content
+            and "可入场" not in stale_content
+            and "只观察" in stale_content,
+            stale_content[current_idx:current_idx + 300],
+            "report",
+        )
+
+    malformed_kline_path = os.path.join(tmpdir, "malformed_kline.json")
+    malformed_md_path = os.path.join(tmpdir, "malformed_report.md")
+    _write_json(malformed_kline_path, _build_malformed_kline_fixture())
+    rc, stdout, stderr = run_script(
+        "generate_report.py",
+        "--technical", technical_path,
+        "--kline", malformed_kline_path,
+        "--ts-code", "300241.SZ",
+        "--stock-name", "瑞丰光电",
+        "--date", "2026-05-29",
+        "--entry-verdict", "ready",
+        "--entry-signals", "[\"旧买点\"]",
+        "--output-md", malformed_md_path,
+        timeout=15,
+    )
+    malformed_content = ""
+    if rc == 0 and os.path.exists(malformed_md_path):
+        with open(malformed_md_path, "r", encoding="utf-8") as f:
+            malformed_content = f.read()
+    test(
+        "TF-RPT-STALE-04: 无有效K线close不回退旧当前价",
+        "| 当前价 | — |" in malformed_content
+        and "| 当前价 | 7.46 |" not in malformed_content
+        and "可入场" not in malformed_content,
+        malformed_content[:500] if malformed_content else f"exit_code={rc}, stderr={stderr[:200]}",
+        "report",
+    )
+
+    valid_kline_path = os.path.join(tmpdir, "valid_kline_new_close.json")
+    valid_md_path = os.path.join(tmpdir, "valid_new_close_report.md")
+    valid_kline = _build_synthetic_kline("300241.SZ", days=2)
+    valid_kline["data"][-1]["close"] = 7.80
+    _write_json(valid_kline_path, valid_kline)
+    rc, stdout, stderr = run_script(
+        "generate_report.py",
+        "--technical", technical_path,
+        "--kline", valid_kline_path,
+        "--ts-code", "300241.SZ",
+        "--stock-name", "瑞丰光电",
+        "--date", "2026-05-29",
+        "--output-md", valid_md_path,
+        timeout=15,
+    )
+    valid_content = ""
+    if rc == 0 and os.path.exists(valid_md_path):
+        with open(valid_md_path, "r", encoding="utf-8") as f:
+            valid_content = f.read()
+    test(
+        "TF-RPT-STALE-05: 有效K线当前价优先于旧technical",
+        "| 当前价 | 7.80 |" in valid_content and "| 当前价 | 7.46 |" not in valid_content,
+        valid_content[:500] if valid_content else f"exit_code={rc}, stderr={stderr[:200]}",
+        "report",
+    )
+
     sys.path.insert(0, str(SCRIPTS_DIR))
     import generate_report
 
@@ -779,6 +942,102 @@ def run_pipeline_tests(tmpdir):
         "kline_159740.SZ_D_qfq",
         _build_synthetic_kline("159740.SZ", asset="FD"),
     )
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        import run_pipeline
+        from run_pipeline import build_output_files, is_successful_kline
+    except ImportError:
+        run_pipeline = None
+        build_output_files = None
+        is_successful_kline = None
+    stale_output_dir = Path(tmpdir) / "stale_pipeline"
+    stale_output_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(str(stale_output_dir / "technical.json"), _build_stale_technical_fixture())
+    _write_json(str(stale_output_dir / "chip_distribution.json"), {"avg_cost": 7.1})
+    if build_output_files is None:
+        test("TP-PL-STALE-01: K线失败不发布旧technical路径", False, "build_output_files missing", "pipeline")
+    else:
+        files = build_output_files(
+            output_dir=stale_output_dir,
+            kline_path=str(stale_output_dir / "kline.json"),
+            kline_available=False,
+            technical_available=False,
+            chip_available=False,
+            is_etf=False,
+            no_etf=False,
+            no_capital=False,
+            no_fundamental=False,
+            no_macro=False,
+            no_futures=False,
+            no_index_valuation=False,
+            asset="E",
+        )
+        test(
+            "TP-PL-STALE-01: K线失败不发布旧technical路径",
+            files.get("technical") is None and files.get("chip_distribution") is None,
+            f"technical={files.get('technical')}, chip={files.get('chip_distribution')}",
+            "pipeline",
+        )
+        test(
+            "TP-PL-STALE-01a: 最新K线缺close判定不可用",
+            is_successful_kline is not None and not is_successful_kline(_build_malformed_kline_fixture()),
+            "malformed latest K-line should be unavailable",
+            "pipeline",
+        )
+    stale_flow_dir = Path(tmpdir) / "stale_pipeline_flow"
+    stale_flow_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(str(stale_flow_dir / "technical.json"), _build_stale_technical_fixture())
+    _write_json(str(stale_flow_dir / "chip_distribution.json"), {"avg_cost": 7.1})
+    if run_pipeline is None:
+        test("TP-PL-STALE-02: K线失败删除旧下游文件", False, "run_pipeline missing", "pipeline")
+    else:
+        original_run_script = run_pipeline.run_script
+        original_clean_cache = run_pipeline.clean_cache
+        original_argv = sys.argv[:]
+
+        def fake_run_script(cmd, label="", timeout=30):
+            if label in ("fetch_kline_tushare", "fetch_kline_eastmoney"):
+                out_path = cmd[cmd.index("-o") + 1]
+                _write_json(out_path, _build_malformed_kline_fixture())
+            return {
+                "success": True,
+                "label": label,
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+            }
+
+        try:
+            run_pipeline.run_script = fake_run_script
+            run_pipeline.clean_cache = lambda: 0
+            sys.argv = [
+                "run_pipeline.py",
+                "300241.SZ",
+                "--asset", "E",
+                "--output-dir", str(stale_flow_dir),
+                "--no-capital",
+                "--no-fundamental",
+                "--no-macro",
+            ]
+            run_pipeline.main()
+        finally:
+            run_pipeline.run_script = original_run_script
+            run_pipeline.clean_cache = original_clean_cache
+            sys.argv = original_argv
+
+        pipeline_output = load_json_output(str(stale_flow_dir / "pipeline_output.json"))
+        output_files = pipeline_output.get("output_files", {}) if pipeline_output else {}
+        test(
+            "TP-PL-STALE-02: K线失败删除旧下游文件",
+            not (stale_flow_dir / "technical.json").exists()
+            and not (stale_flow_dir / "chip_distribution.json").exists()
+            and output_files.get("technical") is None
+            and output_files.get("chip_distribution") is None,
+            f"technical_exists={(stale_flow_dir / 'technical.json').exists()}, "
+            f"chip_exists={(stale_flow_dir / 'chip_distribution.json').exists()}, "
+            f"output_files={output_files}",
+            "pipeline",
+        )
 
     # TP-RC-01: resolve_code.py - 代码输入
     rc, stdout, stderr = run_script("resolve_code.py", "513180")

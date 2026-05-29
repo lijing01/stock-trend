@@ -123,6 +123,42 @@ def _first_numeric(values):
     return None
 
 
+def _is_error_data_source(meta):
+    return (meta or {}).get("data_source") == "error"
+
+
+def _latest_kline_record(records):
+    valid_records = [record for record in records if isinstance(record, dict)]
+    if not valid_records:
+        return None
+    dated_records = [record for record in valid_records if record.get("trade_date")]
+    if dated_records:
+        return max(dated_records, key=lambda record: str(record.get("trade_date", "")))
+    return valid_records[-1]
+
+
+def _kline_close_status(kline, required=False):
+    """Return (latest_close, unavailable) for explicit K-line inputs."""
+    if not kline:
+        return None, required
+    if not isinstance(kline, dict):
+        return None, required
+
+    meta = kline.get("meta", {})
+    if _is_error_data_source(meta):
+        return None, True
+
+    records = kline.get("data", [])
+    if not isinstance(records, list) or not records:
+        return None, required
+
+    latest_record = _latest_kline_record(records)
+    close = _safe_float(latest_record.get("close")) if latest_record else None
+    if close is not None:
+        return f"{close:.2f}", False
+    return None, True
+
+
 def _nearest_support(values, close):
     numeric_values = [num for num in (_safe_float(value) for value in values or []) if num is not None]
     if not numeric_values:
@@ -375,11 +411,20 @@ def build_context(args):
     summary = technical.get("summary", {})
     meta = technical.get("meta", {})
     kline_meta = kline.get("meta", {})
-    patterns = technical.get("patterns", [])
+
+    # Latest close price: prefer verified K-line; never reuse stale technical price when explicit K-line input is unusable.
+    kline_latest_close, kline_unavailable = _kline_close_status(kline, required=bool(args.kline))
+    if kline_unavailable:
+        summary = {}
+        report_params = {}
+        scores = {}
+        chip_dist = {}
+    patterns = [] if kline_unavailable else technical.get("patterns", [])
     merged_report_params = {**summary, **report_params}
 
-    # Latest close price
-    latest_close = technical.get("latest", {}).get("close", None)
+    latest_close = kline_latest_close
+    if latest_close is None and not kline_unavailable:
+        latest_close = technical.get("latest", {}).get("close", None)
 
     # Parse entry signals JSON
     entry_signals_list = []
@@ -391,6 +436,9 @@ def build_context(args):
                 entry_signals_list = json.loads(args.entry_signals)
             except (json.JSONDecodeError, TypeError):
                 entry_signals_list = [args.entry_signals] if isinstance(args.entry_signals, str) else []
+    if kline_unavailable:
+        entry_signals_list = []
+    entry_verdict = "wait" if kline_unavailable else (args.entry_verdict or "wait")
 
     # Build context
     ts_code = args.ts_code or meta.get("ts_code", kline_meta.get("ts_code", "unknown"))
@@ -405,9 +453,9 @@ def build_context(args):
     macro_score = scores.get("macro", 0)
 
     # Direction and confidence
-    direction = args.direction or summary.get("direction", "neutral")
-    composite_score = args.score if args.score is not None else summary.get("total_score", 0)
-    confidence = args.confidence or summary.get("confidence", "低")
+    direction = "数据不足" if kline_unavailable else (args.direction or summary.get("direction", "neutral"))
+    composite_score = "—" if kline_unavailable else (args.score if args.score is not None else summary.get("total_score", 0))
+    confidence = "低" if kline_unavailable else (args.confidence or summary.get("confidence", "低"))
 
     # Key signals from technical
     tech_signals = summary.get("key_signals", [])
@@ -444,6 +492,8 @@ def build_context(args):
     # K-line data info
     data_source = kline_meta.get("data_source", "")
     data_points = kline_meta.get("record_count") or kline_meta.get("data_points") or meta.get("data_points", 0)
+    if kline_unavailable:
+        data_points = 0
     kline_start = kline_meta.get("start_date", "")
     kline_end = kline_meta.get("end_date", "")
     # If meta doesn't have date range, compute from data array
@@ -502,6 +552,8 @@ def build_context(args):
             (f"跌破支撑位{support_levels[0] if support_levels else '—'}", "减仓观望"),
             ("持续窄幅震荡", "耐心等待方向选择"),
         ]
+    if kline_unavailable:
+        monitor_signals = []
 
     # Special section for ETF/ST/HK
     special_section = None
@@ -573,6 +625,13 @@ def build_context(args):
             "content": "\n\n".join(content_parts) if content_parts else "ETF数据暂无",
         }
 
+    data_quality_warning = summary.get("risk_reward_warning") or (
+        "⚠️ 数据不足，分析可靠性有限" if meta.get("data_points", 999) < 60 else ""
+    )
+    if kline_unavailable:
+        stale_warning = "⚠️ K线数据不可用，已禁用旧技术分析当前价"
+        data_quality_warning = f"{stale_warning}；{data_quality_warning}" if data_quality_warning else stale_warning
+
     context = {
         "股票名称": stock_name,
         "代码": ts_code,
@@ -639,15 +698,15 @@ def build_context(args):
         "特殊标记标题": special_section.get("title", "") if special_section else "",
         "特殊标记内容": special_section.get("content", "") if special_section else "",
         # Data quality warning
-        "数据质量警告": summary.get("risk_reward_warning") or ("⚠️ 数据不足，分析可靠性有限" if meta.get("data_points", 999) < 60 else ""),
+        "数据质量警告": data_quality_warning,
         # Chart and data source annotations
         "has_chart": args.chart is not None and os.path.exists(args.chart),
         "tech_data_source": data_source if data_source else "Tushare/东方财富",
         "capital_data_source": capital_flow.get("meta", {}).get("data_source", "东方财富"),
         # Entry timing
-        "入场时机": args.entry_verdict != "wait",
-        "entry_verdict": args.entry_verdict,
-        "entry_verdict_text": {"ready": "可入场", "watch": "等待确认", "wait": "暂观望", "avoid": "不建议入场"}.get(args.entry_verdict, ""),
+        "入场时机": entry_verdict != "wait",
+        "entry_verdict": entry_verdict,
+        "entry_verdict_text": {"ready": "可入场", "watch": "等待确认", "wait": "暂观望", "avoid": "不建议入场"}.get(entry_verdict, ""),
         "entry_signals": entry_signals_list,
         "entry_signals_text": " + ".join(entry_signals_list) if entry_signals_list else "",
         "entry_signal_count": len(entry_signals_list),
@@ -712,6 +771,8 @@ def build_context(args):
             analysis_data = json.loads(args.analysis)
         except (json.JSONDecodeError, TypeError):
             pass
+    if kline_unavailable:
+        analysis_data = None
 
     if analysis_data:
         events = analysis_data.get("events", [])
