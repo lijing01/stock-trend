@@ -5,6 +5,7 @@ Consolidates headers, secid mapping, and node rotation logic
 that was duplicated across fetch_kline_eastmoney.py and fetch_capital_flow.py.
 """
 
+import math
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -253,3 +254,103 @@ def parse_em_kline_line(line):
         return record
     except (ValueError, IndexError):
         return None
+
+
+def piecewise_linear(value, anchors):
+    """Interpolate value through piecewise-linear anchors.
+
+    Anchors is a sorted list of (x, y) pairs. Returns interpolated y.
+    """
+    if value <= anchors[0][0]:
+        return anchors[0][1]
+    if value >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(len(anchors) - 1):
+        x0, y0 = anchors[i]
+        x1, y1 = anchors[i + 1]
+        if x0 <= value <= x1:
+            t = (value - x0) / (x1 - x0) if x1 != x0 else 0
+            return y0 + t * (y1 - y0)
+    return anchors[-1][1]
+
+
+def piecewise_linear_clamped(value, anchors, low=0.0, high=100.0):
+    """Piecewise-linear interpolation clamped to [low, high]."""
+    result = piecewise_linear(value, anchors)
+    return max(low, min(high, result))
+
+
+def latest_kline_record(records):
+    """Return most recent record from kline data array by trade_date.
+
+    Filters out non-dict entries. Falls back to last element if no dates.
+    """
+    valid = [r for r in records if isinstance(r, dict)]
+    if not valid:
+        return None
+    dated = [r for r in valid if r.get("trade_date")]
+    if dated:
+        return max(dated, key=lambda r: str(r.get("trade_date", "")))
+    return valid[-1]
+
+
+def ma(prices, period):
+    """Simple moving average of price list."""
+    if len(prices) < period:
+        return prices[-1] if prices else 0.0
+    return sum(prices[-period:]) / period
+
+
+def rsi(prices, period=14):
+    """Relative Strength Index (smoothed RSI) from price list."""
+    if len(prices) < period + 1:
+        return 50.0
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rsi_val = 50.0
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            rsi_val = 100.0
+        else:
+            rsi_val = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+    return rsi_val
+
+
+def macd_direction(prices):
+    """Return MACD histogram direction: positive=bullish, negative=bearish."""
+    if len(prices) < 26:
+        return 0.0
+    ema12 = sum(prices[:12]) / 12
+    ema26 = sum(prices[:26]) / 26
+    alpha12, alpha26 = 2 / 13, 2 / 27
+    for p in prices[12:]:
+        ema12 = ema12 * (1 - alpha12) + p * alpha12
+    for p in prices[26:]:
+        ema26 = ema26 * (1 - alpha26) + p * alpha26
+    return ema12 - ema26
+
+
+def bollinger_bands(prices, period=20, std_mult=2.0):
+    """Bollinger Bands from price list: middle, upper, lower, bandwidth_pct."""
+    if len(prices) < period:
+        last = prices[-1] if prices else 0
+        return {"middle": last, "upper": last, "lower": last, "bandwidth_pct": 0}
+    middle = sum(prices[-period:]) / period
+    variance = sum((p - middle) ** 2 for p in prices[-period:]) / period
+    std = math.sqrt(variance) if variance > 0 else 0
+    upper = middle + std_mult * std
+    lower = middle - std_mult * std
+    bandwidth_pct = (upper - lower) / middle * 100 if middle > 0 else 0
+    return {"middle": round(middle, 4), "upper": round(upper, 4),
+            "lower": round(lower, 4), "bandwidth_pct": round(bandwidth_pct, 2)}
+
+
+def volume_ma(kline, period=20):
+    """Average volume over given period from kline record list."""
+    volumes = [r.get("vol", 0) or 0 for r in kline[-period:]]
+    return sum(volumes) / len(volumes) if volumes else 0

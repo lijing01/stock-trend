@@ -31,6 +31,7 @@ SCRIPT_DIR = Path(__file__).parent
 ASSETS_DIR = SCRIPT_DIR.parent / "assets"
 
 from cache_utils import safe_float as _safe_float
+from eastmoney_utils import latest_kline_record
 
 
 def render_template(template_str, context):
@@ -120,16 +121,6 @@ def _is_error_data_source(meta):
     return (meta or {}).get("data_source") == "error"
 
 
-def _latest_kline_record(records):
-    valid_records = [record for record in records if isinstance(record, dict)]
-    if not valid_records:
-        return None
-    dated_records = [record for record in valid_records if record.get("trade_date")]
-    if dated_records:
-        return max(dated_records, key=lambda record: str(record.get("trade_date", "")))
-    return valid_records[-1]
-
-
 def _kline_close_status(kline, required=False):
     """Return (latest_close, unavailable) for explicit K-line inputs."""
     if not kline:
@@ -145,7 +136,7 @@ def _kline_close_status(kline, required=False):
     if not isinstance(records, list) or not records:
         return None, required
 
-    latest_record = _latest_kline_record(records)
+    latest_record = latest_kline_record(records)
     close = _safe_float(latest_record.get("close")) if latest_record else None
     if close is not None:
         return f"{close:.2f}", False
@@ -189,6 +180,17 @@ def _load_scores_file(path):
     except (OSError, json.JSONDecodeError) as exc:
         print(f"Warning: failed to load scores file {path}: {exc}", file=sys.stderr)
         return {}
+
+
+def _load_json_safe(path):
+    """Read JSON file, return {} or [] on failure."""
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _hydrate_args_from_scores_file(args):
@@ -326,54 +328,17 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
     }
 
 
-def build_context(args):
-    """Build template context from CLI arguments and data files."""
-    # Load technical analysis data
-    technical = {}
-    if args.technical:
-        try:
-            with open(args.technical, "r", encoding="utf-8") as f:
-                technical = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
+def _load_all_data(args):
+    """Load all data files and parse JSON args. Pure IO, all upfront."""
+    technical = _load_json_safe(args.technical) or {}
+    kline = _load_json_safe(args.kline) or {}
+    etf_data = _load_json_safe(args.etf_data) or {}
+    capital_flow = _load_json_safe(args.capital_flow) or {}
+    chip_dist = _load_json_safe(args.chip_distribution) or {}
+    fundamental_data = _load_json_safe(args.fundamental_data) or {}
+    macro_data = _load_json_safe(args.macro_data) or {}
+    futures_data = _load_json_safe(args.futures_data) or {}
 
-    # Load kline data for metadata
-    kline = {}
-    if args.kline:
-        try:
-            with open(args.kline, "r", encoding="utf-8") as f:
-                kline = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    # Load ETF data
-    etf_data = {}
-    if args.etf_data:
-        try:
-            with open(args.etf_data, "r", encoding="utf-8") as f:
-                etf_data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    # Load capital flow data
-    capital_flow = {}
-    if args.capital_flow:
-        try:
-            with open(args.capital_flow, "r", encoding="utf-8") as f:
-                capital_flow = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    # Load chip distribution data
-    chip_dist = {}
-    if args.chip_distribution:
-        try:
-            with open(args.chip_distribution, "r", encoding="utf-8") as f:
-                chip_dist = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    # Parse scores JSON
     scores = {}
     if args.scores:
         try:
@@ -381,10 +346,6 @@ def build_context(args):
         except json.JSONDecodeError:
             pass
 
-    scores_data = _hydrate_args_from_scores_file(args)
-    report_params = scores_data.get("report_params", {}) if scores_data else {}
-
-    # Parse risks JSON
     risks = []
     if args.risks:
         try:
@@ -392,13 +353,42 @@ def build_context(args):
         except json.JSONDecodeError:
             risks = [args.risks]
 
-    # Parse special JSON
     special = {}
     if args.special:
         try:
             special = json.loads(args.special)
         except json.JSONDecodeError:
             pass
+
+    scores_data = _hydrate_args_from_scores_file(args)
+    report_params = scores_data.get("report_params", {}) if scores_data else {}
+
+    return {
+        "technical": technical, "kline": kline,
+        "etf_data": etf_data, "capital_flow": capital_flow,
+        "chip_dist": chip_dist, "fundamental_data": fundamental_data,
+        "macro_data": macro_data, "futures_data": futures_data,
+        "scores": scores, "risks": risks, "special": special,
+        "scores_data": scores_data, "report_params": report_params,
+    }
+
+
+def build_context(args):
+    """Build template context from CLI arguments and data files."""
+    d = _load_all_data(args)
+    technical = d["technical"]
+    kline = d["kline"]
+    etf_data = d["etf_data"]
+    capital_flow = d["capital_flow"]
+    chip_dist = d["chip_dist"]
+    scores = d["scores"]
+    scores_data = d["scores_data"]
+    report_params = d["report_params"]
+    risks = d["risks"]
+    special = d["special"]
+    fundamental_data = d["fundamental_data"]
+    macro_data = d["macro_data"]
+    futures_data = d["futures_data"]
 
     # Extract data
     summary = technical.get("summary", {})
@@ -717,36 +707,15 @@ def build_context(args):
         ] if chip_dist else [],
     }
 
-    # Load fundamental data flag
-    has_fund = False
-    if args.fundamental_data:
-        try:
-            with open(args.fundamental_data, "r", encoding="utf-8") as f:
-                fd = json.load(f)
-            has_fund = fd.get("summary", {}).get("data_quality") in ("good", "partial")
-        except Exception:
-            pass
+    # Fundamental data flag
+    has_fund = fundamental_data.get("summary", {}).get("data_quality") in ("good", "partial") if fundamental_data else False
     context["has_fundamental_data"] = has_fund
 
-    # Load macro data flag
-    has_macro = False
-    if args.macro_data:
-        try:
-            with open(args.macro_data, "r", encoding="utf-8") as f:
-                md = json.load(f)
-            has_macro = md.get("summary", {}).get("data_quality") in ("good", "partial")
-        except Exception:
-            pass
+    # Macro data flag
+    has_macro = macro_data.get("summary", {}).get("data_quality") in ("good", "partial") if macro_data else False
     context["has_macro_data"] = has_macro
 
-    # Load futures data
-    futures_data = {}
-    if args.futures_data:
-        try:
-            with open(args.futures_data, "r", encoding="utf-8") as f:
-                futures_data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
+    # Futures data
     if futures_data:
         basis_pct = futures_data.get("basis_pct")
         direction = "升水" if basis_pct is not None and basis_pct > 0 else "贴水"

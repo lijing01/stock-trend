@@ -29,6 +29,11 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from resolve_code import code_to_ts_code
+from eastmoney_utils import (
+    piecewise_linear_clamped,
+    ma as _ma, rsi as _rsi, macd_direction as _macd_direction,
+    bollinger_bands as _bollinger_bands, volume_ma as _volume_ma,
+)
 
 import yaml
 from collections import defaultdict
@@ -338,70 +343,6 @@ def fetch_quick_etf_data(code: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _ma(prices: list, period: int) -> float:
-    """Simple moving average."""
-    if len(prices) < period:
-        return prices[-1] if prices else 0.0
-    return sum(prices[-period:]) / period
-
-
-def _rsi(prices: list, period: int = 14) -> float:
-    """Relative Strength Index (smoothed RSI)."""
-    if len(prices) < period + 1:
-        return 50.0
-    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
-    gains = [d if d > 0 else 0 for d in deltas]
-    losses = [-d if d < 0 else 0 for d in deltas]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    rsi_val = 50.0
-    for i in range(period, len(deltas)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        if avg_loss == 0:
-            rsi_val = 100.0
-        else:
-            rsi_val = 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
-    return rsi_val
-
-
-def _macd_direction(prices: list) -> float:
-    """Return MACD histogram direction: positive=bullish, negative=bearish.
-
-    Uses an approximate EMA calculation over the full price series.
-    """
-    if len(prices) < 26:
-        return 0.0
-    # Seed with SMA
-    ema12 = sum(prices[:12]) / 12
-    ema26 = sum(prices[:26]) / 26
-    alpha12, alpha26 = 2 / 13, 2 / 27
-    for p in prices[12:]:
-        ema12 = ema12 * (1 - alpha12) + p * alpha12
-    for p in prices[26:]:
-        ema26 = ema26 * (1 - alpha26) + p * alpha26
-    return ema12 - ema26
-
-
-def _bollinger_bands(prices: list, period: int = 20, std_mult: float = 2.0) -> dict:
-    """Bollinger Bands: middle (SMA), upper, lower, bandwidth_pct."""
-    if len(prices) < period:
-        last = prices[-1] if prices else 0
-        return {"middle": last, "upper": last, "lower": last, "bandwidth_pct": 0}
-    middle = sum(prices[-period:]) / period
-    variance = sum((p - middle) ** 2 for p in prices[-period:]) / period
-    std = math.sqrt(variance) if variance > 0 else 0
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    bandwidth_pct = (upper - lower) / middle * 100 if middle > 0 else 0
-    return {"middle": round(middle, 4), "upper": round(upper, 4),
-            "lower": round(lower, 4), "bandwidth_pct": round(bandwidth_pct, 2)}
-
-
-def _volume_ma(kline: list, period: int = 20) -> float:
-    """Average volume over given period."""
-    volumes = [r.get("vol", 0) or 0 for r in kline[-period:]]
-    return sum(volumes) / len(volumes) if volumes else 0
 
 
 # ---------------------------------------------------------------------------
@@ -865,41 +806,10 @@ def _trend_strength(closes: list) -> tuple[float, float]:
 
 
 def _piecewise_linear(x: float, anchors: list[tuple[float, float]]) -> float:
-    """Piecewise-linear interpolation between anchor points.
-
-    Args:
-        x: Input value to map.
-        anchors: List of (input_val, output_score) tuples, sorted by input_val ascending.
-
-    Returns:
-        Interpolated output, clamped to [0, 100].
-    """
+    """Piecewise-linear interpolation, clamped to [0, 100]. Thin wrapper."""
     if len(anchors) < 2:
         raise ValueError("Need at least 2 anchors for piecewise linear")
-
-    for i in range(len(anchors) - 1):
-        x0, y0 = anchors[i]
-        x1, y1 = anchors[i + 1]
-        if x <= x0:
-            if i == 0:
-                result = y0
-                return max(0.0, min(100.0, result))
-            continue
-        if x <= x1:
-            if x1 == x0:
-                return max(0.0, min(100.0, y0))
-            slope = (y1 - y0) / (x1 - x0)
-            result = y0 + slope * (x - x0)
-            return max(0.0, min(100.0, result))
-
-    # x > last anchor: use last segment
-    x0, y0 = anchors[-2]
-    x1, y1 = anchors[-1]
-    if x1 == x0:
-        return max(0.0, min(100.0, y1))
-    slope = (y1 - y0) / (x1 - x0)
-    result = y1 + slope * (x - x1)
-    return max(0.0, min(100.0, result))
+    return piecewise_linear_clamped(x, anchors, low=0.0, high=100.0)
 
 
 # --- Continuous anchor points for piecewise-linear scoring ---

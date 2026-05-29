@@ -20,10 +20,10 @@ import json
 import math
 import sys
 from collections import defaultdict
-from datetime import date
 from pathlib import Path
 
-from cache_utils import CACHE_DIR
+from cache_utils import CACHE_DIR, load_iopv_history, save_iopv_history
+from eastmoney_utils import piecewise_linear
 
 
 # --- Default weights ---
@@ -72,31 +72,13 @@ IOPV_CAPITAL_FLOW_ANCHORS = [
 ]
 
 
-def _piecewise_linear(value, anchors):
-    """Interpolate value through piecewise-linear anchors.
-
-    Anchors is a sorted list of (x, y) pairs. Returns interpolated y.
-    """
-    if value <= anchors[0][0]:
-        return anchors[0][1]
-    if value >= anchors[-1][0]:
-        return anchors[-1][1]
-    for i in range(len(anchors) - 1):
-        x0, y0 = anchors[i]
-        x1, y1 = anchors[i + 1]
-        if x0 <= value <= x1:
-            t = (value - x0) / (x1 - x0) if x1 != x0 else 0
-            return y0 + t * (y1 - y0)
-    return anchors[-1][1]
-
-
 def score_iopv_capital_flow(iopv_premium_pct):
     """Convert IOPV premium/discount % to a capital_flow score contribution.
 
     Returns a value in [-1.5, +1.5] range, suitable for adding to the
     capital_flow dimension score (which is on the [-3, +3] scale).
     """
-    return round(_piecewise_linear(float(iopv_premium_pct), IOPV_CAPITAL_FLOW_ANCHORS), 2)
+    return round(piecewise_linear(float(iopv_premium_pct), IOPV_CAPITAL_FLOW_ANCHORS), 2)
 
 
 def score_shares_trend_from_etf_data(etf_data: dict) -> float | None:
@@ -121,7 +103,7 @@ def score_shares_trend_from_etf_data(etf_data: dict) -> float | None:
         (-20, 0.0), (-10, 10.0), (-3, 20.0), (0, 40.0),
         (3, 65.0), (10, 85.0), (30, 100.0),
     ]
-    return round(_piecewise_linear(change_pct, SHARES_TREND_ANCHORS), 1)
+    return round(piecewise_linear(change_pct, SHARES_TREND_ANCHORS), 1)
 
 
 def _compute_lhb_sentiment(lhb_data: dict) -> float:
@@ -167,43 +149,6 @@ def _compute_lhb_sentiment(lhb_data: dict) -> float:
 
     adjustment = max(-1.0, min(0.8, adjustment))
     return round(adjustment, 2)
-
-
-# ── IOPV history cache (P2 #9: historical percentile + trend) ──────────────
-
-IOPV_HISTORY_CACHE_FILENAME = "iopv_history.json"
-
-
-def load_iopv_history():
-    """Load IOPV history cache {code: [{date, premium}]}."""
-    path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def save_iopv_history(history: dict, code: str, premium: float):
-    """Append today's IOPV for code and persist."""
-    path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
-    today = date.today().isoformat()
-    entries = history.setdefault(code, [])
-    # Deduplicate: replace if today's entry exists, else append
-    found = False
-    for e in entries:
-        if e.get("date") == today:
-            e["premium"] = round(premium, 4)
-            found = True
-            break
-    if not found:
-        entries.append({"date": today, "premium": round(premium, 4)})
-        # Keep max 60 entries (60 trading days ~ 3 months)
-        if len(entries) > 60:
-            entries[:] = entries[-60:]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def score_iopv_capital_flow_enhanced(

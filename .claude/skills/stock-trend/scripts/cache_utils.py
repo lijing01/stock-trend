@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -251,6 +251,41 @@ def retry(func, max_attempts=2, delay=2):
             if attempt < max_attempts - 1:
                 time.sleep(delay)
     return None, str(last_err)
+
+
+# ─── IOPV history cache ─────────────────────────────────────────────
+
+IOPV_HISTORY_CACHE_FILENAME = "iopv_history.json"
+
+
+def load_iopv_history():
+    """Load IOPV history cache {code: [{date, premium}]}."""
+    path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_iopv_history(history: dict, code: str, premium: float):
+    """Append today's IOPV for code and persist."""
+    path = Path(CACHE_DIR) / IOPV_HISTORY_CACHE_FILENAME
+    today = date.today().isoformat()
+    entries = history.setdefault(code, [])
+    found = False
+    for e in entries:
+        if e.get("date") == today:
+            e["premium"] = round(premium, 4)
+            found = True
+            break
+    if not found:
+        entries.append({"date": today, "premium": round(premium, 4)})
+        if len(entries) > 60:
+            entries[:] = entries[-60:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

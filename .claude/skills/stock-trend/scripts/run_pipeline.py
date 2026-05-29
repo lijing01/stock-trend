@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from cache_utils import clean_cache, safe_float
+from eastmoney_utils import latest_kline_record
 
 SCRIPT_DIR = Path(__file__).parent
 
@@ -83,16 +84,6 @@ def read_json(path):
         return None
 
 
-def _latest_kline_row(rows):
-    valid_rows = [row for row in rows if isinstance(row, dict)]
-    if not valid_rows:
-        return None
-    dated_rows = [row for row in valid_rows if row.get("trade_date")]
-    if dated_rows:
-        return max(dated_rows, key=lambda row: str(row.get("trade_date", "")))
-    return valid_rows[-1]
-
-
 def is_successful_kline(kline_data):
     """Return True only when the current K-line payload has usable rows."""
     if not isinstance(kline_data, dict):
@@ -102,7 +93,7 @@ def is_successful_kline(kline_data):
     rows = kline_data.get("data")
     if not isinstance(rows, list) or not rows:
         return False
-    latest_row = _latest_kline_row(rows)
+    latest_row = latest_kline_record(rows)
     if latest_row is None:
         return False
     return all(safe_float(latest_row.get(key)) is not None for key in ("open", "high", "low", "close"))
