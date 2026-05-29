@@ -83,6 +83,58 @@ def read_json(path):
         return None
 
 
+def is_successful_kline(kline_data):
+    """Return True only when the current K-line payload has usable rows."""
+    if not isinstance(kline_data, dict):
+        return False
+    if kline_data.get("meta", {}).get("data_source") == "error":
+        return False
+    rows = kline_data.get("data")
+    return isinstance(rows, list) and len(rows) > 0
+
+
+def remove_stale_file(path, label, errors):
+    """Delete stale downstream output so report generation cannot reuse it."""
+    if not path or not Path(path).exists():
+        return False
+    try:
+        Path(path).unlink()
+        errors.append(f"Removed stale {label}: {path}")
+        return True
+    except OSError as exc:
+        errors.append(f"Failed to remove stale {label}: {path}: {exc}")
+        return False
+
+
+def build_output_files(
+    output_dir,
+    kline_path,
+    kline_available,
+    technical_available,
+    chip_available,
+    is_etf,
+    no_etf,
+    no_capital,
+    no_fundamental,
+    no_macro,
+    no_futures,
+    no_index_valuation,
+    asset,
+):
+    """Build pipeline output file map using freshness flags from this run."""
+    return {
+        "kline": kline_path,
+        "technical": str(output_dir / "technical.json") if technical_available else None,
+        "etf_data": str(output_dir / "etf_data.json") if is_etf and not no_etf else None,
+        "capital_flow": str(output_dir / "capital_flow.json") if not no_capital else None,
+        "fundamental": str(output_dir / "fundamental.json") if not no_fundamental and asset != "FD" else None,
+        "macro_snapshot": str(output_dir / "macro_snapshot.json") if not no_macro else None,
+        "futures_data": str(output_dir / "futures_data.json") if is_etf and not no_futures else None,
+        "index_valuation": str(output_dir / "index_valuation.json") if is_etf and not no_index_valuation else None,
+        "chip_distribution": str(output_dir / "chip_distribution.json") if chip_available else None,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run full stock-trend data pipeline"
@@ -153,6 +205,10 @@ def main():
     errors = []
     timeouts = []
     results = {}
+    kline_available = False
+    technical_available = False
+    chip_available = False
+    chip_result = {"success": False}
 
     # --- Step 1: Quick diagnostic ---
     print(f"[1/5] Running diagnostic...")
@@ -213,18 +269,21 @@ def main():
     if kline_data:
         data_source = kline_data.get("meta", {}).get("data_source", "unknown")
         record_count = kline_data.get("meta", {}).get("record_count", 0)
+        kline_available = is_successful_kline(kline_data)
         print(f"  K-line data: {data_source}, {record_count} records")
         results["kline"] = {
             "data_source": data_source,
             "record_count": record_count,
         }
+        if not kline_available:
+            errors.append("K-line data unavailable or empty")
     else:
         errors.append("K-line data unavailable")
         results["kline"] = {"data_source": "error", "record_count": 0}
 
     # --- Step 3: Chip distribution analysis (depends on kline, runs before technical) ---
     chip_distribution_path = str(output_dir / "chip_distribution.json")
-    if kline_data and kline_data.get("meta", {}).get("data_source") != "error":
+    if kline_available:
         print(f"[3/5] Computing chip distribution...")
         chip_cmd = [
             sys.executable, str(SCRIPT_DIR / "compute_chip_distribution.py"),
@@ -236,6 +295,7 @@ def main():
         if chip_result["success"]:
             chip_data = read_json(chip_distribution_path)
             if chip_data and "error" not in chip_data:
+                chip_available = True
                 avg_cost = chip_data.get("avg_cost")
                 profit_ratio = chip_data.get("profit_ratio")
                 concentration = chip_data.get("concentration")
@@ -255,7 +315,7 @@ def main():
 
     # --- Step 3.5: Technical analysis (depends on kline, optionally chip distribution) ---
     technical_path = str(output_dir / "technical.json")
-    if kline_data and kline_data.get("meta", {}).get("data_source") != "error":
+    if kline_available:
         print(f"[3.5/5] Running technical analysis...")
         tech_cmd = [
             sys.executable, str(SCRIPT_DIR / "analyze_technical.py"),
@@ -275,7 +335,8 @@ def main():
             errors.append(f"Technical analysis failed: {tech_result['stderr']}")
 
         tech_data = read_json(technical_path)
-        if tech_data:
+        if tech_result["success"] and tech_data:
+            technical_available = True
             summary = tech_data.get("summary", {})
             results["technical"] = {
                 "total_score": summary.get("total_score"),
@@ -288,6 +349,8 @@ def main():
                   f"confidence={summary.get('confidence')}")
     else:
         print(f"[3.5/5] Skipping technical analysis (no K-line data)")
+        remove_stale_file(technical_path, "technical analysis", errors)
+        remove_stale_file(chip_distribution_path, "chip distribution", errors)
 
     # --- Step 4: ETF data and capital flow (parallel, independent) ---
     print(f"[4/5] Fetching supplementary data...")
@@ -470,17 +533,21 @@ def main():
         "results": results,
         "errors": errors,
         "timeouts": timeouts,
-        "output_files": {
-            "kline": kline_path,
-            "technical": technical_path if kline_data else None,
-            "etf_data": str(output_dir / "etf_data.json") if is_etf and not args.no_etf else None,
-            "capital_flow": str(output_dir / "capital_flow.json") if not args.no_capital else None,
-            "fundamental": str(output_dir / "fundamental.json") if not args.no_fundamental and asset != "FD" else None,
-            "macro_snapshot": str(output_dir / "macro_snapshot.json") if not args.no_macro else None,
-            "futures_data": str(output_dir / "futures_data.json") if is_etf and not args.no_futures else None,
-            "index_valuation": str(output_dir / "index_valuation.json") if is_etf and not args.no_index_valuation else None,
-            "chip_distribution": chip_distribution_path if kline_data else None,
-        },
+        "output_files": build_output_files(
+            output_dir=output_dir,
+            kline_path=kline_path,
+            kline_available=kline_available,
+            technical_available=technical_available,
+            chip_available=chip_available,
+            is_etf=is_etf,
+            no_etf=args.no_etf,
+            no_capital=args.no_capital,
+            no_fundamental=args.no_fundamental,
+            no_macro=args.no_macro,
+            no_futures=args.no_futures,
+            no_index_valuation=args.no_index_valuation,
+            asset=asset,
+        ),
     }
 
     pipeline_path = str(output_dir / "pipeline_output.json")
