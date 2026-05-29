@@ -284,9 +284,15 @@ def _normalize_capital_flow(data):
     ]
     return {
         "meta": _stable_keys(data.get("meta", {}), ["ts_code", "asset"]),
-        "data_empty": len(data.get("data", [])) == 0,
         "northbound_individual": extended.get("northbound_individual", {}),
         "northbound_market_values": market_values,
+    }
+
+
+def _normalize_futures_data(data):
+    meta = data.get("meta", {})
+    return {
+        "meta": _stable_keys(meta, ["etf_code", "futures_code", "futures_secid", "index_secid"]),
     }
 
 
@@ -395,6 +401,7 @@ def diff_output(output_name, golden_data, current_data, config, asset_type=None)
         "macro_snapshot.json": _normalize_macro_snapshot,
         "fundamental.json": _normalize_fundamental,
         "capital_flow.json": _normalize_capital_flow,
+        "futures_data.json": _normalize_futures_data,
         "etf_data.json": _normalize_etf_data,
         "technical.json": _normalize_technical,
         "scores.json": _normalize_scores,
