@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from cache_utils import clean_cache
+from cache_utils import clean_cache, safe_float
 
 SCRIPT_DIR = Path(__file__).parent
 
@@ -83,13 +83,6 @@ def read_json(path):
         return None
 
 
-def _safe_number(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _latest_kline_row(rows):
     valid_rows = [row for row in rows if isinstance(row, dict)]
     if not valid_rows:
@@ -112,7 +105,7 @@ def is_successful_kline(kline_data):
     latest_row = _latest_kline_row(rows)
     if latest_row is None:
         return False
-    return all(_safe_number(latest_row.get(key)) is not None for key in ("open", "high", "low", "close"))
+    return all(safe_float(latest_row.get(key)) is not None for key in ("open", "high", "low", "close"))
 
 
 def remove_stale_file(path, label, errors):
@@ -145,7 +138,7 @@ def build_output_files(
 ):
     """Build pipeline output file map using freshness flags from this run."""
     return {
-        "kline": kline_path,
+        "kline": kline_path if kline_available else None,
         "technical": str(output_dir / "technical.json") if technical_available else None,
         "etf_data": str(output_dir / "etf_data.json") if is_etf and not no_etf else None,
         "capital_flow": str(output_dir / "capital_flow.json") if not no_capital else None,
@@ -376,6 +369,7 @@ def main():
         print(f"[3.5/5] Skipping technical analysis (no K-line data)")
         remove_stale_file(technical_path, "technical analysis", errors)
         remove_stale_file(chip_distribution_path, "chip distribution", errors)
+        remove_stale_file(kline_path, "K-line data", errors)
 
     # --- Step 4: ETF data and capital flow (parallel, independent) ---
     print(f"[4/5] Fetching supplementary data...")

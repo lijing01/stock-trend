@@ -30,6 +30,8 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 ASSETS_DIR = SCRIPT_DIR.parent / "assets"
 
+from cache_utils import safe_float as _safe_float
+
 
 def render_template(template_str, context):
     """Simple template engine: {{variable}}, {{#section}}...{{/section}}, {{^section}}...{{/section}}."""
@@ -104,15 +106,6 @@ def direction_symbol(direction):
     elif "空" in direction or "bear" in direction.lower():
         return "▼"
     return "◆"
-
-
-def _safe_float(value):
-    if value in (None, "", "—"):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _first_numeric(values):
@@ -419,7 +412,9 @@ def build_context(args):
         report_params = {}
         scores = {}
         chip_dist = {}
-    patterns = [] if kline_unavailable else technical.get("patterns", [])
+        patterns = []
+    else:
+        patterns = technical.get("patterns", [])
     merged_report_params = {**summary, **report_params}
 
     latest_close = kline_latest_close

@@ -284,6 +284,7 @@ def _normalize_capital_flow(data):
     ]
     return {
         "meta": _stable_keys(data.get("meta", {}), ["ts_code", "asset"]),
+        "data_empty": len(data.get("data", [])) == 0,
         "northbound_individual": extended.get("northbound_individual", {}),
         "northbound_market_values": market_values,
     }
