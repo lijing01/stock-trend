@@ -687,6 +687,8 @@ def run_new_script_tests(tmpdir):
         "--ts-code", "300241.SZ",
         "--stock-name", "瑞丰光电",
         "--date", "2026-05-29",
+        "--entry-verdict", "ready",
+        "--entry-signals", "[\"旧买点\"]",
         "--output-md", stale_md_path,
         timeout=15,
     )
@@ -714,6 +716,7 @@ def run_new_script_tests(tmpdir):
             and "| 压力位 | — |" in stale_content
             and "| 目标价位 | — |" in stale_content
             and "跌破支撑位—" not in stale_content
+            and "可入场" not in stale_content
             and "只观察" in stale_content,
             stale_content[current_idx:current_idx + 300],
             "report",
@@ -729,6 +732,8 @@ def run_new_script_tests(tmpdir):
         "--ts-code", "300241.SZ",
         "--stock-name", "瑞丰光电",
         "--date", "2026-05-29",
+        "--entry-verdict", "ready",
+        "--entry-signals", "[\"旧买点\"]",
         "--output-md", malformed_md_path,
         timeout=15,
     )
@@ -738,7 +743,9 @@ def run_new_script_tests(tmpdir):
             malformed_content = f.read()
     test(
         "TF-RPT-STALE-04: 无有效K线close不回退旧当前价",
-        "| 当前价 | — |" in malformed_content and "| 当前价 | 7.46 |" not in malformed_content,
+        "| 当前价 | — |" in malformed_content
+        and "| 当前价 | 7.46 |" not in malformed_content
+        and "可入场" not in malformed_content,
         malformed_content[:500] if malformed_content else f"exit_code={rc}, stderr={stderr[:200]}",
         "report",
     )
@@ -938,10 +945,11 @@ def run_pipeline_tests(tmpdir):
     sys.path.insert(0, str(SCRIPTS_DIR))
     try:
         import run_pipeline
-        from run_pipeline import build_output_files
+        from run_pipeline import build_output_files, is_successful_kline
     except ImportError:
         run_pipeline = None
         build_output_files = None
+        is_successful_kline = None
     stale_output_dir = Path(tmpdir) / "stale_pipeline"
     stale_output_dir.mkdir(parents=True, exist_ok=True)
     _write_json(str(stale_output_dir / "technical.json"), _build_stale_technical_fixture())
@@ -970,6 +978,12 @@ def run_pipeline_tests(tmpdir):
             f"technical={files.get('technical')}, chip={files.get('chip_distribution')}",
             "pipeline",
         )
+        test(
+            "TP-PL-STALE-01a: 最新K线缺close判定不可用",
+            is_successful_kline is not None and not is_successful_kline(_build_malformed_kline_fixture()),
+            "malformed latest K-line should be unavailable",
+            "pipeline",
+        )
     stale_flow_dir = Path(tmpdir) / "stale_pipeline_flow"
     stale_flow_dir.mkdir(parents=True, exist_ok=True)
     _write_json(str(stale_flow_dir / "technical.json"), _build_stale_technical_fixture())
@@ -984,7 +998,7 @@ def run_pipeline_tests(tmpdir):
         def fake_run_script(cmd, label="", timeout=30):
             if label in ("fetch_kline_tushare", "fetch_kline_eastmoney"):
                 out_path = cmd[cmd.index("-o") + 1]
-                _write_json(out_path, _build_error_kline_fixture())
+                _write_json(out_path, _build_malformed_kline_fixture())
             return {
                 "success": True,
                 "label": label,

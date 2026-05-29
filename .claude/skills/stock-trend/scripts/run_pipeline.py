@@ -83,6 +83,23 @@ def read_json(path):
         return None
 
 
+def _safe_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_kline_row(rows):
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    if not valid_rows:
+        return None
+    dated_rows = [row for row in valid_rows if row.get("trade_date")]
+    if dated_rows:
+        return max(dated_rows, key=lambda row: str(row.get("trade_date", "")))
+    return valid_rows[-1]
+
+
 def is_successful_kline(kline_data):
     """Return True only when the current K-line payload has usable rows."""
     if not isinstance(kline_data, dict):
@@ -90,7 +107,12 @@ def is_successful_kline(kline_data):
     if kline_data.get("meta", {}).get("data_source") == "error":
         return False
     rows = kline_data.get("data")
-    return isinstance(rows, list) and len(rows) > 0
+    if not isinstance(rows, list) or not rows:
+        return False
+    latest_row = _latest_kline_row(rows)
+    if latest_row is None:
+        return False
+    return all(_safe_number(latest_row.get(key)) is not None for key in ("open", "high", "low", "close"))
 
 
 def remove_stale_file(path, label, errors):

@@ -127,6 +127,16 @@ def _is_error_data_source(meta):
     return (meta or {}).get("data_source") == "error"
 
 
+def _latest_kline_record(records):
+    valid_records = [record for record in records if isinstance(record, dict)]
+    if not valid_records:
+        return None
+    dated_records = [record for record in valid_records if record.get("trade_date")]
+    if dated_records:
+        return max(dated_records, key=lambda record: str(record.get("trade_date", "")))
+    return valid_records[-1]
+
+
 def _kline_close_status(kline, required=False):
     """Return (latest_close, unavailable) for explicit K-line inputs."""
     if not kline:
@@ -142,13 +152,11 @@ def _kline_close_status(kline, required=False):
     if not isinstance(records, list) or not records:
         return None, required
 
-    for record in reversed(records):
-        if not isinstance(record, dict):
-            continue
-        close = _safe_float(record.get("close"))
-        if close is not None:
-            return f"{close:.2f}", False
-    return None, required
+    latest_record = _latest_kline_record(records)
+    close = _safe_float(latest_record.get("close")) if latest_record else None
+    if close is not None:
+        return f"{close:.2f}", False
+    return None, True
 
 
 def _nearest_support(values, close):
@@ -430,6 +438,7 @@ def build_context(args):
                 entry_signals_list = [args.entry_signals] if isinstance(args.entry_signals, str) else []
     if kline_unavailable:
         entry_signals_list = []
+    entry_verdict = "wait" if kline_unavailable else (args.entry_verdict or "wait")
 
     # Build context
     ts_code = args.ts_code or meta.get("ts_code", kline_meta.get("ts_code", "unknown"))
@@ -695,9 +704,9 @@ def build_context(args):
         "tech_data_source": data_source if data_source else "Tushare/东方财富",
         "capital_data_source": capital_flow.get("meta", {}).get("data_source", "东方财富"),
         # Entry timing
-        "入场时机": args.entry_verdict != "wait",
-        "entry_verdict": args.entry_verdict,
-        "entry_verdict_text": {"ready": "可入场", "watch": "等待确认", "wait": "暂观望", "avoid": "不建议入场"}.get(args.entry_verdict, ""),
+        "入场时机": entry_verdict != "wait",
+        "entry_verdict": entry_verdict,
+        "entry_verdict_text": {"ready": "可入场", "watch": "等待确认", "wait": "暂观望", "avoid": "不建议入场"}.get(entry_verdict, ""),
         "entry_signals": entry_signals_list,
         "entry_signals_text": " + ".join(entry_signals_list) if entry_signals_list else "",
         "entry_signal_count": len(entry_signals_list),
