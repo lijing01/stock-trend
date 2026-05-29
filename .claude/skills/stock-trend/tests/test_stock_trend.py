@@ -525,13 +525,9 @@ def run_new_script_tests(tmpdir):
         fundamental_summary="—",
         sentiment_summary="—",
         macro_summary="—",
-        entry_verdict="watch",
-        entry_signals=json.dumps(["回踩支撑不破", "量能回补"], ensure_ascii=False),
-        analysis=json.dumps({
-            "core_conflict": "趋势偏多，但当前位置略高于理想回踩位。",
-            "events": [{"date": "2026-06-10", "event": "股东大会", "impact": "事件前若未回踩则放弃计划"}],
-            "advice": ["回踩 1248-1252 分批试仓", "若放量站稳 1288 再考虑追踪"],
-        }, ensure_ascii=False),
+        entry_verdict=None,
+        entry_signals=None,
+        analysis=None,
         chart=None,
         fundamental_data=None,
         macro_data=None,
@@ -544,7 +540,7 @@ def run_new_script_tests(tmpdir):
     )
 
     context = generate_report.build_context(args)
-    test("TF-RPT-CTX-01: 今日动作标签", context.get("今日动作标签") == "等回踩",
+    test("TF-RPT-CTX-01: 今日动作标签", context.get("今日动作标签") == "可低吸",
          f"label={context.get('今日动作标签')}", "report")
     test("TF-RPT-CTX-02: 场景A标题", context.get("场景A标题") == "场景 A：继续上冲",
          f"title={context.get('场景A标题')}", "report")

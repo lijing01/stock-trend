@@ -106,6 +106,140 @@ def direction_symbol(direction):
     return "◆"
 
 
+def _safe_float(value):
+    if value in (None, "", "—"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_numeric(values):
+    for value in values or []:
+        num = _safe_float(value)
+        if num is not None:
+            return num
+    return None
+
+
+def _fmt_price(value):
+    num = _safe_float(value)
+    return "—" if num is None else f"{num:.2f}"
+
+
+def _build_time_window(events):
+    if not events:
+        return "未来 5-10 个交易日有效；若始终未触发则重新评估。"
+    first = events[0]
+    label = first.get("date") or first.get("name") or "关键事件"
+    return f"未来 5-10 个交易日有效；若 {label} 前仍未触发则该计划失效，需重新评估。"
+
+
+def _load_scores_file(path):
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Warning: failed to load scores file {path}: {exc}", file=sys.stderr)
+        return {}
+
+
+def _hydrate_args_from_scores_file(args):
+    scores_data = getattr(args, "_scores_data", None)
+    if scores_data is None:
+        scores_data = _load_scores_file(getattr(args, "scores_file", None))
+        setattr(args, "_scores_data", scores_data)
+
+    report_params = scores_data.get("report_params", {}) if scores_data else {}
+    if scores_data and not getattr(args, "analysis", None):
+        analysis = scores_data.get("analysis")
+        if analysis:
+            args.analysis = json.dumps(analysis, ensure_ascii=False)
+    if not getattr(args, "entry_verdict", None):
+        args.entry_verdict = report_params.get("entry_verdict", "wait")
+    if not getattr(args, "entry_signals", None):
+        args.entry_signals = json.dumps(report_params.get("entry_signals", []), ensure_ascii=False)
+    return scores_data
+
+
+def build_action_plan(direction, confidence, latest_close, report_params, analysis_data):
+    """Derive actionable report context from scoring/report parameters."""
+    report_params = report_params or {}
+    analysis_data = analysis_data or {}
+
+    support_levels = report_params.get("support_levels", [])
+    resistance_levels = report_params.get("resistance_levels", [])
+    support = _first_numeric(support_levels)
+    resistance = _first_numeric(resistance_levels)
+    stop_loss = _safe_float(report_params.get("stop_loss"))
+    tp1 = _safe_float(report_params.get("target_conservative"))
+    tp2 = _safe_float(report_params.get("target_moderate") or report_params.get("target"))
+    rr_ratio = _safe_float(report_params.get("risk_reward_ratio") or report_params.get("rr_moderate"))
+    close = _safe_float(latest_close)
+
+    direction_text = direction or ""
+    is_bearish = "看空" in direction_text or "bear" in direction_text.lower()
+    low_confidence = confidence in ("低", "low")
+    near_tp1 = close is not None and tp1 is not None and close >= tp1 * 0.98
+    near_support = close is not None and support is not None and abs(close - support) / support <= 0.015
+
+    if near_tp1:
+        action_label = "分批止盈"
+    elif is_bearish or low_confidence or rr_ratio is None or rr_ratio < 1.5 or support is None or stop_loss is None:
+        action_label = "只观察"
+    elif near_support:
+        action_label = "可低吸"
+    else:
+        action_label = "等回踩"
+
+    support_text = _fmt_price(support)
+    resistance_text = _fmt_price(resistance)
+    stop_text = _fmt_price(stop_loss)
+    tp1_text = _fmt_price(tp1)
+    tp2_text = _fmt_price(tp2)
+
+    if action_label == "分批止盈":
+        summary = f"当前价接近第一目标 {tp1_text}，优先分批止盈并抬高保护位。"
+        detail = "不再追高加仓，保留底仓观察能否放量突破下一目标。"
+    elif action_label == "只观察":
+        summary = "当前风险收益比或关键价位条件不足，先观察不主动开仓。"
+        detail = "等待支撑、止损、目标与量能条件重新匹配后再制定入场计划。"
+    elif action_label == "可低吸":
+        summary = f"当前价接近支撑 {support_text}，可按计划分批低吸。"
+        detail = f"以 {stop_text} 作为硬止损，单次仓位不宜过重。"
+    else:
+        summary = f"趋势偏多但距离支撑 {support_text} 仍有空间，等待回踩确认。"
+        detail = "避免在压力位下方追高，优先等待缩量回踩或放量突破后的二次确认。"
+
+    scenario_b_action = "继续观察，等待关键价位补全。"
+    if support is not None and stop_loss is not None:
+        scenario_b_action = f"回踩 {support_text} 附近且不破 {stop_text} 时分批试仓；跌破止损则放弃。"
+
+    events = analysis_data.get("events", [])
+    return {
+        "操作计划": True,
+        "今日动作标签": action_label,
+        "今日动作摘要": summary,
+        "今日动作说明": detail,
+        "场景A标题": "场景 A：继续上冲",
+        "场景A条件": f"放量突破或站稳压力位 {resistance_text}",
+        "场景A动作": f"不追高满仓；若接近 {tp1_text} 先分批止盈，突破后再看 {tp2_text}。",
+        "场景B标题": "场景 B：回踩支撑",
+        "场景B条件": f"回踩支撑位 {support_text} 附近并出现止跌信号",
+        "场景B动作": scenario_b_action,
+        "退出条件1": f"有效跌破止损位 {stop_text}",
+        "退出动作1": "立即止损离场，避免亏损扩大。",
+        "退出条件2": f"冲高接近第一目标 {tp1_text}",
+        "退出动作2": "分批止盈，剩余仓位跟踪趋势。",
+        "退出条件3": "事件前仍未触发入场条件或量能持续背离",
+        "退出动作3": "取消原计划，重新评估趋势与风险收益比。",
+        "执行时间窗": _build_time_window(events),
+    }
+
+
 def build_context(args):
     """Build template context from CLI arguments and data files."""
     # Load technical analysis data
@@ -161,6 +295,9 @@ def build_context(args):
         except json.JSONDecodeError:
             pass
 
+    scores_data = _hydrate_args_from_scores_file(args)
+    report_params = scores_data.get("report_params", {}) if scores_data else {}
+
     # Parse risks JSON
     risks = []
     if args.risks:
@@ -182,6 +319,7 @@ def build_context(args):
     meta = technical.get("meta", {})
     kline_meta = kline.get("meta", {})
     patterns = technical.get("patterns", [])
+    merged_report_params = {**summary, **report_params}
 
     # Latest close price
     latest_close = technical.get("latest", {}).get("close", None)
@@ -189,10 +327,13 @@ def build_context(args):
     # Parse entry signals JSON
     entry_signals_list = []
     if args.entry_signals:
-        try:
-            entry_signals_list = json.loads(args.entry_signals)
-        except (json.JSONDecodeError, TypeError):
-            entry_signals_list = [args.entry_signals] if isinstance(args.entry_signals, str) else []
+        if isinstance(args.entry_signals, list):
+            entry_signals_list = args.entry_signals
+        else:
+            try:
+                entry_signals_list = json.loads(args.entry_signals)
+            except (json.JSONDecodeError, TypeError):
+                entry_signals_list = [args.entry_signals] if isinstance(args.entry_signals, str) else []
 
     # Build context
     ts_code = args.ts_code or meta.get("ts_code", kline_meta.get("ts_code", "unknown"))
@@ -219,15 +360,15 @@ def build_context(args):
     pattern_summary = "；".join(f"{p['name']}({p['direction']})" for p in patterns[:3]) if patterns else ""
 
     # Risk/reward
-    stop_loss = summary.get("stop_loss", "—")
-    target_conservative = summary.get("target_conservative")
-    target_moderate = summary.get("target_moderate") or summary.get("target", "—")
-    target_aggressive = summary.get("target_aggressive")
-    target = summary.get("target", "—")
-    rr_ratio = summary.get("risk_reward_ratio", "—")
-    favorable_rr = summary.get("favorable_rr")
-    position_sizing = summary.get("position_sizing", "—")
-    max_drawdown = summary.get("max_drawdown_pct", "—")
+    stop_loss = report_params.get("stop_loss", summary.get("stop_loss", "—"))
+    target_conservative = report_params.get("target_conservative", summary.get("target_conservative"))
+    target_moderate = report_params.get("target_moderate", summary.get("target_moderate") or summary.get("target", "—"))
+    target_aggressive = report_params.get("target_aggressive", summary.get("target_aggressive"))
+    target = report_params.get("target", summary.get("target", "—"))
+    rr_ratio = report_params.get("risk_reward_ratio", summary.get("risk_reward_ratio", "—"))
+    favorable_rr = report_params.get("favorable_rr", summary.get("favorable_rr"))
+    position_sizing = report_params.get("position_sizing", summary.get("position_sizing", "—"))
+    max_drawdown = report_params.get("max_drawdown_pct", summary.get("max_drawdown_pct", "—"))
 
     # Format target with three tiers if available
     target_display = str(target_moderate)
@@ -235,8 +376,8 @@ def build_context(args):
         target_display = f"{target_conservative}/{target_moderate}/{target_aggressive}"
 
     # Support/resistance levels
-    support_levels = summary.get("support_levels", [])
-    resistance_levels = summary.get("resistance_levels", [])
+    support_levels = report_params.get("support_levels", summary.get("support_levels", []))
+    resistance_levels = report_params.get("resistance_levels", summary.get("resistance_levels", []))
     support_str = " / ".join(str(s) for s in support_levels[:3]) if support_levels else "—"
     resistance_str = " / ".join(str(r) for r in resistance_levels[:3]) if resistance_levels else "—"
 
@@ -270,9 +411,9 @@ def build_context(args):
         rr_display += " ✗"
 
     # Three-tier R:R
-    rr_conservative = summary.get("rr_conservative")
-    rr_moderate = summary.get("rr_moderate") or rr_ratio
-    rr_aggressive = summary.get("rr_aggressive")
+    rr_conservative = report_params.get("rr_conservative", summary.get("rr_conservative"))
+    rr_moderate = report_params.get("rr_moderate", summary.get("rr_moderate")) or rr_ratio
+    rr_aggressive = report_params.get("rr_aggressive", summary.get("rr_aggressive"))
 
     def fmt_rr(val):
         if val is None:
@@ -537,15 +678,10 @@ def build_context(args):
         context["事件列表"] = []
         context["操作建议列表"] = []
 
+    context.update(build_action_plan(direction, confidence, latest_close, merged_report_params, analysis_data))
+
     # Validation warnings from scores file
-    validation_warnings = []
-    if args.scores_file:
-        try:
-            with open(args.scores_file, "r", encoding="utf-8") as f:
-                sf = json.load(f)
-            validation_warnings = sf.get("validation_warnings", [])
-        except Exception:
-            pass
+    validation_warnings = scores_data.get("validation_warnings", []) if scores_data else []
     context["校验警告"] = len(validation_warnings) > 0
     context["校验警告列表"] = [{"警告项": w} for w in validation_warnings] if validation_warnings else []
 
@@ -577,8 +713,8 @@ def main():
     parser.add_argument("--sentiment-summary", help="Sentiment dimension summary")
     parser.add_argument("--macro-summary", help="Macro dimension summary")
     # Comprehensive analysis for 综合研判 section
-    parser.add_argument("--entry-verdict", default="wait", help="Entry timing: ready/watch/wait/avoid")
-    parser.add_argument("--entry-signals", default="[]", help="JSON array of entry confirmation signal strings")
+    parser.add_argument("--entry-verdict", help="Entry timing: ready/watch/wait/avoid")
+    parser.add_argument("--entry-signals", help="JSON array of entry confirmation signal strings")
     parser.add_argument("--analysis", help="JSON object with core_conflict, events, advice for 综合研判 section")
     # Chart and new data files
     parser.add_argument("--chart", help="Path to chart HTML fragment to embed")
@@ -652,6 +788,7 @@ def main():
         try:
             with open(args.scores_file, "r", encoding="utf-8") as f:
                 scores_data = json.load(f)
+            setattr(args, "_scores_data", scores_data)
             # Override individual parameters from scores file
             if not args.scores:
                 args.scores = json.dumps(scores_data.get("scores", {}))
@@ -689,7 +826,7 @@ def main():
             if not args.entry_verdict:
                 args.entry_verdict = rp.get("entry_verdict", "wait")
             if not args.entry_signals:
-                args.entry_signals = rp.get("entry_signals", [])
+                args.entry_signals = json.dumps(rp.get("entry_signals", []), ensure_ascii=False)
         except (OSError, json.JSONDecodeError):
             pass
 
