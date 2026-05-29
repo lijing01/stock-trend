@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
@@ -41,6 +42,59 @@ def load_json_output(path):
     """Load JSON from a file path."""
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _write_cache_entry(cache_dir, cache_key, data):
+    """Write a cache_utils-compatible cache entry for subprocess tests."""
+    os.makedirs(cache_dir, exist_ok=True)
+    path = os.path.join(cache_dir, f"{cache_key}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "cache_timestamp": time.time(),
+            "cache_key": cache_key,
+            **data,
+        }, f, ensure_ascii=False, indent=2)
+
+
+def _write_code_kline_cache(cache_dir, code, data):
+    """Write the code/kline.json cache used by capital-flow estimation."""
+    code_dir = os.path.join(cache_dir, code)
+    os.makedirs(code_dir, exist_ok=True)
+    with open(os.path.join(code_dir, "kline.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _build_synthetic_kline(ts_code, asset="E", days=90):
+    """Build deterministic OHLCV data for tests that need cached K-line input."""
+    records = []
+    base = 10.0 if asset == "FD" else 1000.0
+    for i in range(days):
+        close = round(base + i * 0.1, 3)
+        open_price = round(close - 0.05, 3)
+        records.append({
+            "trade_date": f"2026{i // 28 + 1:02d}{i % 28 + 1:02d}",
+            "open": open_price,
+            "close": close,
+            "high": round(close + 0.2, 3),
+            "low": round(open_price - 0.2, 3),
+            "pre_close": round(close - 0.1, 3),
+            "change": 0.1,
+            "pct_chg": 0.8,
+            "vol": 1000000 + i * 1000,
+            "amount": 10000000 + i * 10000,
+            "ts_code": ts_code,
+        })
+    return {
+        "meta": {
+            "ts_code": ts_code,
+            "asset": asset,
+            "freq": "D",
+            "adj": "qfq",
+            "record_count": len(records),
+            "data_source": "test_cache",
+        },
+        "data": records,
+    }
 
 
 def test(name, condition, detail="", category="general"):
@@ -433,37 +487,51 @@ def run_new_script_tests(tmpdir):
     """Test new data scripts: fetch_etf_data, fetch_capital_flow, generate_report."""
     print("\n📦 新脚本测试 (New Scripts)")
     print("=" * 50)
+    cache_dir = os.path.join(tmpdir, "script_cache")
+    kline_for_estimate = os.path.join(tmpdir, "tf01.json")
+    if os.path.exists(kline_for_estimate):
+        _write_code_kline_cache(cache_dir, "600519", load_json_output(kline_for_estimate))
+    else:
+        _write_code_kline_cache(cache_dir, "600519", _build_synthetic_kline("600519.SH"))
+    old_cache_dir = os.environ.get("STOCK_TREND_CACHE_DIR")
+    os.environ["STOCK_TREND_CACHE_DIR"] = cache_dir
 
     # TF-ETF-01: fetch_etf_data.py 基本功能测试
-    etf_path = os.path.join(tmpdir, "tf_etf01.json")
-    rc, stdout, stderr = run_script("fetch_etf_data.py", "513180", "-o", etf_path, timeout=15)
-    if rc == 0 and os.path.exists(etf_path):
-        try:
-            data = load_json_output(etf_path)
-            ds = data.get("data_source", "")
-            test("TF-ETF-01: ETF数据获取(513180)", ds == "eastmoney",
-                 f"source={ds}", "fetch")
-            test("TF-ETF-01a: 含fund_code", "fund_code" in data,
-                 f"fund_code={data.get('fund_code')}", "fetch")
-        except (json.JSONDecodeError, OSError):
-            test("TF-ETF-01: ETF数据获取(513180)", False, "JSON解析失败", "fetch")
-    else:
-        test("TF-ETF-01: ETF数据获取(513180)", False, f"exit_code={rc}", "fetch")
+    try:
+        etf_path = os.path.join(tmpdir, "tf_etf01.json")
+        rc, stdout, stderr = run_script("fetch_etf_data.py", "513180", "-o", etf_path, timeout=15)
+        if rc == 0 and os.path.exists(etf_path):
+            try:
+                data = load_json_output(etf_path)
+                ds = data.get("data_source", "")
+                test("TF-ETF-01: ETF数据获取(513180)", ds == "eastmoney",
+                     f"source={ds}", "fetch")
+                test("TF-ETF-01a: 含fund_code", "fund_code" in data,
+                     f"fund_code={data.get('fund_code')}", "fetch")
+            except (json.JSONDecodeError, OSError):
+                test("TF-ETF-01: ETF数据获取(513180)", False, "JSON解析失败", "fetch")
+        else:
+            test("TF-ETF-01: ETF数据获取(513180)", False, f"exit_code={rc}", "fetch")
 
-    # TF-CF-01: fetch_capital_flow.py 股票资金流向测试
-    cf_path = os.path.join(tmpdir, "tf_cf01.json")
-    rc, stdout, stderr = run_script("fetch_capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=30)
-    if rc == 0 and os.path.exists(cf_path):
-        try:
-            data = load_json_output(cf_path)
-            ds = data.get("meta", {}).get("data_source", "")
-            count = data.get("meta", {}).get("record_count", 0)
-            test("TF-CF-01: 股票资金流向(600519)", ds != "error",
-                 f"source={ds}, records={count}", "fetch")
-        except (json.JSONDecodeError, OSError):
-            test("TF-CF-01: 股票资金流向(600519)", False, "JSON解析失败", "fetch")
-    else:
-        test("TF-CF-01: 股票资金流向(600519)", False, f"exit_code={rc}", "fetch")
+        # TF-CF-01: fetch_capital_flow.py 股票资金流向测试
+        cf_path = os.path.join(tmpdir, "tf_cf01.json")
+        rc, stdout, stderr = run_script("fetch_capital_flow.py", "600519.SH", "--asset", "E", "-o", cf_path, timeout=30)
+        if rc == 0 and os.path.exists(cf_path):
+            try:
+                data = load_json_output(cf_path)
+                ds = data.get("meta", {}).get("data_source", "")
+                count = data.get("meta", {}).get("record_count", 0)
+                test("TF-CF-01: 股票资金流向(600519)", ds != "error",
+                     f"source={ds}, records={count}", "fetch")
+            except (json.JSONDecodeError, OSError):
+                test("TF-CF-01: 股票资金流向(600519)", False, "JSON解析失败", "fetch")
+        else:
+            test("TF-CF-01: 股票资金流向(600519)", False, f"exit_code={rc}", "fetch")
+    finally:
+        if old_cache_dir is None:
+            os.environ.pop("STOCK_TREND_CACHE_DIR", None)
+        else:
+            os.environ["STOCK_TREND_CACHE_DIR"] = old_cache_dir
 
     # TF-RPT-01: generate_report.py 模板渲染测试
     tech_path, kline_path, scores_path = _write_report_fixture(tmpdir, "render")
@@ -688,6 +756,12 @@ def run_pipeline_tests(tmpdir):
     """Test resolve_code, run_pipeline, and compute_scores scripts."""
     print("\n🔧 管线与自动化测试 (Pipeline)")
     print("=" * 50)
+    cache_dir = os.path.join(tmpdir, "pipeline_cache")
+    _write_cache_entry(
+        cache_dir,
+        "kline_159740.SZ_D_qfq",
+        _build_synthetic_kline("159740.SZ", asset="FD"),
+    )
 
     # TP-RC-01: resolve_code.py - 代码输入
     rc, stdout, stderr = run_script("resolve_code.py", "513180")
@@ -821,10 +895,18 @@ def run_pipeline_tests(tmpdir):
 
     # TP-PL-01: run_pipeline.py - ETF标的
     pipeline_path = os.path.join(tmpdir, "pipeline01.json")
-    rc, stdout, stderr = run_script(
-        "run_pipeline.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
-        "-o", tmpdir, timeout=180,
-    )
+    old_cache_dir = os.environ.get("STOCK_TREND_CACHE_DIR")
+    os.environ["STOCK_TREND_CACHE_DIR"] = cache_dir
+    try:
+        rc, stdout, stderr = run_script(
+            "run_pipeline.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
+            "-o", tmpdir, timeout=180,
+        )
+    finally:
+        if old_cache_dir is None:
+            os.environ.pop("STOCK_TREND_CACHE_DIR", None)
+        else:
+            os.environ["STOCK_TREND_CACHE_DIR"] = old_cache_dir
     if rc == 0:
         # Check pipeline output
         pp = os.path.join(tmpdir, "pipeline_output.json")
