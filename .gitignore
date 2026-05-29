@@ -2,4 +2,5 @@ reports/
 __pycache__/
 *.pyc
 .cache/
+.worktrees/
 .claude/settings.local.json
