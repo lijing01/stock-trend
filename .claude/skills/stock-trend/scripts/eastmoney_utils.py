@@ -6,6 +6,8 @@ that was duplicated across fetch_kline_eastmoney.py and fetch_capital_flow.py.
 """
 
 import time
+import urllib.request
+from datetime import datetime, timedelta
 
 EM_API_HOSTS = [
     "push2his.eastmoney.com",
@@ -153,3 +155,101 @@ def rotate_em_host(fetch_fn, max_retries=3):
             if attempt < max_retries - 1:
                 time.sleep(1)
     raise RuntimeError(f"East Money全节点失败: {last_error}")
+
+
+def fetch_url(url, headers=None, timeout=15):
+    """Fetch URL via HTTP GET. Falls back to proxyless if proxy fails.
+
+    Args:
+        url: Full URL string.
+        headers: Request headers dict (default EM_HEADERS).
+        timeout: Request timeout in seconds.
+
+    Returns:
+        Response body as UTF-8 string.
+
+    Raises:
+        Exception from first attempt if both proxy and proxyless fail.
+    """
+    req = urllib.request.Request(url, headers=headers or EM_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except Exception as first:
+        try:
+            proxyless = urllib.request.ProxyHandler({})
+            opener = urllib.request.build_opener(proxyless)
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except Exception:
+            raise first
+
+
+def build_em_kline_url(host, secid, freq='D', lmt=250, beg=None, end=None):
+    """Build East Money K-line API URL.
+
+    Args:
+        host: API hostname (e.g. push2his.eastmoney.com).
+        secid: Market-prefixed code (e.g. 1.600519, 90.BK0477).
+        freq: 'D' for daily or 'W' for weekly.
+        lmt: Max records to fetch.
+        beg/end: Date range YYYYMMDD (auto-calculated if omitted).
+
+    Returns:
+        Full URL string.
+    """
+    f1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
+    f2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+    klt = "102" if freq == "W" else "101"
+    if not end:
+        end = datetime.now().strftime("%Y%m%d")
+    if not beg:
+        delta = 730 if freq == "W" else 365
+        beg = (datetime.now() - timedelta(days=delta)).strftime("%Y%m%d")
+    return (f"https://{host}/api/qt/stock/kline/get"
+            f"?secid={secid}&fields1={f1}&fields2={f2}"
+            f"&klt={klt}&fqt=1&beg={beg}&end={end}&lmt={lmt}")
+
+
+def parse_em_kline_line(line):
+    """Parse single East Money K-line CSV string -> record dict.
+
+    Fields: trade_date, open, close, high, low, pre_close, change,
+            pct_chg, vol, amount, turnover_rate (if available).
+
+    Returns None if line is malformed.
+    """
+    parts = line.split(",")
+    if len(parts) < 11:
+        return None
+    try:
+        trade_date = parts[0].replace("-", "")
+        open_p = float(parts[1])
+        close_p = float(parts[2])
+        high_p = float(parts[3])
+        low_p = float(parts[4])
+        vol = float(parts[5])
+        amount = float(parts[6])
+        pct_chg = float(parts[8])
+        change = float(parts[9])
+        turnover_rate = float(parts[10]) if len(parts) > 10 and parts[10] else None
+
+        pre_close = round(close_p - change, 4) if change != 0 else close_p
+
+        record = {
+            "trade_date": trade_date,
+            "open": open_p,
+            "close": close_p,
+            "high": high_p,
+            "low": low_p,
+            "pre_close": pre_close,
+            "change": change,
+            "pct_chg": pct_chg,
+            "vol": vol,
+            "amount": amount,
+        }
+        if turnover_rate is not None:
+            record["turnover_rate"] = turnover_rate
+        return record
+    except (ValueError, IndexError):
+        return None

@@ -17,41 +17,13 @@ import argparse
 import json
 import os
 import sys
-import urllib.request
 from cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
 from resolve_code import detect_asset, detect_adj
 from datetime import datetime, timedelta
-from eastmoney_utils import EM_HEADERS, EM_API_HOSTS, build_secid
-
-
-def freq_to_klt(freq):
-    """Convert frequency code to East Money klt parameter."""
-    return "102" if freq == "W" else "101"
-
-
-def calc_beg_date(freq):
-    """Calculate start date string for East Money API based on frequency."""
-    end = datetime.now()
-    if freq == "W":
-        start = end - timedelta(days=730)  # ~2 years for weekly
-    else:
-        start = end - timedelta(days=365)  # ~1 year for daily
-    return start.strftime("%Y%m%d")
-
-
-def _read_url(req, timeout=15):
-    """Read URL with standard request first, then proxyless fallback."""
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8")
-    except Exception as first_error:
-        try:
-            proxyless = urllib.request.ProxyHandler({})
-            opener = urllib.request.build_opener(proxyless)
-            with opener.open(req, timeout=timeout) as resp:
-                return resp.read().decode("utf-8")
-        except Exception:
-            raise first_error
+from eastmoney_utils import (
+    EM_HEADERS, EM_API_HOSTS, build_secid,
+    fetch_url, build_em_kline_url, parse_em_kline_line,
+)
 
 
 def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
@@ -59,28 +31,10 @@ def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
 
     Returns a list of parsed records or raises on error.
     """
-    klt = freq_to_klt(freq)
-    beg = calc_beg_date(freq)
-    end = datetime.now().strftime("%Y%m%d")
-    # fqt=1: forward adjustment (前复权)
-    fields1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
-    fields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-
-    url = (
-        f"https://{host}/api/qt/stock/kline/get"
-        f"?secid={secid}"
-        f"&fields1={fields1}"
-        f"&fields2={fields2}"
-        f"&klt={klt}"
-        f"&fqt=1"
-        f"&beg={beg}"
-        f"&end={end}"
-        f"&lmt={lmt}"
-    )
-
-    req = urllib.request.Request(url, headers=EM_HEADERS)
+    url = build_em_kline_url(host, secid, freq=freq, lmt=lmt)
     try:
-        result = json.loads(_read_url(req, timeout=15))
+        raw = fetch_url(url, headers=EM_HEADERS, timeout=15)
+        result = json.loads(raw)
     except Exception as e:
         raise RuntimeError(f"东方财富API请求失败({host}): {e}")
 
@@ -98,43 +52,9 @@ def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
 
     records = []
     for line in klines:
-        parts = line.split(",")
-        if len(parts) < 11:
-            continue
-        # f51=日期, f52=开, f53=收, f54=高, f55=低,
-        # f56=成交量, f57=成交额, f58=振幅, f59=涨跌幅, f60=涨跌额, f61=换手率
-        try:
-            trade_date = parts[0].replace("-", "")
-            open_p = float(parts[1])
-            close_p = float(parts[2])
-            high_p = float(parts[3])
-            low_p = float(parts[4])
-            vol = float(parts[5])
-            amount = float(parts[6])
-            pct_chg = float(parts[8])
-            change = float(parts[9])
-            turnover_rate = float(parts[10]) if len(parts) > 10 and parts[10] else None
-
-            pre_close = round(close_p - change, 4) if change != 0 else close_p
-
-            record = {
-                "trade_date": trade_date,
-                "open": open_p,
-                "close": close_p,
-                "high": high_p,
-                "low": low_p,
-                "pre_close": pre_close,
-                "change": change,
-                "pct_chg": pct_chg,
-                "vol": vol,
-                "amount": amount,
-            }
-            if turnover_rate is not None:
-                record["turnover_rate"] = turnover_rate
-
+        record = parse_em_kline_line(line)
+        if record:
             records.append(record)
-        except (ValueError, IndexError):
-            continue
 
     return records, name
 

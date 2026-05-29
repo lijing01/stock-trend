@@ -13,43 +13,12 @@ import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from eastmoney_utils import EM_HEADERS
-
-# CDN fallback hosts work behind corporate proxies blocking push2his/push2.
-EM_CDN_HOSTS = [
-    "push2.eastmoney.com",
-    "38.push2.eastmoney.com",
-    "48.push2.eastmoney.com",
-    "push2test.eastmoney.com",
-    "60.push2.eastmoney.com",
-    "95.push2.eastmoney.com",
-]
+from eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, fetch_url, build_em_kline_url, parse_em_kline_line
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-
-
-def _build_kline_url(host: str, secid: str) -> str:
-    """Build URL requesting max available BK index K-line data."""
-    end = datetime.now()
-    beg = (end - timedelta(days=180)).strftime("%Y%m%d")  # 6mo to cope with sparse BK data
-    end_str = end.strftime("%Y%m%d")
-    fields1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13"
-    fields2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-    return (
-        f"https://{host}/api/qt/stock/kline/get"
-        f"?secid={secid}"
-        f"&fields1={fields1}"
-        f"&fields2={fields2}"
-        f"&klt=101"
-        f"&fqt=1"
-        f"&beg={beg}"
-        f"&end={end_str}"
-        f"&lmt=200"
-    )
 
 
 def _parse_kline_response(raw: str, min_records: int) -> list[dict]:
@@ -64,43 +33,12 @@ def _parse_kline_response(raw: str, min_records: int) -> list[dict]:
 
     records = []
     for line in klines:
-        parts = line.split(",")
-        if len(parts) < 11:
-            continue
-        try:
-            records.append({
-                "trade_date": parts[0].replace("-", ""),
-                "open": float(parts[1]),
-                "close": float(parts[2]),
-                "high": float(parts[3]),
-                "low": float(parts[4]),
-                "vol": float(parts[5]),
-                "amount": float(parts[6]),
-                "pct_chg": float(parts[8]),
-            })
-        except (ValueError, IndexError):
-            continue
+        record = parse_em_kline_line(line)
+        if record:
+            records.append(record)
 
     records.sort(key=lambda x: x["trade_date"])
     return records[-min_records:]
-
-
-def _try_fetch(url: str, timeout: int = 15, no_proxy: bool = False) -> Optional[str]:
-    """Try fetching URL, optionally bypassing proxy."""
-    import urllib.request
-    try:
-        if no_proxy:
-            proxyless = urllib.request.ProxyHandler({})
-            opener = urllib.request.build_opener(proxyless)
-            req = urllib.request.Request(url, headers=EM_HEADERS)
-            with opener.open(req, timeout=timeout) as resp:
-                return resp.read().decode("utf-8")
-        else:
-            req = urllib.request.Request(url, headers=EM_HEADERS)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read().decode("utf-8")
-    except Exception:
-        return None
 
 
 def fetch_single_kline(sector_code: str, min_records: int = 20,
@@ -126,17 +64,13 @@ def fetch_single_kline(sector_code: str, min_records: int = 20,
     last_error = None
 
     for attempt in range(retries + 1):
-        host = EM_CDN_HOSTS[attempt % len(EM_CDN_HOSTS)]
-        url = _build_kline_url(host, secid)
-
-        for use_no_proxy in [True, False]:
-            raw = _try_fetch(url, no_proxy=use_no_proxy)
-            if raw:
-                try:
-                    return _parse_kline_response(raw, min_records)
-                except RuntimeError as e:
-                    last_error = e
-                    break
+        host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
+        url = build_em_kline_url(host, secid, lmt=200)
+        try:
+            raw = fetch_url(url, headers=EM_HEADERS)
+            return _parse_kline_response(raw, min_records)
+        except Exception as e:
+            last_error = e
             if attempt < retries:
                 _time.sleep(0.5)
 

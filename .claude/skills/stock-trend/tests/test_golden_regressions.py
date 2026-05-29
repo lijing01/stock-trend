@@ -11,6 +11,7 @@ SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import eastmoney_utils as emu
 import fetch_kline_eastmoney as fke
 import test_golden as tg
 
@@ -81,8 +82,8 @@ def test_fetch_eastmoney_supports_no_proxy_fallback():
         },
     }).encode("utf-8")
 
-    old_urlopen = fke.urllib.request.urlopen
-    old_build_opener = fke.urllib.request.build_opener
+    old_urlopen = emu.urllib.request.urlopen
+    old_build_opener = emu.urllib.request.build_opener
     try:
         def fail_urlopen(req, timeout=15):
             raise RuntimeError("proxy blocked")
@@ -90,16 +91,16 @@ def test_fetch_eastmoney_supports_no_proxy_fallback():
         def fake_build_opener(*handlers):
             return FakeOpener(payload)
 
-        fke.urllib.request.urlopen = fail_urlopen
-        fke.urllib.request.build_opener = fake_build_opener
+        emu.urllib.request.urlopen = fail_urlopen
+        emu.urllib.request.build_opener = fake_build_opener
 
         records, name = fke.fetch_eastmoney("1.513180", "D", lmt=1)
         test("fetch_eastmoney falls back to no-proxy opener", len(records) == 1 and name == "测试ETF")
     except Exception as exc:
         test("fetch_eastmoney falls back to no-proxy opener", False, str(exc))
     finally:
-        fke.urllib.request.urlopen = old_urlopen
-        fke.urllib.request.build_opener = old_build_opener
+        emu.urllib.request.urlopen = old_urlopen
+        emu.urllib.request.build_opener = old_build_opener
 
 
 def test_diff_output_ignores_volatile_error_fields():
