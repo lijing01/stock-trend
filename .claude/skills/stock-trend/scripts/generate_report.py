@@ -127,31 +127,28 @@ def _is_error_data_source(meta):
     return (meta or {}).get("data_source") == "error"
 
 
-def _latest_valid_kline_close(kline):
-    """Return the latest close only when K-line data is explicitly usable."""
-    meta = kline.get("meta", {}) if isinstance(kline, dict) else {}
-    if not kline or _is_error_data_source(meta):
-        return None
+def _kline_close_status(kline, required=False):
+    """Return (latest_close, unavailable) for explicit K-line inputs."""
+    if not kline:
+        return None, required
+    if not isinstance(kline, dict):
+        return None, required
+
+    meta = kline.get("meta", {})
+    if _is_error_data_source(meta):
+        return None, True
 
     records = kline.get("data", [])
     if not isinstance(records, list) or not records:
-        return None
+        return None, required
 
     for record in reversed(records):
         if not isinstance(record, dict):
             continue
         close = _safe_float(record.get("close"))
         if close is not None:
-            return f"{close:.2f}"
-    return None
-
-
-def _is_kline_unavailable(kline):
-    if not kline:
-        return False
-    meta = kline.get("meta", {}) if isinstance(kline, dict) else {}
-    records = kline.get("data", []) if isinstance(kline, dict) else []
-    return _is_error_data_source(meta) or not records
+            return f"{close:.2f}", False
+    return None, required
 
 
 def _nearest_support(values, close):
@@ -406,12 +403,17 @@ def build_context(args):
     summary = technical.get("summary", {})
     meta = technical.get("meta", {})
     kline_meta = kline.get("meta", {})
-    patterns = technical.get("patterns", [])
+
+    # Latest close price: prefer verified K-line; never reuse stale technical price when explicit K-line input is unusable.
+    kline_latest_close, kline_unavailable = _kline_close_status(kline, required=bool(args.kline))
+    if kline_unavailable:
+        summary = {}
+        report_params = {}
+        scores = {}
+        chip_dist = {}
+    patterns = [] if kline_unavailable else technical.get("patterns", [])
     merged_report_params = {**summary, **report_params}
 
-    # Latest close price: prefer verified K-line; never reuse stale technical price when K-line failed.
-    kline_latest_close = _latest_valid_kline_close(kline)
-    kline_unavailable = _is_kline_unavailable(kline)
     latest_close = kline_latest_close
     if latest_close is None and not kline_unavailable:
         latest_close = technical.get("latest", {}).get("close", None)
@@ -426,6 +428,8 @@ def build_context(args):
                 entry_signals_list = json.loads(args.entry_signals)
             except (json.JSONDecodeError, TypeError):
                 entry_signals_list = [args.entry_signals] if isinstance(args.entry_signals, str) else []
+    if kline_unavailable:
+        entry_signals_list = []
 
     # Build context
     ts_code = args.ts_code or meta.get("ts_code", kline_meta.get("ts_code", "unknown"))
@@ -440,9 +444,9 @@ def build_context(args):
     macro_score = scores.get("macro", 0)
 
     # Direction and confidence
-    direction = args.direction or summary.get("direction", "neutral")
-    composite_score = args.score if args.score is not None else summary.get("total_score", 0)
-    confidence = args.confidence or summary.get("confidence", "低")
+    direction = "数据不足" if kline_unavailable else (args.direction or summary.get("direction", "neutral"))
+    composite_score = "—" if kline_unavailable else (args.score if args.score is not None else summary.get("total_score", 0))
+    confidence = "低" if kline_unavailable else (args.confidence or summary.get("confidence", "低"))
 
     # Key signals from technical
     tech_signals = summary.get("key_signals", [])
@@ -479,6 +483,8 @@ def build_context(args):
     # K-line data info
     data_source = kline_meta.get("data_source", "")
     data_points = kline_meta.get("record_count") or kline_meta.get("data_points") or meta.get("data_points", 0)
+    if kline_unavailable:
+        data_points = 0
     kline_start = kline_meta.get("start_date", "")
     kline_end = kline_meta.get("end_date", "")
     # If meta doesn't have date range, compute from data array
@@ -537,6 +543,8 @@ def build_context(args):
             (f"跌破支撑位{support_levels[0] if support_levels else '—'}", "减仓观望"),
             ("持续窄幅震荡", "耐心等待方向选择"),
         ]
+    if kline_unavailable:
+        monitor_signals = []
 
     # Special section for ETF/ST/HK
     special_section = None
@@ -754,6 +762,8 @@ def build_context(args):
             analysis_data = json.loads(args.analysis)
         except (json.JSONDecodeError, TypeError):
             pass
+    if kline_unavailable:
+        analysis_data = None
 
     if analysis_data:
         events = analysis_data.get("events", [])

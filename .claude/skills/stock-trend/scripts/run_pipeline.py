@@ -160,6 +160,9 @@ def main():
     if removed:
         print(f"Cache cleanup: removed {removed} stale files")
 
+    asset = None
+    adj = None
+
     # --code mode: auto-resolve
     if args.code and not args.ts_code:
         resolve_path = get_data_dir(args.code) / "resolve.json"

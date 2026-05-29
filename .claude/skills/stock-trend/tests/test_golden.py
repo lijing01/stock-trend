@@ -289,11 +289,47 @@ def _normalize_capital_flow(data):
     }
 
 
-def _normalize_futures_data(data):
+def _has_futures_semantics(data):
+    return isinstance(data.get("basis"), dict) and isinstance(data.get("signals"), dict)
+
+
+def _normalize_futures_data(data, include_numeric=False):
     meta = data.get("meta", {})
-    return {
+    normalized = {
         "meta": _stable_keys(meta, ["etf_code", "futures_code", "futures_secid", "index_secid"]),
     }
+    basis = data.get("basis") or {}
+    signals = data.get("signals") or {}
+    if basis and signals:
+        normalized["basis"] = _stable_keys(basis, ["direction", "signal"])
+        normalized["signals"] = _stable_keys(signals, [
+            "basis_signal",
+            "oi_signal",
+            "volume_signal",
+            "composite_signal",
+        ])
+        if include_numeric:
+            normalized["basis"]["basis_pct"] = basis.get("basis_pct")
+            normalized["signals"].update(_stable_keys(signals, [
+                "basis_score",
+                "oi_score",
+                "volume_score",
+                "composite_score",
+            ]))
+    return normalized
+
+
+def _diff_futures_data(golden_data, current_data, config):
+    include_semantics = _has_futures_semantics(golden_data) and _has_futures_semantics(current_data)
+    latest_golden = ((golden_data.get("futures") or {}).get("latest") or {}).get("date")
+    latest_current = ((current_data.get("futures") or {}).get("latest") or {}).get("date")
+    include_numeric = include_semantics and latest_golden == latest_current
+    return deep_diff(
+        _normalize_futures_data(golden_data, include_numeric=include_numeric),
+        _normalize_futures_data(current_data, include_numeric=include_numeric),
+        "",
+        config,
+    )
 
 
 def _normalize_etf_data(data):
@@ -389,6 +425,9 @@ def diff_output(output_name, golden_data, current_data, config, asset_type=None)
     if output_name == "kline.json":
         return _diff_kline(golden_data, current_data, config, asset_type)
 
+    if output_name == "futures_data.json":
+        return _diff_futures_data(golden_data, current_data, config)
+
     if asset_type:
         asset_overrides = config.get("asset_thresholds", {}).get(asset_type, {})
         if asset_overrides:
@@ -401,7 +440,6 @@ def diff_output(output_name, golden_data, current_data, config, asset_type=None)
         "macro_snapshot.json": _normalize_macro_snapshot,
         "fundamental.json": _normalize_fundamental,
         "capital_flow.json": _normalize_capital_flow,
-        "futures_data.json": _normalize_futures_data,
         "etf_data.json": _normalize_etf_data,
         "technical.json": _normalize_technical,
         "scores.json": _normalize_scores,
