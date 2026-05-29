@@ -332,12 +332,15 @@ def _diff_kline(golden_data, current_data, config, asset_type=None):
 
     normalized_golden = {"data": []}
     normalized_current = {"data": []}
+    latest_common_date = common_dates[-1]
     for trade_date in common_dates:
         golden_row = golden_rows[trade_date]
         current_row = current_rows[trade_date]
         golden_vol, current_vol = _normalized_volume_pair(golden_row.get("vol"), current_row.get("vol"))
         golden_amount, current_amount = _normalized_amount_pair(golden_row.get("amount"), current_row.get("amount"))
+        skip_live_turnover = trade_date == latest_common_date
         skip_volume = (
+            skip_live_turnover or
             golden_amount == 0 and current_amount == 0
             and (golden_data.get("meta", {}).get("ts_code", "").endswith(".HK")
                  or current_data.get("meta", {}).get("ts_code", "").endswith(".HK"))
@@ -348,7 +351,6 @@ def _diff_kline(golden_data, current_data, config, asset_type=None):
             "close": golden_row.get("close"),
             "high": golden_row.get("high"),
             "low": golden_row.get("low"),
-            "amount": golden_amount,
         }
         current_record = {
             "trade_date": trade_date,
@@ -356,8 +358,10 @@ def _diff_kline(golden_data, current_data, config, asset_type=None):
             "close": current_row.get("close"),
             "high": current_row.get("high"),
             "low": current_row.get("low"),
-            "amount": current_amount,
         }
+        if not skip_live_turnover:
+            golden_record["amount"] = golden_amount
+            current_record["amount"] = current_amount
         if not skip_volume:
             golden_record["vol"] = golden_vol
             current_record["vol"] = current_vol

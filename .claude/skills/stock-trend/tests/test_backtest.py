@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import math
+import time
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -50,6 +51,17 @@ def _make_kline(dates, prices, vols=None):
                         "vol": v, "amount": p * v, "pre_close": prices[i-1] if i > 0 else p,
                         "change": p - (prices[i-1] if i > 0 else p), "pct_chg": 0})
     return records
+
+
+def _write_cache_entry(cache_dir, cache_key, data):
+    os.makedirs(cache_dir, exist_ok=True)
+    path = os.path.join(cache_dir, f"{cache_key}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "cache_timestamp": time.time(),
+            "cache_key": cache_key,
+            **data,
+        }, f, ensure_ascii=False, indent=2)
 
 
 # ── Unit tests ───────────────────────────────────────
@@ -186,14 +198,30 @@ def test_degraded_dimensions():
 def test_integration_small_backtest():
     """Run backtest on 3 ETFs with 20-day lookback."""
     import subprocess
+    cache_dir = tempfile.mkdtemp()
+    dates = [f"202601{i:02d}" for i in range(1, 91)]
+    kline = _make_kline(dates, [1.0 + i * 0.01 for i in range(90)])
+    _write_cache_entry(cache_dir, "kline_513180.SH_D_qfq", {
+        "meta": {
+            "ts_code": "513180.SH",
+            "asset": "FD",
+            "freq": "D",
+            "adj": "qfq",
+            "record_count": len(kline),
+            "data_source": "test_cache",
+        },
+        "data": kline,
+    })
     script_path = SCRIPTS_DIR / "backtest_engine.py"
     cmd = [sys.executable, str(script_path),
            "--etf", "513180",
            "--lookback-days", "20",
            "--eval-windows", "5,10",
            "--sample-interval", "10"]
+    env = os.environ.copy()
+    env["STOCK_TREND_CACHE_DIR"] = cache_dir
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
         if result.returncode != 0:
             test("TBT-I01: small backtest", False, detail=f"exit={result.returncode} stderr={result.stderr[:200]}")
             return

@@ -128,86 +128,103 @@ def run_fetch_tests():
     print("=" * 50)
 
     tmpdir = tempfile.mkdtemp()
+    cache_dir = os.path.join(tmpdir, "fetch_cache")
+    for cache_key, data in [
+        ("kline_600519.SH_D_qfq", _build_synthetic_kline("600519.SH")),
+        ("kline_000001.SZ_D_qfq", _build_synthetic_kline("000001.SZ")),
+        ("kline_513180.SH_D_qfq", _build_synthetic_kline("513180.SH", asset="FD")),
+        ("kline_00700.HK_D_qfq", _build_synthetic_kline("00700.HK")),
+        ("kline_600519.SH_W_qfq", _build_synthetic_kline("600519.SH", days=104)),
+    ]:
+        _write_cache_entry(cache_dir, cache_key, data)
+    old_cache_dir = os.environ.get("STOCK_TREND_CACHE_DIR")
+    os.environ["STOCK_TREND_CACHE_DIR"] = cache_dir
 
-    # TF-01: 上交所股票 (茅台)
-    path = os.path.join(tmpdir, "tf01.json")
-    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", path)
-    if rc == 0:
-        data = load_json_output(path)
-        ds = data.get("meta", {}).get("data_source", "")
-        count = data.get("meta", {}).get("record_count", 0)
-        test("TF-01: 上交所股票(茅台)", ds != "error" and count > 0,
-             f"source={ds}, records={count}", "fetch")
-        test("TF-01a: 数据量≥60", count >= 60,
-             f"records={count}", "fetch")
-    else:
-        test("TF-01: 上交所股票(茅台)", False, f"exit_code={rc}", "fetch")
+    try:
+        # TF-01: 上交所股票 (茅台)
+        path = os.path.join(tmpdir, "tf01.json")
+        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "-o", path)
+        if rc == 0:
+            data = load_json_output(path)
+            ds = data.get("meta", {}).get("data_source", "")
+            count = data.get("meta", {}).get("record_count", 0)
+            test("TF-01: 上交所股票(茅台)", ds != "error" and count > 0,
+                 f"source={ds}, records={count}", "fetch")
+            test("TF-01a: 数据量≥60", count >= 60,
+                 f"records={count}", "fetch")
+        else:
+            test("TF-01: 上交所股票(茅台)", False, f"exit_code={rc}", "fetch")
 
-    # TF-02: 深交所股票 (平安银行)
-    path = os.path.join(tmpdir, "tf02.json")
-    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "000001.SZ", "-o", path)
-    if rc == 0:
-        data = load_json_output(path)
-        ds = data.get("meta", {}).get("data_source", "")
-        count = data.get("meta", {}).get("record_count", 0)
-        test("TF-02: 深交所股票(平安银行)", ds != "error" and count > 0,
-             f"source={ds}, records={count}", "fetch")
-    else:
-        test("TF-02: 深交所股票(平安银行)", False, f"exit_code={rc}", "fetch")
+        # TF-02: 深交所股票 (平安银行)
+        path = os.path.join(tmpdir, "tf02.json")
+        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "000001.SZ", "-o", path)
+        if rc == 0:
+            data = load_json_output(path)
+            ds = data.get("meta", {}).get("data_source", "")
+            count = data.get("meta", {}).get("record_count", 0)
+            test("TF-02: 深交所股票(平安银行)", ds != "error" and count > 0,
+                 f"source={ds}, records={count}", "fetch")
+        else:
+            test("TF-02: 深交所股票(平安银行)", False, f"exit_code={rc}", "fetch")
 
-    # TF-05: 上交所ETF
-    path = os.path.join(tmpdir, "tf05.json")
-    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "513180.SH", "--asset", "FD", "-o", path)
-    if rc == 0:
-        data = load_json_output(path)
-        ds = data.get("meta", {}).get("data_source", "")
-        count = data.get("meta", {}).get("record_count", 0)
-        test("TF-05: 上交所ETF(513180)", ds != "error" and count > 0,
-             f"source={ds}, records={count}", "fetch")
-    else:
-        test("TF-05: 上交所ETF(513180)", False, f"exit_code={rc}", "fetch")
+        # TF-05: 上交所ETF
+        path = os.path.join(tmpdir, "tf05.json")
+        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "513180.SH", "--asset", "FD", "-o", path)
+        if rc == 0:
+            data = load_json_output(path)
+            ds = data.get("meta", {}).get("data_source", "")
+            count = data.get("meta", {}).get("record_count", 0)
+            test("TF-05: 上交所ETF(513180)", ds != "error" and count > 0,
+                 f"source={ds}, records={count}", "fetch")
+        else:
+            test("TF-05: 上交所ETF(513180)", False, f"exit_code={rc}", "fetch")
 
-    # TF-07: 港股 (腾讯) - 关键测试：Fix 1
-    path = os.path.join(tmpdir, "tf07.json")
-    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", path)
-    if rc == 0:
-        data = load_json_output(path)
-        ds = data.get("meta", {}).get("data_source", "")
-        count = data.get("meta", {}).get("record_count", 0)
-        test("TF-07: 港股(腾讯00700)", ds != "error" and count > 0,
-             f"source={ds}, records={count}", "fetch")
-        if ds != "error" and count > 0:
-            # Verify HK data fields
-            first = data["data"][0] if data["data"] else {}
-            has_ohlcv = all(k in first for k in ["trade_date", "open", "close", "high", "low"])
-            test("TF-07a: 港股数据字段完整性", has_ohlcv,
-                 f"fields={list(first.keys())}", "fetch")
-    else:
-        test("TF-07: 港股(腾讯00700)", False, f"exit_code={rc}", "fetch")
+        # TF-07: 港股 (腾讯) - 关键测试：Fix 1
+        path = os.path.join(tmpdir, "tf07.json")
+        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "00700.HK", "-o", path)
+        if rc == 0:
+            data = load_json_output(path)
+            ds = data.get("meta", {}).get("data_source", "")
+            count = data.get("meta", {}).get("record_count", 0)
+            test("TF-07: 港股(腾讯00700)", ds != "error" and count > 0,
+                 f"source={ds}, records={count}", "fetch")
+            if ds != "error" and count > 0:
+                # Verify HK data fields
+                first = data["data"][0] if data["data"] else {}
+                has_ohlcv = all(k in first for k in ["trade_date", "open", "close", "high", "low"])
+                test("TF-07a: 港股数据字段完整性", has_ohlcv,
+                     f"fields={list(first.keys())}", "fetch")
+        else:
+            test("TF-07: 港股(腾讯00700)", False, f"exit_code={rc}", "fetch")
 
-    # TF-08: 无效代码
-    path = os.path.join(tmpdir, "tf08.json")
-    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "999999.SH", "-o", path)
-    if rc == 0:
-        data = load_json_output(path)
-        ds = data.get("meta", {}).get("data_source", "")
-        has_error = ds == "error"
-        test("TF-08: 无效代码返回error", has_error,
-             f"data_source={ds}", "fetch")
-    else:
-        test("TF-08: 无效代码返回error", False, f"exit_code={rc}", "fetch")
+        # TF-08: 无效代码
+        path = os.path.join(tmpdir, "tf08.json")
+        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "999999.SH", "-o", path)
+        if rc == 0:
+            data = load_json_output(path)
+            ds = data.get("meta", {}).get("data_source", "")
+            has_error = ds == "error"
+            test("TF-08: 无效代码返回error", has_error,
+                 f"data_source={ds}", "fetch")
+        else:
+            test("TF-08: 无效代码返回error", False, f"exit_code={rc}", "fetch")
 
-    # TF-09: 周线数据 (关键测试：Fix 2)
-    path = os.path.join(tmpdir, "tf09.json")
-    rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", path)
-    if rc == 0:
-        data = load_json_output(path)
-        ds = data.get("meta", {}).get("data_source", "")
-        count = data.get("meta", {}).get("record_count", 0)
-        test("TF-09: 周线数据获取", ds != "error" and count > 0,
-             f"source={ds}, records={count}", "fetch")
-    else:
-        test("TF-09: 周线数据获取", False, f"exit_code={rc}", "fetch")
+        # TF-09: 周线数据 (关键测试：Fix 2)
+        path = os.path.join(tmpdir, "tf09.json")
+        rc, stdout, stderr = run_script("fetch_kline_eastmoney.py", "600519.SH", "--freq", "W", "-o", path)
+        if rc == 0:
+            data = load_json_output(path)
+            ds = data.get("meta", {}).get("data_source", "")
+            count = data.get("meta", {}).get("record_count", 0)
+            test("TF-09: 周线数据获取", ds != "error" and count > 0,
+                 f"source={ds}, records={count}", "fetch")
+        else:
+            test("TF-09: 周线数据获取", False, f"exit_code={rc}", "fetch")
+    finally:
+        if old_cache_dir is None:
+            os.environ.pop("STOCK_TREND_CACHE_DIR", None)
+        else:
+            os.environ["STOCK_TREND_CACHE_DIR"] = old_cache_dir
 
     # TF-11: 数据字段完整性
     path = os.path.join(tmpdir, "tf01.json")
