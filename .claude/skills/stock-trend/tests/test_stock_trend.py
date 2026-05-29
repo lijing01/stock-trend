@@ -466,37 +466,67 @@ def run_new_script_tests(tmpdir):
         test("TF-CF-01: 股票资金流向(600519)", False, f"exit_code={rc}", "fetch")
 
     # TF-RPT-01: generate_report.py 模板渲染测试
-    tech_path = os.path.join(tmpdir, "ta01.json")
-    kline_path = os.path.join(tmpdir, "tf01.json")
-    if os.path.exists(tech_path) and os.path.exists(kline_path):
-        md_path = os.path.join(tmpdir, "test_report.md")
-        html_path = os.path.join(tmpdir, "test_report.html")
-        rc, stdout, stderr = run_script(
-            "generate_report.py",
-            "--technical", tech_path,
-            "--kline", kline_path,
-            "--scores", '{"technical":1,"capital_flow":0.5,"fundamental":-1,"sentiment":0,"macro":0}',
-            "--direction", "震荡",
-            "--score", "-0.08",
-            "--confidence", "低",
-            "--risks", '["布林带极度收口"]',
-            "--output-md", md_path,
-            "--output-html", html_path,
-            timeout=15,
-        )
-        test("TF-RPT-01: 报告生成(exit_code)", rc == 0, f"exit_code={rc}", "report")
-        if rc == 0:
-            md_exists = os.path.exists(md_path)
-            test("TF-RPT-01a: Markdown报告存在", md_exists, f"path={md_path}", "report")
-            html_exists = os.path.exists(html_path)
-            test("TF-RPT-01b: HTML报告存在", html_exists, f"path={html_path}", "report")
-            if md_exists:
-                with open(md_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                test("TF-RPT-01c: MD含标题", "趋势报告" in content,
-                     f"len={len(content)}", "report")
-    else:
-        skip("TF-RPT-01: 报告生成", "缺少前置数据")
+    tech_path, kline_path, scores_path = _write_report_fixture(tmpdir, "render")
+    md_path = os.path.join(tmpdir, "test_report.md")
+    html_path = os.path.join(tmpdir, "test_report.html")
+    rc, stdout, stderr = run_script(
+        "generate_report.py",
+        "--technical", tech_path,
+        "--kline", kline_path,
+        "--scores-file", scores_path,
+        "--stock-name", "贵州茅台",
+        "--date", "2026-05-29",
+        "--output-md", md_path,
+        "--output-html", html_path,
+        timeout=15,
+    )
+    test("TF-RPT-01: 报告生成(exit_code)", rc == 0, f"exit_code={rc}", "report")
+    if rc == 0:
+        md_exists = os.path.exists(md_path)
+        test("TF-RPT-01a: Markdown报告存在", md_exists, f"path={md_path}", "report")
+        html_exists = os.path.exists(html_path)
+        test("TF-RPT-01b: HTML报告存在", html_exists, f"path={html_path}", "report")
+
+        if md_exists:
+            with open(md_path, "r", encoding="utf-8") as f:
+                md_content = f.read()
+            test("TF-RPT-01c: MD含今日动作", "今日动作" in md_content, md_content[:200], "report")
+            test("TF-RPT-01d: MD含场景A", "场景 A：继续上冲" in md_content, md_content[:200], "report")
+            test("TF-RPT-01e: MD含场景B", "场景 B：回调到位" in md_content, md_content[:200], "report")
+            test("TF-RPT-01f: MD含执行时间窗", "执行时间窗" in md_content, md_content[:200], "report")
+
+        if html_exists:
+            with open(html_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+            test("TF-RPT-01g: HTML含今日动作", "今日动作" in html_content, html_content[:200], "report")
+            test("TF-RPT-01h: HTML含场景A", "场景 A：继续上冲" in html_content, html_content[:200], "report")
+            test("TF-RPT-01i: HTML含场景B", "场景 B：回调到位" in html_content, html_content[:200], "report")
+
+    weak_tech_path, weak_kline_path, weak_scores_path = _write_report_fixture(
+        tmpdir,
+        "render_weak",
+        confidence="低",
+        rr_ratio=None,
+        latest_close=1298.0,
+    )
+    weak_md_path = os.path.join(tmpdir, "test_report_weak.md")
+    rc, stdout, stderr = run_script(
+        "generate_report.py",
+        "--technical", weak_tech_path,
+        "--kline", weak_kline_path,
+        "--scores-file", weak_scores_path,
+        "--stock-name", "贵州茅台",
+        "--date", "2026-05-29",
+        "--output-md", weak_md_path,
+        timeout=15,
+    )
+    weak_md_content = ""
+    if rc == 0 and os.path.exists(weak_md_path):
+        with open(weak_md_path, "r", encoding="utf-8") as f:
+            weak_md_content = f.read()
+    test("TF-RPT-02: 低置信度默认只观察",
+         "只观察" in weak_md_content,
+         weak_md_content[:200], "report")
 
     sys.path.insert(0, str(SCRIPTS_DIR))
     import generate_report
