@@ -349,6 +349,86 @@ def run_analyze_tests(tmpdir):
 # New Script Tests (TF-ETF, TF-CF, TF-RPT)
 # ========================
 
+def _write_report_fixture(tmpdir, name, *, confidence="中", rr_ratio=2.2, latest_close=1260.0):
+    technical_path = os.path.join(tmpdir, f"{name}_technical.json")
+    kline_path = os.path.join(tmpdir, f"{name}_kline.json")
+    scores_path = os.path.join(tmpdir, f"{name}_scores.json")
+
+    technical = {
+        "meta": {"ts_code": "600519.SH"},
+        "latest": {"close": latest_close},
+        "summary": {
+            "total_score": 2.1,
+            "direction": "看多",
+            "confidence": confidence,
+            "key_signals": ["均线多头排列", "支撑位附近缩量企稳"],
+            "support_levels": [1248.0, 1235.0],
+            "resistance_levels": [1288.0, 1315.0],
+            "stop_loss": 1236.0,
+            "target_conservative": 1288.0,
+            "target_moderate": 1315.0,
+            "target_aggressive": 1340.0,
+            "risk_reward_ratio": rr_ratio,
+            "rr_conservative": 0.9,
+            "rr_moderate": rr_ratio,
+            "rr_aggressive": 3.1,
+            "position_sizing": "标准仓位(50-70%)",
+            "max_drawdown_pct": -1.9,
+        },
+        "patterns": [],
+    }
+
+    kline = {
+        "meta": {
+            "ts_code": "600519.SH",
+            "data_source": "eastmoney",
+            "record_count": 120,
+            "start_date": "2026-01-02",
+            "end_date": "2026-05-29",
+        },
+        "data": [{"trade_date": "2026-05-29", "close": latest_close}],
+    }
+
+    scores = {
+        "scores": {"technical": 2, "capital_flow": 1, "fundamental": 0, "sentiment": 0, "macro": 0},
+        "direction": "看多",
+        "composite_score": 2.1,
+        "confidence": confidence,
+        "risks": ["量能不足"],
+        "analysis": {
+            "core_conflict": "趋势偏多，但当前位置略高于理想回踩位。",
+            "events": [{"date": "2026-06-10", "event": "股东大会", "impact": "事件前若未回踩则放弃计划"}],
+            "advice": ["回踩 1248-1252 分批试仓", "若放量站稳 1288 再考虑追踪"],
+        },
+        "report_params": {
+            "entry_verdict": "watch",
+            "entry_signals": ["回踩支撑不破", "量能回补"],
+            "support_levels": [1248.0, 1235.0],
+            "resistance_levels": [1288.0, 1315.0],
+            "stop_loss": 1236.0,
+            "target_conservative": 1288.0,
+            "target_moderate": 1315.0,
+            "target_aggressive": 1340.0,
+            "risk_reward_ratio": rr_ratio,
+            "rr_conservative": 0.9,
+            "rr_moderate": rr_ratio,
+            "rr_aggressive": 3.1,
+            "position_sizing": "标准仓位(50-70%)",
+            "max_drawdown_pct": -1.9,
+        },
+    }
+
+    for path, payload in (
+        (technical_path, technical),
+        (kline_path, kline),
+        (scores_path, scores),
+    ):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    return technical_path, kline_path, scores_path
+
+
 def run_new_script_tests(tmpdir):
     """Test new data scripts: fetch_etf_data, fetch_capital_flow, generate_report."""
     print("\n📦 新脚本测试 (New Scripts)")
@@ -417,6 +497,66 @@ def run_new_script_tests(tmpdir):
                      f"len={len(content)}", "report")
     else:
         skip("TF-RPT-01: 报告生成", "缺少前置数据")
+
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    import generate_report
+
+    tech_path, kline_path, scores_path = _write_report_fixture(tmpdir, "actionable")
+    with open(scores_path, "r", encoding="utf-8") as f:
+        report_params_data = json.load(f)["report_params"]
+
+    args = argparse.Namespace(
+        technical=tech_path,
+        kline=kline_path,
+        etf_data=None,
+        capital_flow=None,
+        scores=json.dumps({"technical": 2, "capital_flow": 1, "fundamental": 0, "sentiment": 0, "macro": 0}, ensure_ascii=False),
+        scores_file=None,
+        pipeline=None,
+        direction="看多",
+        score=2.1,
+        confidence="中",
+        risks=json.dumps(["量能不足"], ensure_ascii=False),
+        special=None,
+        ts_code="600519.SH",
+        stock_name="贵州茅台",
+        date="2026-05-29",
+        horizon="日线",
+        focus=None,
+        capital_summary="—",
+        fundamental_summary="—",
+        sentiment_summary="—",
+        macro_summary="—",
+        entry_verdict="watch",
+        entry_signals=json.dumps(["回踩支撑不破", "量能回补"], ensure_ascii=False),
+        analysis=json.dumps({
+            "core_conflict": "趋势偏多，但当前位置略高于理想回踩位。",
+            "events": [{"date": "2026-06-10", "event": "股东大会", "impact": "事件前若未回踩则放弃计划"}],
+            "advice": ["回踩 1248-1252 分批试仓", "若放量站稳 1288 再考虑追踪"],
+        }, ensure_ascii=False),
+        chart=None,
+        fundamental_data=None,
+        macro_data=None,
+        futures_data=None,
+        chip_distribution=None,
+        output_md=None,
+        output_html=None,
+        code=None,
+        data_dir=None,
+        report_params_data=report_params_data,
+    )
+
+    context = generate_report.build_context(args)
+    test("TF-RPT-CTX-01: 今日动作标签", context.get("今日动作标签") == "等回踩",
+         f"label={context.get('今日动作标签')}", "report")
+    test("TF-RPT-CTX-02: 场景A标题", context.get("场景A标题") == "场景 A：继续上冲",
+         f"title={context.get('场景A标题')}", "report")
+    test("TF-RPT-CTX-03: 场景B动作含分批试仓",
+         "分批试仓" in str(context.get("场景B动作", "")),
+         str(context.get("场景B动作")), "report")
+    test("TF-RPT-CTX-04: 执行时间窗含事件日期",
+         "2026-06-10" in str(context.get("执行时间窗", "")),
+         str(context.get("执行时间窗")), "report")
 
 
 # ========================
