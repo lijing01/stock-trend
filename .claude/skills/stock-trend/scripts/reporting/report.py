@@ -126,25 +126,29 @@ def _is_error_data_source(meta):
 
 
 def _kline_close_status(kline, required=False):
-    """Return (latest_close, unavailable) for explicit K-line inputs."""
+    """Return (latest_close, latest_date, unavailable) for explicit K-line inputs."""
     if not kline:
-        return None, required
+        return None, None, required
     if not isinstance(kline, dict):
-        return None, required
+        return None, None, required
 
     meta = kline.get("meta", {})
     if _is_error_data_source(meta):
-        return None, True
+        return None, None, True
 
     records = kline.get("data", [])
     if not isinstance(records, list) or not records:
-        return None, required
+        return None, None, required
 
     latest_record = latest_kline_record(records)
     close = _safe_float(latest_record.get("close")) if latest_record else None
+    raw_date = latest_record.get("trade_date") if latest_record else None
     if close is not None:
-        return f"{close:.2f}", False
-    return None, True
+        # trade_date is string like "20260529" or int 20260529
+        raw_str = str(raw_date)[:8] if raw_date else ""
+        date_str = f"{raw_str[:4]}-{raw_str[4:6]}-{raw_str[6:8]}" if len(raw_str) == 8 else raw_str
+        return f"{close:.2f}", date_str, False
+    return None, None, True
 
 
 def _nearest_support(values, close):
@@ -400,7 +404,7 @@ def build_context(args):
     kline_meta = kline.get("meta", {})
 
     # Latest close price: prefer verified K-line; never reuse stale technical price when explicit K-line input is unusable.
-    kline_latest_close, kline_unavailable = _kline_close_status(kline, required=bool(args.kline))
+    kline_latest_close, kline_latest_date, kline_unavailable = _kline_close_status(kline, required=bool(args.kline))
     if kline_unavailable:
         summary = {}
         report_params = {}
@@ -654,6 +658,7 @@ def build_context(args):
         "支撑位": support_str,
         "压力位": resistance_str,
         "当前价": latest_close if latest_close is not None else "—",
+        "当前价日期": kline_latest_date or "",
         "止损位": stop_loss,
         "目标位": target_display,
         "风险收益比": rr_display,
