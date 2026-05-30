@@ -42,11 +42,29 @@ allowed-tools:
   - Bash(open *)
   - Bash(open -a "Google Chrome" *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/longhubang_agg.py *)  # 龙虎榜板块聚合
+  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py *)  # 龙虎榜信号跟踪
 ---
 
 # 股票趋势判断
 
-**分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/stock-trend`→下方Step 1-4。各流程独立。
+**分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/stock-trend`→下方Step 1-4。各流程独立。
+
+---
+
+## /lhb-tracker [--history N] [--report] [--snapshot-only]
+
+龙虎榜机构信号跟踪系统 — 每日记录机构净买板块快照，验证后续 3/5/10 日表现。
+
+**步骤**：
+
+1. 运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30] [--report] [--snapshot-only]
+```
+
+2. 每日自动保存快照 → 历史数据积累后验证信号有效性
+3. `--report` 生成完整跟踪报告到 `reports/lists/`
+4. 信号验证：胜率 > 60% 视为有效信号；买入/卖出分开统计
 
 ---
 
