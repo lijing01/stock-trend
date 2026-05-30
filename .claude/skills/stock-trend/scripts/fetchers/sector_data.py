@@ -571,6 +571,169 @@ def load_rankings_cache_full() -> Optional[dict]:
         return None
 
 
+# ──────────────────────── Snapshot History ────────────────────────
+# Daily sector snapshot history replaces BK K-line dependence for
+# market-theme persistence analysis. Every successful realtime fetch
+# appends a snapshot.  market_theme.py reads last N snapshot days
+# to compute trend persistence.
+
+SNAPSHOT_FILE = CACHE_DIR / "sector_snapshot_history.json"
+SNAPSHOT_MAX_DAYS = 30  # auto-prune older snapshots
+
+
+def _hot_ranked_sectors(rankings: dict, top_n: int = 30) -> list[dict]:
+    """Extract top N sectors sorted by composite hot score.
+
+    Same filtering as rank_hot_sectors but lighter — always applies
+    min_stocks=4, min_up_ratio=0.05 to avoid degenerate data.
+    Used for snapshot history (archival quality, not display quality).
+    """
+    sectors = rankings.get("sectors", [])
+    # Filter tiny / dead sectors
+    sectors = [
+        s for s in sectors
+        if (s.get("up_count", 0) or 0) + (s.get("down_count", 0) or 0) >= 4
+        and _up_ratio(s) >= 0.05
+    ]
+    for s in sectors:
+        s["hot_score"] = compute_hot_score(s)
+    sectors.sort(key=lambda x: x.get("hot_score", 0), reverse=True)
+    # Min-max normalize
+    if sectors:
+        scores = [s["hot_score"] for s in sectors]
+        lo, hi = min(scores), max(scores)
+        if hi > lo:
+            for s in sectors:
+                s["hot_score"] = round(
+                    (s["hot_score"] - lo) / (hi - lo) * 100, 1
+                )
+    return sectors[:top_n]
+
+
+def append_daily_snapshot(rankings: dict, override_date: str = "") -> None:
+    """Append today's sector snapshot to history file.
+
+    Called after successful realtime ranking fetch (NOT on non-trading
+    days).  Stores compact sector summaries keyed by date for fast
+    persistence loading.
+
+    Args:
+        rankings: output from get_sector_rankings().
+        override_date: force date string YYYY-MM-DD (for testing).
+    """
+    sectors = rankings.get("sectors", [])
+    active = sum(
+        1 for s in sectors
+        if (s.get("up_count", 0) or 0) > 0 or (s.get("down_count", 0) or 0) > 0
+    )
+    if active == 0:
+        return  # non-trading day, skip
+
+    date_key = override_date or datetime.now().strftime("%Y-%m-%d")
+
+    # Compute top 30 summaries
+    top = _hot_ranked_sectors(rankings, top_n=30)
+    summary = []
+    for s in top:
+        up = s.get("up_count", 0) or 0
+        down = s.get("down_count", 0) or 0
+        total = up + down
+        summary.append({
+            "code": s.get("code", ""),
+            "name": s.get("name", ""),
+            "hot_score": s.get("hot_score", 0),
+            "change_pct": s.get("change_pct"),
+            "up_ratio": round(up / total, 3) if total > 0 else 0,
+            "rank": len(summary) + 1,
+        })
+
+    # Load existing history, update, save
+    history = {}
+    if SNAPSHOT_FILE.exists():
+        try:
+            history = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, Exception):
+            pass
+    history[date_key] = summary
+
+    # Auto-prune: keep last SNAPSHOT_MAX_DAYS
+    dates = sorted(history.keys())
+    if len(dates) > SNAPSHOT_MAX_DAYS:
+        keep = set(dates[-SNAPSHOT_MAX_DAYS:])
+        history = {k: v for k, v in history.items() if k in keep}
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    SNAPSHOT_FILE.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+
+
+def load_snapshot_history(days: int = 10) -> dict[str, list[dict]]:
+    """Load snapshot history for the last N trading days.
+
+    Returns dict mapping date YYYY-MM-DD -> list of sector summaries.
+    Each summary has: code, name, hot_score, change_pct, up_ratio, rank.
+    Returns empty dict if no history available.
+    """
+    if not SNAPSHOT_FILE.exists():
+        return {}
+    try:
+        history = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, Exception):
+        return {}
+    dates = sorted(history.keys())
+    recent = dates[-days:] if len(dates) > days else dates
+    return {d: history[d] for d in recent}
+
+
+def get_last_trading_day() -> tuple[Optional[str], str]:
+    """Determine last trading day from best available source.
+
+    Three-tier lookup:
+      1. Snapshot history latest date (exact, set by append_daily_snapshot)
+      2. Rankings cache cached_at (exact, set by save_rankings_cache)
+      3. Calendar fallback: today - 1 weekday (approximate)
+
+    Returns:
+        (date_str YYYY-MM-DD or None, source_label)
+        source_label: "snapshot" | "cache" | "calendar" | ""
+    """
+    # Tier 1: snapshot history latest date
+    if SNAPSHOT_FILE.exists():
+        try:
+            history = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
+            if history and isinstance(history, dict):
+                dates = sorted(history.keys())
+                if dates:
+                    return dates[-1], "snapshot"
+        except Exception:
+            pass
+
+    # Tier 2: rankings cache timestamp
+    if CACHE_FILE.exists():
+        try:
+            payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            cached_at_str = payload.get("cached_at", "")
+            if cached_at_str:
+                cached_at = datetime.fromisoformat(cached_at_str)
+                age = datetime.now() - cached_at
+                if age.total_seconds() <= MAX_CACHE_AGE_HOURS * 3600:
+                    return cached_at.strftime("%Y-%m-%d"), "cache"
+        except Exception:
+            pass
+
+    # Tier 3: calendar fallback (weekend regression)
+    today = datetime.now()
+    if today.weekday() == 5:   # Saturday → Friday
+        prev = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        prev = prev.replace(day=prev.day - 1)
+        return prev.strftime("%Y-%m-%d"), "calendar"
+    elif today.weekday() == 6:  # Sunday → Friday
+        prev = today.replace(hour=0, minute=0, second=0, microsecond=0)
+        prev = prev.replace(day=prev.day - 2)
+        return prev.strftime("%Y-%m-%d"), "calendar"
+    # Weekday but might be holiday — can't detect without calendar API
+    return None, ""
+
+
 # ──────────────────────── Main CLI ────────────────────────
 
 
