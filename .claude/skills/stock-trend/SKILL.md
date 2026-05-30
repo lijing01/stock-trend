@@ -8,6 +8,7 @@ triggers:
   - /etf-backtest
   - /longtou
   - /market-theme
+  - /ths-theme
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
@@ -32,6 +33,8 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_data.py *)        # 板块排行/成分股
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py *)       # 市场主线分析
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_kline.py *)       # BK指数K线
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/zt_replay.py *)           # 涨停复盘(同花顺)
+  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py *)           # 涨停热力主题(同花顺)
   - WebSearch
   - WebFetch
   - mcp__web-search__bing_search
@@ -42,7 +45,29 @@ allowed-tools:
 
 # 股票趋势判断
 
-**分支路由**：触发 `/etf-scan`→ETF扫描流程；`/longtou`→龙头流程；`/market-theme`→主线流程；`/stock-trend`→下方Step 1-4。各流程独立，互不交叉。
+**分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/stock-trend`→下方Step 1-4。各流程独立。
+
+---
+
+## /ths-theme [--date YYYY-MM-DD] [--top N] [--min-score N] [--ddx] [--json]
+
+基于同花顺涨停复盘数据，按概念板块聚合计算涨停热力评分。**可选 `--ddx` 整合 DDE 大单资金流向做交叉验证。**
+
+评分维度（纯涨停版）：涨停家数(30%) + 连板强度(25%) + 早盘强度(20%) + 封单强度(15%) + 炸板惩罚(-10%)
+评分维度（含 DDX）：涨停热力×70% + DDX资金力×30%
+
+**步骤**：
+
+1. 运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--date YYYY-MM-DD] [--top N] [--min-score N] [--ddx] [--rebuild-mapping] [--json]
+```
+
+2. 呈现：概览卡片 → 概念热度排行 → 核心热点 → 活跃方向 → 初现方向 → [DDX资金交叉验证] → [资金潜伏] → 炸板统计
+
+3. 热力区间：≥70核心热点 | 50-69活跃方向 | 30-49初现方向 | <30弱势
+
+4. `--ddx` 开启 DDX 资金面分析：先爬同花顺 DDX 排行 top 100 → 按板块聚合（需东方财富板块映射） → 与概念热力交叉验证 → 识别"资金潜伏但无涨停"的暗线板块。首次运行 `--ddx` 会构建股票→板块映射表（需 ~2-3 分钟），之后缓存 7 天。可用 `--rebuild-mapping` 强制重建。
 
 ---
 

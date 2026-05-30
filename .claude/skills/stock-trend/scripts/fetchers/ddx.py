@@ -130,6 +130,45 @@ def fetch_ddx_data(codes: list[str]) -> dict[str, dict]:
     return {k: v for k, v in all_records.items() if k in code_set}
 
 
+def fetch_ddx_ranking(top_n: int = 100) -> list[dict]:
+    """Fetch top N stocks by DDX from 同花顺 DDE ranking page.
+
+    Unlike fetch_ddx_data(), this scans the full ranking page without
+    requiring a pre-defined code list. Used for sector-level DDX aggregation.
+
+    Args:
+        top_n: max stocks to return (actual count depends on page).
+
+    Returns:
+        List of dicts sorted by DDX descending:
+            code, name, ddx, ddy, ddz, ddx_days, super_order_ratio, fetch_time
+        Returns empty list on any failure (graceful degradation).
+    """
+    html = _fetch_page(THS_DDX_URL)
+    if html is None:
+        return []
+    raw = _parse_ddx_table(html)
+    if not raw:
+        return []
+
+    # Build list, parse name from original page if possible
+    results = []
+    for code, data in raw.items():
+        results.append({
+            "code": code,
+            "name": "",  # name not parsed in current table parser
+            "ddx": data.get("ddx", 0),
+            "ddy": data.get("ddy", 0),
+            "ddz": data.get("ddz", 0),
+            "ddx_days": data.get("ddx_days", 0),
+            "super_order_ratio": data.get("super_order_ratio", 0),
+        })
+
+    # Sort by DDX descending (ranking page order)
+    results.sort(key=lambda x: x["ddx"], reverse=True)
+    return results[:top_n]
+
+
 def compute_ddx_score(ddx_data: dict) -> float:
     """Compute DDX score (0-100) for leader scoring weight.
 
