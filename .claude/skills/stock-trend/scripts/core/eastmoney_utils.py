@@ -6,6 +6,9 @@ that was duplicated across fetch_kline_eastmoney.py and fetch_capital_flow.py.
 """
 
 import math
+import re
+import socket
+import subprocess
 import time
 import urllib.request
 from datetime import datetime, timedelta
@@ -173,17 +176,67 @@ def fetch_url(url, headers=None, timeout=15):
         Exception from first attempt if both proxy and proxyless fail.
     """
     req = urllib.request.Request(url, headers=headers or EM_HEADERS)
+    first_error = None
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8")
-    except Exception as first:
+    except Exception as e:
+        first_error = e
         try:
             proxyless = urllib.request.ProxyHandler({})
             opener = urllib.request.build_opener(proxyless)
             with opener.open(req, timeout=timeout) as resp:
                 return resp.read().decode("utf-8")
         except Exception:
-            raise first
+            pass
+
+    # Fallback: curl with explicit IPv4 resolution (bypasses broken CDN DNS)
+    hostname = _extract_host(url)
+    if hostname:
+        try:
+            return _fetch_via_curl(url, hostname, headers, timeout)
+        except Exception:
+            raise first_error
+    raise first_error
+
+
+def _extract_host(url):
+    """Extract hostname from URL."""
+    m = re.match(r'https?://([^/:]+)', url)
+    return m.group(1) if m else None
+
+
+def _fetch_via_curl(url, hostname, headers, timeout):
+    """Fetch URL using curl subprocess with forced IPv4 resolution.
+
+    Works around CDN DNS issues where the traffic manager redirects
+    to IPv6 (push2ipv6.trafficmanager.cn) causing empty replies.
+
+    Resolves hostname to IPv4 address, then uses --resolve flag
+    to bypass broken DNS/CDN routing.
+    """
+    # Resolve IPv4 address (AF_INET only)
+    try:
+        ip = socket.getaddrinfo(hostname, 443, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+    except socket.gaierror:
+        raise RuntimeError(f"DNS resolution failed for {hostname}")
+
+    cmd = [
+        "curl", "-s", "--max-time", str(timeout),
+        "--resolve", f"{hostname}:443:{ip}",
+        "-H", f"Host: {hostname}",
+    ]
+    hdrs = headers or EM_HEADERS
+    for k, v in hdrs.items():
+        cmd.extend(["-H", f"{k}: {v}"])
+    cmd.append(url)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+    if result.returncode != 0:
+        raise RuntimeError(f"curl failed (exit={result.returncode}): {result.stderr[:200]}")
+    if not result.stdout.strip():
+        raise RuntimeError("curl returned empty response")
+    return result.stdout
 
 
 def build_em_kline_url(host, secid, freq='D', lmt=250, beg=None, end=None):

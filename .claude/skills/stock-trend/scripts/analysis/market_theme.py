@@ -642,6 +642,7 @@ def main():
     parser.add_argument("--top", type=int, default=15, help="扫描板块数量, 默认15")
     parser.add_argument("--days", type=int, default=10, help="K线回溯天数, 默认10")
     parser.add_argument("--min-score", type=float, default=0, help="最低持续性分(过滤噪声), 默认0")
+    parser.add_argument("--output-html", action="store_true", default=True, help=argparse.SUPPRESS)
     parser.add_argument("--no-html", action="store_true", help="跳过HTML报告生成")
     args = parser.parse_args()
 

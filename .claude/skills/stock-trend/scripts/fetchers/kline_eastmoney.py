@@ -173,6 +173,120 @@ def fetch_hk_stock(ts_code, freq, lmt=250):
     return records, name
 
 
+def fetch_tencent_a_stock(ts_code, freq):
+    """Fetch A-share K-line data from Tencent Finance API.
+
+    Tencent Finance provides free A-share data without authentication.
+    Used as fallback when EastMoney and BaoStock are unavailable.
+
+    URL pattern: web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{code},{klt},,,{lmt},qfq
+    Prefix: sh=Shanghai, sz=Shenzhen
+    Klt: day=daily, week=weekly
+
+    Data format per row: [date, open, close, high, low, volume]
+
+    Args:
+        ts_code: Tushare-style code, e.g. 600519.SH, 000001.SZ
+        freq: 'D' for daily, 'W' for weekly
+
+    Returns:
+        Tuple of (records_list, name_string)
+
+    Raises:
+        RuntimeError: If Tencent API fails to return data
+    """
+    import urllib.request
+
+    code, suffix = ts_code.rsplit(".", 1)
+    if suffix == "SH":
+        prefix = "sh"
+    elif suffix == "SZ":
+        prefix = "sz"
+    else:
+        raise RuntimeError(f"腾讯A股API不支持该市场: {ts_code}")
+
+    klt = "week" if freq == "W" else "day"
+    lmt = 250 if freq == "D" else 120
+    url = (
+        f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        f"?param={prefix}{code},{klt},,,{lmt},qfq"
+    )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.qq.com/",
+        "Accept": "*/*",
+    }
+
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+    except Exception as e:
+        raise RuntimeError(f"腾讯A股K线API请求失败: {e}")
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        raise RuntimeError("腾讯A股K线API返回非JSON数据")
+
+    if data.get("code") != 0:
+        raise RuntimeError(f"腾讯A股K线API返回错误: code={data.get('code')}")
+
+    stock_key = f"{prefix}{code}"
+    stock_data = data.get("data", {}).get(stock_key, {})
+    freq_key = "qfqweek" if freq == "W" else "qfqday"
+    klines = stock_data.get(freq_key, [])
+
+    if not klines:
+        # Try alternative keys
+        for key in stock_data:
+            if isinstance(stock_data[key], list) and key.startswith("qfq"):
+                klines = stock_data[key]
+                break
+
+    if not klines:
+        raise RuntimeError(f"腾讯A股K线API未返回数据: {ts_code}")
+
+    records = []
+    for item in klines:
+        try:
+            if len(item) < 6:
+                continue
+            trade_date = str(item[0]).replace("-", "")
+            open_p = float(item[1])
+            close_p = float(item[2])
+            high_p = float(item[3])
+            low_p = float(item[4])
+            vol = float(item[5])
+
+            if trade_date and close_p > 0:
+                record = {
+                    "trade_date": trade_date,
+                    "open": open_p,
+                    "close": close_p,
+                    "high": high_p,
+                    "low": low_p,
+                    "vol": vol,
+                    "amount": 0,
+                }
+                if records:
+                    prev_close = records[-1]["close"]
+                    record["pre_close"] = round(prev_close, 4)
+                    if prev_close > 0:
+                        record["pct_chg"] = round((close_p - prev_close) / prev_close * 100, 4)
+                records.append(record)
+        except (ValueError, IndexError):
+            continue
+
+    if not records:
+        raise RuntimeError(f"腾讯A股K线API未返回有效数据: {ts_code}")
+
+    records.sort(key=lambda x: x["trade_date"])
+    name = ts_code
+    return records, name
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch K-line data from East Money (东方财富) API"
@@ -276,13 +390,21 @@ def main():
     except RuntimeError as e:
         error_msg = str(e)
 
-    # Fallback to BaoStock if all EastMoney hosts failed
+    # Fallback to Tencent Finance (A-shares) if EastMoney failed
+    if records is None and not args.ts_code.endswith(".HK"):
+        try:
+            records, name = fetch_tencent_a_stock(args.ts_code, args.freq)
+            used_host = "tencent_a"
+        except Exception:
+            pass
+
+    # Fallback to BaoStock if EastMoney + Tencent both failed
     if records is None and not args.ts_code.endswith(".HK"):
         try:
             records, name = fetch_baostock(args.ts_code, args.freq)
             used_host = "baostock"
         except Exception as e:
-            error_msg = f"东方财富全节点失败 + BaoStock降级失败: {error_msg}; {e}"
+            error_msg = f"东方财富全节点失败 + Tencent/BaoStock降级失败: {error_msg}; {e}"
 
     if records is None:
         result = {
@@ -298,7 +420,7 @@ def main():
         output_json(result, output_path=args.output)
         return
 
-    data_source = "eastmoney" if used_host in EM_API_HOSTS else "baostock"
+    data_source = "eastmoney" if used_host in EM_API_HOSTS else (used_host if used_host in ("tencent_a", "baostock", "tencent_hk") else "unknown")
 
     record_count = len(records)
     warnings = []
