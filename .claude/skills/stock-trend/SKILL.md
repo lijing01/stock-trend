@@ -49,25 +49,24 @@ allowed-tools:
 
 ---
 
-## /ths-theme [--date YYYY-MM-DD] [--top N] [--min-score N] [--ddx] [--json]
+## /ths-theme [--top N] [--min-score N] [--json]
 
-基于同花顺涨停复盘数据，按概念板块聚合计算涨停热力评分。**可选 `--ddx` 整合 DDE 大单资金流向做交叉验证。**
+基于 AKShare 同花顺数据，对行业/概念板块做热力评分。
 
-评分维度（纯涨停版）：涨停家数(30%) + 连板强度(25%) + 早盘强度(20%) + 封单强度(15%) + 炸板惩罚(-10%)
-评分维度（含 DDX）：涨停热力×70% + DDX资金力×30%
+评分公式：涨跌幅(35%) + 主力净流入(35%) + 上涨比率(30%)
 
 **步骤**：
 
 1. 运行：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--date YYYY-MM-DD] [--top N] [--min-score N] [--ddx] [--rebuild-mapping] [--json]
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json]
 ```
 
-2. 呈现：概览卡片 → 概念热度排行 → 核心热点 → 活跃方向 → 初现方向 → [DDX资金交叉验证] → [资金潜伏] → 炸板统计
+2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 概念驱动事件 → 资金流向极端 → 弱势板块
 
-3. 热力区间：≥70核心热点 | 50-69活跃方向 | 30-49初现方向 | <30弱势
+3. 数据来源：同花顺行业实时排行（AKShare），无需直连通花顺网站
 
-4. `--ddx` 开启 DDX 资金面分析：先爬同花顺 DDX 排行 top 100 → 按板块聚合（需东方财富板块映射） → 与概念热力交叉验证 → 识别"资金潜伏但无涨停"的暗线板块。首次运行 `--ddx` 会构建股票→板块映射表（需 ~2-3 分钟），之后缓存 7 天。可用 `--rebuild-mapping` 强制重建。
+4. `--json` 输出结构化 JSON 给 Agent 消费。
 
 ---
 
