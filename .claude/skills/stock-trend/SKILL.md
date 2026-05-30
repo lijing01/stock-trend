@@ -138,7 +138,7 @@ python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--s
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [--days 10] [--min-score 30] [--output-html]
 ```
-三阶段：板块扫描→BK K线获取→持续性分析(5日涨幅30%+上涨天数比25%+10日涨幅20%+加速度15%+稳定性10%)。HTML输出到 `reports/lists/market-theme-{时间}.html`。
+三阶段：板块扫描(实时排行API)→快照历史加载→持续性分析(上榜率30%+平均热度20%+排名趋势20%+今日热度15%+上涨率趋势15%)。HTML输出到 `reports/lists/market-theme-{时间}.html`。
 
 2. 非--no-html时打开：`open -a "Google Chrome" reports/lists/market-theme-{时间}.html`
 

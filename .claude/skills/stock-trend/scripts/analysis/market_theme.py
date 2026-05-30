@@ -284,6 +284,13 @@ def compute_persistence(sector: dict, snapshots: list[dict],
     Returns:
         Dict with persistence metrics, or None if sector has no data at all.
     """
+    # Apply lookback window truncation
+    if lookback_days and len(snapshots) > lookback_days:
+        snapshots = snapshots[-lookback_days:]
+
+    if not snapshots:
+        return None
+
     total_days = len(history) if history else 1
     n = len(snapshots)
     hot_score = sector.get("hot_score", 0) or 0

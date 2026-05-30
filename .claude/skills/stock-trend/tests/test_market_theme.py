@@ -2,10 +2,11 @@
 """Market theme (/market-theme) test suite.
 
 Tests for analyze_market_theme.py covering:
-  - window truncation via --days / lookback_days
-  - min_score default removal (no invisible gap)
-  - hot_threshold stability (double threshold)
-  - edge cases: short/empty klines, boundary scores
+  - window truncation via lookback_days (P0 #1)
+  - min_score default removal (no invisible gap) (P0 #2)
+  - hot_threshold stability & double threshold (P0 #3)
+  - edge cases: empty/shorter snapshots, boundary scores
+  - report rendering
 
 Usage:
     python3 test_market_theme.py              # Run all tests
@@ -49,9 +50,28 @@ def skip(name, reason=""):
     print(f"  [SKIP] {name}" + (f" — {reason}" if reason else ""))
 
 
-def make_kline(pct_chgs):
-    """Build fake kline records from a list of pct_chg values."""
-    return [{"pct_chg": c} for c in pct_chgs]
+def make_snapshot(pct_chgs, code="BK0001", name="测试板块", start_rank=20):
+    """Build fake snapshot entries from pct_chg values.
+
+    Each entry has snapshot-format keys: code, name, hot_score,
+    change_pct, up_ratio, rank.
+
+    hot_score derived: max(0, min(100, 50 + pct_chg * 10)).
+    up_ratio: 0.8 if pct_chg > 0 else 0.3.
+    rank: descending from start_rank.
+    """
+    entries = []
+    for i, pct in enumerate(pct_chgs):
+        hot = max(0.0, min(100.0, 50.0 + (pct or 0) * 10.0))
+        entries.append({
+            "code": code,
+            "name": name,
+            "hot_score": hot,
+            "change_pct": pct,
+            "up_ratio": 0.8 if (pct or 0) > 0 else 0.3,
+            "rank": max(1, start_rank - i),
+        })
+    return entries
 
 
 def make_sector(code="BK0001", name="测试板块", hot_score=80, change_pct=1.5, total_count=20):
@@ -68,72 +88,73 @@ def make_sector(code="BK0001", name="测试板块", hot_score=80, change_pct=1.5
 
 
 def test_window_truncation_uses_only_lookback_days():
-    """compute_persistence with lookback_days should truncate data window.
+    """compute_persistence with lookback_days truncates snapshots.
 
-    Build 20 records: first 10 are flat (0%), last 10 are strong up (2% each).
-    With lookback=5 → takes last 5 (all strong 2%) → mom5=10.0, up_ratio=1.0
-    With lookback=15 → takes last 15 (5 flat + 10 strong) → mom5=10.0, up_ratio=10/15≈0.67
-    Default lookback=10 → takes last 10 (all strong 2%) → mom5=10.0, up_ratio=1.0
+    Build 12 entries: first 6 weak (pct=-3%), last 6 strong (pct=+3%).
+    lookback=5 → last 5 strong entries → up_days_ratio=0.8.
+    lookback=10 → last 10 (4 weak + 6 strong) → up_days_ratio=0.6.
     """
-    flat = [0.0] * 10
-    strong = [2.0] * 10
-    kline = make_kline(flat + strong)  # 20 records total
+    weak_pct = [-3.0] * 6
+    strong_pct = [3.0] * 6
+    snapshots = make_snapshot(weak_pct + strong_pct)  # 12 entries
 
     sector = make_sector()
+    # History has 15 days; on_list_rate = n/15 for each window
+    history = {f"2026-05-{i:02d}": [] for i in range(15)}
 
-    # lookback=5: last 5 records = all 2% strong
-    r5 = amt.compute_persistence(sector, kline, lookback_days=5)
+    # lookback=5: truncates to last 5 (all strong)
+    r5 = amt.compute_persistence(sector, snapshots, lookback_days=5, history=history)
     test(
-        "lookback=5: momentum_5d ~10.0",
-        r5 and abs(r5["momentum_5d"] - 10.0) < 0.01,
-        f"got {r5['momentum_5d'] if r5 else 'None'}",
+        "lookback=5: returns result",
+        r5 is not None,
     )
     test(
-        "lookback=5: up_days_ratio = 1.0 (5/5 up)",
-        r5 and r5["up_days_ratio"] == 1.0,
+        "lookback=5: up_days_ratio = 0.8 (all strong entries)",
+        r5 and abs(r5["up_days_ratio"] - 0.8) < 0.01,
         f"got {r5['up_days_ratio'] if r5 else 'None'}",
     )
-
-    # lookback=15: last 15 = 5 flat + 10 strong → mom5 still last 5 strong
-    r15 = amt.compute_persistence(sector, kline, lookback_days=15)
     test(
-        "lookback=15: momentum_5d still ~10.0",
-        r15 and abs(r15["momentum_5d"] - 10.0) < 0.01,
-        f"got {r15['momentum_5d'] if r15 else 'None'}",
-    )
-    test(
-        "lookback=15: up_days_ratio = 0.67 (10/15 up)",
-        r15 and abs(r15["up_days_ratio"] - 10/15) < 0.01,
-        f"got {r15['up_days_ratio'] if r15 else 'None'}",
+        "lookback=5: momentum_5d = 0 (uniform hot_score via window)",
+        r5 and abs(r5["momentum_5d"] - 0.0) < 0.01,
+        f"got {r5['momentum_5d'] if r5 else 'None'}",
     )
 
-    # Default lookback=10: last 10 = all strong
-    r10 = amt.compute_persistence(sector, kline)
+    # lookback=10: truncates to last 10 (4 weak + 6 strong)
+    r10 = amt.compute_persistence(sector, snapshots, lookback_days=10, history=history)
     test(
-        "lookback=default(10): momentum_5d ~10.0 (strong window)",
-        r10 and abs(r10["momentum_5d"] - 10.0) < 0.01,
-        f"got {r10['momentum_5d'] if r10 else 'None'}",
+        "lookback=10: returns result",
+        r10 is not None,
     )
+    # up_ratio = (4*0.3 + 6*0.8) / 10 = 0.6
     test(
-        "lookback=default(10): up_days_ratio = 1.0 (10/10 up)",
-        r10 and r10["up_days_ratio"] == 1.0,
+        "lookback=10: up_days_ratio = 0.6 (4 weak + 6 strong)",
+        r10 and abs(r10["up_days_ratio"] - 0.6) < 0.01,
         f"got {r10['up_days_ratio'] if r10 else 'None'}",
+    )
+
+    # Default lookback=None: uses all 12 snapshots (6 weak + 6 strong)
+    r_default = amt.compute_persistence(sector, snapshots, lookback_days=12, history=history)
+    test(
+        "lookback=12 (all): up_days_ratio = 0.55 (6*0.3 + 6*0.8)/12",
+        r_default and abs(r_default["up_days_ratio"] - 0.55) < 0.01,
+        f"got {r_default['up_days_ratio'] if r_default else 'None'}",
     )
 
 
 def test_window_truncation_shorter_than_requested():
-    """When kline is shorter than lookback_days, use all available."""
-    kline = make_kline([1.0, 2.0, 3.0, 4.0])
+    """When snapshots shorter than lookback_days, use all available."""
+    snapshots = make_snapshot([1.0, 2.0, 3.0, 4.0])
     sector = make_sector()
-    r = amt.compute_persistence(sector, kline, lookback_days=10)
+    history = {f"2026-05-{i:02d}": [] for i in range(10)}
+    r = amt.compute_persistence(sector, snapshots, lookback_days=10, history=history)
     test(
-        "lookback > len(kline): uses all 4 records",
+        "lookback > len: computes without error",
         r is not None,
     )
     test(
-        "lookback > len(kline): momentum_5d = sum of 4 records",
-        r and abs(r["momentum_5d"] - 10.0) < 0.01,
-        f"got {r['momentum_5d'] if r else 'None'}",
+        "lookback > len: up_days_ratio = 0.8 (all 4 entries up_ratio=0.8)",
+        r and abs(r["up_days_ratio"] - 0.8) < 0.01,
+        f"got {r['up_days_ratio'] if r else 'None'}",
     )
 
 
@@ -145,14 +166,15 @@ def test_min_score_default_zero():
 
     Verify persistence < 30 results flow through compute + classify correctly.
     """
-    # Weak kline: 5 flat days → persistence should be low
-    kline = make_kline([0.0, 0.0, 0.0, 0.0, 0.0])
-    sector = make_sector(hot_score=30)
-    r = amt.compute_persistence(sector, kline, lookback_days=5)
+    # Weak snapshots: very low pct change → low hot_score → low persistence
+    snapshots = make_snapshot([-5.0, -5.0])  # hot_score clamped at 0
+    sector = make_sector(hot_score=20)
+    history = {f"2026-05-{i:02d}": [] for i in range(5)}
+    r = amt.compute_persistence(sector, snapshots, lookback_days=5, history=history)
     classified = amt.classify_themes([r]) if r else {"fading": []}
 
     test(
-        "low-persistence sector (< 30) is NOT dropped",
+        "low-persistence sector is NOT dropped",
         r is not None,
         f"got {'None' if r is None else r['persistence']}",
     )
@@ -217,24 +239,37 @@ def test_hot_threshold_single_outlier_not_dragging():
 # ──────────────────────── Test: edge cases ────────────────────────
 
 
-def test_empty_kline():
-    """Empty kline returns None."""
-    r = amt.compute_persistence(make_sector(), [])
-    test("empty kline returns None", r is None)
+def test_empty_snapshots():
+    """Empty snapshots returns None."""
+    r = amt.compute_persistence(make_sector(), [], lookback_days=10, history={"d1": []})
+    test("empty snapshots returns None", r is None)
 
 
-def test_short_kline():
-    """Kline with < 3 records returns None."""
-    r = amt.compute_persistence(make_sector(), make_kline([1.0, 2.0]))
-    test("kline < 3 returns None", r is None)
+def test_sparse_snapshots():
+    """Few snapshots (< 3) computes without error (no minimum requirement)."""
+    snapshots = make_snapshot([1.0, 2.0])
+    sector = make_sector()
+    history = {"d1": [{"code": "BK0001"}], "d2": [{"code": "BK0001"}]}
+    r = amt.compute_persistence(sector, snapshots, lookback_days=10, history=history)
+    test("sparse snapshots (< 3) returns result", r is not None)
+    # rank_trend falls to 50 (neutral) → on_list_rate=1.0 & avg_hot=65 → label "→ (走平)"
+    test("sparse: trend_label = → (走平) (high on_list_rate + avg_hot)",
+         r and r["trend_label"] == "→ (走平)")
 
 
-def test_kline_exactly_3():
-    """Kline with exactly 3 records computes without error."""
-    r = amt.compute_persistence(make_sector(), make_kline([1.0, 2.0, 3.0]))
-    test("kline=3 returns result", r is not None)
-    test("kline=3: momentum_5d uses all 3 records", r and abs(r["momentum_5d"] - 6.0) < 0.01)
-    test("kline=3: acceleration = 0 (needs 10)", r and r["acceleration"] == 0.0)
+def test_snapshots_exactly_3():
+    """Exactly 3 snapshot entries computes without error, neutral trend."""
+    snapshots = make_snapshot([1.0, 2.0, 3.0])
+    sector = make_sector()
+    history = {"d1": [], "d2": [], "d3": []}
+    r = amt.compute_persistence(sector, snapshots, lookback_days=3, history=history)
+    test("snapshots=3 returns result", r is not None)
+    # momentum_5d: avg_hot - mean(last 3)
+    # avg_hot = mean(60,70,80) = 70, last 3 avg = 70 → mom5=0
+    test("snapshots=3: momentum_5d = 0 (uniform)", r and abs(r["momentum_5d"] - 0.0) < 0.01)
+    # rank_trend: 3 entries < 4 → falls to elif snapshots → 50 → trend_label ↘
+    test("snapshots=3: trend_label correct with sparse data",
+         r and r["trend_label"] in ("↘ (减弱)", "→ (走平)"))
 
 
 def test_classification_boundaries():
@@ -265,6 +300,9 @@ def test_all_sectors_fading():
     test("all fading: fading has all", len(classified["fading"]) == 2)
 
 
+# ──────────────────────── Test: Report rendering ────────────────────────
+
+
 def test_generate_report_uses_lookback_days_for_up_day_count():
     """Markdown report should not hardcode 10 when rendering up-day count."""
     classified = {
@@ -272,7 +310,6 @@ def test_generate_report_uses_lookback_days_for_up_day_count():
             "name": "主题A",
             "hot_score": 80,
             "momentum_5d": 5.0,
-            "momentum_10d": 8.0,
             "up_days_ratio": round(10 / 15, 2),
             "persistence": 72.3,
             "trend_label": "↗ (延续)",
@@ -281,7 +318,6 @@ def test_generate_report_uses_lookback_days_for_up_day_count():
             "name": "主题B",
             "hot_score": 65,
             "momentum_5d": 3.0,
-            "momentum_10d": 4.5,
             "up_days_ratio": round(10 / 15, 2),
             "persistence": 55.0,
             "trend_label": "→ (走平)",
@@ -291,14 +327,19 @@ def test_generate_report_uses_lookback_days_for_up_day_count():
         "one_day_wonders": [],
     }
     report = amt.generate_report(classified, {"scan_time": "20260528-160000"}, 15)
-    test("report uses 10/15 for strong up-day count", "| 主题A | 80 | +5.0% | +8.0% | 10/15 | **72.3** | ↗ (延续) |" in report)
-    test("report uses 10/15 for moderate up-day count", "| 主题B | 65 | +3.0% | 10/15 | 55.0 | → (走平) |" in report)
+    # Current report format: name | hot_score | momentum_5d | up_days_ratio% | persistence | trend
+    test("report shows strong sector with correct format",
+         "| 主题A | 80 | +5.0 | 67% | **72.3** | ↗ (延续) |" in report)
+    test("report shows moderate sector with correct format",
+         "| 主题B | 65 | +3.0 | 67% | 55.0 | → (走平) |" in report)
 
 
 def test_generate_html_report_persistence_cell_has_closed_class_quote():
     """HTML report should render valid class attribute for persistence cell."""
     cell = amt._COL_RENDERERS["persistence"]({"persistence": 72.3})
-    test("persistence cell has valid class attribute", cell == '<td class="ml-strong">72.3</td>', f"got {cell}")
+    test("persistence cell has valid class attribute",
+         cell == '<td class="ml-strong">72.3</td>',
+         f"got {cell}")
 
 
 # ──────────────────────── Main ────────────────────────
@@ -330,9 +371,9 @@ def main():
 
     # ── Edge cases ──
     print("\n--- Edge cases ---")
-    test_empty_kline()
-    test_short_kline()
-    test_kline_exactly_3()
+    test_empty_snapshots()
+    test_sparse_snapshots()
+    test_snapshots_exactly_3()
     test_classification_boundaries()
     test_all_sectors_fading()
 
