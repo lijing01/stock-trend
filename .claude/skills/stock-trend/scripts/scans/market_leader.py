@@ -85,7 +85,7 @@ def analyze_sector(sector: dict, leader_n: int = 3, core_n: int = 3) -> dict:
         core_n: number of core stocks to return.
 
     Returns:
-        Sector dict with leaders and core_stocks added.
+        Sector dict with leaders, core_stocks, and filter stats added.
     """
     code = sector["code"]
     name = sector["name"]
@@ -96,17 +96,43 @@ def analyze_sector(sector: dict, leader_n: int = 3, core_n: int = 3) -> dict:
         print(f"    No stocks found")
         return {**sector, "stocks_count": 0, "leaders": [], "core_stocks": []}
 
-    leaders = filter_leaders(stocks, top_n=leader_n)
-    cores = filter_core_stocks(stocks, top_n=core_n)
+    # Hard filter: ST removal + market cap bounds
+    filtered_stocks = []
+    excluded = []
+    for s in stocks:
+        s_name = s.get("name", "")
+        mcap = s.get("market_cap") or 0
+
+        if any(kw in s_name for kw in ("ST", "*ST", "退")):
+            excluded.append({"code": s["code"], "name": s_name, "reason": "ST/退市风险"})
+            continue
+        if mcap < 5e9:
+            excluded.append({"code": s["code"], "name": s_name, "reason": "市值过小(<50亿)"})
+            continue
+
+        filtered_stocks.append(s)
+
+    leaders = filter_leaders(filtered_stocks, top_n=leader_n)
+    cores = filter_core_stocks(filtered_stocks, top_n=core_n)
 
     # Dedup: remove from cores any stock already in leaders
     leader_codes = {s["code"] for s in leaders}
     cores = [s for s in cores if s["code"] not in leader_codes]
 
-    print(f"    {len(stocks)} stocks, {len(leaders)} leaders, {len(cores)} core")
+    # Collect flags for each selected stock
+    all_selected = leaders + cores
+    for s in all_selected:
+        s.setdefault("flags", {})
+        s["flags"]["volume_breakout"] = s.pop("_volume_breakout", False)
+        s["flags"]["is_laggard"] = s.pop("_is_laggard", False)
+
+    print(f"    {len(stocks)} stocks → {len(filtered_stocks)} after filter"
+          f" ({len(excluded)} excluded), {len(leaders)} leaders, {len(cores)} core")
     return {
         **sector,
         "stocks_count": len(stocks),
+        "stocks_after_filter": len(filtered_stocks),
+        "excluded": excluded[:10],
         "leaders": leaders,
         "core_stocks": cores,
     }

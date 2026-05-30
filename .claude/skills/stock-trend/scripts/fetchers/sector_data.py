@@ -314,49 +314,101 @@ def _to_float(val: Any) -> float:
     return float(val)
 
 
-def filter_leaders(stocks: list[dict], top_n: int = 3) -> list[dict]:
+def filter_leaders(stocks: list[dict], top_n: int = 3,
+                   min_market_cap: float = 5e9,
+                   max_market_cap: float = 5e11) -> list[dict]:
     """Filter leader stocks (龙头) from sector constituents.
 
-    Criteria: phase return(50%) + turnover/amount(30%) + limit-up signal(20%)
+    Criteria: phase return(50%) + turnover/amount(30%) + volume breakout(20%)
 
     Args:
         stocks: list from get_sector_stocks().
         top_n: number of leaders to return.
+        min_market_cap: minimum market cap in yuan (default 50亿).
+        max_market_cap: maximum market cap in yuan (default 5000亿).
 
     Returns:
         Top N leaders sorted by composite leader score.
     """
-    scored = []
+    # Pre-filter: ST removal + market cap bounds
+    filtered = []
     for s in stocks:
+        name = s.get("name", "")
+        if any(kw in name for kw in ("ST", "*ST", "退")):
+            continue
+        mcap = _to_float(s.get("market_cap"))
+        if mcap < min_market_cap or mcap > max_market_cap:
+            continue
+        filtered.append(s)
+
+    # Compute median amount for breakout detection
+    amounts = [_to_float(s.get("amount")) for s in filtered if _to_float(s.get("amount")) > 0]
+    median_amount = sorted(amounts)[len(amounts) // 2] if amounts else 1e8
+
+    scored = []
+    for s in filtered:
         change = s.get("change_pct") or 0
         amount = _to_float(s.get("amount"))
 
         # Leader score: today's change proxies phase return + volume
         change_score = min(100, max(0, 50 + change * 5))    # 0%→50, +10%→100
-        amount_score = min(100, _to_float(amount) / 1e7) # scaled
-        leader_score = change_score * 0.50 + amount_score * 0.30
+        amount_score = min(100, amount / 1e7)                # scaled
+
+        # Volume breakout bonus: change > 3% AND amount > 1.5x sector median
+        breakout_bonus = 0
+        if change > 3.0 and median_amount > 0 and amount > median_amount * 1.5:
+            breakout_bonus = min(100, max(0, 50 + (amount / median_amount - 1) * 50))
+
+        leader_score = change_score * 0.50 + amount_score * 0.30 + breakout_bonus * 0.20
 
         s["leader_score"] = round(leader_score, 1)
+        s["_volume_breakout"] = breakout_bonus > 0
         scored.append(s)
 
     scored.sort(key=lambda x: x.get("leader_score", 0), reverse=True)
     return scored[:top_n]
 
 
-def filter_core_stocks(stocks: list[dict], top_n: int = 3) -> list[dict]:
+def filter_core_stocks(stocks: list[dict], top_n: int = 3,
+                       min_market_cap: float = 5e9,
+                       max_market_cap: float = 5e11) -> list[dict]:
     """Filter core stocks (中军) from sector constituents.
 
-    Criteria: market cap(40%) + fundamentals/pe(40%) + stability(20%)
+    Criteria: market cap(35%) + fundamentals/pe(35%) + stability(15%) + laggard bonus(15%)
 
     Args:
         stocks: list from get_sector_stocks().
         top_n: number of core stocks to return.
+        min_market_cap: minimum market cap in yuan (default 50亿).
+        max_market_cap: maximum market cap in yuan (default 5000亿).
 
     Returns:
         Top N core stocks sorted by composite core score.
     """
-    scored = []
+    # Pre-filter: ST removal + market cap bounds
+    filtered = []
     for s in stocks:
+        name = s.get("name", "")
+        if any(kw in name for kw in ("ST", "*ST", "退")):
+            continue
+        mcap = _to_float(s.get("market_cap"))
+        if mcap < min_market_cap or mcap > max_market_cap:
+            continue
+        filtered.append(s)
+
+    # Precompute change percentiles for laggard detection
+    changes = sorted([s.get("change_pct") or 0 for s in filtered])
+
+    def _pct_rank(val, sorted_vals):
+        """Percentile rank of val in sorted_vals (0-100)."""
+        if not sorted_vals:
+            return 50
+        n = len(sorted_vals)
+        rank = sum(1 for v in sorted_vals if v < val)
+        return rank / n * 100
+
+    scored = []
+    for s in filtered:
         mcap = s.get("market_cap") or 0
         pe = s.get("pe") or 0
         change = s.get("change_pct") or 0
@@ -371,8 +423,16 @@ def filter_core_stocks(stocks: list[dict], top_n: int = 3) -> list[dict]:
         # Stability: moderate change (0~5%) preferred over extreme
         stability_score = max(0, 100 - abs(change) * 10)
 
-        core_score = cap_score * 0.40 + pe_score * 0.40 + stability_score * 0.20
+        # Laggard bonus: underperformed within sector but has reasonable PE
+        pct_rank = _pct_rank(change, changes)
+        laggard_bonus = 0
+        if pct_rank < 50 and pe and 0 < pe < 30:
+            laggard_bonus = min(20, (50 - pct_rank) * 0.4)
+
+        core_score = (cap_score * 0.35 + pe_score * 0.35
+                      + stability_score * 0.15 + laggard_bonus * 0.15)
         s["core_score"] = round(core_score, 1)
+        s["_is_laggard"] = laggard_bonus > 0
         scored.append(s)
 
     scored.sort(key=lambda x: x.get("core_score", 0), reverse=True)
@@ -415,6 +475,57 @@ def rescore_leaders_with_ddx(leaders: list[dict],
 
     leaders.sort(key=lambda x: x.get("leader_score", 0), reverse=True)
     return leaders
+
+
+# ──────────────────────── Rankings Cache ────────────────────────
+
+CACHE_DIR = SCRIPT_DIR.parent.parent.parent.parent / ".cache" / "stock-trend"
+CACHE_FILE = CACHE_DIR / "sector_rankings_cache.json"
+MAX_CACHE_AGE_HOURS = 96  # 4 days, covers long weekends
+
+# A-share market hours: 9:30-11:30, 13:00-15:00 CST
+_MARKET_OPEN_MINUTES = (9 * 60 + 30, 15 * 60)  # 570, 900
+
+
+def _is_outside_market_hours(dt: datetime) -> bool:
+    """Check if datetime is outside A-share trading hours.
+
+    Cache written during market hours (9:30-15:00) may contain
+    incomplete mid-session data — reject for weekend fallback.
+    """
+    t = dt.hour * 60 + dt.minute
+    return t < _MARKET_OPEN_MINUTES[0] or t >= _MARKET_OPEN_MINUTES[1]
+
+
+def save_rankings_cache(rankings: dict) -> None:
+    """Save sector rankings snapshot for non-trading-day fallback."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "cached_at": datetime.now().isoformat(),
+        "rankings": rankings,
+    }
+    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def load_rankings_cache() -> Optional[dict]:
+    """Load cached sector rankings if fresh AND written outside market hours.
+
+    Returns the rankings dict or None if expired / mid-session / corrupted.
+    """
+    if not CACHE_FILE.exists():
+        return None
+    try:
+        payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        cached_at = datetime.fromisoformat(payload["cached_at"])
+        age = datetime.now() - cached_at
+        if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            return None
+        # Reject mid-session cache — data may be incomplete
+        if not _is_outside_market_hours(cached_at):
+            return None
+        return payload["rankings"]
+    except Exception:
+        return None
 
 
 # ──────────────────────── Main CLI ────────────────────────

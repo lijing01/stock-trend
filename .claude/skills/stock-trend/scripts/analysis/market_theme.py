@@ -33,24 +33,103 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
-from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
+from fetchers.sector_data import get_sector_rankings, rank_hot_sectors, save_rankings_cache, load_rankings_cache
 from fetchers.sector_kline import batch_fetch_kline
 
 
 # ──────────────────────── Phase 1: Sector Scan ────────────────────────
 
 
-def get_top_sectors(top_n: int = 15) -> list[dict]:
+def _check_non_trading(all_sectors: list[dict]) -> bool:
+    """Detect non-trading day by checking if API returned all-zero data."""
+    sample = all_sectors[:20]
+    return not any(
+        (s.get("up_count", 0) or 0) != 0 or (s.get("down_count", 0) or 0) != 0
+        for s in sample
+    )
+
+
+def get_top_sectors(top_n: int = 15) -> tuple[list[dict], Optional[dict[str, list[dict]]], str, str]:
     """Phase 1: Get today's top hot sectors.
 
+    Three-tier fallback on non-trading days:
+      1. Real-time snapshot API (normal path)
+      2. Cached rankings from last trading day (< 96h, outside market hours)
+      3. BK K-line historical data (last resort, may be stale)
+
     Returns:
-        List of sector dicts with code, name, hot_score, change_pct, etc.
+        (sectors, prefetched_klines, data_date, source)
+        - sectors: ranked sector dicts
+        - prefetched_klines: K-lines pre-fetched in BK fallback (None otherwise)
+        - data_date: date the ranking data represents
+        - source: "realtime" | "cache" | "bk_kline"
     """
     print(f"[Phase 1/3] Scanning top {top_n} sectors...")
     rankings = get_sector_rankings()
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
     hot = rank_hot_sectors(rankings, top_n=top_n, min_stocks=8, min_up_ratio=0.15)
-    print(f"  Got {len(hot)} hot sectors from {rankings['meta']['total_sectors']} total")
-    return hot
+
+    if hot:
+        # ── Tier 1: real-time data ──
+        print(f"  Got {len(hot)} hot sectors from {rankings['meta']['total_sectors']} total")
+        save_rankings_cache(rankings)
+        return hot, None, today_str, "realtime"
+
+    # ── Zero hot sectors: detect non-trading day vs weak market ──
+    all_sectors = rankings.get("sectors", [])
+    if not _check_non_trading(all_sectors):
+        print(f"  Got 0 hot sectors from {rankings['meta']['total_sectors']} total (weak market)")
+        return [], None, today_str, "realtime"
+
+    # ── Tier 2: cached rankings ──
+    print(f"  ⚠️ 0 hot sectors — non-trading day detected, trying cached rankings...")
+    cached = load_rankings_cache()
+    if cached:
+        cached_hot = rank_hot_sectors(cached, top_n=top_n, min_stocks=8, min_up_ratio=0.15)
+        if cached_hot:
+            # Derive cache date from rankings meta.fetch_time (YYYYMMDD-HHMMSS)
+            fetch_ts = cached.get("meta", {}).get("fetch_time", "")
+            cache_date = f"{fetch_ts[:4]}-{fetch_ts[4:6]}-{fetch_ts[6:8]}" if len(fetch_ts) >= 8 else today_str
+            print(f"  ✓ Cache hit — {len(cached_hot)} sectors from {cache_date}")
+            data_date = cache_date if cache_date != today_str else today_str
+            return cached_hot, None, data_date, "cache"
+
+    # ── Tier 3: BK K-line fallback (last resort) ──
+    print(f"  ⚠️ Cache miss/unavailable, falling back to BK K-line data (may be stale)...")
+
+    industries = [s for s in all_sectors if s.get("type") == "industry"]
+    if not industries:
+        industries = all_sectors[:100]
+
+    candidates = industries[:min(100, len(industries))]
+    codes = [s["code"] for s in candidates if s.get("code")]
+    print(f"  Fetching K-lines for {len(codes)} industry sectors...")
+
+    prefetched = batch_fetch_kline(codes, min_records=20, max_workers=6)
+
+    ranked = []
+    last_trading_date = ""
+    for s in candidates:
+        k = prefetched.get(s["code"], [])
+        if k:
+            last = k[-1]
+            chg = last.get("pct_chg", 0) or 0
+            ld = last.get("trade_date", "")
+            if ld and (not last_trading_date or ld > last_trading_date):
+                last_trading_date = ld
+            s["change_pct"] = chg
+            s["hot_score"] = max(0, min(100, 50 + chg * 10))
+            ranked.append(s)
+
+    ranked.sort(key=lambda x: x.get("hot_score", 0), reverse=True)
+    top = ranked[:top_n]
+
+    data_date = last_trading_date or today_str
+    if len(data_date) == 8 and data_date.isdigit():
+        data_date = f"{data_date[:4]}-{data_date[4:6]}-{data_date[6:]}"
+    print(f"  Got {len(top)} sectors from BK K-line ({data_date})")
+    return top, prefetched, data_date, "bk_kline"
 
 
 # ──────────────────────── Phase 2: Fetch K-lines ────────────────────────
@@ -235,12 +314,23 @@ def classify_themes(results: list[dict]) -> dict:
 def generate_report(classified: dict, meta: dict, lookback_days: int) -> str:
     """Generate Markdown report."""
     scan_time = meta.get("scan_time", "")
+    data_date = meta.get("data_date", "")
+    data_source = meta.get("data_source", "realtime")
     lines = []
 
     lines.append(f"## 市场主线分析报告  {scan_time}")
     lines.append(f"")
     lines.append(f"▸ 分析周期: 最近 {lookback_days} 个交易日")
     lines.append(f"▸ 持续性阈值: 强≥70 | 中≥50 | 弱<50")
+
+    # Flag non-trading day data source
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if data_source == "bk_kline" and data_date and data_date != today_str:
+        lines.append(f"▸ 数据日期: {data_date}（⚠️ BK K线回退，数据可能滞后）")
+    elif data_source == "cache" and data_date and data_date != today_str:
+        lines.append(f"▸ 数据日期: {data_date}（缓存，最近交易日）")
+    elif data_date and data_date != today_str:
+        lines.append(f"▸ 数据日期: {data_date}（最近交易日，当前非交易时段）")
     lines.append(f"")
 
     strong = classified["strong"]
@@ -399,11 +489,24 @@ def _generate_html_report(classified: dict, meta: dict, results: list[dict],
                           lookback_days: int) -> str:
     """Generate HTML report matching stock-trend report-template style."""
     scan_time = meta.get("scan_time", "")
+    data_date = meta.get("data_date", "")
+    data_source = meta.get("data_source", "realtime")
     strong = classified["strong"]
     moderate = classified["moderate"]
     emerging = classified["emerging"]
     fading = classified["fading"]
     one_day = classified.get("one_day_wonders", [])
+
+    # Build data-date annotation for non-trading days
+    today_str_html = datetime.now().strftime("%Y-%m-%d")
+    date_note = ""
+    if data_date and data_date != today_str_html:
+        if data_source == "bk_kline":
+            date_note = f" | 数据日期: {data_date}（⚠️ BK K线回退，数据可能滞后）"
+        elif data_source == "cache":
+            date_note = f" | 数据日期: {data_date}（缓存，最近交易日）"
+        else:
+            date_note = f" | 数据日期: {data_date}（最近交易日）"
 
     rank_cols = ["name", "today_change", "momentum_5d", "momentum_10d",
                  "up_days_ratio", "persistence", "trend_label"]
@@ -480,7 +583,7 @@ footer{{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}}
 <header>
 <h1>市场主线分析报告</h1>
 <p class="dt">分析时间: {scan_time} | 耗时: {meta.get('elapsed_seconds','?')}s</p>
-<p class="meta">扫描板块: {meta.get('total_sectors',0)} 个 | 分析周期: 最近 {lookback_days} 个数据点</p>
+<p class="meta">扫描板块: {meta.get('total_sectors',0)} 个 | 分析周期: 最近 {lookback_days} 个数据点{date_note}</p>
 </header>
 
 {rank_table}
@@ -513,10 +616,13 @@ def main():
     start = time.time()
 
     # Phase 1: Get today's hot sectors
-    sectors = get_top_sectors(top_n=args.top)
+    sectors, prefetched_klines, data_date, data_source = get_top_sectors(top_n=args.top)
 
-    # Phase 2: Fetch K-lines
-    klines = fetch_kline_for_sectors(sectors, max_workers=4)
+    # Phase 2: Fetch K-lines (skip if BK fallback already fetched them)
+    if prefetched_klines is not None:
+        klines = prefetched_klines
+    else:
+        klines = fetch_kline_for_sectors(sectors, max_workers=4)
 
     # Phase 3: Compute persistence scores
     print(f"[Phase 3/3] Computing persistence scores...")
@@ -539,6 +645,8 @@ def main():
         "elapsed_seconds": round(elapsed, 1),
         "lookback_days": args.days,
         "total_sectors": len(sectors),
+        "data_date": data_date,
+        "data_source": data_source,
         "strong": len(classified["strong"]),
         "moderate": len(classified["moderate"]),
         "emerging": len(classified["emerging"]),

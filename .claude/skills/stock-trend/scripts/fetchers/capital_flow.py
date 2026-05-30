@@ -246,6 +246,7 @@ def fetch_individual_northbound(code):
         if df is not None and not df.empty:
             latest = df.iloc[-1] if len(df) > 1 else df.iloc[0]
             return {
+                "date": str(latest.get("日期", "")),
                 "hold_shares": safe_float(latest.get("持股股数")),
                 "hold_value_billion": safe_float(latest.get("持股数")),
                 "change_shares": safe_float(latest.get("股数变动")),
@@ -427,6 +428,25 @@ def main():
                 result["data_extended"]["longhubang"] = lhb
         except Exception as e:
             errors.append(f"龙虎榜: {e}")
+
+    # Compute individual stock capital flow streak (consecutive net inflow days)
+    if asset == "E" and result.get("data"):
+        main_streak = 0
+        total_streak = 0
+        for record in result["data"]:
+            if (record.get("main_net_inflow") or 0) > 0:
+                main_streak += 1
+            else:
+                break
+        for record in result["data"]:
+            if (record.get("total_net_inflow") or 0) > 0:
+                total_streak += 1
+            else:
+                break
+        result["data_extended"]["individual_streak"] = {
+            "main_streak": main_streak,
+            "total_streak": total_streak,
+        }
 
     if errors:
         result["warnings"] = errors

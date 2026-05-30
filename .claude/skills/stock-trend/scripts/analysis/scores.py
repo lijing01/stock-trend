@@ -891,6 +891,14 @@ def main():
                 mb = margin.get("margin_balance_billion")
                 if mb is not None and mb > 100:
                     cap_score += 1
+            # Individual stock main force consecutive net inflow
+            istreak = ext.get("individual_streak", {})
+            if istreak and isinstance(istreak, dict):
+                ms = istreak.get("main_streak", 0)
+                if ms >= 5:
+                    cap_score += 2
+                elif ms >= 3:
+                    cap_score += 1
             cap_score = max(-3, min(3, cap_score))
             if cap_score != 0:
                 scores["capital_flow"] = scores.get("capital_flow", 0) + cap_score
@@ -946,6 +954,17 @@ def main():
                     elif mb < 30:
                         sent_score -= 0.5
                     auto_src.append("margin")
+
+            # Individual stock main force consecutive inflow → confidence signal
+            istreak = ext.get("individual_streak", {})
+            if istreak and isinstance(istreak, dict):
+                ms = istreak.get("main_streak", 0)
+                if ms >= 5:
+                    sent_score += 1.0
+                elif ms >= 3:
+                    sent_score += 0.5
+                if ms:
+                    auto_src.append("ind_streak")
 
             sent_score = max(-3, min(3, sent_score))
             if sent_score != 0 or auto_src:
