@@ -315,7 +315,7 @@ def generate_report(scored: list[dict], classified: dict,
 def _generate_html_report(scored: list[dict], classified: dict,
                           summary: dict, concepts: list[dict],
                           meta: dict) -> str:
-    """Generate HTML report."""
+    """Generate HTML report with interactive visualizations."""
     now = meta.get("scan_time", "")
     strong = classified["strong"]
     active = classified["active"]
@@ -351,6 +351,58 @@ def _generate_html_report(scored: list[dict], classified: dict,
 
     ind_cols = ["rank", "name", "hot", "change", "net", "ud", "leader"]
 
+    # ── Fund flow bar data (top 5 in / top 5 out) ──
+    sorted_by_net = sorted(scored, key=lambda s: s.get("net_flow", 0) or 0, reverse=True)
+    top_inflow = [s for s in sorted_by_net if (s.get("net_flow", 0) or 0) > 0][:5]
+    top_outflow = [s for s in reversed(sorted_by_net) if (s.get("net_flow", 0) or 0) < 0][:5]
+    # Max absolute net for scaling bars
+    all_nets = [abs(s.get("net_flow", 0) or 0) for s in top_inflow + top_outflow]
+    max_net = max(all_nets) / 1e8 if all_nets else 1
+
+    def _fund_bar(sector, side):
+        net_yi = (sector.get("net_flow", 0) or 0) / 1e8
+        pct = min(100, abs(net_yi) / max_net * 100) if max_net else 0
+        color = "#dc2626" if side == "in" else "#16a34a"
+        bar_cls = "bar-in" if side == "in" else "bar-out"
+        label = f"+{net_yi:.1f}" if net_yi > 0 else f"{net_yi:.1f}"
+        return f'<div class="bar-row"><span class="bar-label">{sector["name"]}</span><div class="bar-track"><div class="{bar_cls}" style="width:{pct:.0f}%;background:{color}"></div></div><span class="bar-val">{label}亿</span></div>'
+
+    fund_bars = '<div class="fund-flow"><div class="fund-col"><h4 style="color:#dc2626;margin:0 0 8px">📈 流入 Top 5</h4>'
+    fund_bars += "".join(_fund_bar(s, "in") for s in top_inflow)
+    fund_bars += '</div><div class="fund-col"><h4 style="color:#16a34a;margin:0 0 8px">📉 流出 Top 5</h4>'
+    fund_bars += "".join(_fund_bar(s, "out") for s in top_outflow)
+    fund_bars += "</div></div>"
+
+    # ── Plotly scatter data ──
+    scatter_data = []
+    for s in scored:
+        change = s.get("change_pct", 0) or 0
+        net_yi = (s.get("net_flow", 0) or 0) / 1e8
+        amount_yi = (s.get("total_amount", 0) or 0) / 1e8
+        scatter_data.append({
+            "name": s["name"],
+            "change": round(change, 2),
+            "net": round(net_yi, 2),
+            "amount": round(amount_yi, 1),
+            "score": round(s["hot_score"], 0),
+            "up": (s.get("up_count", 0) or 0),
+            "down": (s.get("down_count", 0) or 0),
+        })
+
+    # ── Score distribution histogram ──
+    buckets = [0] * 10
+    for s in scored:
+        idx = min(9, int(s["hot_score"] // 10))
+        buckets[idx] += 1
+    max_bucket = max(buckets) if buckets else 1
+
+    def _dist_bar(count, idx):
+        pct = count / max_bucket * 100 if max_bucket else 0
+        label = f"{idx*10}-{(idx+1)*10}"
+        return f'<div class="dbar-row"><span class="dbar-label">{label}</span><div class="dbar-track"><div class="dbar-fill" style="width:{pct:.0f}%"></div></div><span class="dbar-val">{count}</span></div>'
+
+    dist_bars = "".join(_dist_bar(buckets[i], i) for i in range(10))
+
     # Concept rows
     concept_rows = ""
     for c in concepts[:10]:
@@ -363,10 +415,11 @@ def _generate_html_report(scored: list[dict], classified: dict,
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>板块热力主题 {now}</title>
+<script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f5f7;color:#1d1d1f;line-height:1.6;padding:20px}}
-.w{{max-width:960px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:36px 40px}}
+.w{{max-width:1100px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:36px 40px}}
 header{{border-bottom:2px solid #f0f0f0;padding-bottom:16px;margin-bottom:24px}}
 h1{{font-size:24px;color:#1a1a1a}}
 .dt{{color:#86868b;font-size:14px;margin:4px 0}}
@@ -387,6 +440,22 @@ tr:nth-child(even) td{{background:#f9fafb}}
 .sec{{background:#fafafa;border-radius:8px;padding:16px 20px;margin:20px 0;border:1px solid #e5e7eb}}
 .sec h2{{margin-top:0}}
 .sec.sec-strong{{border-left:4px solid #16a34a}}
+/* Fund flow bars */
+.fund-flow{{display:flex;gap:24px;margin:20px 0 30px}}
+.fund-col{{flex:1}}
+.bar-row{{display:flex;align-items:center;margin:6px 0;font-size:13px;gap:8px}}
+.bar-label{{width:80px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.bar-track{{flex:1;height:20px;background:#f0f0f0;border-radius:4px;overflow:hidden}}
+.bar-in,.bar-out{{height:100%;border-radius:4px;min-width:2px;transition:width .3s}}
+.bar-val{{width:72px;font-weight:600;font-size:12px}}
+/* Distribution bars */
+.dist-box{{display:flex;gap:20px;margin:12px 0}}
+.dbar-row{{display:flex;align-items:center;margin:3px 0;font-size:12px;gap:8px}}
+.dbar-label{{width:50px;text-align:right;font-size:11px;color:#86868b}}
+.dbar-track{{flex:1;height:14px;background:#f0f0f0;border-radius:3px;overflow:hidden}}
+.dbar-fill{{height:100%;background:#6366f1;border-radius:3px;min-width:2px}}
+.dbar-val{{width:28px;font-weight:600;font-size:11px;color:#6366f1;text-align:right}}
+.chart-box{{width:100%;height:500px;margin:16px 0}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:32px}}
 </style>
 </head>
@@ -408,6 +477,32 @@ tr:nth-child(even) td{{background:#f9fafb}}
 
 <div class="leader-bar">📈 领涨: {'、'.join(summary['top_gainers'][:5])}</div>
 
+<div class="sec">
+<h2>💰 资金流向</h2>
+{fund_bars}
+</div>
+
+<div class="sec">
+<h2>📊 板块分布图 — 涨跌幅 vs 主力净流入</h2>
+<p style="font-size:13px;color:#86868b;margin:4px 0 8px">气泡大小 = 成交额，颜色 = 热度分 | 悬停查看详情</p>
+<div id="scatterChart" class="chart-box"></div>
+</div>
+
+<div class="sec">
+<h2>📋 热度分布</h2>
+<div class="dist-box">
+<div style="flex:1">
+<p style="font-size:12px;color:#86868b;margin:0 0 6px">各分数段板块数量</p>
+{dist_bars}
+</div>
+<div style="flex:0 0 auto;padding:8px 12px;background:#f0fdf4;border-radius:8px;font-size:13px;line-height:1.8">
+<div><strong>强势 (≥70):</strong> <span style="color:#16a34a">{len(strong)}</span></div>
+<div><strong>活跃 (50-69):</strong> <span style="color:#1d4ed8">{len(active)}</span></div>
+<div><strong>弱势 (&lt;30):</strong> <span style="color:#a1a1a6">{len(weak)}</span></div>
+</div>
+</div>
+</div>
+
 {'<div class="sec sec-strong"><h2>强势板块（热度≥70）</h2><table><thead><tr><th>#</th><th>板块</th><th>热度</th><th>涨跌幅</th><th>净流入</th><th>涨跌</th><th>领涨</th></tr></thead><tbody>' + _rows(strong[:10], ind_cols) + '</tbody></table></div>' if strong else ''}
 
 {'<div class="sec"><h2>活跃板块（50-69）</h2><table><thead><tr><th>#</th><th>板块</th><th>热度</th><th>涨跌幅</th><th>净流入</th><th>涨跌</th><th>领涨</th></tr></thead><tbody>' + _rows(active[:8], ind_cols) + '</tbody></table></div>' if active else ''}
@@ -422,6 +517,41 @@ tr:nth-child(even) td{{background:#f9fafb}}
 <p class="disc">数据来源: 同花顺 (AKShare) | 仅供学习参考</p>
 </footer>
 </div>
+
+<script>
+var scatterData = {json.dumps(scatter_data, ensure_ascii=False)};
+var trace = {{
+  x: scatterData.map(d => d.change),
+  y: scatterData.map(d => d.net),
+  mode: 'markers',
+  type: 'scatter',
+  marker: {{
+    size: scatterData.map(d => Math.max(6, Math.sqrt(d.amount) * 1.5)),
+    color: scatterData.map(d => d.score),
+    colorscale: [['0','#e74c3c'],['0.3','#f39c12'],['0.5','#fdcb6e'],['0.7','#6ab04c'],['1','#2d7d46']],
+    showscale: true,
+    colorbar: {{title: '热度', titleside: 'right'}},
+    line: {{color:'#fff', width: 0.5}},
+    sizeref: 0.3,
+    sizemode: 'area',
+  }},
+  text: scatterData.map(d => d.name),
+  hovertemplate: '<b>%{{text}}</b><br>涨跌幅: %{{x:.2f}}%<br>净流入: %{{y:.1f}}亿<br>热度: %{{marker.color:.0f}}<extra></extra>',
+}};
+
+var layout = {{
+  title: '',
+  xaxis: {{title: '涨跌幅(%)', zerolinecolor: '#ddd', gridcolor: '#f0f0f0'}},
+  yaxis: {{title: '主力净流入(亿)', zerolinecolor: '#ddd', gridcolor: '#f0f0f0'}},
+  hovermode: 'closest',
+  margin: {{l:60, r:30, t:10, b:50, pad:4}},
+  plot_bgcolor: '#fafafa',
+  paper_bgcolor: '#fafafa',
+  font: {{family: 'PingFang SC, Microsoft YaHei, sans-serif', size: 13}},
+}};
+
+Plotly.newPlot('scatterChart', [trace], layout, {{responsive: true, displayModeBar: false}});
+</script>
 </body>
 </html>"""
 

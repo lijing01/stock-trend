@@ -274,7 +274,8 @@ scripts/
 │   └── ths_utils.py                 # 同花顺反爬工具(header/retry/parse)
 ├── fetchers/
 │   ├── ddx.py                       # DDX排行: fetch_ddx_data + fetch_ddx_ranking
-│   ├── longhubang.py                # 龙虎榜(按code查询，待增强无目标扫描)
+│   ├── longhubang.py                # 龙虎榜(按code查询)
+│   ├── longhubang_agg.py            # 龙虎榜板块聚合(AKShare+P4)
 │   ├── zt_replay.py                 # 涨停复盘爬虫 + 按概念聚合
 │   └── sector_mapper.py             # 股票→板块映射构建 + DDX板块聚合
 └── analysis/
@@ -296,7 +297,7 @@ tests/
 | **P1** | DDX无目标扫描 + 板块映射 + 资金聚合 | ✅ 已完成 | `ddx.py`, `sector_mapper.py`, `test_ddx_integration.py` |
 | **P2** | 评分引擎 + MD/HTML + SKILL挂钩 | ✅ 已完成 | `ths_theme.py`, `test_ths_theme.py`, `SKILL.md` |
 | **P3** | 双源交叉验证（同花顺概念 ↔ BK 板块） | ✅ 已包含在 P1/P2 | `cross_reference_with_ddx()` |
-| **P4** | 龙虎榜机构倾向板块聚合 | 🚧 待开发 | `longhubang.py` 改造 |
+| **P4** | 龙虎榜机构倾向板块聚合 | ✅ 已完成 | `longhubang_agg.py`, `test_longhubang_agg.py` |
 | **P5** | 概念板块排行（q.10jqka.com.cn 爬取） | ❌ 待开发 | 新文件 |
 
 ---
