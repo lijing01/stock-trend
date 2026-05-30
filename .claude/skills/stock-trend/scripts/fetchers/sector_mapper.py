@@ -24,7 +24,7 @@ from typing import Optional
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from core.eastmoney_utils import rotate_em_host, EM_HEADERS
+from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS
 from fetchers.sector_data import get_sector_list
 
 # ──────────────── 缓存 ────────────────
@@ -53,8 +53,8 @@ def _fetch_sector_stocks_raw(sector_code: str, max_stocks: int = 30) -> list[dic
         f"&pn=1&pz={max_stocks}&po=0&np=1&fltt=2"
         f"&fid=f3"
     )
-    for attempt in range(3):
-        host = rotate_em_host(attempt)
+    for attempt in range(6):
+        host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
         actual_url = url.replace("https://push2.eastmoney.com", f"https://{host}", 1) if host != "push2.eastmoney.com" else url
         try:
             req = urllib.request.Request(actual_url, headers=EM_HEADERS)

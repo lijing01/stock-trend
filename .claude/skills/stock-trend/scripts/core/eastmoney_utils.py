@@ -20,10 +20,10 @@ EM_API_HOSTS = [
 ]
 
 EM_PUSH2_HOSTS = [
+    "push2test.eastmoney.com",    # CDN fallback - 当前环境可用
     "push2.eastmoney.com",
     "38.push2.eastmoney.com",
     "48.push2.eastmoney.com",
-    "push2test.eastmoney.com",    # CDN fallback - 部分网络环境下主节点限流时可用
     "60.push2.eastmoney.com",      # CDN fallback
     "95.push2.eastmoney.com",      # CDN fallback
 ]

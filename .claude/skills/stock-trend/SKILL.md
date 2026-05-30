@@ -41,6 +41,7 @@ allowed-tools:
   - mcp__web-search__crawl_webpage
   - Bash(open *)
   - Bash(open -a "Google Chrome" *)
+  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/longhubang_agg.py *)  # 龙虎榜板块聚合
 ---
 
 # 股票趋势判断
@@ -49,17 +50,25 @@ allowed-tools:
 
 ---
 
-## /ths-theme [--top N] [--min-score N] [--json]
+## /ths-theme [--top N] [--min-score N] [--json] [--longhubang|--lhb]
 
 基于 AKShare 同花顺数据，对行业/概念板块做热力评分。
 
 评分公式：涨跌幅(35%) + 主力净流入(35%) + 上涨比率(30%)
 
+`--longhubang` 开启龙虎榜机构板块聚合分析：
+1. 拉取东方财富龙虎榜机构买卖明细（`stock_lhb_jgmmtj_em`）
+2. 通过板块映射表（BK 分类）将上榜股票按板块聚合
+3. 计算龙虎榜板块评分（机构净买额40% + 上榜家数25% + 机构参与度20% + 净买一致性15%）
+4. 报告追加🏛️龙虎榜机构板块聚合章节（含净买入/净卖出 Top 3 详情）
+
+`--lhb-date YYYYMMDD` 指定龙虎榜日期（默认最近交易日）。
+
 **步骤**：
 
 1. 运行：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json]
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--longhubang] [--lhb-date YYYYMMDD]
 ```
 
 2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 概念驱动事件 → 资金流向极端 → 弱势板块

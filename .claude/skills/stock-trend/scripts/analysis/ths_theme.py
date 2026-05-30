@@ -435,6 +435,9 @@ def main():
     parser.add_argument("--min-score", type=float, default=0, help="最低热力分")
     parser.add_argument("-j", "--json", action="store_true", help="JSON 输出")
     parser.add_argument("--no-html", action="store_true", help="跳过 HTML")
+    parser.add_argument("--longhubang", "--lhb", action="store_true",
+                        help="龙虎榜机构板块聚合分析")
+    parser.add_argument("--lhb-date", type=str, help="龙虎榜日期 YYYYMMDD")
     args = parser.parse_args()
 
     start = time.time()
@@ -463,12 +466,33 @@ def main():
     classified = classify_industries(scored)
     summary = market_summary(scored)
 
+    # 龙虎榜数据
+    lhb_sectors = []
+    if args.longhubang:
+        print("\n[Phase 4/4] 龙虎榜机构板块聚合...")
+        try:
+            from fetchers.longhubang_agg import (
+                run_lhb_analysis,
+                generate_lhb_md_section,
+                generate_lhb_html_section,
+            )
+            lhb_result = run_lhb_analysis(args.lhb_date)
+            lhb_sectors = lhb_result.get("sectors", [])
+            if lhb_sectors:
+                print(f"  Got {lhb_result['meta']['total_lhb_stocks']} LHB stocks "
+                      f"across {len(lhb_sectors)} sectors")
+            else:
+                print(f"  ⚠️ {lhb_result['meta']['note']}")
+        except Exception as e:
+            print(f"  ⚠️ 龙虎榜分析失败: {e}")
+
     elapsed = time.time() - start
     meta = {
         "scan_time": now,
         "elapsed_seconds": round(elapsed, 1),
         "total_sectors": len(scored),
         "source": "akshare",
+        "has_longhubang": bool(lhb_sectors),
     }
 
     if args.json:
@@ -483,16 +507,28 @@ def main():
             "strong": [s["name"] for s in classified["strong"]],
             "active": [s["name"] for s in classified["active"]],
             "concepts": concepts[:10] if concepts else [],
+            "longhubang": lhb_sectors[:args.top] if lhb_sectors else [],
         }
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         report = generate_report(scored, classified, summary,
                                  concepts or [], meta)
+        # 追加龙虎榜章节
+        lhb_md = ""
+        if lhb_sectors:
+            from fetchers.longhubang_agg import generate_lhb_md_section
+            lhb_md = generate_lhb_md_section(lhb_sectors, args.top)
+        report += lhb_md
         print(report)
 
     if not args.no_html and not args.json:
         html = _generate_html_report(scored, classified, summary,
                                      concepts or [], meta)
+        # 追加龙虎榜 HTML 章节
+        if lhb_sectors:
+            from fetchers.longhubang_agg import generate_lhb_html_section
+            lhb_html = generate_lhb_html_section(lhb_sectors, args.top)
+            html = html.replace("</div>\n\n<footer>", f"{lhb_html}\n</div>\n\n<footer>")
         html_path = REPORTS_DIR / f"ths-theme-{now_ts}.html"
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         html_path.write_text(html, encoding="utf-8")
