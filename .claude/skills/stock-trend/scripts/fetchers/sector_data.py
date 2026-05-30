@@ -497,20 +497,43 @@ def _is_outside_market_hours(dt: datetime) -> bool:
     return t < _MARKET_OPEN_MINUTES[0] or t >= _MARKET_OPEN_MINUTES[1]
 
 
-def save_rankings_cache(rankings: dict) -> None:
-    """Save sector rankings snapshot for non-trading-day fallback."""
+def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None) -> None:
+    """Save sector rankings snapshot for non-trading-day fallback.
+
+    Also saves pre-computed hot_sectors if provided, so non-trading day
+    can return yesterday's actual hot sector rankings rather than
+    regenerating from stale data.
+
+    Does NOT overwrite existing cache if today's data has no real sector
+    activity (non-trading day). This preserves the last trading day's cache.
+    """
+    sectors = rankings.get("sectors", [])
+    active = sum(
+        1 for s in sectors
+        if (s.get("up_count", 0) or 0) > 0 or (s.get("down_count", 0) or 0) > 0
+    )
+    # Never cache zero-activity data (non-trading day).
+    # Without this guard, first run on a weekend creates a zero cache
+    # that drowns the last trading day's data.
+    if active == 0:
+        return
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "cached_at": datetime.now().isoformat(),
         "rankings": rankings,
     }
+    if hot_sectors:
+        payload["hot_sectors"] = hot_sectors
     CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
 def load_rankings_cache() -> Optional[dict]:
-    """Load cached sector rankings if fresh AND written outside market hours.
+    """Load cached sector rankings if fresh and has any sector data.
 
-    Returns the rankings dict or None if expired / mid-session / corrupted.
+    Returns the rankings dict or None if expired / corrupted.
+    Accepts caches from any time of day (including mid-session).
+    Even a sparse intraday cache is more useful than multi-week stale
+    BK K-line fallback.
     """
     if not CACHE_FILE.exists():
         return None
@@ -520,10 +543,30 @@ def load_rankings_cache() -> Optional[dict]:
         age = datetime.now() - cached_at
         if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
             return None
-        # Reject mid-session cache — data may be incomplete
-        if not _is_outside_market_hours(cached_at):
+        # Must have at least some sectors (not an empty cache)
+        rankings = payload.get("rankings", {})
+        sectors = rankings.get("sectors", [])
+        if len(sectors) < 5:
             return None
-        return payload["rankings"]
+        return rankings
+    except Exception:
+        return None
+
+
+def load_rankings_cache_full() -> Optional[dict]:
+    """Load full cached payload including hot_sectors if present.
+
+    Returns the raw payload dict, or None if expired / corrupted.
+    """
+    if not CACHE_FILE.exists():
+        return None
+    try:
+        payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        cached_at = datetime.fromisoformat(payload["cached_at"])
+        age = datetime.now() - cached_at
+        if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            return None
+        return payload
     except Exception:
         return None
 

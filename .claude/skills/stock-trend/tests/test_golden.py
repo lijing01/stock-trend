@@ -282,10 +282,15 @@ def _normalize_capital_flow(data):
         item.get("net_buy_billion")
         for item in (extended.get("northbound_market") or [])[-10:]
     ]
+    # Only compare stable fields — live API may add/remove volatile keys
+    northbound = extended.get("northbound_individual") or {}
+    northbound_stable = _stable_keys(northbound, [
+        "hold_shares", "change_shares", "hold_value_billion",
+    ])
     return {
         "meta": _stable_keys(data.get("meta", {}), ["ts_code", "asset"]),
         "data_empty": len(data.get("data", [])) == 0,
-        "northbound_individual": extended.get("northbound_individual", {}),
+        "northbound_individual": northbound_stable,
         "northbound_market_values": market_values,
     }
 

@@ -11,16 +11,6 @@
   },
   "data": [
     {
-      "trade_date": "20250523",
-      "open": 517.0,
-      "close": 518.0,
-      "high": 520.5,
-      "low": 512.0,
-      "vol": 16262610.0,
-      "amount": 0,
-      "ts_code": "00700.HK"
-    },
-    {
       "trade_date": "20250526",
       "open": 515.0,
       "close": 510.0,
@@ -28,8 +18,6 @@
       "low": 508.0,
       "vol": 17286567.0,
       "amount": 0,
-      "pre_close": 518.0,
-      "pct_chg": -1.5444,
       "ts_code": "00700.HK"
     },
     {
@@ -3006,6 +2994,18 @@
       "amount": 0,
       "pre_close": 434.4,
       "pct_chg": -2.1639,
+      "ts_code": "00700.HK"
+    },
+    {
+      "trade_date": "20260529",
+      "open": 428.2,
+      "close": 427.2,
+      "high": 438.4,
+      "low": 423.6,
+      "vol": 48005475.0,
+      "amount": 0,
+      "pre_close": 425.0,
+      "pct_chg": 0.5176,
       "ts_code": "00700.HK"
     }
   ]

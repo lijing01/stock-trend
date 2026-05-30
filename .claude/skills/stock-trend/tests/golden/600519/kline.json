@@ -4,37 +4,13 @@
     "asset": "E",
     "freq": "D",
     "adj": "qfq",
-    "record_count": 243,
-    "data_points": 243,
+    "record_count": 242,
+    "data_points": 242,
     "data_source": "baostock",
     "em_host": null,
     "warnings": []
   },
   "data": [
-    {
-      "trade_date": "20250528",
-      "open": 1488.95602044,
-      "high": 1491.33797976,
-      "low": 1478.357748,
-      "close": 1482.215172,
-      "pct_chg": -0.4469,
-      "vol": 1626568.0,
-      "amount": 2504624605.12,
-      "pre_close": 1488.8692284,
-      "ts_code": "600519.SH"
-    },
-    {
-      "trade_date": "20250529",
-      "open": 1485.10824,
-      "high": 1499.57358,
-      "low": 1477.393392,
-      "close": 1485.10824,
-      "pct_chg": 0.1952,
-      "vol": 2185958.0,
-      "amount": 3375465796.02,
-      "pre_close": 1482.215172,
-      "ts_code": "600519.SH"
-    },
     {
       "trade_date": "20250530",
       "open": 1485.2528934,
@@ -2925,6 +2901,18 @@
       "vol": 4588998.0,
       "amount": 5895475019.48,
       "pre_close": 1303.0,
+      "ts_code": "600519.SH"
+    },
+    {
+      "trade_date": "20260529",
+      "open": 1270.6,
+      "high": 1329.0,
+      "low": 1270.0,
+      "close": 1326.0,
+      "pct_chg": 3.9201,
+      "vol": 7647805.0,
+      "amount": 10037388211.15,
+      "pre_close": 1275.98,
       "ts_code": "600519.SH"
     }
   ]

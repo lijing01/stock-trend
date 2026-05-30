@@ -33,7 +33,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 REPORTS_LISTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
-from fetchers.sector_data import get_sector_rankings, rank_hot_sectors, save_rankings_cache, load_rankings_cache
+from fetchers.sector_data import get_sector_rankings, rank_hot_sectors, save_rankings_cache, load_rankings_cache, load_rankings_cache_full
 from fetchers.sector_kline import batch_fetch_kline
 
 
@@ -68,12 +68,16 @@ def get_top_sectors(top_n: int = 15) -> tuple[list[dict], Optional[dict[str, lis
     rankings = get_sector_rankings()
     today_str = datetime.now().strftime("%Y-%m-%d")
 
+    # Always save rankings for future non-trading-day cache fallback
+    save_rankings_cache(rankings)
+
     hot = rank_hot_sectors(rankings, top_n=top_n, min_stocks=8, min_up_ratio=0.15)
 
     if hot:
         # ── Tier 1: real-time data ──
         print(f"  Got {len(hot)} hot sectors from {rankings['meta']['total_sectors']} total")
-        save_rankings_cache(rankings)
+        # Save hot_sectors alongside raw rankings for non-trading day reuse
+        save_rankings_cache(rankings, hot_sectors=hot)
         return hot, None, today_str, "realtime"
 
     # ── Zero hot sectors: detect non-trading day vs weak market ──
@@ -84,16 +88,34 @@ def get_top_sectors(top_n: int = 15) -> tuple[list[dict], Optional[dict[str, lis
 
     # ── Tier 2: cached rankings ──
     print(f"  ⚠️ 0 hot sectors — non-trading day detected, trying cached rankings...")
-    cached = load_rankings_cache()
-    if cached:
-        cached_hot = rank_hot_sectors(cached, top_n=top_n, min_stocks=8, min_up_ratio=0.15)
-        if cached_hot:
-            # Derive cache date from rankings meta.fetch_time (YYYYMMDD-HHMMSS)
-            fetch_ts = cached.get("meta", {}).get("fetch_time", "")
-            cache_date = f"{fetch_ts[:4]}-{fetch_ts[4:6]}-{fetch_ts[6:8]}" if len(fetch_ts) >= 8 else today_str
-            print(f"  ✓ Cache hit — {len(cached_hot)} sectors from {cache_date}")
-            data_date = cache_date if cache_date != today_str else today_str
-            return cached_hot, None, data_date, "cache"
+    cache_payload = load_rankings_cache_full()
+    if cache_payload:
+        cached_at_str = cache_payload.get("cached_at", "")
+        try:
+            cached_at = datetime.fromisoformat(cached_at_str)
+            cache_date_str = cached_at.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            cache_date_str = today_str
+
+        # Validate cached data has real activity (not zero-data from buggy prior runs)
+        cached_rankings = cache_payload.get("rankings", {})
+        cached_sectors = cached_rankings.get("sectors", [])
+        cache_active = sum(
+            1 for s in cached_sectors
+            if (s.get("up_count", 0) or 0) > 0 or (s.get("down_count", 0) or 0) > 0
+        )
+        if cache_active == 0:
+            print(f"  ⚠️ Cached data from {cache_date_str} has 0 active sectors — skipping")
+        else:
+            # Pre-computed hot_sectors from last trading day — best quality
+            cached_hot = cache_payload.get("hot_sectors")
+            if cached_hot:
+                print(f"  ✓ Cache hit — {len(cached_hot)} sectors from {cache_date_str} "
+                      f"(active sectors: {cache_active})")
+                data_date = cache_date_str if cache_date_str != today_str else today_str
+                return cached_hot, None, data_date, "cache"
+            # Raw cache exists but no hot_sectors (data may be from non-trading day)
+            print(f"  ⚠️ Cached data from {cache_date_str} has no hot_sectors — falling through to BK K-line")
 
     # ── Tier 3: BK K-line fallback (last resort) ──
     print(f"  ⚠️ Cache miss/unavailable, falling back to BK K-line data (may be stale)...")
@@ -129,6 +151,16 @@ def get_top_sectors(top_n: int = 15) -> tuple[list[dict], Optional[dict[str, lis
     if len(data_date) == 8 and data_date.isdigit():
         data_date = f"{data_date[:4]}-{data_date[4:6]}-{data_date[6:]}"
     print(f"  Got {len(top)} sectors from BK K-line ({data_date})")
+
+    # Warn if BK K-line data is > 4 calendar days old (stale CDN cache)
+    try:
+        dd = datetime.strptime(data_date, "%Y-%m-%d")
+        tn = datetime.strptime(today_str, "%Y-%m-%d")
+        if (tn - dd).days > 4:
+            print(f"  ⚠️ BK K-line data is {(tn - dd).days} days stale — CDN cache may be outdated")
+    except ValueError:
+        pass
+
     return top, prefetched, data_date, "bk_kline"
 
 

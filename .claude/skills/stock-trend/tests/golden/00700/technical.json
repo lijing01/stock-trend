@@ -2,7 +2,7 @@
   "meta": {
     "ts_code": "00700.HK",
     "is_etf": false,
-    "analysis_date": "20260528",
+    "analysis_date": "20260530",
     "data_points": 250,
     "indicators_computed": [
       "ma",
@@ -17,14 +17,14 @@
     ]
   },
   "latest": {
-    "date": "20260528",
-    "close": 425.0,
+    "date": "20260529",
+    "close": 427.2,
     "ma": {
       "values": {
-        "ma5": 435.76,
-        "ma10": 445.98,
-        "ma20": 457.4,
-        "ma60": 493.1417
+        "ma5": 433.4,
+        "ma10": 442.68,
+        "ma20": 454.8,
+        "ma60": 491.6283
       },
       "alignment": "bearish",
       "signal": {
@@ -34,27 +34,27 @@
       }
     },
     "macd": {
-      "dif": -15.8391,
-      "dea": -13.9994,
-      "histogram": -3.6793,
+      "dif": -16.2377,
+      "dea": -14.4471,
+      "histogram": -3.5813,
       "signal": {
         "type": "neutral",
-        "description": "绿柱放大",
-        "score": -1
+        "description": "绿柱缩窄",
+        "score": 0
       }
     },
     "rsi": {
-      "rsi14": 20.76,
+      "rsi14": 24.24,
       "signal": {
         "type": "oversold",
-        "description": "RSI=20.8，超卖",
+        "description": "RSI=24.2，超卖",
         "score": 1
       }
     },
     "kdj": {
-      "k": 10.57,
-      "d": 13.46,
-      "j": 4.79,
+      "k": 11.73,
+      "d": 12.88,
+      "j": 9.42,
       "signal": {
         "type": "neutral",
         "description": "超卖区",
@@ -62,37 +62,37 @@
       }
     },
     "bollinger": {
-      "upper": 487.6578,
-      "middle": 457.4,
-      "lower": 427.1422,
+      "upper": 486.0895,
+      "middle": 454.8,
+      "lower": 423.5105,
       "signal": {
-        "type": "breakout_lower",
-        "description": "跌破下轨",
-        "score": -1
-      }
-    },
-    "volume": {
-      "vol": 42196103.0,
-      "vol_ma20": 30170706.0,
-      "vol_ratio": 1.4,
-      "signal": {
-        "type": "neutral",
-        "description": "量价中性(量比1.40)",
+        "type": "middle_support",
+        "description": "中轨下方运行",
         "score": 0
       }
     },
+    "volume": {
+      "vol": 48005475.0,
+      "vol_ma20": 31604929.0,
+      "vol_ratio": 1.52,
+      "signal": {
+        "type": "volume_confirms",
+        "description": "放量上涨(量比1.52)",
+        "score": 2
+      }
+    },
     "adx": {
-      "adx": 40.59,
-      "plus_di": 15.35,
-      "minus_di": 38.49,
+      "adx": 39.12,
+      "plus_di": 18.0,
+      "minus_di": 35.1,
       "signal": {
         "type": "trend_strength",
-        "description": "ADX=40.6，强趋势；-DI>+DI确认空头",
+        "description": "ADX=39.1，趋势有效；-DI>+DI确认空头",
         "score": -1
       }
     },
     "obv": {
-      "obv": -588612558.0,
+      "obv": -523320516.0,
       "signal": {
         "type": "money_flow",
         "description": "OBV在20日均线下方，资金净流出",
@@ -100,12 +100,12 @@
       }
     },
     "atr": {
-      "atr": 12.2857,
-      "atr_pct": 2.89,
+      "atr": 12.7,
+      "atr_pct": 2.97,
       "volatility_level": "high",
       "signal": {
         "type": "volatility",
-        "description": "ATR=12.29(2.9%)，高波动",
+        "description": "ATR=12.70(3.0%)，高波动",
         "score": 0
       }
     },
@@ -116,67 +116,64 @@
   },
   "patterns": [
     {
-      "name": "跳空向下",
-      "name_en": "Bearish Gap Down",
-      "direction": "bearish",
-      "position": "breakdown",
-      "score": -1,
-      "candles": 2
+      "name": "纺锤线",
+      "name_en": "Spinning Top",
+      "direction": "neutral",
+      "position": "indecision",
+      "score": 0,
+      "candles": 1
     }
   ],
   "summary": {
-    "total_score": -0.71,
+    "total_score": -0.17,
     "direction": "neutral",
     "confidence": "low",
-    "consistency": 0.62,
+    "consistency": 0.38,
     "key_signals": [
       "空头排列",
-      "绿柱放大",
-      "RSI=20.8，超卖",
+      "绿柱缩窄",
+      "RSI=24.2，超卖",
       "超卖区",
-      "跌破下轨",
-      "量价中性(量比1.40)",
-      "ADX=40.6，强趋势；-DI>+DI确认空头",
+      "中轨下方运行",
+      "放量上涨(量比1.52)",
+      "ADX=39.1，趋势有效；-DI>+DI确认空头",
       "OBV在20日均线下方，资金净流出"
     ],
     "data_quality": "good",
     "dimension_scores": {
       "ma": -2,
-      "macd": -1,
+      "macd": 0,
       "rsi": 1,
       "kdj": 1,
-      "bollinger": -1,
-      "volume": 0,
+      "bollinger": 0,
+      "volume": 2,
       "adx": -1,
       "obv": -1,
-      "patterns": -1
+      "patterns": 0
     },
     "support_levels": [
-      420.4,
-      190,
-      170,
-      160,
-      150
+      413.6667,
+      423.6
     ],
     "resistance_levels": [
-      427.1422,
-      457.4,
-      487.6578,
-      518.9,
-      550.575
+      428.2,
+      438.4,
+      454.8,
+      462.6,
+      469.0
     ],
-    "stop_loss": 400.43,
-    "target_conservative": 427.14,
-    "target_moderate": 487.66,
-    "target_aggressive": 518.9,
-    "target": 487.66,
-    "risk_reward_ratio": 2.55,
-    "rr_conservative": 0.09,
-    "rr_moderate": 2.55,
-    "rr_aggressive": 3.82,
+    "stop_loss": 401.8,
+    "target_conservative": 428.2,
+    "target_moderate": 469.0,
+    "target_aggressive": 465.3,
+    "target": 469.0,
+    "risk_reward_ratio": 1.65,
+    "rr_conservative": 0.04,
+    "rr_moderate": 1.65,
+    "rr_aggressive": 1.5,
     "favorable_rr": true,
-    "position_sizing": "标准仓位(50-70%)",
-    "position_tier": 2,
+    "position_sizing": "半仓(40-50%)",
+    "position_tier": 1,
     "risk_reward_warning": null,
     "max_drawdown_pct": -37.27,
     "entry_signals": {

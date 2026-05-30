@@ -2,17 +2,17 @@
   "meta": {
     "ts_code": "00700.HK",
     "data_source": "akshare_hk",
-    "fetch_time": "20260528-222900",
+    "fetch_time": "20260530-154522",
     "asset": "E"
   },
   "summary": {
     "data_quality": "good",
-    "pe_ttm": 14.74,
-    "pb": 3.03,
+    "pe_ttm": 14.82,
+    "pb": 3.05,
     "roe": 5.09,
     "eps": 6.43,
-    "market_cap_billion": 38751.76,
-    "dividend_yield_pct": 1.25
+    "market_cap_billion": 38952.36,
+    "dividend_yield_pct": 1.24
   },
   "data": {},
   "errors": [
