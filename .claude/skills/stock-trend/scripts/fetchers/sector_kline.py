@@ -70,6 +70,7 @@ def fetch_single_kline(sector_code: str, min_records: int = 20,
     for attempt in range(retries + 1):
         host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
         url = build_em_kline_url(host, secid, lmt=200)
+        url += f"&_={int(_time.time() * 1000)}"  # CDN cache bust
         try:
             raw = fetch_url(url, headers=EM_HEADERS)
             return _parse_kline_response(raw, min_records)
