@@ -157,6 +157,21 @@ def get_sector_rankings() -> dict:
         except Exception as e:
             print(f"  Warning: 无法获取{sname}板块排行: {e}", file=sys.stderr)
 
+    # If EM API returned zero active sectors, try AKShare fallback
+    active = sum(
+        1 for s in result["sectors"]
+        if (s.get("up_count", 0) or 0) > 0 or (s.get("down_count", 0) or 0) > 0
+    )
+    if active == 0 or result["meta"]["total_sectors"] < 5:
+        try:
+            from fetchers.sector_akshare import get_sector_rankings_akshare
+            akshare_result = get_sector_rankings_akshare()
+            if akshare_result and akshare_result.get("sectors"):
+                print(f"  [AKShare] 备选数据源: {len(akshare_result['sectors'])} sectors")
+                result = akshare_result
+        except Exception as e:
+            print(f"  [AKShare] 备选数据源失败: {e}", file=sys.stderr)
+
     result["meta"]["total_sectors"] = len(result["sectors"])
     return result
 
