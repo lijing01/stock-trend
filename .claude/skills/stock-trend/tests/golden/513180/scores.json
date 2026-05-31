@@ -1,7 +1,7 @@
 {
   "scores": {
     "technical": 0.26,
-    "capital_flow": 0.4,
+    "capital_flow": 0.2,
     "fundamental": 0,
     "sentiment": 0,
     "macro": 1
@@ -13,7 +13,7 @@
     "sentiment": 0.15,
     "macro": 0.1
   },
-  "composite_score": 0.291,
+  "composite_score": 0.241,
   "direction": "震荡偏多",
   "direction_detail": "震荡",
   "direction_modifier": "偏多",
@@ -35,7 +35,7 @@
     "iopv_enhanced": {
       "absolute": 0.8,
       "percentile": 0.0,
-      "trend": 0.0,
+      "trend": -0.2,
       "shares_linkage": 0.0
     }
   },
@@ -50,7 +50,7 @@
   "analysis": null,
   "report_params": {
     "direction": "震荡偏多",
-    "score": 0.291,
+    "score": 0.241,
     "confidence": "低",
     "ts_code": "513180.SH",
     "stop_loss": 0.5996,

@@ -1,7 +1,7 @@
 {
   "meta": {
     "data_source": "akshare",
-    "fetch_time": "20260530-154441"
+    "fetch_time": "20260531-154234"
   },
   "summary": {
     "data_quality": "good",
@@ -20,7 +20,7 @@
       "1y": 3.0,
       "5y": 3.5
     },
-    "pmi": 50.3,
+    "pmi": 50.0,
     "cpi_yoy": 1.2,
     "m2_growth_pct": 0.27
   },
@@ -40,7 +40,7 @@
       "1y": 3.0,
       "5y": 3.5
     },
-    "pmi": 50.3,
+    "pmi": 50.0,
     "cpi_yoy": 1.2,
     "m2_growth_pct": 0.27
   },

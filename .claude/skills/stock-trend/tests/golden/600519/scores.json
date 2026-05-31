@@ -27,7 +27,7 @@
   "special": null,
   "data_quality": "good",
   "automated_sources": {
-    "fundamental": "error",
+    "fundamental": "partial",
     "macro": "good",
     "sentiment": "northbound"
   },

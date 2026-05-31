@@ -2,8 +2,8 @@
   "meta": {
     "ts_code": "513180.SH",
     "is_etf": true,
-    "analysis_date": "20260530",
-    "data_points": 118,
+    "analysis_date": "20260531",
+    "data_points": 117,
     "indicators_computed": [
       "ma",
       "macd",
@@ -66,7 +66,7 @@
       "lower": 0.6018,
       "signal": {
         "type": "middle_support",
-        "description": "中轨下方运行",
+        "description": "中轨下方运行；布林带收口(40%分位)",
         "score": 0
       }
     },
@@ -91,7 +91,7 @@
       }
     },
     "obv": {
-      "obv": -575202662.0,
+      "obv": -531729291.0,
       "signal": {
         "type": "money_flow",
         "description": "OBV在20日均线上方，资金净流入",
@@ -124,7 +124,7 @@
       "绿柱缩窄；底背离",
       "RSI=33.0，中性区间；顶背离",
       "KDJ中性区域(K=37.5,D=30.8,J=50.8)",
-      "中轨下方运行",
+      "中轨下方运行；布林带收口(40%分位)",
       "量价中性(量比1.03)",
       "ADX=7.7，震荡市",
       "OBV在20日均线上方，资金净流入"

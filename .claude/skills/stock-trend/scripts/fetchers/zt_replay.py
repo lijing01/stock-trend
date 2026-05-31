@@ -1,255 +1,225 @@
 #!/usr/bin/env python3
-"""同花顺涨停复盘数据获取器 (zt_replay).
+"""涨停复盘数据获取 (zt_replay) — AKShare 东方财富数据源.
 
-爬取同花顺每日涨停板数据，提取涨停股票的概念归因（同花顺独有）。
+替代原同花顺直爬方案（当前环境 403），改用 AKShare 东方财富涨停池 API.
 
-核心数据：
-  - 涨停股票列表（代码、名称）
-  - 涨停原因/概念标签 ← 同花顺独有，东方财富没有
-  - 首次涨停时间（早盘/午后/尾盘）
-  - 连板高度
-  - 封单金额
+数据源:
+  - stock_zt_pool_em() — 今日涨停板池
+  - stock_zt_pool_strong_em() — 强势涨停（60日新高等）
+  - sector_mapper — 股票→概念板块映射（替代同花顺概念标签）
 
 Usage:
     python3 zt_replay.py                          # 今日涨停榜
     python3 zt_replay.py --date 2026-05-29        # 历史某日
-    python3 zt_replay.py --top-concepts 10         # 今日概念涨停排行
     python3 zt_replay.py --aggregate concepts      # 按概念聚合输出
     python3 zt_replay.py --json                    # JSON 输出
 """
 
 import argparse
 import json
-import re
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.ths_utils import fetch_page, extract_table_rows, parse_amount
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
 
-# ──────────────── 常量 ────────────────
+try:
+    import akshare as ak
+    HAS_AKSHARE = True
+except ImportError:
+    HAS_AKSHARE = False
 
-# 今日涨停首页
-THS_ZT_URL = "https://data.10jqka.com.cn/financial/zt/"
-# 按日期查询: https://data.10jqka.com.cn/financial/zt/date/2026-05-30/
-THS_ZT_DATE_URL = "https://data.10jqka.com.cn/financial/zt/date/{}/"
-
-# ──────────────── 涨停板数据结构 ────────────────
-
-LIMIT_UP_SCHEMA = [
-    "code",         # 股票代码
-    "name",         # 股票名称
-    "concepts",     # 涨停原因/概念标签 (list[str])
-    "first_limit_time",  # 首次涨停时间 "HH:MM"
-    "last_limit_time",   # 最后涨停时间 "HH:MM" (可能有)
-    "limit_streak",      # 连板数 (int)
-    "seal_amount",       # 封单金额 (float, 元)
-    "seal_ratio",        # 封板率/封成比 (float, 可选)
-    "limit_type",        # 涨停类型: firm(封板) / blown(炸板) / retest(回封)
-    "board",             # 交易所板块: sh/sz/bj
-]
+from fetchers.sector_mapper import get_mapping as get_sector_mapping
 
 
-# ──────────────── 核心：爬取 + 解析 ────────────────
+# ──────────────── 工具函数 ────────────────
 
 
-def _url(date_str: Optional[str] = None) -> str:
-    """Build target URL for given date (None = today)."""
-    if date_str:
-        return THS_ZT_DATE_URL.format(date_str)
-    return THS_ZT_URL
+def _safe_float(val) -> float:
+    if val is None: return 0.0
+    try: return float(val)
+    except (ValueError, TypeError): return 0.0
+
+
+def _safe_int(val) -> int:
+    if val is None: return 0
+    try: return int(val)
+    except (ValueError, TypeError): return 0
+
+
+def _detect_board(code: str) -> str:
+    if code.startswith("6") or code.startswith("9"): return "sh"
+    if code.startswith("0") or code.startswith("3"): return "sz"
+    if code.startswith("8") or code.startswith("4"): return "bj"
+    return "unknown"
 
 
 def _classify_limit_time(t: Optional[str]) -> str:
-    """Classify limit-up timing bucket."""
+    """Classify limit-up timing bucket from HHMMSS or HH:MM."""
     if not t:
         return "unknown"
+    t = t.replace(":", "")
+    if len(t) < 4:
+        return "unknown"
     try:
-        h, m = int(t.split(":")[0]), int(t.split(":")[1])
+        h, m = int(t[:2]), int(t[2:4])
         minutes = h * 60 + m
-        if minutes < 9 * 60 + 30:
-            return "pre_open"       # 集合竞价涨停
-        elif minutes < 11 * 60 + 30:
-            return "morning_early"  # 早盘
-        elif minutes < 13 * 60:
-            return "morning_late"   # 午前
-        elif minutes < 14 * 60:
-            return "afternoon"      # 午后
-        elif minutes < 15 * 60:
-            return "afternoon_late" # 尾盘
+        if minutes < 9 * 60 + 30: return "pre_open"
+        elif minutes < 11 * 60 + 30: return "morning_early"
+        elif minutes < 13 * 60: return "morning_late"
+        elif minutes < 14 * 60: return "afternoon"
+        elif minutes < 15 * 60: return "afternoon_late"
         return "close"
     except (ValueError, IndexError):
         return "unknown"
 
 
-def _classify_limit_type(row_cells: list[str],
-                         limit_streak: int) -> str:
-    """Infer limit type from cell text."""
-    joined = " ".join(row_cells).lower()
-    if any(kw in joined for kw in ("炸板", "开板", "打开")):
+def _classify_limit_type(blown_count: int,
+                         first_time: Optional[str],
+                         last_time: Optional[str]) -> str:
+    """Determine limit type from blow-off count and times."""
+    if blown_count is None:
+        blown_count = 0
+    if blown_count > 0:
+        # If it re-sealed (different first/last time), it's a retest
+        if first_time and last_time and first_time != last_time:
+            return "retest"
         return "blown"
-    if any(kw in joined for kw in ("回封", "回板")):
-        return "retest"
-    if any(kw in joined for kw in ("涨停", "封板", "一字板")):
-        return "firm"
-    # if limit_streak >= 1, it's a firm limit-up
-    if limit_streak >= 1:
-        return "firm"
     return "firm"
 
 
-def _detect_board(code: str) -> str:
-    """Detect exchange board from 6-digit code."""
-    if code.startswith("6") or code.startswith("9"):
-        return "sh"
-    if code.startswith("0") or code.startswith("3"):
-        return "sz"
-    if code.startswith("8") or code.startswith("4"):
-        return "bj"
-    return "unknown"
+def _timing_to_str(t) -> Optional[str]:
+    """Convert AKShare time (int/str) to HH:MM string."""
+    if t is None:
+        return None
+    s = str(t).strip()
+    if len(s) == 6:
+        return f"{s[:2]}:{s[2:4]}"
+    if len(s) == 4:
+        return f"{s[:2]}:{s[2:4]}"
+    if ":" in s:
+        return s[:5]
+    return None
 
 
-def _parse_limit_streak(raw: str) -> int:
-    """Parse连板数 from strings like '3连板', '首板', '2板'."""
-    raw = raw.strip()
-    if not raw or raw in ("-", "--", "—"):
-        return 1  # 默认至少是首板
-    if "首板" in raw or "首" in raw:
-        return 1
-    m = re.search(r'(\d+)', raw)
-    if m:
-        return int(m.group(1))
-    return 1
+# ──────────────── 概念映射缓存 ────────────────
+
+_concept_cache = None  # stock_code → [concept_names]
 
 
-def _parse_concepts(cell_text: str) -> list[str]:
-    """Parse concept tags from 涨停原因 cell.
+def _load_concept_map() -> dict[str, list[str]]:
+    """Build stock→concept map from sector_mapper cache."""
+    global _concept_cache
+    if _concept_cache is not None:
+        return _concept_cache
 
-    Cell may contain: "DeepSeek概念,AI芯片,国产替代"
-    Or: "人工智能; 大数据; 云计算"
-    Returns cleaned list of concept names.
+    mapping = get_sector_mapping()
+    if not mapping:
+        _concept_cache = {}
+        return _concept_cache
+
+    stock_map = mapping.get("mapping", {})
+    result = {}
+    for code, sectors in stock_map.items():
+        concepts = [s["name"] for s in sectors if s["type"] == "concept"]
+        if concepts:
+            result[code] = concepts
+    _concept_cache = result
+    return result
+
+
+def _lookup_concepts(code: str, industry: str = "") -> list[str]:
+    """Look up concept tags for a stock code.
+
+    Uses sector_mapper cache (BK concept sectors).
+    Falls back to industry name if no concept mapping found.
     """
-    if not cell_text or cell_text in ("-", "--", "—"):
-        return []
-    # Split by common delimiters
-    raw = cell_text.strip()
-    parts = re.split(r'[,，;；/、\s]{1,3}', raw)
-    concepts = []
-    for p in parts:
-        p = p.strip().strip('"\'「」【】')
-        if p and len(p) >= 2 and p not in ("-", "--", "—"):
-            concepts.append(p)
+    cmap = _load_concept_map()
+    concepts = cmap.get(code, [])
+    if not concepts and industry:
+        concepts = [industry]
     return concepts
 
 
+# ──────────────── 核心：获取涨停数据 ────────────────
+
+
 def fetch_limitup_stocks(date_str: Optional[str] = None) -> list[dict]:
-    """Fetch today's (or specified date's) limit-up stock list from 同花顺.
+    """Fetch limit-up stock list from AKShare 东方财富涨停池.
 
     Args:
         date_str: "YYYY-MM-DD" or None for today.
 
     Returns:
         List of dicts:
-            code, name, concepts, first_limit_time, last_limit_time,
-            limit_streak, seal_amount, seal_ratio, limit_type, board
-        Returns empty list on any failure (graceful degradation).
+            code, name, concepts (list), first_limit_time, last_limit_time,
+            limit_streak, seal_amount, limit_type, timing_bucket, board,
+            blown_count, industry
+        Empty list on failure (non-trading day / no data).
     """
-    url = _url(date_str)
-    html = fetch_page(url, referer="https://data.10jqka.com.cn/financial/zt/")
-    if html is None:
+    if not HAS_AKSHARE:
         return []
 
-    rows = extract_table_rows(html)
-    if not rows:
+    if date_str is None:
+        dt = datetime.now().strftime("%Y%m%d")
+    else:
+        dt = date_str.replace("-", "")
+
+    try:
+        df = ak.stock_zt_pool_em(date=dt)
+        if df is None or df.empty:
+            return []
+    except Exception:
         return []
+
+    # Preload concept mapping
+    _load_concept_map()
 
     results = []
     seen_codes = set()
 
-    for cells in rows:
-        if len(cells) < 4:
-            continue
-
-        # Extract 6-digit stock code
-        code = None
-        for c in cells[:3]:
-            m = re.search(r'\b(\d{6})\b', c)
-            if m:
-                code = m.group(1)
-                break
+    for _, row in df.iterrows():
+        code = str(row.get("代码", "")).strip()
         if not code or code in seen_codes:
             continue
+        seen_codes.add(code)
 
-        # Determine column layout (flexible for page structure changes)
-        name = ""
-        concepts_raw = ""
-        first_time = None
-        last_time = None
-        streak_raw = "1"
-        seal_raw = ""
-        limit_type_raw = ""
+        name = str(row.get("名称", ""))
+        industry = str(row.get("所属行业", ""))
 
-        # Scan remaining cells for typed content
-        # Order matters: check streak/amount/time FIRST to exclude them from
-        # concept detection (concept cells may also contain digits/letters).
-        for cell in cells[1:]:
-            lower = cell.lower()
-            stripped = cell.strip()
+        # Seal amount (封板资金) — yuan
+        seal_amount = _safe_float(row.get("封板资金", 0))
 
-            # Limit streak: "3连板", "首板", "2连板", "N板"
-            if re.search(r'[连板首板]', cell):
-                streak_raw = cell
-                continue
-            # Amount with 亿/万
-            if re.search(r'[亿万]', cell) and not seal_raw:
-                seal_raw = cell
-                continue
-            # Limit type keywords
-            if any(kw in lower for kw in ("炸板", "回封", "一字", "涨停")):
-                limit_type_raw = cell
-                continue
-            # Time pattern "HH:MM" or "HH:MM-HH:MM"
-            times = re.findall(r'\b(\d{1,2}):(\d{2})\b', cell)
-            if times:
-                ts = ":".join(times[0])
-                if first_time is None:
-                    first_time = ts
-                elif len(times) > 1:
-                    last_time = ":".join(times[1])
-                elif last_time is None:
-                    last_time = ts
-                continue
-            # Concept tags — mixed Chinese/English, comma-separated
-            if (re.match(r'^[一-鿿,，、;；\s]{2,60}$', stripped) or
-                re.match(r'^[一-鿿A-Za-z0-9,，、;；/\s]{2,80}$', stripped)):
-                if len(stripped) > len(name) + 2:
-                    concepts_raw = cell
+        # Times
+        first_time = _timing_to_str(row.get("首次封板时间"))
+        last_time = _timing_to_str(row.get("最后封板时间"))
 
-        # If concepts_raw still empty, check first few cells for concept tags
-        if not concepts_raw:
-            for cell in cells[2:5]:
-                stripped = cell.strip()
-                if (re.match(r'^[一-鿿，,、\s]{2,50}$', stripped) or
-                    re.match(r'^[一-鿿A-Za-z0-9，,、\s]{2,60}$', stripped)):
-                    if len(stripped) > 2:
-                        concepts_raw = cell
-                        break
+        # Limit streak
+        limit_streak = _safe_int(row.get("连板数", 1))
+        if limit_streak < 1:
+            limit_streak = 1
 
-        name = cells[2] if len(cells) > 2 else ""
-        concepts = _parse_concepts(concepts_raw)
-        limit_streak = _parse_limit_streak(streak_raw)
-        seal_amount = parse_amount(seal_raw)
-        limit_type = _classify_limit_type(cells, limit_streak)
+        # Blown count
+        blown_count = _safe_int(row.get("炸板次数", 0))
+
+        # Limit type
+        limit_type = _classify_limit_type(blown_count, first_time, last_time)
+
+        # Timing bucket
         timing_bucket = _classify_limit_time(first_time)
+
+        # Board
         board = _detect_board(code)
 
-        seen_codes.add(code)
+        # Concepts — from sector_mapper, fallback to industry
+        concepts = _lookup_concepts(code, industry)
+
         results.append({
             "code": code,
-            "name": name.strip(),
+            "name": name,
             "concepts": concepts,
             "first_limit_time": first_time,
             "last_limit_time": last_time,
@@ -258,15 +228,17 @@ def fetch_limitup_stocks(date_str: Optional[str] = None) -> list[dict]:
             "limit_type": limit_type,
             "timing_bucket": timing_bucket,
             "board": board,
+            "blown_count": blown_count,
+            "industry": industry,
         })
 
-    # Sort: higher streak first, then earlier limit time
+    # Sort: higher streak first, earlier limit time
     results.sort(key=lambda r: (-r["limit_streak"],
                                 r["first_limit_time"] or "99:99"))
     return results
 
 
-# ──────────────── 按概念聚合 ────────────────
+# ──────────────── 聚合函数 ────────────────
 
 
 def aggregate_by_concept(stocks: list[dict]) -> list[dict]:
@@ -289,7 +261,7 @@ def aggregate_by_concept(stocks: list[dict]) -> list[dict]:
         results.append({
             "concept": concept,
             "stock_count": len(members),
-            "continuous_count": len(streaks),  # 连板股数
+            "continuous_count": len(streaks),
             "max_streak": max(streaks) if streaks else 1,
             "early_morning_count": sum(1 for m in members
                                        if m.get("timing_bucket") in ("pre_open", "morning_early")),
@@ -297,7 +269,7 @@ def aggregate_by_concept(stocks: list[dict]) -> list[dict]:
             "members": [{"code": m["code"], "name": m["name"],
                          "limit_streak": m["limit_streak"],
                          "first_limit_time": m["first_limit_time"]}
-                        for m in members[:5]],  # top 5 members
+                        for m in members[:5]],
         })
 
     results.sort(key=lambda r: (-r["stock_count"], -r["max_streak"]))
@@ -315,7 +287,7 @@ def aggregate_by_limit_streak(stocks: list[dict]) -> dict[int, int]:
     return dict(sorted(counter.items(), reverse=True))
 
 
-# ──────────────── 输出 ────────────────
+# ──────────────── 报告 ────────────────
 
 
 def format_report(stocks: list[dict],
@@ -327,7 +299,6 @@ def format_report(stocks: list[dict],
     lines.append(f"## 涨停复盘 {date_str}")
     lines.append("")
 
-    # Summary stats
     total = len(stocks)
     firm = sum(1 for s in stocks if s["limit_type"] == "firm")
     blown = sum(1 for s in stocks if s["limit_type"] == "blown")
@@ -342,13 +313,11 @@ def format_report(stocks: list[dict],
                  f"| 早盘涨停: {early} 只")
     lines.append("")
 
-    # Streak distribution
     if streak_dist:
         bar = " ".join(f"{k}连板:{v}" for k, v in streak_dist.items())
         lines.append(f"**连板分布**: {bar}")
         lines.append("")
 
-    # Concept ranking
     if concepts:
         lines.append("### 概念涨停排行")
         lines.append("")
@@ -364,7 +333,6 @@ def format_report(stocks: list[dict],
             )
         lines.append("")
 
-    # All stocks
     lines.append("### 全部涨停股")
     lines.append("")
     lines.append("| 代码 | 名称 | 概念 | 首次涨停 | 连板 | 封单(亿) |")
@@ -377,7 +345,7 @@ def format_report(stocks: list[dict],
             f"{s['first_limit_time'] or '-'} | {s['limit_streak']} | {seal} |"
         )
     lines.append("")
-    lines.append(f"> 数据来源: 同花顺涨停复盘 | {date_str}")
+    lines.append(f"> 数据来源: 东方财富涨停池 (AKShare) | {date_str}")
     return "\n".join(lines)
 
 
@@ -385,7 +353,7 @@ def format_report(stocks: list[dict],
 
 
 def main():
-    parser = argparse.ArgumentParser(description="同花顺涨停复盘数据获取")
+    parser = argparse.ArgumentParser(description="涨停复盘数据获取")
     parser.add_argument("--date", type=str, help="日期 YYYY-MM-DD, 默认今日")
     parser.add_argument("-j", "--json", action="store_true", help="JSON 输出")
     parser.add_argument("--aggregate", choices=["concepts", "streak"],

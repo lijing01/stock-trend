@@ -2,8 +2,8 @@
   "meta": {
     "ts_code": "600519.SH",
     "is_etf": false,
-    "analysis_date": "20260530",
-    "data_points": 242,
+    "analysis_date": "20260531",
+    "data_points": 250,
     "indicators_computed": [
       "ma",
       "macd",
@@ -72,8 +72,8 @@
       }
     },
     "volume": {
-      "vol": 7647805.0,
-      "vol_ma20": 5066895.0,
+      "vol": 76478.0,
+      "vol_ma20": 50669.0,
       "vol_ratio": 1.51,
       "signal": {
         "type": "volume_confirms",
@@ -92,7 +92,7 @@
       }
     },
     "obv": {
-      "obv": -93430505.0,
+      "obv": -1061214.0,
       "signal": {
         "type": "money_flow",
         "description": "OBV在20日均线下方，资金净流出",

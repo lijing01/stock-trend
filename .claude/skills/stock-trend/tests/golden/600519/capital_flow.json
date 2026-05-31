@@ -2,72 +2,13 @@
   "meta": {
     "ts_code": "600519.SH",
     "asset": "E",
-    "data_source": "kline_estimate",
-    "record_count": 5
+    "secid": "1.600519",
+    "data_source": "eastmoney",
+    "record_count": 0
   },
-  "data": [
-    {
-      "date": "20260522",
-      "main_net_inflow": -227721534.72,
-      "main_inflow": 0,
-      "main_outflow": 227721534.72,
-      "retail_net_inflow": -278326320.22,
-      "retail_inflow": 0,
-      "retail_outflow": 278326320.22,
-      "total_net_inflow": -506047854.94,
-      "estimated": true
-    },
-    {
-      "date": "20260525",
-      "main_net_inflow": -77682550.56,
-      "main_inflow": 0,
-      "main_outflow": 77682550.56,
-      "retail_net_inflow": -94945339.58,
-      "retail_inflow": 0,
-      "retail_outflow": 94945339.58,
-      "total_net_inflow": -172627890.14,
-      "estimated": true
-    },
-    {
-      "date": "20260526",
-      "main_net_inflow": -139623672.17,
-      "main_inflow": 0,
-      "main_outflow": 139623672.17,
-      "retail_net_inflow": -170651154.87,
-      "retail_inflow": 0,
-      "retail_outflow": 170651154.87,
-      "total_net_inflow": -310274827.04,
-      "estimated": true
-    },
-    {
-      "date": "20260527",
-      "main_net_inflow": 204110393.32,
-      "main_inflow": 204110393.32,
-      "main_outflow": 0,
-      "retail_net_inflow": 249468258.51,
-      "retail_inflow": 249468258.51,
-      "retail_outflow": 0,
-      "total_net_inflow": 453578651.83,
-      "estimated": true
-    },
-    {
-      "date": "20260528",
-      "main_net_inflow": -148180084.85,
-      "main_inflow": 0,
-      "main_outflow": 148180084.85,
-      "retail_net_inflow": -181108992.6,
-      "retail_inflow": 0,
-      "retail_outflow": 181108992.6,
-      "total_net_inflow": -329289077.45,
-      "estimated": true
-    }
-  ],
+  "data": [],
   "data_extended": {
     "northbound_market": [
-      {
-        "date": "20260514",
-        "net_buy_billion": 0
-      },
       {
         "date": "20260515",
         "net_buy_billion": 0
@@ -103,9 +44,14 @@
       {
         "date": "20260528",
         "net_buy_billion": 0
+      },
+      {
+        "date": "20260529",
+        "net_buy_billion": 0
       }
     ],
     "northbound_individual": {
+      "date": "",
       "hold_shares": null,
       "hold_value_billion": null,
       "change_shares": null
