@@ -68,9 +68,17 @@ python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30
 
 ---
 
-## /ths-theme [--top N] [--min-score N] [--json] [--longhubang|--lhb]
+## /ths-theme [--top N] [--min-score N] [--json] [--longhubang|--lhb] [--zt]
 
 基于 AKShare 同花顺数据，对行业/概念板块做热力评分。
+
+`--zt` 开启涨停概念热度评分（需东方财富涨停池数据）：
+1. 拉取东方财富涨停板池（`stock_zt_pool_em`）
+2. 按概念聚合涨停数据，计算涨停分（涨停数30%+连板25%+早盘20%+封单15%-炸板10%）
+3. 与行业热力交叉匹配 → 识别双引擎确认（涨停+行业共振）和独立涨停方向
+4. 报告追加🚀涨停概念热度章节
+
+`--zt-date YYYY-MM-DD` 指定涨停日期（默认今日）。
 
 评分公式：涨跌幅(35%) + 主力净流入(35%) + 上涨比率(30%)
 
