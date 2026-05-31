@@ -127,17 +127,17 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [
 
 ## 4. 涨停热力 `/ths-theme`
 
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分。
+基于 AKShare 同花顺数据，对行业/概念板块做热力评分。**默认同时执行涨停概念评分 + 龙虎榜分析**。
 
 ```bash
-# 今日行业热力
+# 全量（行业 + 涨停 + 龙虎榜）
 /ths-theme
 
-# 涨停概念热度 + 龙虎榜
-/ths-theme --zt --longhubang
+# 仅行业热力（跳过涨停和龙虎榜）
+/ths-theme --no-zt --no-lhb
 
 # 指定日期
-/ths-theme --zt --zt-date 2026-05-29 --longhubang --lhb-date 20260529
+/ths-theme --zt-date 2026-05-29 --lhb-date 20260529
 
 # JSON 输出
 /ths-theme --json
@@ -145,14 +145,14 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [
 
 **后台脚本**：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--longhubang] [--lhb-date YYYYMMDD] [--zt] [--zt-date YYYY-MM-DD]
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
 ```
 
 **行业评分**：涨跌幅 35% + 主力净流入 35% + 上涨比率 30%
 
-**涨停评分**（`--zt`）：涨停数 30% + 连板强度 25% + 早盘强度 20% + 封单强度 15% - 炸板惩罚 10%
+**涨停评分**（默认开启）：涨停数 30% + 连板强度 25% + 早盘强度 20% + 封单强度 15% - 炸板惩罚 10%
 
-**龙虎榜评分**（`--longhubang`）：机构净买额 40% + 上榜家数 25% + 机构参与度 20% + 净买一致性 15%
+**龙虎榜评分**（默认开启）：机构净买额 40% + 上榜家数 25% + 机构参与度 20% + 净买一致性 15%
 
 **数据源**：AKShare 同花顺行业排行 + 东方财富涨停池 + 东方财富龙虎榜
 

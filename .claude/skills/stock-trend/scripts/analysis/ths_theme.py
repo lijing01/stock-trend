@@ -692,10 +692,11 @@ def main():
     parser.add_argument("--min-score", type=float, default=0, help="最低热力分")
     parser.add_argument("-j", "--json", action="store_true", help="JSON 输出")
     parser.add_argument("--no-html", action="store_true", help="跳过 HTML")
-    parser.add_argument("--longhubang", "--lhb", action="store_true",
-                        help="龙虎榜机构板块聚合分析")
+    parser.add_argument("--no-zt", action="store_true", default=False,
+                        help="跳过涨停概念热度评分")
+    parser.add_argument("--no-longhubang", "--no-lhb", action="store_true", default=False,
+                        help="跳过龙虎榜机构板块聚合分析")
     parser.add_argument("--lhb-date", type=str, help="龙虎榜日期 YYYYMMDD")
-    parser.add_argument("--zt", action="store_true", help="涨停概念热度评分")
     parser.add_argument("--zt-date", type=str, help="涨停日期 YYYY-MM-DD")
     args = parser.parse_args()
 
@@ -727,7 +728,7 @@ def main():
 
     # 涨停概念数据
     zt_scored = []
-    if args.zt:
+    if not args.no_zt:
         print("\n[Phase 4/4] 涨停概念热度评分...")
         zt_stocks = fetch_zt_limitup_data(args.zt_date)
         if zt_stocks:
@@ -739,7 +740,7 @@ def main():
 
     # 龙虎榜数据
     lhb_sectors = []
-    if args.longhubang:
+    if not args.no_longhubang:
         print("\n[Phase 4/4] 龙虎榜机构板块聚合...")
         try:
             from fetchers.longhubang_agg import (

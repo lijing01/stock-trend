@@ -89,11 +89,11 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 
 ---
 
-## /ths-theme [--top N] [--min-score N] [--json] [--longhubang|--lhb] [--zt]
+## /ths-theme [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb]
 
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分。
+基于 AKShare 同花顺数据，对行业/概念板块做热力评分。**默认同时执行涨停概念评分 + 龙虎榜分析**，`--no-zt` / `--no-lhb` 可跳过。
 
-`--zt` 开启涨停概念热度评分（需东方财富涨停池数据）：
+涨停概念热度评分（默认开启）：
 1. 拉取东方财富涨停板池（`stock_zt_pool_em`）
 2. 按概念聚合涨停数据，计算涨停分（涨停数30%+连板25%+早盘20%+封单15%-炸板10%）
 3. 与行业热力交叉匹配 → 识别双引擎确认（涨停+行业共振）和独立涨停方向
@@ -103,7 +103,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 
 评分公式：涨跌幅(35%) + 主力净流入(35%) + 上涨比率(30%)
 
-`--longhubang` 开启龙虎榜机构板块聚合分析：
+龙虎榜机构板块聚合分析（默认开启）：
 1. 拉取东方财富龙虎榜机构买卖明细（`stock_lhb_jgmmtj_em`）
 2. 通过板块映射表（BK 分类）将上榜股票按板块聚合
 3. 计算龙虎榜板块评分（机构净买额40% + 上榜家数25% + 机构参与度20% + 净买一致性15%）
@@ -115,12 +115,12 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 
 1. 运行：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--longhubang] [--lhb-date YYYYMMDD]
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb] [--lhb-date YYYYMMDD]
 ```
 
-2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 概念驱动事件 → 资金流向极端 → 弱势板块
+2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 涨停概念热度 → 龙虎榜板块聚合 → 概念驱动事件 → 资金流向极端 → 弱势板块
 
-3. 数据来源：同花顺行业实时排行（AKShare），无需直连通花顺网站
+3. 数据来源：同花顺行业实时排行（AKShare）+ 东方财富涨停池 + 东方财富龙虎榜
 
 4. `--json` 输出结构化 JSON 给 Agent 消费。
 
