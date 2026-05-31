@@ -43,11 +43,12 @@ allowed-tools:
   - Bash(open -a "Google Chrome" *)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/longhubang_agg.py *)  # 龙虎榜板块聚合
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py *)  # 龙虎榜信号跟踪
+  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py *)  # 周主线报告
 ---
 
 # 股票趋势判断
 
-**分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/stock-trend`→下方Step 1-4。各流程独立。
+**分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。各流程独立。
 
 ---
 
@@ -66,6 +67,25 @@ python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30
 3. `--report` 生成 MD 报告到 `reports/lists/`
 4. `--html` 生成 HTML 报告（含 Plotly 交互式信号收益/胜率图 + 信号明细表）
 5. 信号验证：胜率 > 60% 视为有效信号；买入/卖出分开统计
+
+---
+
+## /weekly [--weeks N] [--html] [--json]
+
+周主线报告 — 聚合一周数据，识别适合中线持仓（1-6个月）的主线方向。
+
+**评分公式**：周均热度(30%) + 上榜频率(25%) + 最新热度(25%) + 趋势(10%) + LHB验证(10%)
+
+**步骤**：
+
+1. 运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1] [--html] [--json]
+```
+
+2. 数据来源：市场持续性快照 + 龙虎榜快照 + 今日行业热力
+3. 分类：🔥中期主线(≥65) / 👀关注方向(45-64) / ❄️退潮(<30)
+4. 需要积累至少3天市场持续性数据才有效
 
 ---
 
