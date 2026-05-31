@@ -293,6 +293,108 @@ def generate_tracker_report(snapshots: list[dict], signal_analysis: dict) -> str
     return "\n".join(lines)
 
 
+# ──────────────── HTML 报告 ────────────────
+
+
+def _generate_lhb_html_report(snapshots: list[dict],
+                               signal_analysis: dict,
+                               date_str: str) -> str:
+    """Generate HTML report with signal visualization."""
+    signals = signal_analysis.get("signals", {})
+    all_sigs = []
+    for w in ["3d", "5d", "10d"]:
+        for s in signals.get(w, []):
+            all_sigs.append({**s, "window": w})
+
+    sig_rows = ""
+    for s in sorted(all_sigs, key=lambda x: abs(x.get("return", 0)), reverse=True)[:30]:
+        cls = "sig-correct" if s["correct"] else "sig-wrong"
+        mark = "✅" if s["correct"] else "❌"
+        ret_cls = "sp" if s["return"] > 0 else "sn"
+        sig_rows += (
+            f"<tr class='{cls}'><td>{s['date']}</td><td>{s['window']}</td>"
+            f"<td><strong>{s['sector']}</strong></td><td>{s['direction']}</td>"
+            f"<td>{mark}</td><td class='{ret_cls}'>{s['return']:+.2f}%</td>"
+            f"<td>{s.get('lhb_score',0):.0f}</td><td>{s.get('inst_net_yi',0):+.2f}</td></tr>"
+        )
+
+    chart_data = json.dumps({
+        "windows": list(signals.keys()),
+        "buy_returns": [signals[w]["buy_avg_return"] for w in signals],
+        "sell_returns": [signals[w]["sell_avg_return"] for w in signals],
+        "buy_hits": [signals[w]["buy_hit_rate"] for w in signals],
+        "sell_hits": [signals[w]["sell_hit_rate"] for w in signals],
+        "overall_hits": [signals[w]["overall_hit_rate"] for w in signals],
+    }) if signals else "{}"
+
+    latest = snapshots[-1] if snapshots else None
+    latest_rows = ""
+    if latest:
+        for sec in latest["sectors"][:10]:
+            chg = sec.get("change_pct")
+            chg_str = f"{chg:+.2f}%" if chg is not None else "-"
+            dc = "sp" if sec["direction"] == "净买" else "sn"
+            latest_rows += (
+                f"<tr><td>{sec['sector_name']}</td><td class='{dc}'>{sec['direction']}</td>"
+                f"<td>{sec['lhb_score']:.0f}</td><td>{sec['inst_net_yi']:+.2f}亿</td>"
+                f"<td>{sec['stock_count']}</td><td>{chg_str}</td></tr>"
+            )
+
+    now = date_str or datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>龙虎榜信号跟踪 {now}</title>
+<script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f5f7;color:#1d1d1f;padding:20px}}
+.w{{max-width:1100px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:36px 40px}}
+h1{{font-size:24px;color:#1a1a1a}} h2{{font-size:18px;margin:24px 0 12px;padding-bottom:6px;border-bottom:1px solid #e5e7eb}}
+.dt{{color:#86868b;font-size:14px;margin:4px 0}}
+.card{{background:#f9fafb;border-radius:8px;padding:12px 16px;text-align:center}}
+.card .num{{font-size:22px;font-weight:700;color:#1d4ed8}}
+.card .lbl{{font-size:12px;color:#86868b;margin-top:2px}}
+.sec{{background:#fafafa;border-radius:8px;padding:16px 20px;margin:20px 0;border:1px solid #e5e7eb;border-left:4px solid #7c3aed}}
+table{{width:100%;border-collapse:collapse;margin-bottom:16px;border-radius:8px;overflow:hidden}}
+th,td{{padding:10px 14px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:13px}}
+th{{background:#7c3aed;color:#fff;font-weight:600;font-size:12px}}
+tr.sig-correct td{{background:#f0fdf4}} tr.sig-wrong td{{background:#fef2f2}}
+.sp{{color:#dc2626;font-weight:600}} .sn{{color:#16a34a;font-weight:600}}
+.chart-box{{width:100%;height:350px;margin:12px 0}}
+.summary{{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}}
+.summary .card{{flex:1;min-width:100px}}
+.disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:32px}}
+</style></head><body><div class="w">
+<header><h1>🏛️ 龙虎榜机构信号跟踪</h1><p class="dt">{now}</p></header>
+<div class="summary">
+<div class="card"><div class="num">{len(snapshots)}</div><div class="lbl">快照天数</div></div>
+<div class="card"><div class="num">{sum(len(s.get('sectors',[])) for s in snapshots) if snapshots else 0}</div><div class="lbl">信号总数</div></div>
+<div class="card"><div class="num">{sum(1 for s in all_sigs if s['correct']) if all_sigs else 0}</div><div class="lbl">正确</div></div>
+<div class="card"><div class="num">{sum(1 for s in all_sigs if not s['correct']) if all_sigs else 0}</div><div class="lbl">错误</div></div>
+</div>
+<div class="sec"><h2>📊 信号收益 (买入 vs 卖出)</h2><div id="returnChart" class="chart-box"></div></div>
+<div class="sec"><h2>📊 信号胜率</h2><div id="hitChart" class="chart-box"></div></div>
+<div class="sec"><h2>📋 信号明细 (Top 30)</h2><table><thead><tr><th>日期</th><th>窗口</th><th>板块</th><th>方向</th><th>结果</th><th>收益</th><th>评分</th><th>净额(亿)</th></tr></thead><tbody>{sig_rows}</tbody></table></div>
+<div class="sec"><h2>📋 最近快照</h2><table><thead><tr><th>板块</th><th>方向</th><th>评分</th><th>净买(亿)</th><th>上榜</th><th>涨跌</th></tr></thead><tbody>{latest_rows}</tbody></table></div>
+<footer><p class="disc">数据来源: 东方财富龙虎榜 (AKShare) | 仅供学习参考</p></footer></div>
+<script>
+var cd = {chart_data};
+if (cd.windows && cd.windows.length > 0) {{
+  Plotly.newPlot('returnChart', [
+    {{x:cd.windows, y:cd.buy_returns, type:'bar', name:'买入均收益', marker:{{color:'#dc2626'}}}},
+    {{x:cd.windows, y:cd.sell_returns, type:'bar', name:'卖出均收益', marker:{{color:'#16a34a'}}}}
+  ], {{barmode:'group', margin:{{l:50,r:20,t:10,b:40}}, yaxis:{{title:'收益(%)'}}, plot_bgcolor:'#fafafa', paper_bgcolor:'#fafafa', font:{{family:'PingFang SC, Microsoft YaHei', size:13}}}}, {{responsive:true, displayModeBar:false}});
+  Plotly.newPlot('hitChart', [
+    {{x:cd.windows, y:cd.buy_hits, mode:'lines+markers', name:'买入胜率', line:{{color:'#dc2626',width:2}}, marker:{{size:8}}}},
+    {{x:cd.windows, y:cd.sell_hits, mode:'lines+markers', name:'卖出胜率', line:{{color:'#16a34a',width:2}}, marker:{{size:8}}}},
+    {{x:cd.windows, y:cd.overall_hits, mode:'lines+markers', name:'总胜率', line:{{color:'#7c3aed',width:3}}, marker:{{size:10}}}}
+  ], {{margin:{{l:50,r:20,t:10,b:40}}, yaxis:{{title:'胜率(%)', range:[0,100]}}, plot_bgcolor:'#fafafa', paper_bgcolor:'#fafafa', font:{{family:'PingFang SC, Microsoft YaHei', size:13}}}}, {{responsive:true, displayModeBar:false}});
+}}
+</script></body></html>"""
+
+
 # ──────────────── 主流程 ────────────────
 
 
@@ -300,6 +402,7 @@ def main():
     parser = argparse.ArgumentParser(description="龙虎榜机构信号跟踪")
     parser.add_argument("--history", type=int, default=30, help="回溯天数")
     parser.add_argument("--report", action="store_true", help="生成跟踪报告")
+    parser.add_argument("--html", action="store_true", help="生成 HTML 报告")
     parser.add_argument("--snapshot-only", action="store_true", help="仅保存今日快照")
     args = parser.parse_args()
 
@@ -353,16 +456,24 @@ def main():
         print(f"  ⚠️ {note}")
 
     # 4. 报告（可选）
+    now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
     if args.report:
         report = generate_tracker_report(snapshots, analysis)
-        now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         report_path = REPORTS_DIR / f"lhb-tracker-{now_ts}.md"
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report, encoding="utf-8")
-        print(f"报告: {report_path}")
-    else:
-        report = generate_tracker_report(snapshots, analysis)
-        print(report)
+        print(f"MD报告: {report_path}")
+
+    if args.html:
+        html = _generate_lhb_html_report(snapshots, analysis,
+                                         datetime.now().strftime("%Y-%m-%d %H:%M"))
+        html_path = REPORTS_DIR / f"lhb-tracker-{now_ts}.html"
+        html_path.write_text(html, encoding="utf-8")
+        print(f"HTML报告: {html_path}")
+
+    if not args.report and not args.html:
+        print(generate_tracker_report(snapshots, analysis))
 
     # 5. 最近快照详情
     if snapshots:

@@ -51,7 +51,7 @@ allowed-tools:
 
 ---
 
-## /lhb-tracker [--history N] [--report] [--snapshot-only]
+## /lhb-tracker [--history N] [--report] [--html] [--snapshot-only]
 
 龙虎榜机构信号跟踪系统 — 每日记录机构净买板块快照，验证后续 3/5/10 日表现。
 
@@ -59,12 +59,13 @@ allowed-tools:
 
 1. 运行：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30] [--report] [--snapshot-only]
+python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30] [--report] [--html] [--snapshot-only]
 ```
 
 2. 每日自动保存快照 → 历史数据积累后验证信号有效性
-3. `--report` 生成完整跟踪报告到 `reports/lists/`
-4. 信号验证：胜率 > 60% 视为有效信号；买入/卖出分开统计
+3. `--report` 生成 MD 报告到 `reports/lists/`
+4. `--html` 生成 HTML 报告（含 Plotly 交互式信号收益/胜率图 + 信号明细表）
+5. 信号验证：胜率 > 60% 视为有效信号；买入/卖出分开统计
 
 ---
 
