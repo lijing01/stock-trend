@@ -482,13 +482,16 @@ def _generate_html_report(scored: list[dict], classified: dict,
     sorted_by_net = sorted(scored, key=lambda s: s.get("net_flow", 0) or 0, reverse=True)
     top_inflow = [s for s in sorted_by_net if (s.get("net_flow", 0) or 0) > 0][:5]
     top_outflow = [s for s in reversed(sorted_by_net) if (s.get("net_flow", 0) or 0) < 0][:5]
-    # Max absolute net for scaling bars
-    all_nets = [abs(s.get("net_flow", 0) or 0) for s in top_inflow + top_outflow]
-    max_net = max(all_nets) / 1e8 if all_nets else 1
+    # Per-column max for scaling bars (inflow/outflow independent)
+    in_nets = [abs(s.get("net_flow", 0) or 0) for s in top_inflow]
+    out_nets = [abs(s.get("net_flow", 0) or 0) for s in top_outflow]
+    max_in = max(in_nets) / 1e8 if in_nets else 1
+    max_out = max(out_nets) / 1e8 if out_nets else 1
 
     def _fund_bar(sector, side):
         net_yi = (sector.get("net_flow", 0) or 0) / 1e8
-        pct = min(100, abs(net_yi) / max_net * 100) if max_net else 0
+        col_max = max_in if side == "in" else max_out
+        pct = min(100, abs(net_yi) / col_max * 100) if col_max else 0
         color = "#dc2626" if side == "in" else "#16a34a"
         bar_cls = "bar-in" if side == "in" else "bar-out"
         label = f"+{net_yi:.1f}" if net_yi > 0 else f"{net_yi:.1f}"
