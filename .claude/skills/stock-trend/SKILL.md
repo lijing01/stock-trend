@@ -9,6 +9,7 @@ triggers:
   - /longtou
   - /market-theme
   - /ths-theme
+  - /integrated-scan
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
@@ -44,6 +45,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/longhubang_agg.py *)  # 龙虎榜板块聚合
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py *)  # 龙虎榜信号跟踪
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py *)  # 周主线报告
+  - Bash(python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py *)  # 整合扫描
 ---
 
 # 股票趋势判断
@@ -126,6 +128,32 @@ python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--mi
 
 ---
 
+## /integrated-scan [--top N] [--compact] [--output-html] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
+
+ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块做龙头扫描，输出整合报告。
+
+**顺序 pipeline**：
+1. `ths_theme.py --export-sectors` — 全市场板块热力 + 涨停概念评分
+2. 筛选 heat_score≥50 & zt_score≥50 的板块
+3. `market_leader.py --sectors-from qualified_sectors.json` — 只扫热板块
+4. 拼接为整合报告
+
+**步骤**：
+
+1. 运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
+```
+
+2. 呈现：总览（热力板块数、龙头标数、市场情绪）→ 按板块展开（板块热力指标 → 龙头清单 → 综合信号标签）
+
+3. 边界情况：
+   - 无热板块：不跑 longtou，只输出 ths-theme 热力报告 + 提示无强信号
+   - 映射找不到东方财富板块：标注"东方财富无对应板块"，保留方向参考
+   - ths-theme/longtou 任一失败：降级为另一项的输出，不阻塞
+
+---
+
 ## /etf-scan [--top N] [--focus <板块>] [--output compact|full]
 
 扫描精选ETF池，输出趋势排名。`--focus`: 宽基指数/科技/金融/消费医药/制造周期/商品跨境。
@@ -186,7 +214,7 @@ python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-day
 
 ---
 
-## /longtou [--top N] [--sector <板块名>] [--compact]
+## /longtou [--top N] [--sector <板块名>] [--sectors-from <file>] [--compact]
 
 扫描热点板块→识别龙头/中军→pipeline深度分析。`--top`默认10，`--sector`指定板块跳过扫描。
 
