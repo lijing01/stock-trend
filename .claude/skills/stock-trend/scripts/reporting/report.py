@@ -419,6 +419,18 @@ def build_context(args):
     if latest_close is None and not kline_unavailable:
         latest_close = technical.get("latest", {}).get("close", None)
 
+    # For ETFs, use NAV as displayed current price (more representative than market close)
+    display_current_price = latest_close
+    display_price_date = kline_latest_date
+    if etf_data:
+        nav_info = etf_data.get("nav", {})
+        nav_val = nav_info.get("nav")
+        if nav_val is not None:
+            display_current_price = nav_val
+            nav_date = nav_info.get("nav_date", "")
+            if nav_date:
+                display_price_date = nav_date
+
     # Parse entry signals JSON
     entry_signals_list = []
     if args.entry_signals:
@@ -657,8 +669,8 @@ def build_context(args):
         # Risk/reward
         "支撑位": support_str,
         "压力位": resistance_str,
-        "当前价": latest_close if latest_close is not None else "—",
-        "当前价日期": kline_latest_date or "",
+        "当前价": display_current_price if display_current_price is not None else "—",
+        "当前价日期": display_price_date or "",
         "止损位": stop_loss,
         "目标位": target_display,
         "风险收益比": rr_display,
