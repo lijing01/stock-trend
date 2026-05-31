@@ -696,6 +696,8 @@ def main():
                         help="跳过涨停概念热度评分")
     parser.add_argument("--no-longhubang", "--no-lhb", action="store_true", default=False,
                         help="跳过龙虎榜机构板块聚合分析")
+    parser.add_argument("--export-sectors", action="store_true", default=False,
+                        help="导出热板块列表到 qualified_sectors.json")
     parser.add_argument("--lhb-date", type=str, help="龙虎榜日期 YYYYMMDD")
     parser.add_argument("--zt-date", type=str, help="涨停日期 YYYY-MM-DD")
     args = parser.parse_args()
@@ -757,6 +759,50 @@ def main():
                 print(f"  ⚠️ {lhb_result['meta']['note']}")
         except Exception as e:
             print(f"  ⚠️ 龙虎榜分析失败: {e}")
+
+    # ── 热板块导出（用于 longtou 消费） ──
+    if args.export_sectors:
+        if args.no_zt:
+            print("  ⚠️ --export-sectors 需要涨停数据 (去掉 --no-zt)")
+        else:
+            qualified = []
+            # Build a set of sectors that pass dual confirmation
+            zt_sectors_with_score = {}
+            for zc in zt_scored:
+                if zc.get("zt_score", 0) >= 50:
+                    name = zc.get("matched_industry") or zc["concept"]
+                    zt_sectors_with_score[name] = max(
+                        zt_sectors_with_score.get(name, 0),
+                        zc["zt_score"]
+                    )
+            for s in scored:
+                heat = s["hot_score"]
+                name = s["name"]
+                zt_val = zt_sectors_with_score.get(name, 0)
+                if heat >= 50 and zt_val >= 50:
+                    # Find matching lhb data
+                    lhb_info = {"score": 0, "direction": ""}
+                    for lhb_sec in lhb_sectors:
+                        if lhb_sec["name"] == name or name in lhb_sec.get("member_names", []):
+                            lhb_info = {"score": lhb_sec.get("lhb_score", 0),
+                                        "direction": lhb_sec.get("direction", "")}
+                            break
+                    qualified.append({
+                        "name": name,
+                        "heat_score": round(heat, 1),
+                        "zt_score": round(zt_val, 1),
+                        "lhb_score": round(lhb_info["score"], 1),
+                        "lhb_direction": lhb_info["direction"],
+                    })
+            if qualified:
+                try:
+                    from bridge.sector_feeder import export_qualified_sectors
+                    export_qualified_sectors(qualified, heat_min=50, zt_min=50)
+                    print(f"\n[export] 热板块导出: {len(qualified)} 个板块 → .cache/stock-trend/qualified_sectors.json")
+                except Exception as e:
+                    print(f"\n⚠️ 热板块导出失败: {e}")
+            else:
+                print(f"\n[export] 无满足 heat≥50 & zt≥50 的板块，跳过导出")
 
     elapsed = time.time() - start
     meta = {
