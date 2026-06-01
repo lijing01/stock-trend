@@ -162,6 +162,7 @@ def get_sector_rankings() -> dict:
         1 for s in result["sectors"]
         if (s.get("up_count", 0) or 0) > 0 or (s.get("down_count", 0) or 0) > 0
     )
+    result["meta"]["total_sectors"] = len(result["sectors"])
     if active == 0 or result["meta"]["total_sectors"] < 5:
         try:
             from fetchers.sector_akshare import get_sector_rankings_akshare
@@ -172,7 +173,6 @@ def get_sector_rankings() -> dict:
         except Exception as e:
             print(f"  [AKShare] 备选数据源失败: {e}", file=sys.stderr)
 
-    result["meta"]["total_sectors"] = len(result["sectors"])
     return result
 
 
