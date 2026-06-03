@@ -52,7 +52,7 @@ holdings:
   status: active
   close_price: null
   close_date: null
-  current_price: 7.67
+  current_price: 7.37
 - code: '159740'
   ts_code: 159740.SZ
   name: 恒生科技ETF大成
@@ -68,7 +68,7 @@ holdings:
   status: active
   close_price: null
   close_date: null
-  current_price: 0.611
+  current_price: 0.632
 - code: '601166'
   ts_code: 601166.SH
   name: 兴业银行
@@ -84,13 +84,13 @@ holdings:
   status: active
   close_price: null
   close_date: null
-  current_price: 17.97
+  current_price: 18.66
 - code: '516160'
   ts_code: 516160.SH
   name: 新能源ETF南方
   buy_price: 3.19
   buy_date: '2026-05-22'
-  quantity: 8000.0
+  quantity: 4000.0
   stop_loss: 3.0
   targets:
   - 3.18
@@ -100,7 +100,7 @@ holdings:
   status: active
   close_price: null
   close_date: null
-  current_price: 3.201
+  current_price: 3.024
 settings:
   alert_threshold_pct: 3.0
   default_stop_loss_pct: 5.0

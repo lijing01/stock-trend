@@ -786,7 +786,7 @@ def main():
                     # Find matching lhb data
                     lhb_info = {"score": 0, "direction": ""}
                     for lhb_sec in lhb_sectors:
-                        if lhb_sec["name"] == name or name in lhb_sec.get("member_names", []):
+                        if lhb_sec.get("name", "") == name or name in lhb_sec.get("member_names", []):
                             lhb_info = {"score": lhb_sec.get("lhb_score", 0),
                                         "direction": lhb_sec.get("direction", "")}
                             break
