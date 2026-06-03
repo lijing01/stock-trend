@@ -419,17 +419,9 @@ def build_context(args):
     if latest_close is None and not kline_unavailable:
         latest_close = technical.get("latest", {}).get("close", None)
 
-    # For ETFs, use NAV as displayed current price (more representative than market close)
+    # For ETFs, keep market close as displayed current price (NAV shown separately in ETF section)
     display_current_price = latest_close
     display_price_date = kline_latest_date
-    if etf_data:
-        nav_info = etf_data.get("nav", {})
-        nav_val = nav_info.get("nav")
-        if nav_val is not None:
-            display_current_price = nav_val
-            nav_date = nav_info.get("nav_date", "")
-            if nav_date:
-                display_price_date = nav_date
 
     # Parse entry signals JSON
     entry_signals_list = []
