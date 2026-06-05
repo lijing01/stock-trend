@@ -11,20 +11,6 @@ holdings:
   stop_loss: null
   targets: []
   ts_code: 159740.SZ
-- buy_date: '2026-04-15'
-  buy_price: 1.025
-  close_date: '2026-05-17'
-  close_price: 0.629
-  code: '513180'
-  name: 恒生科技ETF华夏
-  notes: ''
-  quantity: 2000.0
-  status: closed
-  stop_loss: 0.95
-  targets:
-  - 1.15
-  - 1.25
-  ts_code: 513180.SH
 - buy_date: '2026-05-27'
   buy_price: 7.508
   close_date: '2026-05-27'
@@ -38,14 +24,14 @@ holdings:
   targets: []
   ts_code: 300241.SZ
 - buy_date: '2026-05-27'
-  buy_price: 7.554
+  buy_price: 7.708
   close_date: null
   close_price: null
   code: '300241'
-  current_price: 8.18
+  current_price: 7.92
   name: 瑞丰光电
-  notes: ''
-  quantity: 10000.0
+  notes: 2026-06-05 加仓 2000股@8.0, 再加仓 2000股@8.19
+  quantity: 14000.0
   status: active
   stop_loss: 6.65
   targets:
@@ -53,12 +39,22 @@ holdings:
   - 8.28
   - 9.0
   ts_code: 300241.SZ
+  lots:
+  - buy_date: '2026-05-27'
+    buy_price: 7.554
+    quantity: 10000
+  - buy_date: '2026-06-05'
+    buy_price: 8.0
+    quantity: 2000
+  - buy_date: '2026-06-05'
+    buy_price: 8.19
+    quantity: 2000
 - buy_date: '2026-05-27'
   buy_price: 0.647
   close_date: null
   close_price: null
   code: '159740'
-  current_price: 0.622
+  current_price: 0.613
   name: 恒生科技ETF大成
   notes: ''
   quantity: 250700.0
@@ -74,7 +70,7 @@ holdings:
   close_date: null
   close_price: null
   code: '601166'
-  current_price: 18.29
+  current_price: 18.6
   name: 兴业银行
   notes: ''
   quantity: 1500.0
