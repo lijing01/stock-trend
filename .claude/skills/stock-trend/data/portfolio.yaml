@@ -25,14 +25,14 @@ holdings:
   ts_code: 300241.SZ
 - buy_date: '2026-05-27'
   buy_price: 7.708
-  close_date: null
-  close_price: null
+  close_date: '2026-06-09'
+  close_price: 7.8
   code: '300241'
-  current_price: 7.92
+  current_price: 8.08
   name: 瑞丰光电
   notes: 2026-06-05 加仓 2000股@8.0, 再加仓 2000股@8.19
   quantity: 14000.0
-  status: active
+  status: closed
   stop_loss: 6.65
   targets:
   - 7.68
@@ -54,7 +54,7 @@ holdings:
   close_date: null
   close_price: null
   code: '159740'
-  current_price: 0.613
+  current_price: 0.593
   name: 恒生科技ETF大成
   notes: ''
   quantity: 250700.0
@@ -70,10 +70,10 @@ holdings:
   close_date: null
   close_price: null
   code: '601166'
-  current_price: 18.6
+  current_price: 18.54
   name: 兴业银行
-  notes: ''
-  quantity: 1500.0
+  notes: 2026-06-05 卖出 700股@18.59，获利 +621
+  quantity: 800.0
   status: active
   stop_loss: 17.0
   targets:
@@ -100,3 +100,4 @@ holdings:
 settings:
   alert_threshold_pct: 3.0
   default_stop_loss_pct: 5.0
+  cash: 109000.0
