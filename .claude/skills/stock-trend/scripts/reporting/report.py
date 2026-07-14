@@ -346,6 +346,7 @@ def _load_all_data(args):
     fundamental_data = _load_json_safe(args.fundamental_data) or {}
     macro_data = _load_json_safe(args.macro_data) or {}
     futures_data = _load_json_safe(args.futures_data) or {}
+    wyckoff_data = _load_json_safe(getattr(args, "wyckoff_data", None)) or {}
 
     scores = {}
     if args.scores:
@@ -376,6 +377,7 @@ def _load_all_data(args):
         "etf_data": etf_data, "capital_flow": capital_flow,
         "chip_dist": chip_dist, "fundamental_data": fundamental_data,
         "macro_data": macro_data, "futures_data": futures_data,
+        "wyckoff_data": wyckoff_data,
         "scores": scores, "risks": risks, "special": special,
         "scores_data": scores_data, "report_params": report_params,
     }
@@ -397,6 +399,7 @@ def build_context(args):
     fundamental_data = d["fundamental_data"]
     macro_data = d["macro_data"]
     futures_data = d["futures_data"]
+    wyckoff_data = d["wyckoff_data"]
 
     # Extract data
     summary = technical.get("summary", {})
@@ -658,6 +661,10 @@ def build_context(args):
         "基本面摘要": args.fundamental_summary or "—",
         "情绪面摘要": args.sentiment_summary or "—",
         "宏观面摘要": args.macro_summary or "—",
+        # Wyckoff (initial fallback, overridden in wyckoff processing block below)
+        "维科夫面得分": 0,
+        "维科夫面摘要": "—",
+        "维科夫面CSS": "sz",
         # Risk/reward
         "支撑位": support_str,
         "压力位": resistance_str,
@@ -741,6 +748,64 @@ def build_context(args):
         context["futures_signal"] = ""
         context["has_futures_data"] = False
 
+    # Wyckoff analysis
+    if wyckoff_data and "error" not in wyckoff_data.get("meta", {}):
+        w_phase = wyckoff_data.get("phase", {})
+        w_range = wyckoff_data.get("range", {})
+        w_vsa = wyckoff_data.get("vsa_signals", [])
+        w_ce = wyckoff_data.get("cause_effect", {})
+        w_signals = wyckoff_data.get("wyckoff_signals", {})
+        w_score = wyckoff_data.get("wyckoff_score", 0)
+
+        context["wyckoff"] = True
+        context["wyckoff_score"] = w_score
+        context["wyckoff_score_label"] = f"{w_score:+.1f}"
+        context["wyckoff_phase"] = w_phase.get("primary", "")
+        context["wyckoff_phase_name"] = w_phase.get("primary_name", "")
+        context["wyckoff_confidence"] = f"{w_phase.get('confidence', 0) * 100:.0f}%"
+        context["wyckoff_sub_phase"] = w_phase.get("primary_sub_phase", "")
+        context["wyckoff_sub_phase_name"] = w_phase.get("sub_phase_name", "")
+
+        if w_range.get("is_clear_range"):
+            context["wyckoff_support"] = w_range.get("support", "—")
+            context["wyckoff_resistance"] = w_range.get("resistance", "—")
+            context["wyckoff_duration_bars"] = w_range.get("duration_bars", "—")
+            context["wyckoff_range_height_pct"] = f"{w_range.get('range_height_pct', 0)}%"
+        else:
+            context["wyckoff_support"] = "—"
+            context["wyckoff_resistance"] = "—"
+            context["wyckoff_duration_bars"] = "—"
+            context["wyckoff_range_height_pct"] = "—"
+
+        context["wyckoff_horizontal_count"] = w_ce.get("horizontal_count", "—")
+        context["wyckoff_vertical_height"] = w_ce.get("vertical_height", "—")
+        context["wyckoff_time_projection"] = w_ce.get("time_projection_days", "—")
+        targets = w_ce.get("targets", [])
+        context["wyckoff_targets"] = targets
+        context["multiple_targets"] = len(targets) > 1
+
+        context["wyckoff_vsa_signals"] = len(w_vsa) > 0
+        context["wyckoff_vsa_list"] = [
+            {"description": vs.get("description", ""), "strength": vs.get("strength", 1)}
+            for vs in w_vsa[:5]
+        ]
+
+        context["wyckoff_trading_implication"] = w_signals.get("trading_implication", "—")
+
+        # Also add dimension summary for key signals table
+        w_summary = getattr(args, "wyckoff_summary", "") or ""
+        if not w_summary and w_phase.get("primary_name"):
+            w_summary = f"{w_phase['primary_name']}({w_phase.get('sub_phase_name', '')})"
+        context["维科夫面摘要"] = w_summary
+        context["维科夫面得分"] = w_score
+        context["维科夫面CSS"] = score_css(w_score)
+    else:
+        context["wyckoff"] = False
+        context["wyckoff_score"] = 0
+        context["维科夫面摘要"] = "—"
+        context["维科夫面得分"] = "—"
+        context["维科夫面CSS"] = "sz"
+
     # Comprehensive analysis (综合研判 section) from args.analysis JSON
     analysis_data = None
     if args.analysis:
@@ -817,6 +882,8 @@ def main():
     parser.add_argument("--macro-data", help="Path to macro snapshot JSON")
     parser.add_argument("--futures-data", help="Path to futures data JSON (ETF only)")
     parser.add_argument("--chip-distribution", help="Path to chip distribution JSON")
+    parser.add_argument("--wyckoff-data", help="Path to Wyckoff analysis JSON")
+    parser.add_argument("--wyckoff-summary", help="Wyckoff dimension summary text")
     # Output paths
     parser.add_argument("--output-md", help="Output Markdown file path")
     parser.add_argument("--output-html", help="Output HTML file path")
@@ -851,6 +918,11 @@ def main():
             if futures_path.exists():
                 args.futures_data = str(futures_path)
 
+        if not args.wyckoff_data:
+            wyckoff_path = data_dir / "wyckoff.json"
+            if wyckoff_path.exists():
+                args.wyckoff_data = str(wyckoff_path)
+
     if not args.output_md and not args.output_html:
         print("Error: at least one of --output-md or --output-html is required", file=sys.stderr)
         sys.exit(1)
@@ -875,6 +947,8 @@ def main():
                 args.chip_distribution = output_files["chip_distribution"]
             if not args.macro_data and output_files.get("macro_snapshot"):
                 args.macro_data = output_files["macro_snapshot"]
+            if not args.wyckoff_data and output_files.get("wyckoff"):
+                args.wyckoff_data = output_files["wyckoff"]
         except (OSError, json.JSONDecodeError):
             pass
 
