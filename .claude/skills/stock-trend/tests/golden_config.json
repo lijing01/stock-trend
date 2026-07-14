@@ -32,6 +32,12 @@
       "volume": 0.03
     }
   },
+  "wyckoff": {
+    "source": "pipeline",
+    "codes": ["600519.SH", "000858.SZ", "000002.SZ"],
+    "assert_fields": ["phase.primary", "wyckoff_score", "phase.confidence"],
+    "enabled": false
+  },
   "numeric_threshold_map": {
     "total_score": "score",
     "confidence": "score",
