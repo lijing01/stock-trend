@@ -85,6 +85,7 @@ def build_output_files(
     kline_available,
     technical_available,
     chip_available,
+    wyckoff_available,
     is_etf,
     no_etf,
     no_capital,
@@ -105,6 +106,7 @@ def build_output_files(
         "futures_data": str(output_dir / "futures_data.json") if is_etf and not no_futures else None,
         "index_valuation": str(output_dir / "index_valuation.json") if is_etf and not no_index_valuation else None,
         "chip_distribution": str(output_dir / "chip_distribution.json") if chip_available else None,
+        "wyckoff": str(output_dir / "wyckoff.json") if wyckoff_available else None,
     }
 
 
@@ -118,6 +120,8 @@ def main():
     parser.add_argument("--asset", choices=["E", "FD"], help="Asset type (auto-detected if omitted)")
     parser.add_argument("--adj", choices=["qfq", "hfq", "none"], help="Adjustment type (auto-detected if omitted)")
     parser.add_argument("--freq", choices=["D", "W"], default="D", help="K-line frequency (default: D)")
+    parser.add_argument("--kline-days", type=int, default=250,
+                        help="Number of K-line days to fetch (default: 250)")
     parser.add_argument("--no-etf", action="store_true", help="Skip ETF data fetch")
     parser.add_argument("--no-capital", action="store_true", help="Skip capital flow fetch")
     parser.add_argument("--no-fundamental", action="store_true", help="Skip fundamental data fetch")
@@ -180,6 +184,7 @@ def main():
     kline_available = False
     technical_available = False
     chip_available = False
+    wyckoff_available = False
     chip_result = {"success": False}
 
     # --- Step 1: Quick diagnostic ---
@@ -204,6 +209,7 @@ def main():
     ]
     if args.no_cache:
         kline_cmd.append("--no-cache")
+    kline_cmd.extend(["--days", str(args.kline_days)])
     kline_result = run_script(kline_cmd, label="fetch_kline_tushare")
     if kline_result.get("timeout"):
         timeouts.append("fetch_kline_tushare")
@@ -231,6 +237,7 @@ def main():
             ]
         if args.no_cache:
             fallback_cmd.append("--no-cache")
+        fallback_cmd.extend(["--days", str(args.kline_days)])
         fallback_result = run_script(fallback_cmd, label="fetch_kline_eastmoney")
         if fallback_result.get("timeout"):
             timeouts.append("fetch_kline_eastmoney")
@@ -324,6 +331,38 @@ def main():
         remove_stale_file(technical_path, "technical analysis", errors)
         remove_stale_file(chip_distribution_path, "chip distribution", errors)
         remove_stale_file(kline_path, "K-line data", errors)
+
+    # --- Step 3.6: Wyckoff analysis (depends on kline) ---
+    wyckoff_path = str(output_dir / "wyckoff.json")
+    if kline_available:
+        print(f"[3.6/5] Running Wyckoff analysis...")
+        wyckoff_cmd = [
+            sys.executable, str(SCRIPT_DIR / "analysis/wyckoff.py"),
+            kline_path, "-o", wyckoff_path,
+        ]
+        wyckoff_result = run_script(wyckoff_cmd, label="analyze_wyckoff", timeout=15)
+        if wyckoff_result.get("timeout"):
+            timeouts.append("analyze_wyckoff")
+        if wyckoff_result["success"]:
+            wyckoff_data = read_json(wyckoff_path)
+            if wyckoff_data and wyckoff_data.get("meta", {}).get("error") is None:
+                wyckoff_available = True
+                wyckoff_score_val = wyckoff_data.get("wyckoff_score", 0)
+                wyckoff_phase = wyckoff_data.get("phase", {}).get("primary_name", "")
+                wyckoff_sub = wyckoff_data.get("phase", {}).get("sub_phase_name", "")
+                results["wyckoff"] = {
+                    "phase": wyckoff_phase,
+                    "sub_phase": wyckoff_sub,
+                    "score": wyckoff_score_val,
+                }
+                print(f"  Wyckoff: {wyckoff_phase}({wyckoff_sub}), score={wyckoff_score_val}")
+            else:
+                print(f"  Wyckoff analysis skipped: {wyckoff_data.get('meta', {}).get('error', 'unknown') if wyckoff_data else 'no output'}")
+        else:
+            print(f"  Wyckoff analysis failed: {wyckoff_result['stderr']}")
+    else:
+        print(f"[3.6/5] Skipping Wyckoff analysis (no K-line data)")
+        remove_stale_file(wyckoff_path, "Wyckoff analysis", errors)
 
     # --- Step 4: ETF data and capital flow (parallel, independent) ---
     print(f"[4/5] Fetching supplementary data...")
@@ -515,6 +554,7 @@ def main():
             kline_available=kline_available,
             technical_available=technical_available,
             chip_available=chip_available,
+            wyckoff_available=wyckoff_available,
             is_etf=is_etf,
             no_etf=args.no_etf,
             no_capital=args.no_capital,
