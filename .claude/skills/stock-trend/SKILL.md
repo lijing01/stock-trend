@@ -289,7 +289,7 @@ python3 .claude/skills/stock-trend/scripts/pipeline/runner.py --code <code>
 
 内部自动：代码解析→K线(Tushare→东方财富降级)→技术分析→ETF数据(ETF标的)→资金流向(北向/融资/龙虎榜)→基本面(AKShare,ETF跳过)→宏观快照(汇率/利率/PMI/CPI/M2)→期货数据(ETF标的:基差/OI/量)。
 
-输出到 `.cache/stock-trend/{code}/`：`pipeline_output.json`/`kline.json`/`technical.json`/`etf_data.json`/`futures_data.json`/`capital_flow.json`/`fundamental.json`/`macro_snapshot.json`。
+输出到 `.cache/stock-trend/{code}/`：`pipeline_output.json`/`kline.json`/`technical.json`/`etf_data.json`/`futures_data.json`/`capital_flow.json`/`fundamental.json`/`macro_snapshot.json`/`wyckoff.json`。
 
 **缓存TTL**：盘中5min/盘后16h(宏观:盘中4h/盘后12h,基本面:盘中30min/盘后16h)。`--no-cache`强制刷新。**超时**：每步30s，超时维度标记timeout。
 

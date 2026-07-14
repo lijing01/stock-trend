@@ -973,6 +973,7 @@ def run_pipeline_tests(tmpdir):
             no_macro=False,
             no_futures=False,
             no_index_valuation=False,
+            wyckoff_available=False,
             asset="E",
         )
         test(
