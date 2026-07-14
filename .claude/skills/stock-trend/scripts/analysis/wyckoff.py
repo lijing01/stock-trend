@@ -505,3 +505,369 @@ def classify_markdown(swings: list, closes: list, volumes: list, lows: list,
             return (SUB_STOPPING_VOL, 0.6)
 
     return (SUB_BREAKDOWN, 0.4)
+
+
+DEFAULT_VOL_MA_PERIOD = 50
+
+
+def analyze_vsa(ohlcv: dict, atr_values: list, ma50: list | None = None) -> list[dict]:
+    """Volume Spread Analysis: detect effort-vs-result divergences.
+
+    Analyzes each bar for VSA signals: absorption, no supply, no demand,
+    stopping volume, and upthrust patterns.
+
+    Returns list of signal dicts sorted by bar_index ascending.
+    """
+    closes = ohlcv["close"]
+    highs = ohlcv["high"]
+    lows = ohlcv["low"]
+    opens = ohlcv["open"]
+    volumes = ohlcv["volume"]
+
+    if ma50 is None:
+        ma50 = compute_ma(volumes, DEFAULT_VOL_MA_PERIOD)
+
+    signals = []
+
+    for i in range(1, len(closes)):
+        atr = atr_values[i]
+        if atr is None or atr == 0:
+            continue
+        vol = volumes[i]
+        vol_ma_val = ma50[i] if ma50 and i < len(ma50) else _ma_of_last_n(volumes, i, 50)
+        if vol_ma_val is None or vol_ma_val == 0:
+            continue
+        vol_ratio = vol / vol_ma_val
+        spread = highs[i] - lows[i]
+        spread_ratio = spread / atr
+        if spread == 0:
+            continue
+
+        upper_shadow = highs[i] - max(closes[i], opens[i])
+        lower_shadow = min(closes[i], opens[i]) - lows[i]
+        shadow_upper_ratio = upper_shadow / spread
+        shadow_lower_ratio = lower_shadow / spread
+        close_position = (closes[i] - lows[i]) / spread
+
+        # Absorption: wide spread, high volume, close mid-range
+        if vol_ratio > 1.5 and spread_ratio > 0.8 and 0.3 <= close_position <= 0.7:
+            strength = min(3, int(vol_ratio * 1.5))
+            signals.append({
+                "type": "absorption",
+                "sub_type": "effort_no_result",
+                "strength": strength,
+                "bar_index": i,
+                "description": f"放量震仓，主力吸筹特征 (vol={vol_ratio:.1f}x)",
+            })
+
+        # No Supply: narrow spread down, low volume
+        if spread_ratio < 0.6 and closes[i] < opens[i] and vol_ratio < 0.7:
+            strength = min(3, max(1, int((1 - vol_ratio) * 5)))
+            signals.append({
+                "type": "no_supply",
+                "sub_type": "supply_exhaustion",
+                "strength": strength,
+                "bar_index": i,
+                "description": f"缩量下跌，抛压枯竭 (vol={vol_ratio:.1f}x)",
+            })
+
+        # No Demand: narrow spread up, low volume
+        if spread_ratio < 0.6 and closes[i] > opens[i] and vol_ratio < 0.7:
+            strength = min(3, max(1, int((1 - vol_ratio) * 5)))
+            signals.append({
+                "type": "no_demand",
+                "sub_type": "demand_exhaustion",
+                "strength": strength,
+                "bar_index": i,
+                "description": f"缩量上涨，买盘不足 (vol={vol_ratio:.1f}x)",
+            })
+
+        # Stopping Volume: high vol, close high, lower shadow
+        if vol_ratio > 1.8 and closes[i] < opens[i] and close_position > 0.6 and shadow_lower_ratio > 0.3:
+            strength = min(3, int(vol_ratio * 1.2))
+            signals.append({
+                "type": "stopping_volume",
+                "sub_type": "selling_climax",
+                "strength": strength,
+                "bar_index": i,
+                "description": f"放量下跌+长下影，止跌量出现 (vol={vol_ratio:.1f}x)",
+            })
+
+        # Upthrust: narrow spread, high close, upper shadow, high vol
+        if vol_ratio > 1.3 and spread_ratio < 0.7 and closes[i] > opens[i] and shadow_upper_ratio > 0.4:
+            strength = min(3, max(1, int(vol_ratio)))
+            signals.append({
+                "type": "upthrust",
+                "sub_type": "effort_no_result",
+                "strength": strength,
+                "bar_index": i,
+                "description": f"放量窄幅+上影，上冲受阻 (vol={vol_ratio:.1f}x)",
+            })
+
+    return signals
+
+
+def compute_cause_effect(trading_range: dict, current_price: float) -> dict:
+    """Wyckoff 'Cause leads to Effect' quantification.
+
+    Horizontal count: duration -> time projection.
+    Vertical count: range height -> price targets.
+    """
+    support = trading_range["support"]
+    resistance = trading_range["resistance"]
+    height = resistance - support
+    duration = trading_range["duration_bars"]
+
+    time_projection = max(5, int(duration * 0.5))
+
+    if current_price > resistance:
+        target1 = current_price + height
+        target2 = current_price + height * 1.5
+        target3 = current_price + height * 2.0
+        direction_label = "吸筹"
+    elif current_price < support:
+        target1 = current_price - height
+        target2 = current_price - height * 1.5
+        target3 = current_price - height * 2.0
+        direction_label = "派发"
+    else:
+        return {
+            "horizontal_count": duration,
+            "vertical_height": round(height, 2),
+            "targets": [],
+            "time_projection_days": time_projection,
+            "cause_description": f"箱体内震荡 {duration} 根 K 线，高度 {height:.2f}，等待突破确认",
+        }
+
+    return {
+        "horizontal_count": duration,
+        "vertical_height": round(height, 2),
+        "targets": [
+            {"level": 1, "price": round(target1, 2), "ratio": 1.0},
+            {"level": 2, "price": round(target2, 2), "ratio": 1.5},
+            {"level": 3, "price": round(target3, 2), "ratio": 2.0},
+        ],
+        "time_projection_days": time_projection,
+        "cause_description": (
+            f"{duration} 根 K 线横盘{direction_label}"
+            f"，箱体高度 {height:.2f} ({height / ((support + resistance) / 2) * 100:.1f}%)"
+        ),
+    }
+
+
+def wyckoff_score(phase: str, sub_phase: str) -> float:
+    """Map phase/sub_phase to score in [-3, +3] range."""
+    key = (phase, sub_phase)
+    score = PHASE_SCORES.get(key, DEFAULT_PHASE_SCORE)
+    return max(-3.0, min(3.0, score))
+
+
+def generate_trading_implication(phase: str, sub_phase: str) -> str:
+    """Generate human-readable trading implication based on Wyckoff signals."""
+    if phase == PHASE_UNKNOWN:
+        return "当前无明显维科夫阶段特征，暂无法提供操作参考。"
+
+    if phase == PHASE_ACCUMULATION:
+        implications = {
+            SUB_SC: "抛售高潮出现，卖压集中释放，短期可能形成低点区域。不宜追空，等待二次测试确认。",
+            SUB_AR: "自动反弹阶段，卖压暂缓。观察反弹量能，若缩量则可能再次测试支撑。",
+            SUB_ST: "二次测试缩量确认支撑，吸筹信号增强。关注后续能否放量突破箱体。",
+            SUB_SPRING: "初支（Spring）形态，短暂击穿支撑后快速收回，主力试盘特征。可考虑轻仓试多。",
+            SUB_LPS: "最后支撑点附近缩量止跌，吸筹接近尾声。做好突破入场准备。",
+            SUB_PRE_MARKUP: "拉升前准备阶段，震荡收窄、成交量极度萎缩。等待放量突破信号。",
+        }
+        return implications.get(sub_phase, "吸筹阶段运行中，以箱体上下沿作为关键边界。")
+
+    if phase == PHASE_MARKUP:
+        implications = {
+            SUB_JAC: "JAC（跃过小溪）放量突破箱体，趋势确认。可顺势做多，以箱顶作为止损参考。",
+            SUB_BU: "回踩箱顶获支撑，缩量整理。突破确认后的健康回调，可考虑加仓。",
+            SUB_CONTINUATION: "持续拉升阶段。顺应趋势持有，跟踪止盈，不逆势猜顶。",
+        }
+        return implications.get(sub_phase, "拉升阶段，多头持仓为主，注意跟踪趋势力度变化。")
+
+    if phase == PHASE_DISTRIBUTION:
+        implications = {
+            SUB_BC: "买入高潮（BC）出现，巨量长上影，主力派发特征。应逐步减仓。",
+            SUB_UTAD: "UTAD（上冲回落）假突破，量价背离。派发确认信号，建议减仓或离场。",
+            SUB_LPSY: "最后供应点（LPSY），反弹缩量无力。清仓为主，不再做多。",
+            SUB_SOW: "弱势信号（SOW），跌破支撑或测试支撑时量大。离场观望。",
+            SUB_PRE_MARKDOWN: "砸盘前兆。全面离场，准备做空或空仓。",
+        }
+        return implications.get(sub_phase, "派发阶段运行中，以减仓和控制风险为主。")
+
+    if phase == PHASE_MARKDOWN:
+        implications = {
+            SUB_BREAKDOWN: "破位下跌，趋势转空。多单离场，不抄底。",
+            SUB_PANIC: "恐慌抛售阶段，放量急跌。空仓等待，不接飞刀。",
+            SUB_STOPPING_VOL: "止跌量出现，抛压衰竭信号。关注是否形成新的吸筹区间。",
+        }
+        return implications.get(sub_phase, "砸盘阶段，空仓观望，等待止跌企稳信号。")
+
+    return ""
+
+
+def analyze(kline_path: str, output_path: str | None = None) -> dict:
+    """Run full Wyckoff analysis pipeline.
+
+    Args:
+        kline_path: Path to K-line JSON file.
+        output_path: Optional path to write output JSON.
+
+    Returns:
+        wyckoff_analysis dict with phase, range, VSA, cause_effect, score.
+    """
+    kline_data = load_kline(kline_path)
+    if kline_data is None:
+        return {"meta": {"error": "failed to load K-line data"}, "phase": {"primary": PHASE_UNKNOWN}}
+
+    data_rows = kline_data.get("data", [])
+    if not data_rows:
+        return {"meta": {"error": "empty K-line data"}, "phase": {"primary": PHASE_UNKNOWN}}
+
+    kline_meta = kline_data.get("meta", {})
+    ohlcv = extract_ohlcv(data_rows)
+    closes = ohlcv["close"]
+    highs = ohlcv["high"]
+    lows = ohlcv["low"]
+    volumes = ohlcv["volume"]
+
+    if len(closes) < 30:
+        return {"meta": {"error": f"insufficient data ({len(closes)} rows)"}, "phase": {"primary": PHASE_UNKNOWN}}
+
+    atr_values = compute_atr(highs, lows, closes)
+
+    swings = detect_swing_points(closes, highs, lows, volumes, atr_values)
+    swings = mark_climaxes(swings, highs, lows, closes, volumes, atr_values)
+    for s in swings:
+        idx = s["index"]
+        if idx < len(ohlcv["date"]):
+            s["date"] = ohlcv["date"][idx]
+
+    trading_range = detect_trading_range(swings, closes, atr_values)
+
+    latest_idx = len(closes) - 1
+    phase = PHASE_UNKNOWN
+    sub_phase = ""
+    confidence = 0.0
+
+    if trading_range:
+        result = classify_accumulation(swings, closes, volumes, lows, highs,
+                                       trading_range, atr_values, latest_idx)
+        if result:
+            sub_phase, confidence = result
+            phase = PHASE_ACCUMULATION
+
+        if not result:
+            result = classify_distribution(swings, closes, volumes, lows, highs,
+                                           trading_range, atr_values, latest_idx)
+            if result:
+                sub_phase, confidence = result
+                phase = PHASE_DISTRIBUTION
+
+        if not result:
+            result = classify_markup(swings, closes, volumes, highs,
+                                     trading_range, atr_values, latest_idx)
+            if result:
+                sub_phase, confidence = result
+                phase = PHASE_MARKUP
+
+        if phase == PHASE_UNKNOWN:
+            result = classify_markdown(swings, closes, volumes, lows, highs,
+                                       trading_range, atr_values, latest_idx)
+            if result:
+                sub_phase, confidence = result
+                phase = PHASE_MARKDOWN
+    else:
+        if len(closes) >= 50:
+            ma20 = compute_ma(closes, 20)
+            ma60 = compute_ma(closes, 60)
+            if ma20[-1] and ma60[-1] and closes[-1] > ma20[-1] and ma20[-1] > ma60[-1]:
+                phase = PHASE_MARKUP
+                sub_phase = SUB_CONTINUATION
+                confidence = 0.3
+            elif ma20[-1] and ma60[-1] and closes[-1] < ma20[-1] and ma20[-1] < ma60[-1]:
+                phase = PHASE_MARKDOWN
+                sub_phase = SUB_BREAKDOWN
+                confidence = 0.3
+
+    if phase == PHASE_UNKNOWN and trading_range:
+        confidence = 0.3
+
+    vsa_signals = analyze_vsa(ohlcv, atr_values)
+
+    current_price = closes[-1]
+    cause_effect = compute_cause_effect(trading_range, current_price) if trading_range else {}
+
+    score = wyckoff_score(phase, sub_phase) if sub_phase else DEFAULT_PHASE_SCORE
+
+    key_signals = []
+    if trading_range:
+        key_signals.append(f"箱体支撑 {trading_range['support']:.2f} / 阻力 {trading_range['resistance']:.2f}")
+    if sub_phase:
+        sub_name = SUB_PHASE_NAMES.get(sub_phase, sub_phase)
+        key_signals.append(f"子阶段: {sub_name}")
+    for vs in vsa_signals[-3:]:
+        key_signals.append(vs["description"])
+
+    vsa_signals_sorted = sorted(vsa_signals, key=lambda s: s["bar_index"], reverse=True)
+
+    result = {
+        "meta": {
+            "ts_code": kline_meta.get("ts_code", ""),
+            "name": kline_meta.get("name", ""),
+            "calc_date": kline_meta.get("end_date", ""),
+            "kline_days": len(closes),
+            "data_quality": "good" if len(closes) >= 150 else ("limited" if len(closes) >= 60 else "insufficient"),
+        },
+        "phase": {
+            "primary": phase,
+            "primary_name": PHASE_NAMES.get(phase, "未知阶段"),
+            "confidence": round(confidence, 2),
+            "secondary_possibilities": [],
+            "primary_sub_phase": sub_phase,
+            "sub_phase_name": SUB_PHASE_NAMES.get(sub_phase, ""),
+        },
+        "range": trading_range or {"is_clear_range": False},
+        "swing_points": swings[-20:],
+        "vsa_signals": vsa_signals_sorted[:10],
+        "cause_effect": cause_effect,
+        "wyckoff_score": round(score, 2),
+        "wyckoff_signals": {
+            "verdict": (
+                "bullish" if score > 1.0 else
+                "cautiously_bullish" if score > 0 else
+                "bearish" if score < -1.0 else
+                "cautiously_bearish" if score < 0 else
+                "neutral"
+            ),
+            "key_signals": key_signals[-5:],
+            "trading_implication": generate_trading_implication(phase, sub_phase),
+        },
+    }
+
+    if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
+    return result
+
+
+def main():
+    """CLI entry point: python3 wyckoff.py <kline_json> [-o <output_path>]"""
+    if len(sys.argv) < 2:
+        print("Usage: python3 wyckoff.py <kline_json> [-o <output_path>]", file=sys.stderr)
+        sys.exit(1)
+    kline_path = sys.argv[1]
+    output_path = None
+    if "-o" in sys.argv:
+        idx = sys.argv.index("-o")
+        if idx + 1 < len(sys.argv):
+            output_path = sys.argv[idx + 1]
+    result = analyze(kline_path, output_path)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
