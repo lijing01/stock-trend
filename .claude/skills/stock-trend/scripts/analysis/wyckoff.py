@@ -104,6 +104,9 @@ RANGE_MIN_HEIGHT_ATRS = 3
 RANGE_MIN_TOUCHES = 3
 RANGE_MIN_BARS = 20
 
+# Maximum lookback for finding breakout
+FIND_BREAKOUT_MAX_BARS = 60
+
 
 def load_kline(path: str) -> dict | None:
     """Load K-line JSON, validate structure."""
@@ -311,3 +314,194 @@ def _median(values: list) -> float | None:
         return None
     n = len(vals)
     return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+
+def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
+                           highs: list, trading_range: dict | None, atr_values: list,
+                           latest_idx: int) -> tuple | None:
+    """Detect accumulation phase and sub-phase.
+
+    Returns (sub_phase, confidence) or None if not in accumulation.
+    """
+    if trading_range is None:
+        return None
+    range_support = trading_range["support"]
+    range_resistance = trading_range["resistance"]
+    latest_close = closes[latest_idx]
+    latest_atr = atr_values[latest_idx] or 0
+    latest_vol = volumes[latest_idx]
+
+    if latest_close > range_resistance + latest_atr * 1.0:
+        return None
+    if latest_close < range_support - latest_atr * 1.0:
+        return None
+
+    recent_swing_lows = [s for s in swings if s["type"] == "low"
+                         and s["index"] > trading_range["resistance_idx"] * 0.7
+                         and s["price"] >= range_support - latest_atr * 2
+                         and s["price"] <= range_resistance + latest_atr * 2]
+    if not recent_swing_lows:
+        near_support = abs(latest_close - range_support) <= latest_atr * 0.5
+        if near_support and latest_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.7:
+            return (SUB_LPS, 0.6)
+        return None
+
+    latest_swing_low = recent_swing_lows[-1]
+    if latest_swing_low["is_climax"] and latest_swing_low.get("climax_type") == "selling":
+        return (SUB_SC, 0.8)
+
+    if len(recent_swing_lows) >= 1:
+        sc_swings = [s for s in recent_swing_lows if s.get("is_climax")]
+        if sc_swings:
+            sc_idx = sc_swings[-1]["index"]
+            bars_since_sc = latest_idx - sc_idx
+            if bars_since_sc <= 10 and latest_close > range_support + (range_resistance - range_support) * 0.3:
+                return (SUB_AR, 0.7)
+
+    if len(recent_swing_lows) >= 2:
+        prev_low = recent_swing_lows[-2]
+        curr_low = latest_swing_low
+        if (curr_low["volume_ratio"] < prev_low["volume_ratio"] * 0.7
+                and abs(curr_low["price"] - prev_low["price"]) <= latest_atr * 2):
+            return (SUB_ST, 0.8)
+
+    spring_candidates = [s for s in recent_swing_lows
+                         if s["price"] < range_support - latest_atr * 0.3
+                         and s["price"] >= range_support - latest_atr * 2.0]
+    if spring_candidates and any(s["volume_ratio"] > 1.5 for s in spring_candidates):
+        return (SUB_SPRING, 0.7)
+
+    near_support = abs(latest_close - range_support) <= latest_atr * 0.5
+    if near_support and latest_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.6:
+        return (SUB_LPS, 0.7)
+
+    return (SUB_LPS, 0.5)
+
+
+def classify_markup(swings: list, closes: list, volumes: list, highs: list,
+                     trading_range: dict | None, atr_values: list,
+                     latest_idx: int) -> tuple | None:
+    """Detect markup phase after breakout from accumulation range."""
+    if trading_range is None:
+        return None
+    range_resistance = trading_range["resistance"]
+    latest_close = closes[latest_idx]
+    latest_atr = atr_values[latest_idx] or 0
+
+    if latest_close <= range_resistance:
+        return None
+
+    trend_high = max(closes[max(0, latest_idx - 20) : latest_idx + 1])
+    retrace_from_high = (trend_high - latest_close) / latest_atr if latest_atr > 0 else 0
+    bars_since_breakout = _find_first_breakout_bar(closes, trading_range, latest_idx)
+
+    if bars_since_breakout is not None and bars_since_breakout <= 5:
+        breakout_volumes = volumes[latest_idx - bars_since_breakout : latest_idx + 1]
+        avg_vol = sum(breakout_volumes) / len(breakout_volumes) if breakout_volumes else 0
+        baseline_vol = _ma_of_last_n(volumes, latest_idx - bars_since_breakout, 50) if latest_idx - bars_since_breakout >= 50 else 1
+        if avg_vol > baseline_vol * 1.3:
+            return (SUB_JAC, 0.8)
+        return (SUB_JAC, 0.5)
+
+    if retrace_from_high <= 2.0 and retrace_from_high >= 0.5:
+        pullback_vol = volumes[latest_idx]
+        if pullback_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.8:
+            return (SUB_BU, 0.7)
+        return (SUB_BU, 0.5)
+
+    return (SUB_CONTINUATION, 0.6)
+
+
+def _find_first_breakout_bar(closes: list, trading_range: dict, latest_idx: int) -> int | None:
+    """Find how many bars ago the price first closed above resistance.
+
+    Returns bar offset (0 = today, 1 = yesterday, etc.) or None if price
+    has never been above resistance in the lookback window.
+    """
+    resistance = trading_range["resistance"]
+    lookback = min(latest_idx, FIND_BREAKOUT_MAX_BARS)
+    for offset in range(lookback):
+        idx = latest_idx - offset
+        if idx < 0:
+            return None
+        if closes[idx] <= resistance:
+            return offset - 1 if offset > 0 else None
+    return FIND_BREAKOUT_MAX_BARS  # Sentinal: breakout happened > N bars ago
+
+
+def classify_distribution(swings: list, closes: list, volumes: list,
+                            lows: list, highs: list, trading_range: dict | None,
+                            atr_values: list, latest_idx: int) -> tuple | None:
+    """Detect distribution phase."""
+    if trading_range is None:
+        return None
+    range_support = trading_range["support"]
+    range_resistance = trading_range["resistance"]
+    latest_close = closes[latest_idx]
+    latest_atr = atr_values[latest_idx] or 0
+
+    if latest_close < range_support - latest_atr * 1.0:
+        return None
+    if latest_close < range_support - latest_atr * 0.5:
+        return (SUB_SOW, 0.6)
+
+    recent_swing_highs = [s for s in swings if s["type"] == "high"
+                          and s["index"] > trading_range["resistance_idx"] * 0.7
+                          and s["price"] >= range_support - latest_atr * 2
+                          and s["price"] <= range_resistance + latest_atr * 2]
+    if not recent_swing_highs:
+        return None
+
+    latest_swing_high = recent_swing_highs[-1]
+
+    if latest_swing_high["is_climax"] and latest_swing_high.get("climax_type") == "buying":
+        return (SUB_BC, 0.8)
+
+    utad_candidates = [s for s in recent_swing_highs
+                       if s["price"] > range_resistance + latest_atr * 0.3
+                       and latest_close < range_resistance + latest_atr * 0.3]
+    if utad_candidates:
+        has_climax = any(s.get("is_climax") for s in utad_candidates)
+        return (SUB_UTAD, 0.75 if has_climax else 0.55)
+
+    near_resistance = abs(latest_close - range_resistance) <= latest_atr * 0.5
+    if near_resistance and volumes[latest_idx] < _ma_of_last_n(volumes, latest_idx, 50) * 0.6:
+        return (SUB_LPSY, 0.65)
+
+    near_support = abs(latest_close - range_support) <= latest_atr * 0.5
+    if near_support:
+        return (SUB_SOW, 0.5)
+
+    return (SUB_LPSY, 0.4)
+
+
+def classify_markdown(swings: list, closes: list, volumes: list, lows: list,
+                       highs: list, trading_range: dict | None, atr_values: list,
+                       latest_idx: int) -> tuple | None:
+    """Detect markdown phase."""
+    if trading_range is None:
+        return None
+    range_support = trading_range["support"]
+    latest_close = closes[latest_idx]
+    latest_atr = atr_values[latest_idx] or 0
+
+    if latest_close >= range_support:
+        return None
+
+    range_under = range_support - latest_close
+    if range_under <= latest_atr * 2.0 and range_under > latest_atr * 0.5:
+        return (SUB_BREAKDOWN, 0.7)
+
+    if len(closes) >= 10:
+        recent_returns = [(closes[i] - closes[i - 1]) / closes[i - 1]
+                          for i in range(max(latest_idx - 10, 1), latest_idx + 1)]
+        avg_return = sum(recent_returns) / len(recent_returns)
+        if avg_return < -0.02 and volumes[latest_idx] > _ma_of_last_n(volumes, latest_idx, 50) * 1.5:
+            return (SUB_PANIC, 0.75)
+
+    if volumes[latest_idx] > _ma_of_last_n(volumes, latest_idx, 50) * 1.5:
+        daily_range = highs[latest_idx] - lows[latest_idx]
+        if daily_range < latest_atr * 0.7:
+            return (SUB_STOPPING_VOL, 0.6)
+
+    return (SUB_BREAKDOWN, 0.4)
