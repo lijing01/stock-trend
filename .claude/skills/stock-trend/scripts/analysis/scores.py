@@ -33,29 +33,34 @@ from core.eastmoney_utils import piecewise_linear
 # --- Default weights ---
 
 DEFAULT_WEIGHTS = {
-    "technical": 0.35,
-    "capital_flow": 0.25,
-    "fundamental": 0.15,
-    "sentiment": 0.15,
-    "macro": 0.10,
+    "technical": 0.28,
+    "capital_flow": 0.23,
+    "fundamental": 0.14,
+    "sentiment": 0.14,
+    "macro": 0.09,
+    "wyckoff": 0.12,
 }
 
 FOCUS_WEIGHTS = {
     "technical": {
-        "technical": 0.55, "capital_flow": 0.20,
-        "fundamental": 0.083, "sentiment": 0.083, "macro": 0.084,
+        "technical": 0.45, "capital_flow": 0.15,
+        "fundamental": 0.08, "sentiment": 0.08, "macro": 0.08,
+        "wyckoff": 0.16,
     },
     "capital_flow": {
-        "capital_flow": 0.50, "technical": 0.20,
-        "fundamental": 0.10, "sentiment": 0.10, "macro": 0.10,
+        "capital_flow": 0.40, "technical": 0.15,
+        "fundamental": 0.08, "sentiment": 0.08, "macro": 0.08,
+        "wyckoff": 0.21,
     },
     "fundamental": {
-        "fundamental": 0.45, "macro": 0.20,
-        "technical": 0.117, "capital_flow": 0.117, "sentiment": 0.116,
+        "fundamental": 0.35, "macro": 0.15,
+        "technical": 0.10, "capital_flow": 0.10, "sentiment": 0.10,
+        "wyckoff": 0.20,
     },
     "sentiment": {
-        "sentiment": 0.45, "technical": 0.25,
-        "capital_flow": 0.10, "fundamental": 0.10, "macro": 0.10,
+        "sentiment": 0.35, "technical": 0.20,
+        "capital_flow": 0.08, "fundamental": 0.08, "macro": 0.08,
+        "wyckoff": 0.21,
     },
 }
 
@@ -334,7 +339,7 @@ def calc_inter_dim_consistency(scores):
         float: 0.0 (all against) ~ 1.0 (all agree), 1.0 if all neutral.
     """
     directions = []
-    for dim in ["technical", "capital_flow", "fundamental", "sentiment", "macro"]:
+    for dim in ["technical", "capital_flow", "fundamental", "sentiment", "macro", "wyckoff"]:
         s = scores.get(dim, 0)
         if s > 0.3:
             directions.append(1)
@@ -658,6 +663,9 @@ def main():
                         help="Fundamental dimension score (-3 to +3)")
     parser.add_argument("--sentiment-score", type=float, default=None,
                         help="Sentiment dimension score (-3 to +3)")
+    parser.add_argument("--wyckoff-score", type=float, default=None,
+                        help="Wyckoff dimension score (-3 to +3)")
+    parser.add_argument("--wyckoff-data", help="Path to wyckoff.json (automated scoring)")
     parser.add_argument("--macro-score", type=float, default=None,
                         help="Macro dimension score (-3 to +3)")
     parser.add_argument("--focus", choices=["technical", "capital_flow", "fundamental", "sentiment"],
@@ -740,6 +748,7 @@ def main():
         "fundamental": round(args.fundamental_score, 2) if args.fundamental_score is not None else 0,
         "sentiment": round(args.sentiment_score, 2) if args.sentiment_score is not None else 0,
         "macro": round(args.macro_score, 2) if args.macro_score is not None else 0,
+        "wyckoff": round(args.wyckoff_score, 2) if args.wyckoff_score is not None else 0,
     }
 
     # Validate input before score computation
@@ -755,6 +764,8 @@ def main():
             _, args.fundamental_data = find_data_file(data_dir, "fundamental.json")
         if not args.macro_data:
             _, args.macro_data = find_data_file(data_dir, "macro_snapshot.json")
+        if not args.wyckoff_data:
+            _, args.wyckoff_data = find_data_file(data_dir, "wyckoff.json")
         if not args.capital_flow_data:
             _, args.capital_flow_data = find_data_file(data_dir, "capital_flow.json")
         if not args.etf_data:
@@ -867,6 +878,23 @@ def main():
                 macro_score = max(-3, min(3, macro_score))
             scores["macro"] = macro_score
             automated_sources["macro"] = dq
+        except Exception:
+            pass
+
+    # Automated Wyckoff scoring (when agent doesn't provide explicit score)
+    if args.wyckoff_data and args.wyckoff_score is None:
+        try:
+            with open(args.wyckoff_data, "r", encoding="utf-8") as f:
+                wy_data = json.load(f)
+            if "error" not in wy_data.get("meta", {}):
+                w_score = wy_data.get("wyckoff_score", 0)
+                data_quality = wy_data.get("meta", {}).get("data_quality", "good")
+                if data_quality == "limited":
+                    w_score *= 0.5
+                elif data_quality == "insufficient":
+                    w_score = 0.0
+                scores["wyckoff"] = round(max(-3.0, min(3.0, w_score)), 2)
+                automated_sources["wyckoff"] = data_quality
         except Exception:
             pass
 
@@ -1282,7 +1310,7 @@ def main():
     # Print summary
     print(f"Composite score: {composite} | Direction: {full_direction} | Confidence: {confidence}")
     print(f"Scores: tech={scores['technical']} cap={scores['capital_flow']} "
-          f"fund={scores['fundamental']} sent={scores['sentiment']} macro={scores['macro']}")
+          f"fund={scores['fundamental']} sent={scores['sentiment']} macro={scores['macro']} wyckoff={scores['wyckoff']}")
     print(f"Weights: " + " ".join(f"{k}={v:.2f}" for k, v in weights.items()))
     print(f"Risks: {unique_risks}")
     print(f"Output: {output_path}")
