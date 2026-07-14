@@ -40,6 +40,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 .advice-list{list-style:none;counter-reset:advice;margin:12px 0}
 .advice-list li{counter-increment:advice;padding:8px 0 8px 32px;position:relative;border-bottom:1px solid #f5f5f5;font-size:14px}
 .advice-list li::before{content:counter(advice) ".";color:#1d4ed8;font-weight:600;position:absolute;left:0}
+.wyckoff-section{border-left:4px solid #6c757d}
 </style>
 </head>
 <body>
@@ -144,13 +145,47 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 <div id="kline-chart">__CHART_HTML__</div>
 {{/has_chart}}
 
+{{#wyckoff}}
+<div class="section wyckoff-section">
+    <h2>七、维科夫操盘法分析</h2>
+
+    <p><strong>阶段判定:</strong> {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）<br>
+    <strong>当前子阶段:</strong> {{wyckoff_sub_phase_name}}</p>
+
+    <table>
+        <tr><th>项目</th><th>数值</th></tr>
+        <tr><td>交易区间</td><td>{{wyckoff_support}} - {{wyckoff_resistance}}</td></tr>
+        <tr><td>横盘时间</td><td>{{wyckoff_duration_bars}} 日</td></tr>
+        <tr><td>箱体高度</td><td>{{wyckoff_range_height_pct}}</td></tr>
+    </table>
+
+    <h3>因果量化</h3>
+    <ul>
+        <li>横盘箱体: {{wyckoff_horizontal_count}} 根 K 线</li>
+        <li>目标价: {{#wyckoff_targets}}T{{level}} {{price}}{{^multiple_targets}} / {{/multiple_targets}}{{/wyckoff_targets}}</li>
+        <li>时间预期: {{wyckoff_time_projection}} 个交易日</li>
+    </ul>
+
+    {{#wyckoff_vsa_signals}}
+    <h3>VSA 信号</h3>
+    <ul>
+    {{#wyckoff_vsa_list}}
+        <li>{{description}}（强度: {{strength}}/3）</li>
+    {{/wyckoff_vsa_list}}
+    </ul>
+    {{/wyckoff_vsa_signals}}
+
+    <p><strong>操作含义:</strong> {{wyckoff_trading_implication}}</p>
+</div>
+{{/wyckoff}}
+
 {{#特殊标记}}
-<h2>七、{{特殊标记标题}}</h2>
+<h2>八、{{特殊标记标题}}</h2>
 <div class="spec">{{特殊标记内容}}</div>
 {{/特殊标记}}
 
 {{#综合研判}}
-<h2>七、综合研判</h2>
+<h2>九、综合研判</h2>
 
 <h3>核心矛盾</h3>
 <div class="analysis">{{核心矛盾}}</div>

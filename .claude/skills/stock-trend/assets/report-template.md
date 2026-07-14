@@ -108,14 +108,41 @@
 {{/chip_high_volume_nodes}}
 {{/chip_distribution}}
 
+{{#wyckoff}}
+## 七、维科夫操盘法分析
+
+**阶段判定**: {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）
+**当前子阶段**: {{wyckoff_sub_phase_name}}
+
+| 项目 | 数值 |
+|---|---|
+| 交易区间 | {{wyckoff_support}} - {{wyckoff_resistance}} |
+| 横盘时间 | {{wyckoff_duration_bars}} 日 |
+| 箱体高度 | {{wyckoff_range_height_pct}} |
+
+**因果量化**:
+- 横盘箱体: {{wyckoff_horizontal_count}} 根 K 线
+- 目标价: {{#wyckoff_targets}}T{{level}} {{price}}{{^multiple_targets}} / {{/multiple_targets}}{{/wyckoff_targets}}
+- 时间预期: {{wyckoff_time_projection}} 个交易日
+
+{{#wyckoff_vsa_signals}}
+**VSA 信号**:
+{{#wyckoff_vsa_list}}
+- {{description}}（强度: {{strength}}/3）
+{{/wyckoff_vsa_list}}
+{{/wyckoff_vsa_signals}}
+
+**操作含义**: {{wyckoff_trading_implication}}
+{{/wyckoff}}
+
 {{#特殊标记}}
-## 七、{{特殊标记标题}}
+## 八、{{特殊标记标题}}
 
 {{特殊标记内容}}
 {{/特殊标记}}
 
 {{#综合研判}}
-## 八、综合研判
+## 九、综合研判
 
 ### 核心矛盾
 
@@ -139,7 +166,7 @@
 {{/综合研判}}
 
 {{#校验警告}}
-## 校验提示
+## 十、校验提示
 
 {{#校验警告列表}}
 - {{警告项}}
