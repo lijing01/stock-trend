@@ -1119,7 +1119,7 @@ def run_pipeline_tests(tmpdir):
                  "composite_score" in data and "direction" in data,
                  f"score={data.get('composite_score')}, dir={data.get('direction')}", "scores")
             test("TP-CS-01a: 包含权重",
-                 "weights" in data and len(data.get("weights", {})) == 5,
+                 "weights" in data and len(data.get("weights", {})) == 6,
                  f"weights={data.get('weights')}", "scores")
             test("TP-CS-01b: 包含风险列表",
                  "risks" in data and isinstance(data.get("risks"), list),
@@ -1165,8 +1165,8 @@ def run_pipeline_tests(tmpdir):
         if rc == 0 and os.path.exists(scores_path):
             data = load_json_output(scores_path)
             weights = data.get("weights", {})
-            test("TP-CS-03: focus权重调整(技术55%)",
-                 abs(weights.get("technical", 0) - 0.55) < 0.01,
+            test("TP-CS-03: focus权重调整(技术45%)",
+                 abs(weights.get("technical", 0) - 0.45) < 0.01,
                  f"technical_weight={weights.get('technical')}", "scores")
         else:
             test("TP-CS-03: focus权重调整", False, f"exit_code={rc}", "scores")

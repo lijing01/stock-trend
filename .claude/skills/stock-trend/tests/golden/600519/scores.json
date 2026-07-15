@@ -1,34 +1,37 @@
 {
   "scores": {
-    "technical": -0.18,
+    "technical": -0.39,
     "capital_flow": 0,
     "fundamental": 0,
     "sentiment": 0.0,
-    "macro": 1
+    "macro": 1,
+    "wyckoff": -2.5
   },
   "weights": {
-    "technical": 0.35,
-    "capital_flow": 0.25,
-    "fundamental": 0.15,
-    "sentiment": 0.15,
-    "macro": 0.1
+    "technical": 0.28,
+    "capital_flow": 0.23,
+    "fundamental": 0.14,
+    "sentiment": 0.14,
+    "macro": 0.09,
+    "wyckoff": 0.12
   },
-  "composite_score": 0.037,
-  "direction": "震荡偏多",
+  "composite_score": -0.319,
+  "direction": "震荡偏空",
   "direction_detail": "震荡",
-  "direction_modifier": "偏多",
+  "direction_modifier": "偏空",
   "confidence": "低",
   "consistency": 0.38,
   "risks": [
     "空头排列",
-    "ADX=44.0，强趋势；-DI>+DI确认空头",
+    "ADX=45.8，强趋势；-DI>+DI确认空头",
     "OBV在20日均线下方，资金净流出"
   ],
   "special": null,
   "data_quality": "good",
   "automated_sources": {
-    "fundamental": "partial",
+    "fundamental": "error",
     "macro": "good",
+    "wyckoff": "good",
     "sentiment": "northbound"
   },
   "validation_warnings": [],
@@ -41,16 +44,16 @@
   },
   "analysis": null,
   "report_params": {
-    "direction": "震荡偏多",
-    "score": 0.037,
+    "direction": "震荡偏空",
+    "score": -0.319,
     "confidence": "低",
     "ts_code": "600519.SH",
-    "stop_loss": 1244.67,
-    "target_conservative": 1329.0,
-    "target_moderate": 1380.22,
-    "target_aggressive": 1407.33,
+    "stop_loss": 1205.46,
+    "target_conservative": 1285.84,
+    "target_moderate": 1324.23,
+    "target_aggressive": 1347.98,
     "risk_reward_ratio": 0.67,
-    "rr_conservative": 0.04,
+    "rr_conservative": 0.13,
     "rr_moderate": 0.67,
     "rr_aggressive": 1.0,
     "favorable_rr": false,
@@ -58,17 +61,17 @@
     "position_tier": 0,
     "max_drawdown_pct": -18.11,
     "support_levels": [
-      1263.32,
-      1277.0,
-      1302.774,
-      1319.61
+      1200,
+      1221.8,
+      1256.4981,
+      1271.0
     ],
     "resistance_levels": [
-      1329.0,
-      1358.6,
-      1372.89,
-      1388.0,
-      1405.0812
+      1285.836,
+      1300,
+      1311.91,
+      1329.99,
+      1358.6
     ],
     "entry_verdict": "wait",
     "entry_signals": [],

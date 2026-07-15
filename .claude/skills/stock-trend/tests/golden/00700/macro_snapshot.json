@@ -1,28 +1,23 @@
 {
   "meta": {
     "data_source": "akshare",
-    "fetch_time": "20260531-154316"
+    "fetch_time": "20260715-154228"
   },
   "summary": {
-    "data_quality": "good",
+    "data_quality": "partial",
     "usd_cny": {
       "usd_cny": {
         "rate": 717.71,
         "change_pct": 0.0
       }
     },
-    "shibor": {
-      "on": null,
-      "1w": null,
-      "1m": null
-    },
     "lpr": {
       "1y": 3.0,
       "5y": 3.5
     },
-    "pmi": 50.0,
-    "cpi_yoy": 1.2,
-    "m2_growth_pct": 0.27
+    "pmi": 50.3,
+    "cpi_yoy": 1.0,
+    "m2_growth_pct": 0.37
   },
   "data": {
     "usd_cny": {
@@ -31,20 +26,16 @@
         "change_pct": 0.0
       }
     },
-    "shibor": {
-      "on": null,
-      "1w": null,
-      "1m": null
-    },
     "lpr": {
       "1y": 3.0,
       "5y": 3.5
     },
-    "pmi": 50.0,
-    "cpi_yoy": 1.2,
-    "m2_growth_pct": 0.27
+    "pmi": 50.3,
+    "cpi_yoy": 1.0,
+    "m2_growth_pct": 0.37
   },
   "errors": [
-    "hs300: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    "shibor: Expecting value: line 1 column 1 (char 0)",
+    "hs300: HTTPSConnectionPool(host='80.push2.eastmoney.com', port=443): Max retries exceeded with url: /api/qt/clist/get?pn=1&pz=100&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=b%3AMK0010%2Cm%3A1%2Bt%3A1%2Cm%3A0+t%3A5%2Cm%3A1%2Bs%3A3%2Cm%3A0%2Bt%3A5%2Cm%3A2&fields=f3%2Cf12%2Cf13 (Caused by ProxyError('Unable to connect to proxy', RemoteDisconnected('Remote end closed connection without response')))"
   ]
 }

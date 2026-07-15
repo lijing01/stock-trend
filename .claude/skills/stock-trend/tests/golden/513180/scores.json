@@ -1,41 +1,45 @@
 {
   "scores": {
-    "technical": 0.26,
-    "capital_flow": 0.2,
+    "technical": 0.2,
+    "capital_flow": -0.75,
     "fundamental": 0,
     "sentiment": 0,
-    "macro": 1
+    "macro": 1,
+    "wyckoff": -2.5
   },
   "weights": {
-    "technical": 0.35,
-    "capital_flow": 0.25,
-    "fundamental": 0.15,
-    "sentiment": 0.15,
-    "macro": 0.1
+    "technical": 0.28,
+    "capital_flow": 0.23,
+    "fundamental": 0.14,
+    "sentiment": 0.14,
+    "macro": 0.09,
+    "wyckoff": 0.12
   },
-  "composite_score": 0.241,
-  "direction": "震荡偏多",
+  "composite_score": -0.327,
+  "direction": "震荡偏空",
   "direction_detail": "震荡",
-  "direction_modifier": "偏多",
+  "direction_modifier": "偏空",
   "confidence": "低",
   "consistency": 0.25,
   "risks": [
     "绿柱缩窄；底背离",
-    "RSI=33.0，中性区间；顶背离"
+    "RSI=30.8，中性区间；顶背离",
+    "OBV在20日均线下方，资金净流出"
   ],
   "special": {
     "type": "etf",
     "title": "ETF 特殊分析",
-    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: -0.08%（折价）；最新净值: 0.6244"
+    "content": "基金名称: 恒生科技ETF华夏；IOPV折溢价率: +1.06%（溢价）；最新净值: 0.5964"
   },
   "data_quality": "good",
   "automated_sources": {
     "macro": "good",
-    "capital_flow_iopv": -0.0801,
+    "wyckoff": "good",
+    "capital_flow_iopv": 1.0563,
     "iopv_enhanced": {
-      "absolute": 0.8,
+      "absolute": -1.5,
       "percentile": 0.0,
-      "trend": -0.2,
+      "trend": 0.0,
       "shares_linkage": 0.0
     }
   },
@@ -49,35 +53,35 @@
   },
   "analysis": null,
   "report_params": {
-    "direction": "震荡偏多",
-    "score": 0.241,
+    "direction": "震荡偏空",
+    "score": -0.327,
     "confidence": "低",
     "ts_code": "513180.SH",
-    "stop_loss": 0.5996,
-    "target_conservative": 0.6202,
-    "target_moderate": 0.6608,
-    "target_aggressive": 0.6744,
+    "stop_loss": 0.5982,
+    "target_conservative": 0.619,
+    "target_moderate": 0.6576,
+    "target_aggressive": 0.6708,
     "risk_reward_ratio": 2.0,
-    "rr_conservative": 0.01,
+    "rr_conservative": 0.05,
     "rr_moderate": 2.0,
     "rr_aggressive": 2.67,
     "favorable_rr": true,
     "position_sizing": "标准仓位(50-70%)",
     "position_tier": 2,
-    "max_drawdown_pct": -23.18,
+    "max_drawdown_pct": -31.51,
     "support_levels": [
-      0.6053,
-      0.609,
-      0.612,
-      0.615,
-      0.618
+      0.604,
+      0.607,
+      0.61,
+      0.614,
+      0.617
     ],
     "resistance_levels": [
-      0.6202,
-      0.623,
-      0.6273,
-      0.6302,
-      0.642
+      0.619,
+      0.622,
+      0.628,
+      0.631,
+      0.6511
     ],
     "entry_verdict": "wait",
     "entry_signals": [],
