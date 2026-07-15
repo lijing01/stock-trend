@@ -209,7 +209,10 @@ def main():
     ]
     if args.no_cache:
         kline_cmd.append("--no-cache")
-    kline_cmd.extend(["--days", str(args.kline_days)])
+    # Calculate start date from kline_days for Tushare
+    from datetime import datetime, timedelta
+    start_date = (datetime.now() - timedelta(days=args.kline_days)).strftime("%Y%m%d")
+    kline_cmd.extend(["--start-date", start_date])
     kline_result = run_script(kline_cmd, label="fetch_kline_tushare")
     if kline_result.get("timeout"):
         timeouts.append("fetch_kline_tushare")
@@ -237,7 +240,7 @@ def main():
             ]
         if args.no_cache:
             fallback_cmd.append("--no-cache")
-        fallback_cmd.extend(["--days", str(args.kline_days)])
+        fallback_cmd.extend(["--lmt", str(args.kline_days)])
         fallback_result = run_script(fallback_cmd, label="fetch_kline_eastmoney")
         if fallback_result.get("timeout"):
             timeouts.append("fetch_kline_eastmoney")
