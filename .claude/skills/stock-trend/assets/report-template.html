@@ -90,6 +90,21 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
     <tr><td>激进</td><td>{{激进目标价}}</td><td>{{激进RR}}</td></tr>
   </tbody>
 </table>
+{{#大盘对比}}
+<div class="analysis">
+  <h3>📊 大盘/板块对比</h3>
+  <p><strong>大盘背景</strong>：{{大盘背景}}</p>
+  {{#板块背景}}<p><strong>板块背景</strong>：{{板块背景}}</p>{{/板块背景}}
+  {{#相对强弱}}<p><strong>相对强弱</strong>：{{相对强弱}}</p>{{/相对强弱}}
+</div>
+{{/大盘对比}}
+{{^大盘对比}}
+{{#大盘对比提示}}
+<div class="analysis">
+  <p class="meta" style="color:#b45309">{{大盘对比提示}}</p>
+</div>
+{{/大盘对比提示}}
+{{/大盘对比}}
 <div class="analysis">
   <h3>执行摘要</h3>
   <p><strong>{{今日动作标签}}</strong>：{{今日动作说明}}</p>

@@ -383,6 +383,79 @@ def _load_all_data(args):
     }
 
 
+def _build_market_context(ts_code: str, kline: dict) -> dict:
+    """大盘/板块对比: 读今日复盘上下文 market_regime.json,对比个股 vs 沪深300 相对强弱 + 所属板块位置.
+
+    复盘上下文由 market_regime.py(/daily-review) 生成.缺失时给出提示,不阻塞报告.
+    """
+    ctx = {
+        "大盘对比": False,
+        "大盘背景": "",
+        "板块背景": "",
+        "相对强弱": "",
+        "大盘对比提示": "",
+    }
+    try:
+        from core.cache_utils import CACHE_DIR
+        ctx_file = Path(CACHE_DIR) / "market_regime.json"
+        if not ctx_file.exists():
+            ctx["大盘对比提示"] = "今日未生成复盘(market_regime.json 缺失),建议先跑 /daily-review 获取大盘/板块上下文"
+            return ctx
+        regime_ctx = json.loads(ctx_file.read_text(encoding="utf-8"))
+    except Exception:
+        ctx["大盘对比提示"] = "复盘上下文读取失败"
+        return ctx
+
+    regime = regime_ctx.get("regime", {})
+    label_icon = {"强势": "🟢", "中性": "🟡", "弱势": "🔴"}.get(regime.get("label", ""), "⚪")
+    hs300 = (regime_ctx.get("indices") or {}).get("000300.SH") or {}
+    hs300_pct = hs300.get("pct_chg")
+    hs300_str = f"沪深300 {hs300_pct:+.2f}%" if hs300_pct is not None else "沪深300 —"
+    ctx["大盘背景"] = (
+        f"市场评分 {regime.get('score', '—')}/100 {label_icon}{regime.get('label', '')} "
+        f"({hs300_str});数据日期 {regime_ctx.get('data_date', '')}"
+    )
+
+    # 个股今日 pct_chg (kline.json 最后一条) vs 沪深300 → 相对强弱
+    stock_pct = None
+    kdata = (kline or {}).get("data", [])
+    if kdata:
+        stock_pct = kdata[-1].get("pct_chg")
+    if stock_pct is not None and hs300_pct is not None:
+        diff = stock_pct - hs300_pct
+        if diff >= 0.5:
+            rs = f"强于大盘(个股{stock_pct:+.2f}% vs 沪深300{hs300_pct:+.2f}%)"
+        elif diff <= -0.5:
+            rs = f"弱于大盘(个股{stock_pct:+.2f}% vs 沪深300{hs300_pct:+.2f}%)"
+        else:
+            rs = f"与大盘持平(个股{stock_pct:+.2f}% vs 沪深300{hs300_pct:+.2f}%)"
+        ctx["相对强弱"] = rs
+
+    # 个股所属板块 vs 今日板块排行位置
+    sector_name = ""
+    if ts_code:
+        try:
+            from fetchers.sector_mapper import get_stock_sectors
+            sectors = get_stock_sectors(str(ts_code).split(".")[0])
+            if sectors:
+                sector_name = sectors[0].get("name", "")
+        except Exception:
+            pass
+    if sector_name:
+        top_names = {s.get("name") for s in regime_ctx.get("top_sectors", [])}
+        bot_names = {s.get("name") for s in regime_ctx.get("bottom_sectors", [])}
+        if sector_name in top_names:
+            pos = "今日最强板块"
+        elif sector_name in bot_names:
+            pos = "今日最弱板块"
+        else:
+            pos = "板块中游"
+        ctx["板块背景"] = f"所属板块: {sector_name}({pos})"
+
+    ctx["大盘对比"] = True
+    return ctx
+
+
 def build_context(args):
     """Build template context from CLI arguments and data files."""
     d = _load_all_data(args)
@@ -844,6 +917,9 @@ def build_context(args):
     validation_warnings = scores_data.get("validation_warnings", []) if scores_data else []
     context["校验警告"] = len(validation_warnings) > 0
     context["校验警告列表"] = [{"警告项": w} for w in validation_warnings] if validation_warnings else []
+
+    # 大盘/板块对比 (今日复盘上下文)
+    context.update(_build_market_context(ts_code, kline))
 
     return context
 

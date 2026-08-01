@@ -10,6 +10,7 @@ triggers:
   - /market-theme
   - /ths-theme
   - /integrated-scan
+  - /daily-review
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
@@ -45,6 +46,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/longhubang_agg.py *)  # 龙虎榜板块聚合
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py *)  # 龙虎榜信号跟踪
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py *)  # 周主线报告
+  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py *)  # 今日复盘/市场环境评分
   - Bash(python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py *)  # 整合扫描
 ---
 
@@ -263,6 +265,27 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [
 
 ---
 
+## /daily-review [--no-refresh] [--json] [--html]
+
+今日复盘 + 市场环境评分 — 整合全市场上下文(大盘/成交额/涨跌家数/涨停/资金/板块排行),输出 0-100 市场环境评分 + 每日复盘报告,并持久化 `market_regime.json` 上下文供 `/stock-trend` 做大盘/板块对比。
+
+**评分公式**: 大盘趋势(25%) + 成交额(20%) + 赚钱效应(25%) + 涨停情绪(20%) + 资金(10%)。≥80 强势(可建仓)/ 60-79 中性(轻仓观察) / <60 弱势(降仓/空仓,不找牛股)。
+
+**步骤**：
+
+1. 运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refresh] [--json] [--html]
+```
+2. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/主力净流入、北向(不可用降级主力净流入)。
+3. 输出: 复盘报告(①市场环境 ②板块最强/最弱 ③持仓轻量分析 ④明日if-then计划) → `reports/lists/daily-review-<时间>.md`;`--json` 结构化输出;`--html` 额外 HTML。
+4. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。
+5. `--no-refresh` 用今日缓存重出报告(非交易日/盘中补看)。
+
+**与 /stock-trend 联动**: 每次先跑 `/daily-review` 生成市场上下文,`/stock-trend` 报告自动含「📊 大盘/板块对比」段(个股 vs 沪深300 相对强弱 + 所属板块位置)。
+
+---
+
 # /stock-trend 流程 (Step 1-4)
 
 ## Step 1: 解析输入
@@ -380,6 +403,8 @@ python3 .claude/skills/stock-trend/scripts/analysis/scores.py --code <code> \
 输出 `.cache/stock-trend/{code}/scores.json`。
 
 ## Step 4: 风险管理 + 生成报告
+
+**大盘/板块对比**(report.py 自动): 若 `.cache/stock-trend/market_regime.json` 存在(今日复盘生成),报告含「📊 大盘/板块对比」段 — 市场评分背景、个股 vs 沪深300 相对强弱、所属板块位置。缺失时提示先跑 `/daily-review`。
 
 **风险管理**：基于`technical.json` summary→止损位、三级目标(保守/主目标/激进)、R:R比、仓位建议、最大回撤。监控信号按趋势方向生成。
 
