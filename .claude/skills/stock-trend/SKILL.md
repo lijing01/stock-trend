@@ -289,20 +289,24 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ---
 
-## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json]
+## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html]
 
-每日候选股 — 自动选热点板块(板块排行 hot_score top 8)→ 维科夫漏斗扫成分股(吸筹/拉升买点子阶段)→ 批量扩展直到 ≥20 只 → 按综合分取 top 30 → 每日候选报告。
+每日候选股 — 自动选热点板块(板块排行 hot_score top 12)→ 维科夫漏斗扫成分股(吸筹/拉升买点子阶段)→ 批量扩展 → 按综合分取 top 30 → 每日候选报告。
 
 **步骤**：
 
-1. 运行：
+1. 运行(默认生成 HTML):
 ```bash
 python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] [--min-candidates 20]
-# 手动指定板块: --sectors BK0420,BK0897; Agent 消费: --json
+# 手动指定板块: --sectors BK0420,BK0897; Agent 消费: --json; 仅 MD: --no-html
 ```
-2. 自动读今日复盘上下文 `market_regime.json`:报告头部标注市场环境评分;<60 弱势市标注"候选仅作观察"。
-3. 输出:候选表(名称/板块/维科夫买点/置信度/综合分/信号) → `reports/lists/candidates-<时间>.md`。
-4. 复核:候选为买点 + 多维打分排序,需人工确认板块持续性/基本面后再入场。
+2. **默认打开 HTML 报告**:
+```bash
+open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
+```
+3. 自动读今日复盘上下文 `market_regime.json`:报告头部标注市场环境评分;<60 弱势市标注"候选仅作观察,不宜建仓"。
+4. 输出:候选表(名称/板块/维科夫买点/置信度/综合分/信号) → `reports/lists/candidates-<时间>.md` + `.html`。
+5. 复核:候选为买点 + 多维打分排序,需人工确认板块持续性/基本面后再入场。
 
 ---
 
