@@ -662,6 +662,22 @@ def wyckoff_score(phase: str, sub_phase: str) -> float:
     return max(-3.0, min(3.0, score))
 
 
+# 买点子阶段:吸筹尾段(Spring/LPS/ST/拉升前)+ 拉升初段(JAC/回踩)。
+# 单一事实源 — stock_scanner 漏斗与 scores.py wyckoff 模式共用。
+BUY_PHASES = (PHASE_ACCUMULATION, PHASE_MARKUP)
+BUY_SUB_PHASES = (SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC, SUB_BU)
+
+
+def normalize_score_100(score_3: float) -> float:
+    """Map wyckoff [-3, +3] score to 0-100."""
+    return max(0.0, min(100.0, (score_3 + 3.0) / 6.0 * 100.0))
+
+
+def is_buy_point(phase: str, sub_phase: str) -> bool:
+    """True when phase/sub_phase is a buy point (accumulation tail / markup early)."""
+    return phase in BUY_PHASES and sub_phase in BUY_SUB_PHASES
+
+
 def generate_trading_implication(phase: str, sub_phase: str) -> str:
     """Generate human-readable trading implication based on Wyckoff signals."""
     if phase == PHASE_UNKNOWN:

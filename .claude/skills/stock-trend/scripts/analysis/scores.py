@@ -28,6 +28,17 @@ from pathlib import Path
 
 from core.cache_utils import CACHE_DIR, load_iopv_history, save_iopv_history
 from core.eastmoney_utils import piecewise_linear
+from analysis.wyckoff import is_buy_point, normalize_score_100
+
+
+def _to_float(val, default=0.0):
+    """Parse float safely (None/non-numeric → default)."""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
 
 
 # --- Default weights ---
@@ -649,6 +660,107 @@ def find_data_file(data_dir, filename):
     return None, str(path)
 
 
+def run_wyckoff_mode(args, data_dir) -> tuple:
+    """--mode wyckoff: standalone 100-分制 report (no composite score).
+
+    Score = 阶段分(70%) + VSA(20%) + 置信度(10%), all normalized to 0-100.
+      - 阶段分: wyckoff_score [-3,+3] → [0,100]; quality limited ×0.9,
+        insufficient → 50 (neutral)
+      - VSA: avg signal strength (1-3) → [0,100]; empty → 50
+      - 置信度: phase.confidence [0,1] → [0,100]; missing → 50
+
+    Args:
+        args: parsed args (uses wyckoff_data / code / output).
+        data_dir: data directory path or None.
+
+    Returns:
+        (output_path, output_dict). Exits 1 on missing/failed wyckoff data.
+    """
+    wy_path = None
+    if args.wyckoff_data:
+        wy_path = args.wyckoff_data
+    elif data_dir:
+        _, wy_path = find_data_file(data_dir, "wyckoff.json")
+    if not wy_path or not Path(wy_path).exists():
+        print("Error: wyckoff.json not found (need --wyckoff-data or --code)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    with open(wy_path, "r", encoding="utf-8") as f:
+        wy_data = json.load(f)
+    if "error" in wy_data.get("meta", {}):
+        print(f"Error: wyckoff analysis failed: {wy_data['meta']['error']}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # 阶段分 (70%)
+    score_3 = _to_float(wy_data.get("wyckoff_score"))
+    phase_norm = normalize_score_100(score_3)
+    data_quality = wy_data.get("meta", {}).get("data_quality", "good")
+    if data_quality == "limited":
+        phase_norm *= 0.9
+    elif data_quality == "insufficient":
+        phase_norm = 50.0
+
+    # VSA (20%): avg signal strength 1-3 → 0-100
+    vsa = wy_data.get("vsa_signals", [])
+    strengths = [_to_float(s.get("strength"), 1.0) for s in vsa
+                 if isinstance(s, dict) and s.get("strength")]
+    vsa_norm = sum(strengths) / len(strengths) / 3.0 * 100.0 if strengths else 50.0
+
+    # 置信度 (10%)
+    conf = wy_data.get("phase", {}).get("confidence")
+    conf_norm = _to_float(conf) * 100.0 if conf is not None else 50.0
+
+    score_100 = round(0.70 * phase_norm + 0.20 * vsa_norm + 0.10 * conf_norm, 1)
+
+    phase = wy_data.get("phase", {})
+    sub = phase.get("primary_sub_phase", "")
+    p_primary = phase.get("primary", "")
+    is_buy = is_buy_point(p_primary, sub)
+
+    if score_100 >= 70:
+        verdict = "强势买点" if is_buy else "偏多"
+    elif score_100 >= 55:
+        verdict = "买点候选" if is_buy else "中性偏多"
+    elif score_100 < 40:
+        verdict = "空头"
+    else:
+        verdict = "中性"
+
+    output = {
+        "mode": "wyckoff",
+        "score_100": score_100,
+        "score_3": round(score_3, 2),
+        "components": {
+            "phase_score": round(phase_norm, 1),
+            "vsa_score": round(vsa_norm, 1),
+            "confidence_score": round(conf_norm, 1),
+        },
+        "weights": {"phase": 0.70, "vsa": 0.20, "confidence": 0.10},
+        "verdict": verdict,
+        "is_buy_point": is_buy,
+        "phase": phase,
+        "range": wy_data.get("range", {}),
+        "vsa_signals": vsa[:10],
+        "cause_effect": wy_data.get("cause_effect", {}),
+        "trading_implication": wy_data.get("wyckoff_signals", {}).get(
+            "trading_implication", ""),
+        "data_quality": data_quality,
+        "meta": wy_data.get("meta", {}),
+    }
+
+    if data_dir:
+        output_path = Path(data_dir) / "wyckoff_score.json"
+    else:
+        output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    return output_path, output
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compute composite scores for stock-trend analysis"
@@ -656,6 +768,10 @@ def main():
     parser.add_argument(
         "--technical",
         help="Path to technical analysis JSON"
+    )
+    parser.add_argument(
+        "--mode", choices=["composite", "wyckoff"], default="composite",
+        help="composite=综合评分(默认); wyckoff=独立维科夫100分制(不进复合分)"
     )
     parser.add_argument("--capital-flow-score", type=float, default=None,
                         help="Capital flow dimension score (-3 to +3)")
@@ -721,6 +837,20 @@ def main():
                         args.asset_type = "etf"
                 except Exception:
                     pass
+
+    # --mode wyckoff: standalone 100-分制 report (no technical/composite needed)
+    if args.mode == "wyckoff":
+        out_path, wout = run_wyckoff_mode(args, data_dir)
+        print(f"Wyckoff 100-分制: {wout['score_100']} | {wout['verdict']}"
+              f" | 买点={'是' if wout['is_buy_point'] else '否'}")
+        print(f"  阶段: {wout['phase'].get('primary_name', '')} "
+              f"{wout['phase'].get('sub_phase_name', '')} "
+              f"置信度={wout['phase'].get('confidence', 0)}")
+        print(f"  组件: 阶段={wout['components']['phase_score']} "
+              f"VSA={wout['components']['vsa_score']} "
+              f"置信={wout['components']['confidence_score']}")
+        print(f"  Output: {out_path}")
+        return
 
     # Read technical analysis
     if data_dir:

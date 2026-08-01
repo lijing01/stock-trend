@@ -26,8 +26,8 @@ from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
 from analysis.wyckoff import (
     analyze_kline_dict,
-    PHASE_ACCUMULATION, PHASE_MARKUP,
-    SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC, SUB_BU,
+    BUY_PHASES, BUY_SUB_PHASES, normalize_score_100,
+    SUB_LPS, SUB_PRE_MARKUP, SUB_JAC,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -531,16 +531,16 @@ def score_sector_strength(candidate, sector_scores, sector_ranks):
 # ──────────────────────── Wyckoff gate (P0-2 funnel) ────────────────────────
 
 
-# 买点子阶段:吸筹尾段(Spring/LPS/ST/拉升前)+ 拉升初段(JAC/回踩)
-WYCKOFF_BUY_PHASES = (PHASE_ACCUMULATION, PHASE_MARKUP)
-WYCKOFF_BUY_SUB_PHASES = (SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC, SUB_BU)
+# 买点子阶段(共享 wyckoff.BUY_* 单一事实源)
+WYCKOFF_BUY_PHASES = BUY_PHASES
+WYCKOFF_BUY_SUB_PHASES = BUY_SUB_PHASES
 WYCKOFF_MIN_CONFIDENCE = 0.3
 WYCKOFF_MIN_BARS = 60
 
 
 def normalize_wyckoff_score(score):
-    """Map wyckoff [-3, +3] to 0-100."""
-    return max(0.0, min(100.0, (score + 3.0) / 6.0 * 100.0))
+    """Map wyckoff [-3, +3] to 0-100 (shared with scores.py)."""
+    return normalize_score_100(score)
 
 
 def wyckoff_gate_pass(analysis):

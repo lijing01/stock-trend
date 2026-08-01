@@ -407,6 +407,13 @@ python3 .claude/skills/stock-trend/scripts/analysis/scores.py --code <code> \
 
 脚本自动从 `.cache/stock-trend/{code}/` 读取 `technical.json` 及各维度数据。
 
+**`--mode wyckoff`(P0-3 独立维科夫 100 分制)**:不进复合分,单跑维科夫出 0-100 分。分数 = 阶段分70%(`wyckoff_score` [-3,+3]→[0,100],quality limited×0.9/insufficient→50) + VSA20%(信号强度均值) + 置信度10%。输出含买点判定(吸筹/拉升阶段买点子阶段)与 verdict,写 `wyckoff_score.json`。
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/scores.py --mode wyckoff --code <code>
+# 或直接给文件
+python3 .claude/skills/stock-trend/scripts/analysis/scores.py --mode wyckoff --wyckoff-data <wyckoff.json> -o /tmp/wyckoff_score.json
+```
+
 **评分规则**：
 - 技术面：从 `technical.json` 的 `summary.total_score` 自动提取
 - 技术面子权重(脚本自动)：趋势(MA/MACD)×1.5、ADX×1.2、震荡(RSI/KDJ)×0.8、通道量能(布林/成交量/OBV)×1.0、K线形态×0.5。一致性因子=同向指标数/总指标数。
