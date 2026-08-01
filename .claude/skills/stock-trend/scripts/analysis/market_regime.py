@@ -642,7 +642,10 @@ def main():
     parser.add_argument("--no-refresh", action="store_true",
                         help="跳过实时拉取,用今日缓存重出报告")
     parser.add_argument("--json", action="store_true", help="JSON 输出到 stdout")
-    parser.add_argument("--html", action="store_true", help="额外生成 HTML 报告")
+    parser.add_argument("--html", dest="html", action="store_true", default=True,
+                        help="(默认) 生成 HTML 报告")
+    parser.add_argument("--no-html", dest="html", action="store_false",
+                        help="不生成 HTML(仅 MD)")
     args = parser.parse_args()
 
     start = time.time()

@@ -287,7 +287,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ---
 
-## /daily-review [--no-refresh] [--json] [--html]
+## /daily-review [--no-refresh] [--json] [--no-html]
 
 今日复盘 + 市场环境评分 — 整合全市场上下文(大盘/成交额/涨跌家数/涨停/资金/板块排行),输出 0-100 市场环境评分 + 每日复盘报告,并持久化 `market_regime.json` 上下文供 `/stock-trend` 做大盘/板块对比。
 
@@ -295,12 +295,16 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 **步骤**：
 
-1. 运行：
+1. 运行(默认生成 HTML,`--no-html` 仅 MD,`--json` stdout 结构化输出):
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refresh] [--json] [--html]
+python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refresh]
 ```
-2. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/主力净流入、北向(不可用降级主力净流入)。
-3. 输出: 复盘报告(①市场环境 ②板块最强/最弱 ③持仓轻量分析 ④明日if-then计划) → `reports/lists/daily-review-<时间>.md`;`--json` 结构化输出;`--html` 额外 HTML。
+2. **默认打开 HTML 报告**:
+```bash
+open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
+```
+3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/主力净流入、北向(不可用降级主力净流入)。
+4. 输出: 复盘报告(①市场环境 ②板块最强/最弱 ③持仓轻量分析 ④明日if-then计划) → `reports/lists/daily-review-<时间>.md` + `.html`。
 4. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。
 5. `--no-refresh` 用今日缓存重出报告(非交易日/盘中补看)。
 
