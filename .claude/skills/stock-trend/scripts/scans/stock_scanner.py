@@ -24,6 +24,11 @@ from datetime import datetime
 
 from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
+from analysis.wyckoff import (
+    analyze_kline_dict,
+    PHASE_ACCUMULATION, PHASE_MARKUP,
+    SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC, SUB_BU,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
@@ -523,8 +528,61 @@ def score_sector_strength(candidate, sector_scores, sector_ranks):
     return max(0.0, min(100.0, score))
 
 
-def run_phase2(candidates, max_workers=4):
-    """Phase 2: Fetch data and compute multi-dimension scores for all candidates."""
+# ──────────────────────── Wyckoff gate (P0-2 funnel) ────────────────────────
+
+
+# 买点子阶段:吸筹尾段(Spring/LPS/ST/拉升前)+ 拉升初段(JAC/回踩)
+WYCKOFF_BUY_PHASES = (PHASE_ACCUMULATION, PHASE_MARKUP)
+WYCKOFF_BUY_SUB_PHASES = (SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC, SUB_BU)
+WYCKOFF_MIN_CONFIDENCE = 0.3
+WYCKOFF_MIN_BARS = 60
+
+
+def normalize_wyckoff_score(score):
+    """Map wyckoff [-3, +3] to 0-100."""
+    return max(0.0, min(100.0, (score + 3.0) / 6.0 * 100.0))
+
+
+def wyckoff_gate_pass(analysis):
+    """Gate: keep only buy-point sub-phases in accumulation/markup.
+
+    Returns True when the analysis shows a candidate in 吸筹/拉升 phase
+    currently at a confirmed buy-point sub-phase (Spring/LPS/ST/PRE_MARKUP
+    or JAC/BU). Distribution/markdown or unconfirmed signals → False.
+    """
+    if not analysis:
+        return False
+    phase = analysis.get("phase", {}).get("primary", "")
+    sub = analysis.get("phase", {}).get("primary_sub_phase", "")
+    conf = _safe_float(analysis.get("phase", {}).get("confidence"))
+    return (phase in WYCKOFF_BUY_PHASES
+            and sub in WYCKOFF_BUY_SUB_PHASES
+            and conf >= WYCKOFF_MIN_CONFIDENCE)
+
+
+def score_wyckoff(analysis):
+    """Wyckoff 100-分制 dimension from analysis dict.
+
+    Base from wyckoff_score [-3, +3] normalized to [0,100]; small bonus for
+    late-accumulation buy points (LPS/PRE_MARKUP/JAC) with high confidence.
+    """
+    if not analysis:
+        return 50.0
+    score = _safe_float(analysis.get("wyckoff_score"), 0.0)
+    s = normalize_wyckoff_score(score)
+    conf = _safe_float(analysis.get("phase", {}).get("confidence"))
+    sub = analysis.get("phase", {}).get("primary_sub_phase", "")
+    if sub in (SUB_LPS, SUB_PRE_MARKUP, SUB_JAC) and conf >= 0.5:
+        s = min(100.0, s + 5.0)
+    return s
+
+
+def run_phase2(candidates, max_workers=4, enable_wyckoff=False):
+    """Phase 2: Fetch data and compute multi-dimension scores for all candidates.
+
+    enable_wyckoff: run Wyckoff gate (P0-2 funnel) — drops candidates not at a
+    buy-point sub-phase and adds a wyckoff dimension to the composite score.
+    """
     print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
     if not candidates:
         return []
@@ -602,15 +660,40 @@ def run_phase2(candidates, max_workers=4):
         if len(records) < 20:
             continue
 
+        # Wyckoff funnel (P0-2): gate on buy-point sub-phases before scoring.
+        wk = None
+        if enable_wyckoff:
+            if len(records) < WYCKOFF_MIN_BARS:
+                continue  # too little data for reliable phase detection
+            wk = analyze_kline_dict(kline)
+            if not wyckoff_gate_pass(wk):
+                continue
+
         dim_momentum = score_momentum(c, kline)
         dim_volume = score_volume_price(c, kline)
         dim_capital = score_capital(c, cap)
         dim_fundamental = score_fundamental_quick(c, fund)
         dim_sector = score_sector_strength(c, sector_scores, sector_changes)
 
-        composite = (dim_momentum * 0.30 + dim_volume * 0.20
-                     + dim_capital * 0.20 + dim_fundamental * 0.15
-                     + dim_sector * 0.15)
+        dims = {
+            "momentum": round(dim_momentum, 1),
+            "volume_price": round(dim_volume, 1),
+            "capital": round(dim_capital, 1),
+            "fundamental": round(dim_fundamental, 1),
+            "sector_strength": round(dim_sector, 1),
+        }
+
+        if enable_wyckoff:
+            dim_wyckoff = score_wyckoff(wk)
+            dims["wyckoff"] = round(dim_wyckoff, 1)
+            # Rebalance: wyckoff takes 25%, others shrink proportionally.
+            composite = (dim_momentum * 0.25 + dim_volume * 0.15
+                         + dim_capital * 0.15 + dim_fundamental * 0.10
+                         + dim_sector * 0.10 + dim_wyckoff * 0.25)
+        else:
+            composite = (dim_momentum * 0.30 + dim_volume * 0.20
+                         + dim_capital * 0.20 + dim_fundamental * 0.15
+                         + dim_sector * 0.15)
 
         # Detect signals
         signals = _detect_signals(c, kline, cap, fund)
@@ -625,7 +708,7 @@ def run_phase2(candidates, max_workers=4):
                                    reverse=True)
         sector_rank = changes_in_sector.index(c["change_pct"]) + 1 if c["change_pct"] in changes_in_sector else len(changes_in_sector)
 
-        scored.append({
+        item = {
             "code": c["code"],
             "ts_code": ts,
             "name": c["name"],
@@ -633,18 +716,24 @@ def run_phase2(candidates, max_workers=4):
             "sector_name": c["sector_name"],
             "sector_hot_score": c["sector_hot_score"],
             "composite_score": round(composite, 1),
-            "dimensions": {
-                "momentum": round(dim_momentum, 1),
-                "volume_price": round(dim_volume, 1),
-                "capital": round(dim_capital, 1),
-                "fundamental": round(dim_fundamental, 1),
-                "sector_strength": round(dim_sector, 1),
-            },
+            "dimensions": dims,
             "signals": signals,
             "warnings": warnings,
             "sector_relative_rank": sector_rank,
             "sector_total": len(changes_in_sector),
-        })
+        }
+
+        if enable_wyckoff and wk:
+            item["wyckoff"] = {
+                "phase": wk.get("phase", {}).get("primary_name", ""),
+                "sub_phase": wk.get("phase", {}).get("sub_phase_name", ""),
+                "confidence": wk.get("phase", {}).get("confidence", 0),
+                "score": round(dim_wyckoff, 1),
+                "verdict": wk.get("wyckoff_signals", {}).get("verdict", ""),
+                "trading_implication": wk.get("wyckoff_signals", {}).get("trading_implication", ""),
+            }
+
+        scored.append(item)
 
     return scored
 
@@ -796,6 +885,8 @@ def main():
                         help="输出前N只股票 (默认10)")
     parser.add_argument("--min-score", type=float, default=50,
                         help="最低综合分阈值 (默认50)")
+    parser.add_argument("--wyckoff", action="store_true",
+                        help="启用维科夫选股漏斗:只保留吸筹/拉升阶段买点候选(Spring/LPS/ST/JAC等)")
     args = parser.parse_args()
 
     # Determine sector codes
@@ -845,7 +936,10 @@ def main():
         return
 
     # Phase 2
-    scored = run_phase2(candidates)
+    scored = run_phase2(candidates, enable_wyckoff=args.wyckoff)
+    if args.wyckoff:
+        print(f"[Wyckoff 漏斗] 过滤后 {len(scored)} 只买点候选",
+              file=sys.stderr)
 
     # Phase 3
     print(f"[Phase 3/3] Building output...", file=sys.stderr)
@@ -859,10 +953,13 @@ def main():
     print(f"\nDone in {elapsed:.1f}s. Top {min(args.top, len(scored))} stocks:", file=sys.stderr)
     for i, s in enumerate(scored[:args.top]):
         dims = s["dimensions"]
+        wk = s.get("wyckoff")
+        wk_str = f" 维={wk['sub_phase']}@{wk['confidence']:.0%}" if wk else ""
         print(f"  {i+1}. {s['name']}({s['code']}) [{s['sector_name']}] "
               f"综合={s['composite_score']:.0f} ★{s['stars']} "
               f"动={dims['momentum']:.0f} 量={dims['volume_price']:.0f} "
-              f"资={dims['capital']:.0f} 基={dims['fundamental']:.0f}",
+              f"资={dims['capital']:.0f} 基={dims['fundamental']:.0f}"
+              f"{wk_str}",
               file=sys.stderr)
 
     print("<!--JSON_OUTPUT-->")

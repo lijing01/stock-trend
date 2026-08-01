@@ -707,17 +707,14 @@ def generate_trading_implication(phase: str, sub_phase: str) -> str:
     return ""
 
 
-def analyze(kline_path: str, output_path: str | None = None) -> dict:
-    """Run full Wyckoff analysis pipeline.
+def analyze_kline_dict(kline_data: dict | None) -> dict:
+    """Run full Wyckoff analysis pipeline from an in-memory K-line dict.
 
-    Args:
-        kline_path: Path to K-line JSON file.
-        output_path: Optional path to write output JSON.
+    Same shape as the on-disk K-line JSON ({"meta": {...}, "data": [...]}).
 
     Returns:
         wyckoff_analysis dict with phase, range, VSA, cause_effect, score.
     """
-    kline_data = load_kline(kline_path)
     if kline_data is None:
         return {"meta": {"error": "failed to load K-line data"}, "phase": {"primary": PHASE_UNKNOWN}}
 
@@ -846,11 +843,24 @@ def analyze(kline_path: str, output_path: str | None = None) -> dict:
         },
     }
 
-    if output_path:
+    return result
+
+
+def analyze(kline_path: str, output_path: str | None = None) -> dict:
+    """Run full Wyckoff analysis pipeline from a K-line JSON file path.
+
+    Args:
+        kline_path: Path to K-line JSON file.
+        output_path: Optional path to write output JSON (skipped on error).
+
+    Returns:
+        wyckoff_analysis dict with phase, range, VSA, cause_effect, score.
+    """
+    result = analyze_kline_dict(load_kline(kline_path))
+    if output_path and "error" not in result.get("meta", {}):
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
-
     return result
 
 

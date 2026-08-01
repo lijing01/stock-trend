@@ -8,6 +8,7 @@ triggers:
   - /etf-backtest
   - /longtou
   - /market-theme
+  - /stock-scanner
   - /ths-theme
   - /integrated-scan
   - /daily-review
@@ -32,6 +33,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/portfolio/manager.py *)           # 持仓管理
   - Bash(python3 .claude/skills/stock-trend/scripts/backtesting/engine.py *)          # 回测引擎
   - Bash(python3 .claude/skills/stock-trend/scripts/scans/market_leader.py *)         # 龙头中军扫描
+  - Bash(python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py *)         # A股板块成分股筛选(含--wyckoff漏斗)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_data.py *)        # 板块排行/成分股
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py *)       # 市场主线分析
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_kline.py *)       # BK指数K线
@@ -262,6 +264,26 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [
 4. 可选：对strong Top3搜索 `WebSearch("{板块名} {YYYY}年{M}月 政策 行业 新闻")`
 
 5. 综合研判。
+
+---
+
+## /stock-scanner [--sectors BK0420,...] [--from-leader <file>] [--top N] [--min-score N] [--wyckoff]
+
+A股热点板块成分股筛选器 — 市场主线/龙头之后接个股漏斗。三阶段：汇聚硬过滤(非A股/ST/市值50-500亿)→多维打分(动量/量价/资金/基本面/板块强度)→排序定星。
+
+**步骤**：
+
+1. 板块来源二选一：
+```bash
+# 方式1:直接给板块代码(来自 market-theme 输出)
+python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --sectors BK0420,BK0897 --top 10
+# 方式2:从 market_leader JSON 输出读取已分析板块
+python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader <leader_output.json> --top 10
+```
+
+2. **`--wyckoff`(P0-2 选股漏斗)**：只保留维科夫**吸筹/拉升**阶段且子阶段为买点(Spring/LPS/ST/PRE_MARKUP/JAC/BU)、置信度≥0.3 的候选；不足 60 根 K 线的候选丢弃。新增 `wyckoff` 100 分维度，复合分重配为 动量0.25/量价0.15/资金0.15/基本面0.10/板块0.10/wyckoff0.25。输出含 `wyckoff` 字段(阶段/子阶段/置信度/研判)。
+
+3. 呈现：Top 排名表(综合分/维度/信号/预警)。`--wyckoff` 时标注维科夫子阶段与置信度。
 
 ---
 
