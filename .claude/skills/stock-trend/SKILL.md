@@ -9,6 +9,7 @@ triggers:
   - /longtou
   - /market-theme
   - /stock-scanner
+  - /candidates
   - /ths-theme
   - /integrated-scan
   - /daily-review
@@ -34,6 +35,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/backtesting/engine.py *)          # 回测引擎
   - Bash(python3 .claude/skills/stock-trend/scripts/scans/market_leader.py *)         # 龙头中军扫描
   - Bash(python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py *)         # A股板块成分股筛选(含--wyckoff漏斗)
+  - Bash(python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py *)      # 每日候选股(自动筛20~30只买点)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_data.py *)        # 板块排行/成分股
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py *)       # 市场主线分析
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_kline.py *)       # BK指数K线
@@ -284,6 +286,23 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 2. **`--wyckoff`(P0-2 选股漏斗)**：只保留维科夫**吸筹/拉升**阶段且子阶段为买点(Spring/LPS/ST/PRE_MARKUP/JAC/BU)、置信度≥0.3 的候选；不足 60 根 K 线的候选丢弃。新增 `wyckoff` 100 分维度，复合分重配为 动量0.25/量价0.15/资金0.15/基本面0.10/板块0.10/wyckoff0.25。输出含 `wyckoff` 字段(阶段/子阶段/置信度/研判)。
 
 3. 呈现：Top 排名表(综合分/维度/信号/预警)。`--wyckoff` 时标注维科夫子阶段与置信度。
+
+---
+
+## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json]
+
+每日候选股 — 自动选热点板块(板块排行 hot_score top 8)→ 维科夫漏斗扫成分股(吸筹/拉升买点子阶段)→ 批量扩展直到 ≥20 只 → 按综合分取 top 30 → 每日候选报告。
+
+**步骤**：
+
+1. 运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] [--min-candidates 20]
+# 手动指定板块: --sectors BK0420,BK0897; Agent 消费: --json
+```
+2. 自动读今日复盘上下文 `market_regime.json`:报告头部标注市场环境评分;<60 弱势市标注"候选仅作观察"。
+3. 输出:候选表(名称/板块/维科夫买点/置信度/综合分/信号) → `reports/lists/candidates-<时间>.md`。
+4. 复核:候选为买点 + 多维打分排序,需人工确认板块持续性/基本面后再入场。
 
 ---
 
