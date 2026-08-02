@@ -13,6 +13,7 @@ triggers:
   - /ths-theme
   - /integrated-scan
   - /daily-review
+  - /wyckoff-backtest
 argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
 allowed-tools:
   - Read
@@ -36,6 +37,7 @@ allowed-tools:
   - Bash(python3 .claude/skills/stock-trend/scripts/scans/market_leader.py *)         # 龙头中军扫描
   - Bash(python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py *)         # A股板块成分股筛选(含--wyckoff漏斗)
   - Bash(python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py *)      # 每日候选股(自动筛20~30只买点)
+  - Bash(python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py *) # 维科夫买点回测(验证候选胜率)
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_data.py *)        # 板块排行/成分股
   - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py *)       # 市场主线分析
   - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_kline.py *)       # BK指数K线
@@ -217,6 +219,32 @@ python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-day
 ```
 
 2. 呈现：回测区间→IC表(窗口/均值/标准差/t值/正向比)→命中率、Top vs Bottom收益差、Top10平均收益。IC>0.05且5%显著=有预测力；命中率>55%=优于随机。
+
+---
+
+## /wyckoff-backtest [--codes 600519,000001] [--sectors BK0477,...] [--from-candidates <json>] [--lookback-days N] [--eval-windows 5,10,20] [--min-confidence N] [--min-gap N] [--output <path>] [--output-html]
+
+维科夫买点回测 — 验证 `/candidates` 买点信号的历史胜率。历史重放：每采样日用截至当日 K 线跑维科夫分析，检测买点（吸筹/拉升阶段 + Spring/LPS/ST/PRE_MARKUP/JAC/BU 子阶段 + 置信度≥阈值），测 5/10/20 日前向收益，对照全样本基线。
+
+**步骤**：
+
+1. 宇宙来源三选一：
+```bash
+# 用候选报告验证 (生产路径): /candidates --json > candidates.json
+python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --from-candidates candidates.json --output-html
+# 手动给代码
+python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --codes 600519,000001
+# 复用 /candidates 热点板块宇宙
+python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --sectors BK0477,BK0897
+```
+
+2. 默认 120 天 / 窗口 5,10,20 / 采样间隔 5 / 置信度≥0.3(与漏斗一致) / 同标的信号去重间隔 10 天。
+
+3. 输出 JSON(stdout)：`summary`(信号vs基线 胜率/均收益/α)、`by_sub_phase`/`by_confidence`/`by_phase`/`by_score_100`(分桶胜率)、`ic`(置信度/100分→前向收益)、`strategy_stats`(主窗口,供凯利)、`signals` 明细。`--output-html` 生成 `reports/lists/wyckoff-backtest-*.html`。
+
+4. 判读：信号胜率显著高于基线=买点有 edge；某子阶段/置信度档位胜率突出=漏斗参数可据此收紧。
+
+**局限**：close-to-close 无成本无止损模拟；宇宙=当前成分股(幸存者偏差)；买点稀缺时样本少，需用完整 `/candidates` 宇宙跑，单看几只意义不大。
 
 ---
 
