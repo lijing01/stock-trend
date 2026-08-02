@@ -188,13 +188,13 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             excluded.append({"code": code, "name": name, "reason": "ST/退市风险"})
             continue
 
-        # Market cap filter: 50-500亿
+        # Market cap filter: 50-2000亿
         mcap = _safe_float(s.get("market_cap"))
         if mcap < 5e9:
             excluded.append({"code": code, "name": name, "reason": "市值过小(<50亿)"})
             continue
-        if mcap > 5e11:
-            excluded.append({"code": code, "name": name, "reason": "市值过大(>5000亿)"})
+        if mcap > 2e11:
+            excluded.append({"code": code, "name": name, "reason": "市值过大(>2000亿)"})
             continue
 
         candidates.append({

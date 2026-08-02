@@ -32,7 +32,7 @@ SIGNAL_LABELS = {
 }
 
 
-def pick_hot_sectors(top_n=12, min_hot=45, min_stocks=10):
+def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10):
     """Pick hot sectors from live rankings (hot_score min-max 0-100)."""
     from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
     rankings = get_sector_rankings()
@@ -40,7 +40,7 @@ def pick_hot_sectors(top_n=12, min_hot=45, min_stocks=10):
     return [(s["code"], s["name"], s.get("hot_score", 0)) for s in hot]
 
 
-def scan_sectors(sector_codes, batch_size=4, per_sector=15, min_candidates=20):
+def scan_sectors(sector_codes, batch_size=4, per_sector=25, min_candidates=20):
     """Run Wyckoff funnel across sectors in batches; expand until enough candidates."""
     all_scored = {}
     for i in range(0, len(sector_codes), batch_size):

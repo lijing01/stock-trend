@@ -271,7 +271,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [
 
 ## /stock-scanner [--sectors BK0420,...] [--from-leader <file>] [--top N] [--min-score N] [--wyckoff]
 
-A股热点板块成分股筛选器 — 市场主线/龙头之后接个股漏斗。三阶段：汇聚硬过滤(非A股/ST/市值50-500亿)→多维打分(动量/量价/资金/基本面/板块强度)→排序定星。
+A股热点板块成分股筛选器 — 市场主线/龙头之后接个股漏斗。三阶段：汇聚硬过滤(非A股/ST/市值50-2000亿)→多维打分(动量/量价/资金/基本面/板块强度)→排序定星。
 
 **步骤**：
 
@@ -291,7 +291,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html]
 
-每日候选股 — 自动选热点板块(板块排行 hot_score top 12)→ 维科夫漏斗扫成分股(吸筹/拉升买点子阶段)→ 批量扩展 → 按综合分取 top 30 → 每日候选报告。
+每日候选股 — 自动选热点板块(板块排行 hot_score top 20)→ 维科夫漏斗扫成分股(每板块 25 只,吸筹/拉升买点子阶段)→ 批量扩展 → 按综合分取 top 30 → 每日候选报告。
 
 **步骤**：
 
