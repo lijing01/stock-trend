@@ -4,9 +4,11 @@
 > 工程路径：`/Users/jing.li7/personal/stock-trend`  
 > Codex CLI：`codex-cli 0.146.0`
 
+> 实施状态（2026-08-05）：本评估提出的 Codex 发现与适配层已经落地：新增 `.agents/skills/stock-trend`、根目录 `AGENTS.md`、Codex 兼容 frontmatter 及 `agents/openai.yaml`。第 1～6 节保留的是迁移前评估与诊断基线；业务测试失败和可选数据源依赖仍需单独处理。
+
 ## 1. 结论
 
-Codex 本身可以正常运行，但当前工程中的 `stock-trend` skill **尚不能被 Codex 原生发现和调用**。
+评估时 Codex 本身可以正常运行，但工程中的 `stock-trend` skill **尚不能被 Codex 原生发现和调用**。发现与适配问题现已按上方实施状态解决。
 
 底层 Python 脚本大部分可以运行；联网授权后，东方财富、腾讯港股和周线数据源均可用。不过工程仍缺少部分可选依赖和 Tushare Token，且现有测试并非全绿。因此当前状态应判断为：
 

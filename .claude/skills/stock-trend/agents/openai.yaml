@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stock Trend"
+  short_description: "分析股票与 ETF 趋势、持仓、主线、扫描和策略回测"
+  default_prompt: "使用 $stock-trend 分析指定股票或 ETF 的中线趋势并给出风险提示。"

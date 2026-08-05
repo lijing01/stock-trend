@@ -1,62 +1,13 @@
 ---
 name: stock-trend
-description: A股/港股/ETF日趋势判断，输出结构化报告
-triggers:
-  - /stock-trend
-  - /etf-scan
-  - /portfolio
-  - /etf-backtest
-  - /longtou
-  - /market-theme
-  - /stock-scanner
-  - /candidates
-  - /ths-theme
-  - /integrated-scan
-  - /daily-review
-  - /wyckoff-backtest
-argument-hint: "<code> [--focus <维度>] [--horizon <周期>] [--multi-timeframe] [--compact] [--no-data]"
-allowed-tools:
-  - Read
-  - Write
-  - Bash(python3 .claude/skills/stock-trend/scripts/core/resolve_code.py *)           # 代码→ts_code解析
-  - Bash(python3 .claude/skills/stock-trend/scripts/pipeline/runner.py *)             # 一键数据管线
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/scores.py *)             # 综合评分
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/kline.py *)              # K线(Tushare)
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/kline_eastmoney.py *)    # K线(东方财富降级)
-  - Bash(python3 .claude/skills/stock-trend/scripts/scans/etf_scanner.py *)           # ETF扫描
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/technical.py *)          # 技术分析
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/etf_data.py *)           # ETF净值/IOPV/规模
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/futures_data.py *)       # 期货基差/OI/量
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/capital_flow.py *)       # 资金流向/北向/融资
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/fundamental.py *)        # PE/PB/ROE/增速
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/macro_snapshot.py *)     # 汇率/利率/PMI/CPI/M2
-  - Bash(python3 .claude/skills/stock-trend/scripts/reporting/chart.py *)             # K线图HTML
-  - Bash(python3 .claude/skills/stock-trend/scripts/reporting/report.py *)            # MD+HTML报告
-  - Bash(python3 .claude/skills/stock-trend/scripts/portfolio/manager.py *)           # 持仓管理
-  - Bash(python3 .claude/skills/stock-trend/scripts/backtesting/engine.py *)          # 回测引擎
-  - Bash(python3 .claude/skills/stock-trend/scripts/scans/market_leader.py *)         # 龙头中军扫描
-  - Bash(python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py *)         # A股板块成分股筛选(含--wyckoff漏斗)
-  - Bash(python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py *)      # 每日候选股(自动筛20~30只买点)
-  - Bash(python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py *) # 维科夫买点回测(验证候选胜率)
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_data.py *)        # 板块排行/成分股
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py *)       # 市场主线分析
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/sector_kline.py *)       # BK指数K线
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/zt_replay.py *)           # 涨停复盘(同花顺)
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py *)           # 涨停热力主题(同花顺)
-  - WebSearch
-  - WebFetch
-  - mcp__web-search__bing_search
-  - mcp__web-search__crawl_webpage
-  - Bash(open *)
-  - Bash(open -a "Google Chrome" *)
-  - Bash(python3 .claude/skills/stock-trend/scripts/fetchers/longhubang_agg.py *)  # 龙虎榜板块聚合
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py *)  # 龙虎榜信号跟踪
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py *)  # 周主线报告
-  - Bash(python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py *)  # 今日复盘/市场环境评分
-  - Bash(python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py *)  # 整合扫描
+description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于 ETF 扫描、持仓与预警、ETF/维科夫回测、市场主线与龙头扫描、涨停和龙虎榜跟踪、每日复盘、周报、候选股及整合扫描。用户提到股票或 ETF 趋势、代码分析、持仓管理、市场主题、龙头、选股、复盘或上述工作流时使用。
 ---
 
 # 股票趋势判断
+
+使用 `$stock-trend` 显式调用；也可直接用自然语言说明标的或工作流。下文保留的 `/stock-trend`、`/etf-scan` 等名称是工作流路由标识，不要求 Codex 提供同名 slash command。
+
+运行 Python 脚本时以仓库根目录为工作目录。行情和新闻属于时效性数据，必须使用可用的联网工具或脚本实时获取；网络受限时申请授权，若仍不可用则明确标注降级或数据缺失，不得把旧缓存冒充实时数据。仅在用户明确要求时打开 GUI 或浏览器。
 
 **分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。各流程独立。
 
@@ -419,7 +370,7 @@ python3 .claude/skills/stock-trend/scripts/reporting/chart.py .cache/stock-trend
 
 摘要通过`--*-summary`传入Step 3。**综合研判**(核心矛盾/关键事件/操作建议)通过`--analysis`传入。
 
-**搜索工具**：`WebSearch`(首选宏观政策)→`mcp__web-search__bing_search`+`crawl_webpage`(中文财经)→`Bash(curl)`(东方财富API)。**禁止WebFetch访问**：`*.eastmoney.com`/`cn.investing.com`/`xueqiu.com`/`10jqka.com.cn`。
+**搜索工具**：使用当前环境可用的联网搜索/网页工具，优先官方公告、交易所、监管机构和数据源；脚本内置数据源作为结构化行情的降级路径。不要直接抓取限制自动访问或结果不稳定的网页（包括 `*.eastmoney.com`、`cn.investing.com`、`xueqiu.com`、`10jqka.com.cn`），需要东方财富数据时优先运行已有 fetcher。
 
 ### C. 数据质量
 
@@ -517,7 +468,7 @@ python3 .claude/skills/stock-trend/scripts/reporting/report.py --code <code> \
 
 **保存路径**：MD→`reports/{ts_code}/{YYYYMMDD-HHmm}.md`，HTML→`reports/{ts_code}/{YYYYMMDD-HHmm}.html`。`ts_code`用Tushare格式(含后缀,如159740.SZ)。
 
-**默认模式**生成后自动打开HTML：`open reports/{ts_code}/{YYYYMMDD-HHmm}.html`。compact跳过。
+**默认模式**生成 HTML 后返回文件路径。只有用户明确要求查看时才打开该文件；`compact` 跳过 HTML。
 
 ## 免责声明
 
