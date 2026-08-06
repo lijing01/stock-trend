@@ -40,7 +40,14 @@ def _read_json(path):
     """Read JSON file, return None on failure."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            meta = payload.setdefault("meta", {})
+            if isinstance(meta, dict) and not (
+                    meta.get("fetch_time") or meta.get("fetched_at")):
+                modified = datetime.fromtimestamp(Path(path).stat().st_mtime)
+                meta["fetch_time"] = modified.strftime("%Y%m%d-%H%M%S")
+        return payload
     except Exception:
         return None
 
@@ -709,6 +716,13 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             fundamental=fund,
             as_of_date=as_of_date,
         )
+        raw_composite = round(composite, 1)
+        quality_adjusted = round(
+            raw_composite
+            * data_quality["coverage_factor"]
+            * data_quality["freshness_factor"],
+            1,
+        )
 
         # Sector-relative rank (within sector, by change_pct)
         sector_code = c.get("sector_code", "")
@@ -723,7 +737,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             "sector_code": sector_code,
             "sector_name": c["sector_name"],
             "sector_hot_score": c["sector_hot_score"],
-            "composite_score": round(composite, 1),
+            "composite_score": raw_composite,
+            "raw_composite_score": raw_composite,
+            "quality_adjusted_score": quality_adjusted,
             "dimensions": dims,
             "signals": signals,
             "warnings": warnings,

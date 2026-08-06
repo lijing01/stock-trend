@@ -18,7 +18,7 @@ import json
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -660,6 +660,7 @@ def append_daily_snapshot(rankings: dict, override_date: str = "") -> None:
             "name": s.get("name", ""),
             "hot_score": s.get("hot_score", 0),
             "change_pct": s.get("change_pct"),
+            "net_flow": s.get("main_force_net"),
             "up_ratio": round(up / total, 3) if total > 0 else 0,
             "rank": len(summary) + 1,
         })
@@ -740,12 +741,10 @@ def get_last_trading_day() -> tuple[Optional[str], str]:
     # Tier 3: calendar fallback (weekend regression)
     today = datetime.now()
     if today.weekday() == 5:   # Saturday → Friday
-        prev = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        prev = prev.replace(day=prev.day - 1)
+        prev = today - timedelta(days=1)
         return prev.strftime("%Y-%m-%d"), "calendar"
     elif today.weekday() == 6:  # Sunday → Friday
-        prev = today.replace(hour=0, minute=0, second=0, microsecond=0)
-        prev = prev.replace(day=prev.day - 2)
+        prev = today - timedelta(days=2)
         return prev.strftime("%Y-%m-%d"), "calendar"
     # Weekday but might be holiday — can't detect without calendar API
     return None, ""

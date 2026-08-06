@@ -451,6 +451,9 @@ def main():
     if errors:
         result["warnings"] = errors
 
+    result.setdefault("meta", {})["fetch_time"] = (
+        datetime.now().strftime("%Y%m%d-%H%M%S"))
+
     if result.get("meta", {}).get("data_source") not in ("error", None):
         save_cache(cache_key, result)
 

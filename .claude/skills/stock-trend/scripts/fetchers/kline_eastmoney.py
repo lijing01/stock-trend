@@ -441,6 +441,7 @@ def main():
             "record_count": record_count,
             "data_points": record_count,
             "data_source": data_source,
+            "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "em_host": used_host if used_host in EM_API_HOSTS else None,
             "warnings": warnings,
         },

@@ -2,6 +2,7 @@
 import json
 import random
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -109,6 +110,22 @@ def test_forward_return_beyond():
     rows = _mk_kline(3, 50.0, 20)
     r = _forward_return(rows, 18, "20991231")
     test("WBT-08: beyond range → None", r is None)
+
+
+def test_forward_return_20_and_60_days():
+    rows = [
+        {
+            "date": (datetime(2026, 1, 1) + timedelta(days=i)).strftime("%Y%m%d"),
+            "close": float(100 + i),
+        }
+        for i in range(61)
+    ]
+    ret20 = _forward_return(rows, 0, rows[20]["date"])
+    ret60 = _forward_return(rows, 0, rows[60]["date"])
+    test("WBT-08a: exact 20-day return", ret20 == 0.2,
+         f"got={ret20}, expected=0.2")
+    test("WBT-08b: exact 60-day return", ret60 == 0.6,
+         f"got={ret60}, expected=0.6")
 
 
 def test_select_signals_dedup():
@@ -243,6 +260,7 @@ def run_wyckoff_backtest_tests():
     test_slice_kline()
     test_forward_return()
     test_forward_return_beyond()
+    test_forward_return_20_and_60_days()
     test_select_signals_dedup()
     test_stats_math()
     test_stats_empty()

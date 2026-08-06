@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Tests for /candidates recommendation policy."""
 import sys
+import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,18 +13,28 @@ from scans.daily_candidates import (
     _generate_html,
     build_json_output,
     build_recommendation_policy,
+    candidate_rank_score,
     classify_candidates,
+    enrich_sector_context,
     generate_report,
+    is_recommendation_session,
+    merge_sector_resonance,
+    resolve_recommendation_date,
 )
 from scans import daily_candidates as dc
 
 
-def candidate(code, eligible=True):
+def candidate(code, eligible=True, adjusted_score=80.0,
+              sector_actionable=True, score_eligible=True):
     return {
         "code": code,
         "name": f"测试{code}",
         "sector_name": "测试板块",
         "composite_score": 80.0,
+        "quality_adjusted_score": adjusted_score,
+        "sector_actionable": sector_actionable,
+        "sector_type": "mainline" if sector_actionable else "single_day_pulse",
+        "score_eligible": score_eligible,
         "wyckoff": {"sub_phase": "LPS", "confidence": 0.6},
         "signals": {},
         "data_quality": {
@@ -34,6 +46,184 @@ def candidate(code, eligible=True):
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_weekend_uses_latest_trading_date(self):
+        result = resolve_recommendation_date(
+            now=datetime(2026, 8, 8, 10, 0),
+            regime_date="2026-08-07",
+            last_trading_date="2026-08-07",
+        )
+        self.assertEqual(result, "2026-08-07")
+
+    def test_calendar_fallback_handles_first_day_of_month(self):
+        from fetchers import sector_data
+
+        class FrozenDateTime:
+            @classmethod
+            def now(cls):
+                return datetime(2026, 8, 1, 10, 0)
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "SNAPSHOT_FILE",
+                          Path(tmpdir) / "snapshots.json"), \
+             patch.object(sector_data, "CACHE_FILE",
+                          Path(tmpdir) / "rankings.json"), \
+             patch.object(sector_data, "datetime", FrozenDateTime):
+            trade_date, source = sector_data.get_last_trading_day()
+        self.assertEqual(trade_date, "2026-07-31")
+        self.assertEqual(source, "calendar")
+
+    def test_premarket_uses_previous_close_date(self):
+        result = resolve_recommendation_date(
+            now=datetime(2026, 8, 6, 8, 30),
+            regime_date="2026-08-05",
+            last_trading_date="2026-08-05",
+        )
+        self.assertEqual(result, "2026-08-05")
+
+    def test_premarket_rejects_stale_snapshot_and_regime_dates(self):
+        result = resolve_recommendation_date(
+            now=datetime(2026, 8, 6, 8, 30),
+            regime_date="2026-07-01",
+            last_trading_date="2026-07-01",
+        )
+        self.assertEqual(result, "2026-08-05")
+
+    def test_premarket_rejects_date_from_previous_week(self):
+        result = resolve_recommendation_date(
+            now=datetime(2026, 8, 6, 8, 30),
+            regime_date="2026-07-30",
+            last_trading_date="2026-07-30",
+        )
+        self.assertEqual(result, "2026-08-05")
+
+    def test_lunch_break_is_still_intraday_provisional(self):
+        self.assertTrue(is_recommendation_session(
+            datetime(2026, 8, 6, 12, 0)))
+
+    def test_sector_with_three_day_persistence_is_actionable(self):
+        ranked = [{
+            "code": "BK1", "name": "持续主线",
+            "absolute_hot_score": 70, "hot_score": 90,
+            "change_pct": 2.0,
+        }]
+        history = {
+            "2026-08-04": [{"code": "BK1", "hot_score": 65,
+                            "net_flow": 1e8}],
+            "2026-08-05": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": 2e8}],
+            "2026-08-06": [{"code": "BK1", "hot_score": 75,
+                            "net_flow": 3e8}],
+        }
+        sector = enrich_sector_context(
+            ranked, history, hs300_change=0.5)[0]
+        self.assertEqual(sector["sector_type"], "mainline")
+        self.assertTrue(sector["sector_actionable"])
+        self.assertEqual(sector["persistence_days"], 3)
+        self.assertGreater(sector["relative_strength"], 0)
+        self.assertGreater(sector["capital_persistence"], 50)
+
+    def test_sector_without_history_is_single_day_observation(self):
+        ranked = [{
+            "code": "BK1", "name": "单日脉冲",
+            "absolute_hot_score": 70, "hot_score": 100,
+            "change_pct": 3.0,
+        }]
+        sector = enrich_sector_context(ranked, {}, hs300_change=0.0)[0]
+        self.assertEqual(sector["sector_type"], "single_day_pulse")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_sector_missing_latest_days_is_not_a_mainline(self):
+        ranked = [{
+            "code": "BK1", "name": "过期热点",
+            "absolute_hot_score": 80, "hot_score": 90,
+            "change_pct": 2.0,
+        }]
+        history = {
+            "2026-08-02": [{"code": "BK1", "hot_score": 90}],
+            "2026-08-03": [{"code": "BK1", "hot_score": 90}],
+            "2026-08-04": [{"code": "BK1", "hot_score": 90}],
+            "2026-08-05": [{"code": "BK2", "hot_score": 80}],
+            "2026-08-06": [{"code": "BK2", "hot_score": 80}],
+        }
+        sector = enrich_sector_context(ranked, history)[0]
+        self.assertEqual(sector["sector_type"], "single_day_pulse")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_short_history_does_not_claim_three_day_persistence(self):
+        ranked = [{
+            "code": "BK1", "name": "新热点",
+            "absolute_hot_score": 70, "hot_score": 80,
+        }]
+        history = {
+            "2026-08-05": [{"code": "BK1", "hot_score": 70}],
+            "2026-08-06": [{"code": "BK1", "hot_score": 80}],
+        }
+        sector = enrich_sector_context(ranked, history)[0]
+        self.assertIsNone(sector["persistence_3d"])
+
+    def test_missing_sector_day_counts_as_zero_in_persistence_window(self):
+        ranked = [{
+            "code": "BK1", "name": "间断热点",
+            "absolute_hot_score": 70, "hot_score": 90,
+        }]
+        history = {
+            "2026-08-04": [{"code": "BK1", "hot_score": 90}],
+            "2026-08-05": [{"code": "BK2", "hot_score": 80}],
+            "2026-08-06": [{"code": "BK1", "hot_score": 90}],
+        }
+        sector = enrich_sector_context(ranked, history)[0]
+        self.assertEqual(sector["persistence_3d"], 60.0)
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_stale_sector_history_is_observation_only(self):
+        ranked = [{
+            "code": "BK1", "name": "过期连续热点",
+            "absolute_hot_score": 70, "hot_score": 90,
+        }]
+        history = {
+            "2026-07-01": [{"code": "BK1", "hot_score": 90}],
+            "2026-07-02": [{"code": "BK1", "hot_score": 90}],
+            "2026-07-03": [{"code": "BK1", "hot_score": 90}],
+        }
+        sector = enrich_sector_context(
+            ranked, history, as_of_date="2026-08-06")[0]
+        self.assertEqual(sector["sector_type"], "single_day_pulse")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_capital_persistence_measures_positive_days_not_amount(self):
+        ranked = [{
+            "code": "BK1", "name": "资金不连续",
+            "absolute_hot_score": 70, "hot_score": 80,
+        }]
+        history = {
+            "2026-08-02": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": 100e8}],
+            "2026-08-03": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -1e8}],
+            "2026-08-04": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -1e8}],
+            "2026-08-05": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -1e8}],
+            "2026-08-06": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -1e8}],
+        }
+        sector = enrich_sector_context(ranked, history)[0]
+        self.assertLess(sector["capital_persistence"], 50)
+        self.assertEqual(sector["capital_positive_days"], 1)
+        self.assertEqual(sector["capital_streak"], 0)
+
+    def test_sector_resonance_merges_zt_and_lhb_scores_by_name(self):
+        ranked = [{"code": "BK1", "name": "半导体"}]
+        merged = merge_sector_resonance(ranked, [{
+            "name": "半导体", "zt_score": 75, "lhb_score": 65,
+        }])
+        self.assertEqual(merged[0]["zt_score"], 75)
+        self.assertEqual(merged[0]["lhb_score"], 65)
+
+    def test_rank_score_prefers_quality_adjusted_score(self):
+        self.assertEqual(
+            candidate_rank_score(candidate("1", adjusted_score=63.5)), 63.5)
+
     def test_pick_hot_sectors_uses_absolute_threshold(self):
         rankings = {"sectors": [
             {"code": "BK1", "name": "弱中最强", "change_pct": -1.0,
@@ -55,8 +245,10 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         results = {
             "BK1": [{"code": "1", "composite_score": 80,
-                      "data_quality": {"eligible": False}}],
+                      "quality_adjusted_score": 40,
+                      "data_quality": {"eligible": True}}],
             "BK2": [{"code": "2", "composite_score": 80,
+                      "quality_adjusted_score": 80,
                       "data_quality": {"eligible": True}}],
         }
 
@@ -111,6 +303,39 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual([item["code"] for item in buckets["actionable"]], ["1"])
         self.assertEqual([item["code"] for item in buckets["observation"]], ["2"])
 
+    def test_strong_regime_never_promotes_single_day_pulse(self):
+        regime = {"score": 85, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        buckets = classify_candidates(
+            [candidate("1", sector_actionable=False)], policy)
+        self.assertEqual(buckets["actionable"], [])
+        self.assertEqual(buckets["observation"][0]["code"], "1")
+        self.assertIn(
+            "single_day_pulse",
+            buckets["observation"][0]["observation_reasons"],
+        )
+
+    def test_low_quality_score_stays_in_observation_pool(self):
+        regime = {"score": 85, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        buckets = classify_candidates([
+            candidate("1", adjusted_score=40, score_eligible=False),
+        ], policy)
+        self.assertEqual(buckets["actionable"], [])
+        self.assertEqual(buckets["observation"][0]["code"], "1")
+        self.assertIn(
+            "quality_adjusted_below_min_score",
+            buckets["observation"][0]["observation_reasons"],
+        )
+
+    def test_top_limit_prioritizes_promotable_candidate(self):
+        pulse = candidate("pulse", adjusted_score=100,
+                          sector_actionable=False)
+        valid = candidate("valid", adjusted_score=80)
+        selected = dc.select_candidate_pool(
+            [pulse, valid], top=1, min_score=50)
+        self.assertEqual([item["code"] for item in selected], ["valid"])
+
     def test_report_renders_all_buckets_and_full_disclaimer(self):
         policy = {
             "mode": "actionable",
@@ -133,6 +358,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("## 今日可执行", report)
         self.assertIn("## 等待触发", report)
         self.assertIn("## 观察池", report)
+        self.assertIn("质量分", report)
+        self.assertIn("coverage_below_70pct", report)
         self.assertIn("股市有风险，投资需谨慎", report)
 
     def test_html_renders_all_buckets_and_full_disclaimer(self):
@@ -180,6 +407,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(output["waiting_trigger"], [])
         self.assertEqual(output["observation"], [])
         self.assertEqual(output["policy"], policy)
+        self.assertEqual(output["candidates"][0]["quality_adjusted_score"], 80.0)
 
 
 def run_daily_candidates_tests():

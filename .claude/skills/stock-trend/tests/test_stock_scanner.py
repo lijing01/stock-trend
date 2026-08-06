@@ -13,6 +13,8 @@ Usage:
 """
 
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,6 +78,18 @@ class TestNormalize(unittest.TestCase):
     def test_clamp(self):
         self.assertEqual(sc.normalize_wyckoff_score(5.0), 100.0)
         self.assertEqual(sc.normalize_wyckoff_score(-5.0), 0.0)
+
+
+class TestMetadata(unittest.TestCase):
+    def test_read_json_backfills_fetch_time_for_legacy_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "kline.json"
+            path.write_text(json.dumps({
+                "meta": {"data_source": "eastmoney"},
+                "data": [{"trade_date": "20260806"}],
+            }), encoding="utf-8")
+            loaded = sc._read_json(path)
+        self.assertTrue(loaded["meta"]["fetch_time"])
 
 
 class TestGatePass(unittest.TestCase):
@@ -167,7 +181,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertNotIn("wyckoff", scored[0]["dimensions"])
         self.assertNotIn("wyckoff", scored[0])
 
-    def test_quality_metadata_does_not_change_composite_score(self):
+    def test_quality_adjusted_score_is_separate_from_raw_score(self):
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
         sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
         sc._fetch_capital_flow = lambda ts: {
@@ -181,6 +195,12 @@ class TestRunPhase2Funnel(unittest.TestCase):
             as_of_date="2026-08-06",
         )[0]
         self.assertEqual(assessed["composite_score"], baseline["composite_score"])
+        self.assertEqual(
+            assessed["raw_composite_score"], assessed["composite_score"])
+        self.assertEqual(
+            assessed["quality_adjusted_score"],
+            round(assessed["raw_composite_score"] * 0.8, 1),
+        )
         self.assertTrue(assessed["data_quality"]["eligible"])
         self.assertEqual(assessed["data_quality"]["coverage"], 0.8)
 
@@ -199,6 +219,10 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertFalse(result[0]["data_quality"]["eligible"])
         self.assertIn("kline_stale", result[0]["data_quality"]["reasons"])
+        self.assertLess(
+            result[0]["quality_adjusted_score"],
+            result[0]["raw_composite_score"],
+        )
 
 
 class TestFilters(unittest.TestCase):
@@ -218,5 +242,13 @@ class TestFilters(unittest.TestCase):
         self.assertFalse(sc._is_st(None))
 
 
+def run_stock_scanner_tests():
+    suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    failed = len(result.failures) + len(result.errors)
+    return result.testsRun - failed, failed
+
+
 if __name__ == "__main__":
-    unittest.main(verbosity=2 if "-v" in sys.argv else 1)
+    _, failed = run_stock_scanner_tests()
+    raise SystemExit(1 if failed else 0)

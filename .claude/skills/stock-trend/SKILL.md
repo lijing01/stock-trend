@@ -283,10 +283,12 @@ python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] 
 ```bash
 open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 ```
-3. 每只候选附 `data_quality`：K 线必须覆盖推荐依据日，总覆盖率必须 ≥70%；不满足者保留在观察池，并明确缺失或过期原因，不得进入可执行/等待触发。
+3. 每只候选附 `data_quality`：统一输出各维度 `data_date/fetched_at/source/quality/stale_reason`；K 线必须覆盖最近有效推荐依据日，总覆盖率必须 ≥70%，已返回的资金/基本面维度不得为错误状态。不满足者保留在观察池，并明确缺失或过期原因。
 4. 自动读取 `market_regime.json` 并执行硬门控：评分 `<60`、数据缺失或日期过期时仅输出观察池；`60–79` 最多 2 只等待触发、组合仓位上限 30%；`≥80` 最多 5 只今日可执行、组合仓位上限 60%。盘中结果统一降级为临时观察版。
-5. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy` 与三层推荐字段。
-6. 复核：候选仍需人工确认板块持续性、基本面和交易计划后再入场；弱市或证据不足时允许“今日无推荐”。
+5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。
+6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。
+7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。观察池显示未升级原因；`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy` 与三层推荐字段。
+8. 复核：候选仍需人工确认基本面和完整交易计划后再入场；弱市或证据不足时允许“今日无推荐”。P0 不代表完整生产链收益已经验证。
 
 ---
 

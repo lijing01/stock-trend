@@ -9,8 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from core.recommendation_quality import assess_candidate_data, latest_data_date
 
 
-def payload(rows, quality="good"):
-    return {"summary": {"data_quality": quality}, "data": rows}
+def payload(rows, quality="good", source="fixture", fetched_at="20260806-160000"):
+    return {
+        "meta": {"data_source": source, "fetch_time": fetched_at},
+        "summary": {"data_quality": quality},
+        "data": rows,
+    }
 
 
 class TestRecommendationQuality(unittest.TestCase):
@@ -57,6 +61,88 @@ class TestRecommendationQuality(unittest.TestCase):
             as_of_date="2026-08-06",
         )
         self.assertFalse(result["dimensions"]["fundamental"]["available"])
+
+    def test_dimension_metadata_is_normalized(self):
+        result = assess_candidate_data(
+            kline=payload(
+                [{"trade_date": "20260806"}],
+                source="eastmoney",
+                fetched_at="20260806-153100",
+            ),
+            capital=payload([{"date": "20260806"}]),
+            fundamental=None,
+            as_of_date="2026-08-06",
+        )
+        kline = result["dimensions"]["kline"]
+        self.assertEqual(kline["source"], "eastmoney")
+        self.assertEqual(kline["fetched_at"], "20260806-153100")
+        self.assertEqual(kline["stale_reason"], "")
+
+    def test_stale_capital_has_explicit_reason_and_lower_freshness(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=payload([{"date": "20260805"}]),
+            fundamental=payload([], quality="good"),
+            as_of_date="2026-08-06",
+        )
+        self.assertEqual(
+            result["dimensions"]["capital"]["stale_reason"],
+            "capital_stale",
+        )
+        self.assertEqual(result["freshness_factor"], 0.5)
+
+    def test_stale_fundamental_fetch_is_not_counted_as_coverage(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=None,
+            fundamental=payload(
+                [], quality="good", fetched_at="20260805-160000"),
+            as_of_date="2026-08-06",
+        )
+        fundamental = result["dimensions"]["fundamental"]
+        self.assertFalse(fundamental["fresh"])
+        self.assertEqual(fundamental["stale_reason"], "fundamental_stale")
+        self.assertEqual(result["coverage"], 0.55)
+        self.assertFalse(result["eligible"])
+
+    def test_returned_error_dimension_blocks_eligibility(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=payload([{"date": "20260806"}]),
+            fundamental=payload([], quality="error"),
+            as_of_date="2026-08-06",
+        )
+        self.assertFalse(result["eligible"])
+        self.assertIn("fundamental_error", result["reasons"])
+
+    def test_real_capital_error_shape_blocks_eligibility(self):
+        capital_error = {
+            "meta": {
+                "ts_code": "600519.SH",
+                "data_source": "error",
+                "error": "资金流向获取失败",
+            },
+            "data": [],
+        }
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=capital_error,
+            fundamental=payload([], quality="good"),
+            as_of_date="2026-08-06",
+        )
+        self.assertFalse(result["eligible"])
+        self.assertIn("capital_error", result["reasons"])
+
+    def test_quality_factors_and_confidence_are_exposed(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=payload([{"date": "20260806"}]),
+            fundamental=None,
+            as_of_date="2026-08-06",
+        )
+        self.assertEqual(result["coverage_factor"], 0.8)
+        self.assertEqual(result["freshness_factor"], 1.0)
+        self.assertEqual(result["confidence"], 0.8)
 
 
 def run_recommendation_quality_tests():

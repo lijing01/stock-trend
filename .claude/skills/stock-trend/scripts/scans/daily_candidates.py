@@ -14,7 +14,7 @@ import sys
 import json
 import argparse
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, time as datetime_time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -25,31 +25,224 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from scans.stock_scanner import gather_candidates, run_phase2
-from core.cache_utils import is_trading_hours
-
 SIGNAL_LABELS = {
     "volume_breakout": "放量突破",
     "northbound_adding": "北向增持",
 }
 
 
-def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10):
+def candidate_rank_score(item):
+    """Return the quality-adjusted rank score with legacy fallback."""
+    return item.get("quality_adjusted_score", item.get("composite_score", 0))
+
+
+def is_recommendation_session(now=None):
+    """Treat the whole 09:30-15:00 window as provisional, including lunch."""
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    current = now.time()
+    return datetime_time(9, 30) <= current <= datetime_time(15, 0)
+
+
+def resolve_recommendation_date(now=None, regime_date="", last_trading_date=""):
+    """Resolve the closing-data date that a recommendation may rely on."""
+    now = now or datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    # Without a trading calendar, only the immediately preceding weekday is
+    # safe to treat as the last close. Holiday uncertainty therefore degrades
+    # to observation through the later K-line/regime date checks.
+    if now.weekday() >= 5 or now.time() < datetime_time(9, 30):
+        previous = now.date() - timedelta(days=1)
+        while previous.weekday() >= 5:
+            previous -= timedelta(days=1)
+        return previous.strftime("%Y-%m-%d")
+    if is_recommendation_session(now):
+        return today
+    return today
+
+
+def _window_average(values, size):
+    if len(values) < size:
+        return None
+    selected = values[-size:]
+    return round(sum(selected) / len(selected), 1)
+
+
+def merge_sector_resonance(ranked, resonance_sectors):
+    """Merge same-day ths-theme ZT/LHB evidence into EM sector rows."""
+    by_name = {
+        item.get("name", ""): item for item in resonance_sectors
+        if item.get("name")
+    }
+    merged = []
+    for source in ranked:
+        sector = dict(source)
+        resonance = by_name.get(sector.get("name", ""), {})
+        for key in ("zt_score", "lhb_score", "lhb_direction"):
+            if resonance.get(key) is not None:
+                sector[key] = resonance[key]
+        merged.append(sector)
+    return merged
+
+
+def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
+    """Attach absolute strength, persistence, relative strength and action gate."""
+    dates = sorted(history.keys())[-10:] if history else []
+    enriched = []
+    for source in ranked:
+        sector = dict(source)
+        code = sector.get("code", "")
+        aligned_entries = []
+        for date_str in dates:
+            match = next(
+                (row for row in history.get(date_str, [])
+                 if row.get("code") == code),
+                None,
+            )
+            aligned_entries.append(match)
+        hot_values = [
+            float(row.get("hot_score", 0) or 0) if row else 0.0
+            for row in aligned_entries
+        ]
+        avg3 = _window_average(hot_values, 3)
+        avg5 = _window_average(hot_values, 5)
+        avg10 = _window_average(hot_values, 10)
+        persistence_values = [v for v in (avg3, avg5, avg10) if v is not None]
+        persistence = (
+            round(sum(persistence_values) / len(persistence_values), 1)
+            if persistence_values else 0.0
+        )
+        change = sector.get("change_pct")
+        relative_strength = None
+        if change is not None and hs300_change is not None:
+            relative_strength = round(float(change) - float(hs300_change), 2)
+
+        days = sum(row is not None for row in aligned_entries)
+        recent_entries = aligned_entries[-3:]
+        history_current = bool(dates) and (
+            not as_of_date or dates[-1] == as_of_date
+        )
+        latest_present = bool(
+            history_current and aligned_entries
+            and aligned_entries[-1] is not None
+        )
+        short_persistence = (
+            round(sum(hot_values) / len(hot_values), 1)
+            if len(hot_values) >= 2 else 0.0
+        )
+        if not persistence_values:
+            persistence = short_persistence
+        classification_persistence = avg3 if avg3 is not None else short_persistence
+        if latest_present and len(dates) >= 3 \
+                and all(row is not None for row in recent_entries) \
+                and classification_persistence >= 60 \
+                and (relative_strength is None or relative_strength >= 0):
+            sector_type = "mainline"
+        elif latest_present and len(dates) >= 2 \
+                and all(row is not None for row in aligned_entries[-2:]) \
+                and classification_persistence >= 45:
+            sector_type = "emerging"
+        else:
+            sector_type = "single_day_pulse"
+
+        relative_component = 50.0
+        if relative_strength is not None:
+            relative_component = max(0.0, min(100.0, 50 + relative_strength * 10))
+        resonance_values = [
+            float(sector[key]) for key in ("zt_score", "lhb_score")
+            if sector.get(key) is not None
+        ]
+        resonance = (
+            sum(resonance_values) / len(resonance_values)
+            if resonance_values else 50.0
+        )
+        recent_capital_entries = aligned_entries[-5:]
+        net_flows = [
+            float(row["net_flow"])
+            for row in recent_capital_entries
+            if row and row.get("net_flow") is not None
+        ]
+        capital_persistence = 50.0
+        capital_positive_days = 0
+        capital_streak = 0
+        if net_flows:
+            capital_positive_days = sum(value > 0 for value in net_flows)
+            denominator = max(1, len(recent_capital_entries))
+            for row in reversed(recent_capital_entries):
+                if not row or row.get("net_flow") is None \
+                        or float(row["net_flow"]) <= 0:
+                    break
+                capital_streak += 1
+            capital_persistence = (
+                capital_positive_days / denominator * 70
+                + min(capital_streak / 3, 1) * 30
+            )
+        sector_score = round(
+            float(sector.get("absolute_hot_score", 0)) * 0.30
+            + persistence * 0.30
+            + relative_component * 0.15
+            + capital_persistence * 0.15
+            + resonance * 0.10,
+            1,
+        )
+        sector.update({
+            "relative_hot_score": sector.get("hot_score", 0),
+            "persistence_3d": avg3,
+            "persistence_5d": avg5,
+            "persistence_10d": avg10,
+            "persistence_score": persistence,
+            "persistence_days": days,
+            "relative_strength": relative_strength,
+            "capital_persistence": round(capital_persistence, 1),
+            "capital_positive_days": capital_positive_days,
+            "capital_streak": capital_streak,
+            "resonance_score": round(resonance, 1),
+            "sector_score": sector_score,
+            "sector_type": sector_type,
+            "sector_actionable": sector_type in ("mainline", "emerging"),
+        })
+        enriched.append(sector)
+    enriched.sort(key=lambda item: item["sector_score"], reverse=True)
+    return enriched
+
+
+def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
+                     as_of_date=""):
     """Pick sectors above an absolute heat floor, in relative-rank order."""
-    from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
+    from fetchers.sector_data import (
+        get_sector_rankings,
+        load_snapshot_history,
+        rank_hot_sectors,
+    )
     rankings = get_sector_rankings()
     ranked = rank_hot_sectors(rankings, top_n=top_n, min_stocks=min_stocks)
     qualified = [
         sector for sector in ranked
         if sector.get("absolute_hot_score", 0) >= min_hot
     ]
-    return [
-        (sector["code"], sector["name"], sector.get("hot_score", 0))
-        for sector in qualified
-    ]
+    expected_date = as_of_date or (regime or {}).get("data_date", "")
+    if expected_date:
+        try:
+            from bridge.sector_feeder import load_qualified_sectors
+            resonance = load_qualified_sectors()
+            if resonance.date == expected_date:
+                qualified = merge_sector_resonance(
+                    qualified, resonance.sectors)
+        except Exception:
+            pass
+    hs300_change = (regime or {}).get("hs300_change")
+    return enrich_sector_context(
+        qualified,
+        load_snapshot_history(days=10),
+        hs300_change=hs300_change,
+        as_of_date=expected_date,
+    )
 
 
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
-                 min_candidates=20, min_score=50, as_of_date=""):
+                 min_candidates=20, min_score=50, as_of_date="",
+                 sector_context=None):
     """Expand until enough score-qualified, data-eligible candidates exist."""
     all_scored = {}
     for i in range(0, len(sector_codes), batch_size):
@@ -64,11 +257,21 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         scored = run_phase2(
             phase1["candidates"], enable_wyckoff=True, as_of_date=as_of_date)
         for s in scored:
+            context = (sector_context or {}).get(s.get("sector_code", ""), {})
+            if context:
+                s.update({
+                    "sector_type": context.get("sector_type", ""),
+                    "sector_actionable": context.get("sector_actionable", False),
+                    "sector_score": context.get("sector_score"),
+                    "sector_persistence": context.get("persistence_score"),
+                    "sector_relative_strength": context.get("relative_strength"),
+                })
             all_scored[s["code"]] = s
         eligible_count = sum(
             1 for item in all_scored.values()
-            if item["composite_score"] >= min_score
+            if candidate_rank_score(item) >= min_score
             and item.get("data_quality", {}).get("eligible", False)
+            and item.get("sector_actionable", True)
         )
         print(
             f"  批次完成,候选 {len(all_scored)} 只,有效 {eligible_count} 只",
@@ -77,6 +280,27 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         if eligible_count >= min_candidates:
             break
     return list(all_scored.values())
+
+
+def select_candidate_pool(scored, top, min_score):
+    """Keep promotable candidates ahead of observation-only high scorers."""
+    candidates = [
+        item for item in scored
+        if item.get("composite_score", 0) >= min_score
+    ]
+    for item in candidates:
+        item["score_eligible"] = candidate_rank_score(item) >= min_score
+
+    def selection_key(item):
+        promotable = (
+            item["score_eligible"]
+            and item.get("data_quality", {}).get("eligible", False)
+            and item.get("sector_actionable", True)
+        )
+        return promotable, candidate_rank_score(item)
+
+    candidates.sort(key=selection_key, reverse=True)
+    return candidates[:top]
 
 
 def _signal_text(signals):
@@ -98,19 +322,23 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 买点 | 置信度 | 综合分 | 覆盖率 | 信号 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 买点 | 置信度 | 原始分 | 质量分 | 覆盖率 | 原因/信号 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
+        reasons = item.get("observation_reasons", []) \
+            or quality.get("reasons", [])
+        detail = "、".join(reasons) if reasons else _signal_text(item.get("signals", {}))
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{item['sector_name']} | {wyckoff.get('sub_phase', '-')} | "
             f"{wyckoff.get('confidence', 0):.0%} | "
             f"{item['composite_score']:.1f} | "
+            f"{candidate_rank_score(item):.1f} | "
             f"{quality.get('coverage', 0):.0%} | "
-            f"{_signal_text(item.get('signals', {}))} |"
+            f"{detail} |"
         )
 
 
@@ -128,6 +356,9 @@ def load_regime_context():
             "label": r.get("label", ""),
             "data_date": d.get("data_date", ""),
             "advice": r.get("advice", ""),
+            "hs300_change": (
+                d.get("indices", {}).get("000300.SH", {}).get("pct_chg")
+            ),
         }
     except Exception:
         return None
@@ -170,17 +401,33 @@ def classify_candidates(candidates, policy):
     eligible = [
         item for item in candidates
         if item.get("data_quality", {}).get("eligible", False)
+        and item.get("sector_actionable", True)
+        and item.get("score_eligible", True)
     ]
     limit = policy.get("max_recommendations", 0)
     actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
     waiting = eligible[:limit] if policy.get("mode") == "waiting_trigger" else []
     promoted = {item["code"] for item in actionable + waiting}
+    observation = []
+    for item in candidates:
+        if item.get("code") in promoted:
+            continue
+        copy = dict(item)
+        reasons = list(item.get("data_quality", {}).get("reasons", []))
+        if not item.get("sector_actionable", True):
+            reasons.append(item.get("sector_type") or "sector_unverified")
+        if not item.get("score_eligible", True):
+            reasons.append("quality_adjusted_below_min_score")
+        if not reasons and policy.get("reasons"):
+            reasons.extend(policy["reasons"])
+        if not reasons:
+            reasons.append("recommendation_limit")
+        copy["observation_reasons"] = list(dict.fromkeys(reasons))
+        observation.append(copy)
     return {
         "actionable": actionable,
         "waiting_trigger": waiting,
-        "observation": [
-            item for item in candidates if item.get("code") not in promoted
-        ],
+        "observation": observation,
     }
 
 
@@ -222,11 +469,14 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets):
 
 def _html_candidate_rows(items):
     if not items:
-        return '<tr><td colspan="8">无</td></tr>'
+        return '<tr><td colspan="9">无</td></tr>'
     rows = []
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
+        reasons = item.get("observation_reasons", []) \
+            or quality.get("reasons", [])
+        detail = "、".join(reasons) if reasons else _signal_text(item.get("signals", {}))
         rows.append(
             f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
@@ -234,8 +484,9 @@ def _html_candidate_rows(items):
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
+            f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
-            f"<td>{_signal_text(item.get('signals', {}))}</td></tr>"
+            f"<td>{detail}</td></tr>"
         )
     return "".join(rows)
 
@@ -287,11 +538,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 <p class="dt">{policy_note}</p>
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>覆盖率</th><th>信号</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>原因/信号</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>覆盖率</th><th>信号</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>原因/信号</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>覆盖率</th><th>信号</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>原因/信号</th></tr></thead><tbody>{observation_rows}</tbody></table>
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""
@@ -330,39 +581,54 @@ def main():
 
     start = time.time()
     regime = load_regime_context()
-    expected_date = datetime.now().strftime("%Y-%m-%d")
+    from fetchers.sector_data import get_last_trading_day
+    last_trading_date, _ = get_last_trading_day()
+    expected_date = resolve_recommendation_date(
+        regime_date=(regime or {}).get("data_date", ""),
+        last_trading_date=last_trading_date or "",
+    )
     policy = build_recommendation_policy(
-        regime, expected_date, market_open=is_trading_hours())
+        regime, expected_date, market_open=is_recommendation_session())
 
     # 板块来源
     if args.sectors:
-        sector_codes = [(c.strip(), c.strip(), 0)
-                        for c in args.sectors.split(",") if c.strip()]
-        print(f"手动板块 {len(sector_codes)} 个: {[c[0] for c in sector_codes]}",
+        sector_codes = [{
+            "code": c.strip(),
+            "name": c.strip(),
+            "absolute_hot_score": 0,
+            "relative_hot_score": 0,
+            "sector_type": "manual_unverified",
+            "sector_actionable": False,
+        } for c in args.sectors.split(",") if c.strip()]
+        print(f"手动板块 {len(sector_codes)} 个: {[c['code'] for c in sector_codes]}",
               file=sys.stderr)
     else:
         print("[1/3] 拉取热点板块...", file=sys.stderr)
-        sector_codes = pick_hot_sectors()
+        sector_codes = pick_hot_sectors(
+            regime=regime, as_of_date=expected_date)
         if not sector_codes:
             print("⚠️ 无热点板块,候选为空", file=sys.stderr)
             sys.exit(1)
+        sector_preview = [
+            f"{sector['name']}({sector['sector_score']:.0f})"
+            for sector in sector_codes[:5]
+        ]
         print(f"  热点板块 {len(sector_codes)} 个: "
-              f"{[f'{n}({h:.0f})' for _, n, h in sector_codes[:5]]}...",
+              f"{sector_preview}...",
               file=sys.stderr)
 
     # 漏斗扫描
     print("[2/3] 维科夫漏斗扫描成分股...", file=sys.stderr)
     scored = scan_sectors(
-        [c[0] for c in sector_codes],
+        [c["code"] for c in sector_codes],
         min_candidates=args.min_candidates,
         min_score=args.min_score,
         as_of_date=expected_date,
+        sector_context={c["code"]: c for c in sector_codes},
     )
 
     # 过滤 + 排序 + 归一化到 top
-    scored = [s for s in scored if s["composite_score"] >= args.min_score]
-    scored.sort(key=lambda x: x["composite_score"], reverse=True)
-    candidates = scored[:args.top]
+    candidates = select_candidate_pool(scored, args.top, args.min_score)
     buckets = classify_candidates(candidates, policy)
 
     elapsed = time.time() - start

@@ -1342,11 +1342,13 @@ def run_daily_recommendation_tests():
     try:
         from test_daily_candidates import run_daily_candidates_tests
         from test_recommendation_quality import run_recommendation_quality_tests
+        from test_stock_scanner import run_stock_scanner_tests
         from test_wyckoff_backtest import run_wyckoff_backtest_tests
 
         global PASSED, FAILED
         for runner in (
             run_recommendation_quality_tests,
+            run_stock_scanner_tests,
             run_daily_candidates_tests,
             run_wyckoff_backtest_tests,
         ):
