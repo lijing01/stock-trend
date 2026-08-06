@@ -34,15 +34,23 @@ SIGNAL_LABELS = {
 
 
 def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10):
-    """Pick hot sectors from live rankings (hot_score min-max 0-100)."""
+    """Pick sectors above an absolute heat floor, in relative-rank order."""
     from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
     rankings = get_sector_rankings()
-    hot = rank_hot_sectors(rankings, top_n=top_n, min_stocks=min_stocks)
-    return [(s["code"], s["name"], s.get("hot_score", 0)) for s in hot]
+    ranked = rank_hot_sectors(rankings, top_n=top_n, min_stocks=min_stocks)
+    qualified = [
+        sector for sector in ranked
+        if sector.get("absolute_hot_score", 0) >= min_hot
+    ]
+    return [
+        (sector["code"], sector["name"], sector.get("hot_score", 0))
+        for sector in qualified
+    ]
 
 
-def scan_sectors(sector_codes, batch_size=4, per_sector=25, min_candidates=20):
-    """Run Wyckoff funnel across sectors in batches; expand until enough candidates."""
+def scan_sectors(sector_codes, batch_size=4, per_sector=25,
+                 min_candidates=20, min_score=50, as_of_date=""):
+    """Expand until enough score-qualified, data-eligible candidates exist."""
     all_scored = {}
     for i in range(0, len(sector_codes), batch_size):
         batch = sector_codes[i:i + batch_size]
@@ -53,11 +61,20 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25, min_candidates=20):
             continue
         if not phase1["candidates"]:
             continue
-        scored = run_phase2(phase1["candidates"], enable_wyckoff=True)
+        scored = run_phase2(
+            phase1["candidates"], enable_wyckoff=True, as_of_date=as_of_date)
         for s in scored:
             all_scored[s["code"]] = s
-        print(f"  批次完成,当前候选 {len(all_scored)} 只", file=sys.stderr)
-        if len(all_scored) >= min_candidates:
+        eligible_count = sum(
+            1 for item in all_scored.values()
+            if item["composite_score"] >= min_score
+            and item.get("data_quality", {}).get("eligible", False)
+        )
+        print(
+            f"  批次完成,候选 {len(all_scored)} 只,有效 {eligible_count} 只",
+            file=sys.stderr,
+        )
+        if eligible_count >= min_candidates:
             break
     return list(all_scored.values())
 
@@ -335,8 +352,12 @@ def main():
 
     # 漏斗扫描
     print("[2/3] 维科夫漏斗扫描成分股...", file=sys.stderr)
-    scored = scan_sectors([c[0] for c in sector_codes],
-                          min_candidates=args.min_candidates)
+    scored = scan_sectors(
+        [c[0] for c in sector_codes],
+        min_candidates=args.min_candidates,
+        min_score=args.min_score,
+        as_of_date=expected_date,
+    )
 
     # 过滤 + 排序 + 归一化到 top
     scored = [s for s in scored if s["composite_score"] >= args.min_score]

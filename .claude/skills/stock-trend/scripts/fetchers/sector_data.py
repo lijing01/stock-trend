@@ -262,18 +262,20 @@ def rank_hot_sectors(rankings: dict, top_n: int = 10,
     sectors = deduped
 
     for s in sectors:
-        s["hot_score"] = compute_hot_score(s)
+        absolute = compute_hot_score(s)
+        s["absolute_hot_score"] = absolute
+        s["hot_score"] = absolute
 
-    sectors.sort(key=lambda x: x.get("hot_score", 0), reverse=True)
+    sectors.sort(key=lambda x: x.get("absolute_hot_score", 0), reverse=True)
 
     # Min-max normalize to 0-100 for consistent differentiation
     if sectors:
-        scores = [s["hot_score"] for s in sectors]
+        scores = [s["absolute_hot_score"] for s in sectors]
         lo, hi = min(scores), max(scores)
         if hi > lo:
             for s in sectors:
                 s["hot_score"] = round(
-                    (s["hot_score"] - lo) / (hi - lo) * 100, 1
+                    (s["absolute_hot_score"] - lo) / (hi - lo) * 100, 1
                 )
 
     return sectors[:top_n]

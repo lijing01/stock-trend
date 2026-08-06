@@ -3,6 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -13,6 +14,7 @@ from scans.daily_candidates import (
     classify_candidates,
     generate_report,
 )
+from scans import daily_candidates as dc
 
 
 def candidate(code, eligible=True):
@@ -32,6 +34,43 @@ def candidate(code, eligible=True):
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_pick_hot_sectors_uses_absolute_threshold(self):
+        rankings = {"sectors": [
+            {"code": "BK1", "name": "弱中最强", "change_pct": -1.0,
+             "main_force_net": -1e8, "up_count": 2, "down_count": 8},
+            {"code": "BK2", "name": "更弱", "change_pct": -3.0,
+             "main_force_net": -2e8, "up_count": 2, "down_count": 8},
+        ]}
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings):
+            picked = dc.pick_hot_sectors(top_n=20, min_hot=45, min_stocks=1)
+        self.assertEqual(picked, [])
+
+    def test_scan_expands_until_eligible_count_reaches_target(self):
+        calls = []
+
+        def fake_gather(batch, top_n_per_sector):
+            calls.append(list(batch))
+            return {"candidates": [{"code": batch[0]}]}
+
+        results = {
+            "BK1": [{"code": "1", "composite_score": 80,
+                      "data_quality": {"eligible": False}}],
+            "BK2": [{"code": "2", "composite_score": 80,
+                      "data_quality": {"eligible": True}}],
+        }
+
+        def fake_phase2(candidates, enable_wyckoff, as_of_date):
+            return results[candidates[0]["code"]]
+
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            scored = dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=1,
+                min_score=50, as_of_date="2026-08-06")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual({item["code"] for item in scored}, {"1", "2"})
+
     def test_missing_regime_allows_observation_only(self):
         policy = build_recommendation_policy(None, "2026-08-06")
         self.assertEqual(policy["mode"], "observation")
