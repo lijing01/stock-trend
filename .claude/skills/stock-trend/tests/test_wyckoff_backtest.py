@@ -3,6 +3,7 @@ import json
 import random
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -94,10 +95,14 @@ def test_slice_kline():
 
 
 def test_forward_return():
-    rows = _mk_kline(2, 50.0, 20)
-    # monotonic-ish check: return is close ratio, always finite
+    rows = [
+        {"date": f"202601{i + 1:02d}", "close": float(100 + i)}
+        for i in range(12)
+    ]
     r = _forward_return(rows, 0, rows[10]["date"])
-    test("WBT-07: forward return computed", r is not None and isinstance(r, float))
+    expected = round((110.0 - 100.0) / 100.0, 6)
+    test("WBT-07: target date close is used", r == expected,
+         f"got={r}, expected={expected}")
 
 
 def test_forward_return_beyond():
@@ -155,6 +160,27 @@ def test_run_backtest_synthetic():
     # every signal carries a date + sub_phase
     for s in r["signals"]:
         test("WBT-I07: signal has date/sub", bool(s.get("date")) and bool(s.get("sub_phase")))
+
+
+def test_baseline_does_not_depend_on_phase_detection():
+    km = {
+        "600519.SH": {"data": _mk_kline(1, 100.0)},
+        "000001.SZ": {"data": _mk_kline(2, 50.0)},
+    }
+    stocks = [
+        {"code": "600519", "ts_code": "600519.SH", "name": "t1"},
+        {"code": "000001", "ts_code": "000001.SZ", "name": "t2"},
+    ]
+    with patch("backtesting.wyckoff_backtest.analyze_kline_dict",
+               return_value={"meta": {"error": "unclassified"}}):
+        result = run_backtest(
+            stocks, km, lookback_days=80, eval_windows=(5,), sample_interval=5)
+    baseline = result["summary"]["5"]["baseline"]
+    test("WBT-I08: baseline survives zero classifications",
+         baseline is not None and baseline["count"] > 0,
+         f"baseline={baseline}")
+    test("WBT-I09: zero classifications produce zero signals",
+         result["meta"]["signal_count"] == 0)
 
 
 def test_run_backtest_error_path():
@@ -222,6 +248,7 @@ def run_wyckoff_backtest_tests():
     test_stats_empty()
     test_bands()
     test_run_backtest_synthetic()
+    test_baseline_does_not_depend_on_phase_detection()
     test_run_backtest_error_path()
     test_renderers()
     test_render_zero_signals()

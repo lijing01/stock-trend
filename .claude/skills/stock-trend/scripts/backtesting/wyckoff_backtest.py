@@ -74,17 +74,14 @@ def slice_kline(kline, target_date):
 
 
 def _forward_return(kline, now_idx, target_date):
-    """Return from kline[now_idx].close to first bar on/after target_date.
-
-    Uses close of the bar before the first bar >= target_date (same rule as
-    backtest engine: the close *at* the window end).
-    """
+    """Return close-to-close performance at first bar on/after target_date."""
     c_now = _safe_close(kline[now_idx])
     if not c_now or c_now <= 0:
         return None
+    target = str(target_date).replace("-", "")
     for i in range(now_idx + 1, len(kline)):
-        if _kline_date(kline[i]) >= target_date:
-            c_fut = _safe_close(kline[i - 1])
+        if _kline_date(kline[i]) >= target:
+            c_fut = _safe_close(kline[i])
             if c_fut and c_fut > 0:
                 return round((c_fut - c_now) / c_now, 6)
             return None
@@ -264,10 +261,6 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
             sliced = slice_kline(rows, date)
             if len(sliced) < MIN_KLINES:
                 continue
-            analysis = analyze_kline_dict({"meta": {}, "data": sliced})
-            sig = _classify_signal(analysis, min_confidence)
-            if sig is None:
-                continue
 
             now_idx = len(sliced) - 1  # same row index in full `rows`
             fwd = {}
@@ -281,6 +274,10 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
             if not fwd:
                 continue
 
+            analysis = analyze_kline_dict({"meta": {}, "data": sliced})
+            sig = _classify_signal(analysis, min_confidence)
+            if sig is None:
+                continue
             if is_buy_point(sig["phase"], sig["sub_phase"]) and sig["confidence"] >= min_confidence:
                 per_stock_raw[s["ts_code"]].append((sidx, date, sig, fwd))
 
