@@ -4,6 +4,20 @@
 > 日期：2026-08-06
 > 适用范围：`/candidates` 每日候选股、`/daily-review` 市场环境、`/wyckoff-backtest` 信号验证
 
+## 落地计划
+
+P0 逐任务实施计划见：
+[`docs/superpowers/plans/2026-08-06-daily-recommendation-p0-reliability.md`](superpowers/plans/2026-08-06-daily-recommendation-p0-reliability.md)。
+
+落地顺序固定为：
+
+1. R0-A：修正回测收益窗口和基准样本。
+2. R0-B：增加候选数据日期、覆盖率和推荐资格。
+3. R0-C：让市场环境与盘中状态控制行动等级。
+4. R0-D：使用热点绝对门槛，并按过滤后有效数量扩池。
+5. P1：补齐交易计划、候选宇宙和完整生产链回测。
+6. P2：保存不可变推荐快照并跟踪实际表现。
+
 ## 1. 背景与结论
 
 当前“今日推荐”的生产链路为：
