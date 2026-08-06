@@ -58,6 +58,13 @@ def _make_candidate(code="600001"):
     }
 
 
+def _make_dated_kline(n=60, ts_code="TEST", trade_date="20260806"):
+    kline = _make_kline(n, ts_code)
+    for row in kline["data"]:
+        row["trade_date"] = trade_date
+    return kline
+
+
 class TestNormalize(unittest.TestCase):
     def test_range_mapping(self):
         self.assertAlmostEqual(sc.normalize_wyckoff_score(-3.0), 0.0)
@@ -159,6 +166,39 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertEqual(len(scored), 1)
         self.assertNotIn("wyckoff", scored[0]["dimensions"])
         self.assertNotIn("wyckoff", scored[0])
+
+    def test_quality_metadata_does_not_change_composite_score(self):
+        sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
+        sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
+        sc._fetch_capital_flow = lambda ts: {
+            "data": [{"date": "20260806", "main_net_inflow": 0}]
+        }
+        baseline = sc.run_phase2(
+            [_make_candidate("600001")], enable_wyckoff=True)[0]
+        assessed = sc.run_phase2(
+            [_make_candidate("600001")],
+            enable_wyckoff=True,
+            as_of_date="2026-08-06",
+        )[0]
+        self.assertEqual(assessed["composite_score"], baseline["composite_score"])
+        self.assertTrue(assessed["data_quality"]["eligible"])
+        self.assertEqual(assessed["data_quality"]["coverage"], 0.8)
+
+    def test_stale_kline_remains_observable_but_not_eligible(self):
+        sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
+        sc._fetch_kline = lambda ts: _make_dated_kline(
+            60, ts, trade_date="20260805")
+        sc._fetch_capital_flow = lambda ts: {
+            "data": [{"date": "20260806", "main_net_inflow": 0}]
+        }
+        result = sc.run_phase2(
+            [_make_candidate("600001")],
+            enable_wyckoff=True,
+            as_of_date="2026-08-06",
+        )
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0]["data_quality"]["eligible"])
+        self.assertIn("kline_stale", result[0]["data_quality"]["reasons"])
 
 
 class TestFilters(unittest.TestCase):

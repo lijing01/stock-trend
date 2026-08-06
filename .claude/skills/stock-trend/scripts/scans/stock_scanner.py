@@ -24,6 +24,7 @@ from datetime import datetime
 
 from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
+from core.recommendation_quality import assess_candidate_data
 from analysis.wyckoff import (
     analyze_kline_dict,
     BUY_PHASES, BUY_SUB_PHASES, normalize_score_100,
@@ -577,7 +578,8 @@ def score_wyckoff(analysis):
     return s
 
 
-def run_phase2(candidates, max_workers=4, enable_wyckoff=False):
+def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
+               as_of_date=""):
     """Phase 2: Fetch data and compute multi-dimension scores for all candidates.
 
     enable_wyckoff: run Wyckoff gate (P0-2 funnel) — drops candidates not at a
@@ -701,6 +703,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False):
         # Detect warnings
         warnings = _detect_warnings(c, kline, cap, fund, dim_momentum, dim_volume,
                                      dim_fundamental)
+        data_quality = assess_candidate_data(
+            kline=kline,
+            capital=cap,
+            fundamental=fund,
+            as_of_date=as_of_date,
+        )
 
         # Sector-relative rank (within sector, by change_pct)
         sector_code = c.get("sector_code", "")
@@ -719,6 +727,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False):
             "dimensions": dims,
             "signals": signals,
             "warnings": warnings,
+            "data_quality": data_quality,
             "sector_relative_rank": sector_rank,
             "sector_total": len(changes_in_sector),
         }
