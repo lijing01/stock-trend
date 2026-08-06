@@ -270,7 +270,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html]
 
-每日候选股 — 自动选热点板块(板块排行 hot_score top 20)→ 维科夫漏斗扫成分股(每板块 25 只,吸筹/拉升买点子阶段)→ 批量扩展 → 按综合分取 top 30 → 每日候选报告。
+每日候选股 — 以热点板块绝对热度门槛筛选板块 → 维科夫漏斗扫成分股(每板块 25 只,吸筹/拉升买点子阶段)→ 按“综合分 + 数据资格”扩池 → 分为今日可执行、等待触发、观察池。
 
 **步骤**：
 
@@ -283,9 +283,10 @@ python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] 
 ```bash
 open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 ```
-3. 自动读今日复盘上下文 `market_regime.json`:报告头部标注市场环境评分;<60 弱势市标注"候选仅作观察,不宜建仓"。
-4. 输出:候选表(名称/板块/维科夫买点/置信度/综合分/信号) → `reports/lists/candidates-<时间>.md` + `.html`。
-5. 复核:候选为买点 + 多维打分排序,需人工确认板块持续性/基本面后再入场。
+3. 每只候选附 `data_quality`：K 线必须覆盖推荐依据日，总覆盖率必须 ≥70%；不满足者保留在观察池，并明确缺失或过期原因，不得进入可执行/等待触发。
+4. 自动读取 `market_regime.json` 并执行硬门控：评分 `<60`、数据缺失或日期过期时仅输出观察池；`60–79` 最多 2 只等待触发、组合仓位上限 30%；`≥80` 最多 5 只今日可执行、组合仓位上限 60%。盘中结果统一降级为临时观察版。
+5. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy` 与三层推荐字段。
+6. 复核：候选仍需人工确认板块持续性、基本面和交易计划后再入场；弱市或证据不足时允许“今日无推荐”。
 
 ---
 

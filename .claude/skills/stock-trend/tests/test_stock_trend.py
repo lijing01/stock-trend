@@ -1332,6 +1332,30 @@ def run_backtest_integration_tests():
         print(f"  [SKIP] backtest tests — {e}")
 
 
+def run_daily_recommendation_tests():
+    """Run recommendation quality, policy, and Wyckoff regression tests."""
+    print("\n📋 今日推荐测试 (Daily Recommendation)")
+    print("=" * 50)
+    tests_dir = SCRIPT_DIR
+    sys.path.insert(0, str(tests_dir))
+    try:
+        from test_daily_candidates import run_daily_candidates_tests
+        from test_recommendation_quality import run_recommendation_quality_tests
+        from test_wyckoff_backtest import run_wyckoff_backtest_tests
+
+        global PASSED, FAILED
+        for runner in (
+            run_recommendation_quality_tests,
+            run_daily_candidates_tests,
+            run_wyckoff_backtest_tests,
+        ):
+            p, f = runner()
+            PASSED += p
+            FAILED += f
+    except ImportError as e:
+        print(f"  [SKIP] daily recommendation tests — {e}")
+
+
 def run_golden_diff_tests():
     """Run golden snapshot diff tests by invoking test_golden.py."""
     test_golden_path = SCRIPT_DIR / "test_golden.py"
@@ -1469,6 +1493,10 @@ def main():
     # Backtest engine tests
     if not args.fetch_only and not args.analyze_only:
         run_backtest_integration_tests()
+
+    # Daily recommendation quality and regression tests
+    if not args.fetch_only and not args.analyze_only:
+        run_daily_recommendation_tests()
 
     # Golden snapshot diff tests
     if not args.fetch_only and not args.analyze_only:
