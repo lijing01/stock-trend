@@ -25,6 +25,7 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from scans.stock_scanner import gather_candidates, run_phase2
+from core.cache_utils import is_trading_hours
 
 SIGNAL_LABELS = {
     "volume_breakout": "放量突破",
@@ -74,6 +75,28 @@ def _signal_text(signals):
     return "、".join(parts) or "-"
 
 
+def _append_candidate_table(lines, title, items, empty_text):
+    lines.extend(["", f"## {title}", ""])
+    if not items:
+        lines.append(f"> {empty_text}")
+        return
+    lines.extend([
+        "| # | 名称(代码) | 板块 | 买点 | 置信度 | 综合分 | 覆盖率 | 信号 |",
+        "|---|---|---|---|---|---|---|---|",
+    ])
+    for index, item in enumerate(items, 1):
+        wyckoff = item.get("wyckoff", {})
+        quality = item.get("data_quality", {})
+        lines.append(
+            f"| {index} | {item['name']}({item['code']}) | "
+            f"{item['sector_name']} | {wyckoff.get('sub_phase', '-')} | "
+            f"{wyckoff.get('confidence', 0):.0%} | "
+            f"{item['composite_score']:.1f} | "
+            f"{quality.get('coverage', 0):.0%} | "
+            f"{_signal_text(item.get('signals', {}))} |"
+        )
+
+
 def load_regime_context():
     """Return market-regime summary line if today's context exists."""
     try:
@@ -93,70 +116,125 @@ def load_regime_context():
         return None
 
 
-def generate_report(candidates, sector_codes, elapsed):
-    lines = []
-    lines.append("# 每日候选股")
-    lines.append("")
-    lines.append(f"> 生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-                 f"扫描板块 {len(sector_codes)} 个 | 候选 {len(candidates)} 只 | "
-                 f"耗时 {elapsed:.0f}s")
+def build_recommendation_policy(regime, expected_date, market_open=False):
+    if market_open:
+        return {
+            "mode": "observation", "max_recommendations": 0,
+            "max_portfolio_pct": 0, "reasons": ["intraday_provisional"],
+        }
+    if not regime or regime.get("score") is None:
+        return {
+            "mode": "observation", "max_recommendations": 0,
+            "max_portfolio_pct": 0, "reasons": ["regime_missing"],
+        }
+    if regime.get("data_date") != expected_date:
+        return {
+            "mode": "observation", "max_recommendations": 0,
+            "max_portfolio_pct": 0, "reasons": ["regime_stale"],
+        }
+    score = float(regime["score"])
+    if score < 60:
+        return {
+            "mode": "observation", "max_recommendations": 0,
+            "max_portfolio_pct": 0, "reasons": ["regime_weak"],
+        }
+    if score < 80:
+        return {
+            "mode": "waiting_trigger", "max_recommendations": 2,
+            "max_portfolio_pct": 30, "reasons": [],
+        }
+    return {
+        "mode": "actionable", "max_recommendations": 5,
+        "max_portfolio_pct": 60, "reasons": [],
+    }
 
+
+def classify_candidates(candidates, policy):
+    eligible = [
+        item for item in candidates
+        if item.get("data_quality", {}).get("eligible", False)
+    ]
+    limit = policy.get("max_recommendations", 0)
+    actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
+    waiting = eligible[:limit] if policy.get("mode") == "waiting_trigger" else []
+    promoted = {item["code"] for item in actionable + waiting}
+    return {
+        "actionable": actionable,
+        "waiting_trigger": waiting,
+        "observation": [
+            item for item in candidates if item.get("code") not in promoted
+        ],
+    }
+
+
+def generate_report(candidates, sector_codes, elapsed, policy, buckets):
+    lines = [
+        "# 每日候选股",
+        "",
+        f"> 生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+        f"扫描板块 {len(sector_codes)} 个 | 候选 {len(candidates)} 只 | "
+        f"耗时 {elapsed:.0f}s",
+        "",
+        f"**推荐模式**: {policy['mode']} | "
+        f"推荐上限 {policy['max_recommendations']} 只 | "
+        f"组合仓位上限 {policy['max_portfolio_pct']}%",
+    ]
     regime = load_regime_context()
-    if regime and regime["score"] is not None:
-        lines.append("")
-        lines.append(f"**市场环境**: {regime['score']} {regime['label']}"
-                     f"(数据 {regime['data_date']}) — {regime.get('advice', '')}")
-        if regime["score"] < 60:
-            lines.append("")
-            lines.append("> ⚠️ **弱势市**:候选仅作观察,不宜建仓,等大盘站回 MA20。")
-
-    lines.append("")
-    if len(candidates) < 20:
-        lines.append("")
-        lines.append(f"> ⚠️ 候选仅 {len(candidates)} 只(目标 20-30):买点稀缺或板块覆盖不足,"
-                     f"可加 `--sectors` 或调低 `--min-score`。")
-
-    lines.append("")
-    lines.append("## 维科夫买点候选")
-    lines.append("")
-    lines.append("| # | 名称(代码) | 板块 | 买点 | 置信度 | 综合分 | 信号 |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for i, s in enumerate(candidates, 1):
-        wk = s.get("wyckoff", {})
-        buy = wk.get("sub_phase", "-")
-        conf = wk.get("confidence", 0)
-        sig = _signal_text(s.get("signals", {}))
-        lines.append(
-            f"| {i} | {s['name']}({s['code']}) | {s['sector_name']} | "
-            f"{buy} | {conf:.0%} | {s['composite_score']:.1f} | {sig} |"
-        )
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append("*候选为维科夫吸筹/拉升买点 + 多维打分排序,需人工复核确认。仅供学习参考,不构成投资建议。*")
+    if regime and regime.get("score") is not None:
+        lines.extend([
+            "",
+            f"**市场环境**: {regime['score']} {regime['label']} "
+            f"(数据 {regime['data_date']}) — {regime.get('advice', '')}",
+        ])
+    if policy.get("reasons"):
+        lines.extend(["", f"> ⚠️ 推荐降级: {', '.join(policy['reasons'])}"])
+    _append_candidate_table(
+        lines, "今日可执行", buckets["actionable"], "今日无可执行推荐。")
+    _append_candidate_table(
+        lines, "等待触发", buckets["waiting_trigger"], "暂无等待触发标的。")
+    _append_candidate_table(
+        lines, "观察池", buckets["observation"], "观察池为空。")
+    lines.extend([
+        "", "---", "",
+        "*候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。*",
+        "",
+        "**本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。**",
+    ])
     return "\n".join(lines)
 
 
-def _generate_html(candidates, sector_codes, elapsed, ts):
+def _html_candidate_rows(items):
+    if not items:
+        return '<tr><td colspan="8">无</td></tr>'
+    rows = []
+    for index, item in enumerate(items, 1):
+        wyckoff = item.get("wyckoff", {})
+        quality = item.get("data_quality", {})
+        rows.append(
+            f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
+            f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
+            f"<td>{item['sector_name']}</td>"
+            f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
+            f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
+            f"<td><strong>{item['composite_score']:.1f}</strong></td>"
+            f"<td>{quality.get('coverage', 0):.0%}</td>"
+            f"<td>{_signal_text(item.get('signals', {}))}</td></tr>"
+        )
+    return "".join(rows)
+
+
+def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets):
     """Lightweight HTML mirror of the MD report."""
     regime = load_regime_context()
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
-
-    rows = ""
-    for i, s in enumerate(candidates, 1):
-        wk = s.get("wyckoff", {})
-        buy = wk.get("sub_phase", "-")
-        conf = wk.get("confidence", 0)
-        sig = _signal_text(s.get("signals", {}))
-        rows += (
-            f"<tr><td>{i}</td><td><strong>{s['name']}</strong><br>"
-            f"<span style='color:#86868b;font-size:12px'>{s['code']}</span></td>"
-            f"<td>{s['sector_name']}</td>"
-            f"<td><span class='buy'>{buy}</span></td>"
-            f"<td>{conf:.0%}</td>"
-            f"<td><strong>{s['composite_score']:.1f}</strong></td>"
-            f"<td>{sig}</td></tr>"
-        )
+    actionable_rows = _html_candidate_rows(buckets["actionable"])
+    waiting_rows = _html_candidate_rows(buckets["waiting_trigger"])
+    observation_rows = _html_candidate_rows(buckets["observation"])
+    policy_note = (
+        f"推荐模式 {policy['mode']} | 推荐上限 "
+        f"{policy['max_recommendations']}只 | 组合仓位上限 "
+        f"{policy['max_portfolio_pct']}%"
+    )
 
     regime_html = ""
     if regime and regime["score"] is not None:
@@ -190,13 +268,32 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <p class="dt">生成 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 扫描板块 {len(sector_codes)} 个 | 候选 {len(candidates)} 只 | 耗时 {elapsed:.0f}s</p>
 {regime_html}
 
-<h2 style="font-size:18px;margin:18px 0 8px">维科夫买点候选</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>信号</th></tr></thead><tbody>
-{rows or '<tr><td colspan="7">无候选(弱市/买点稀缺)</td></tr>'}
-</tbody></table>
+<p class="dt">{policy_note}</p>
+<h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>覆盖率</th><th>信号</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>覆盖率</th><th>信号</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>综合分</th><th>覆盖率</th><th>信号</th></tr></thead><tbody>{observation_rows}</tbody></table>
 
-<footer><p class="disc">候选为维科夫吸筹/拉升买点 + 多维打分排序,需人工复核确认。仅供学习参考,不构成投资建议。</p></footer>
+<footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""
+
+
+def build_json_output(candidates, sector_codes, elapsed, policy, buckets):
+    return {
+        "meta": {
+            "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "sector_count": len(sector_codes),
+            "candidate_count": len(candidates),
+            "elapsed_seconds": round(elapsed, 1),
+        },
+        "policy": policy,
+        "candidates": candidates,
+        "recommendations": buckets["actionable"],
+        "waiting_trigger": buckets["waiting_trigger"],
+        "observation": buckets["observation"],
+    }
 
 
 def main():
@@ -215,6 +312,10 @@ def main():
     args = parser.parse_args()
 
     start = time.time()
+    regime = load_regime_context()
+    expected_date = datetime.now().strftime("%Y-%m-%d")
+    policy = build_recommendation_policy(
+        regime, expected_date, market_open=is_trading_hours())
 
     # 板块来源
     if args.sectors:
@@ -241,24 +342,17 @@ def main():
     scored = [s for s in scored if s["composite_score"] >= args.min_score]
     scored.sort(key=lambda x: x["composite_score"], reverse=True)
     candidates = scored[:args.top]
+    buckets = classify_candidates(candidates, policy)
 
     elapsed = time.time() - start
 
     if args.json:
-        out = {
-            "meta": {
-                "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
-                "sector_count": len(sector_codes),
-                "candidate_count": len(candidates),
-                "elapsed_seconds": round(elapsed, 1),
-            },
-            "candidates": candidates,
-        }
+        out = build_json_output(candidates, sector_codes, elapsed, policy, buckets)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
     # 报告
-    report = generate_report(candidates, sector_codes, elapsed)
+    report = generate_report(candidates, sector_codes, elapsed, policy, buckets)
     print(report)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -268,7 +362,8 @@ def main():
 
     if args.html:
         try:
-            html = _generate_html(candidates, sector_codes, elapsed, ts)
+            html = _generate_html(
+                candidates, sector_codes, elapsed, ts, policy, buckets)
             html_path = REPORTS_DIR / f"candidates-{ts}.html"
             html_path.write_text(html, encoding="utf-8")
             print(f"HTML: {html_path}")

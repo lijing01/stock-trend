@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Tests for /candidates recommendation policy."""
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+
+from scans.daily_candidates import (
+    _generate_html,
+    build_json_output,
+    build_recommendation_policy,
+    classify_candidates,
+    generate_report,
+)
+
+
+def candidate(code, eligible=True):
+    return {
+        "code": code,
+        "name": f"测试{code}",
+        "sector_name": "测试板块",
+        "composite_score": 80.0,
+        "wyckoff": {"sub_phase": "LPS", "confidence": 0.6},
+        "signals": {},
+        "data_quality": {
+            "eligible": eligible,
+            "coverage": 0.8 if eligible else 0.55,
+            "reasons": [] if eligible else ["coverage_below_70pct"],
+        },
+    }
+
+
+class TestRecommendationPolicy(unittest.TestCase):
+    def test_missing_regime_allows_observation_only(self):
+        policy = build_recommendation_policy(None, "2026-08-06")
+        self.assertEqual(policy["mode"], "observation")
+        self.assertEqual(policy["max_recommendations"], 0)
+
+    def test_stale_regime_allows_observation_only(self):
+        regime = {"score": 90, "data_date": "2026-08-05"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        self.assertEqual(policy["mode"], "observation")
+        self.assertIn("regime_stale", policy["reasons"])
+
+    def test_weak_regime_allows_observation_only(self):
+        regime = {"score": 59, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        self.assertEqual(policy["mode"], "observation")
+
+    def test_intraday_output_is_provisional_observation(self):
+        regime = {"score": 90, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(
+            regime, "2026-08-06", market_open=True)
+        self.assertEqual(policy["mode"], "observation")
+        self.assertIn("intraday_provisional", policy["reasons"])
+
+    def test_neutral_regime_limits_waiting_list_to_two(self):
+        regime = {"score": 70, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        buckets = classify_candidates(
+            [candidate("1"), candidate("2"), candidate("3")], policy)
+        self.assertEqual(policy["mode"], "waiting_trigger")
+        self.assertEqual(len(buckets["waiting_trigger"]), 2)
+        self.assertEqual(len(buckets["observation"]), 1)
+
+    def test_strong_regime_never_promotes_ineligible_candidate(self):
+        regime = {"score": 85, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        buckets = classify_candidates(
+            [candidate("1"), candidate("2", eligible=False)], policy)
+        self.assertEqual([item["code"] for item in buckets["actionable"]], ["1"])
+        self.assertEqual([item["code"] for item in buckets["observation"]], ["2"])
+
+    def test_report_renders_all_buckets_and_full_disclaimer(self):
+        policy = {
+            "mode": "actionable",
+            "max_recommendations": 5,
+            "max_portfolio_pct": 60,
+            "reasons": [],
+        }
+        buckets = {
+            "actionable": [candidate("1")],
+            "waiting_trigger": [],
+            "observation": [candidate("2", eligible=False)],
+        }
+        report = generate_report(
+            buckets["actionable"] + buckets["observation"],
+            [("BK1", "测试板块", 80)],
+            1.0,
+            policy,
+            buckets,
+        )
+        self.assertIn("## 今日可执行", report)
+        self.assertIn("## 等待触发", report)
+        self.assertIn("## 观察池", report)
+        self.assertIn("股市有风险，投资需谨慎", report)
+
+    def test_html_renders_all_buckets_and_full_disclaimer(self):
+        policy = {
+            "mode": "actionable",
+            "max_recommendations": 5,
+            "max_portfolio_pct": 60,
+            "reasons": [],
+        }
+        buckets = {
+            "actionable": [candidate("1")],
+            "waiting_trigger": [],
+            "observation": [candidate("2", eligible=False)],
+        }
+        html = _generate_html(
+            buckets["actionable"] + buckets["observation"],
+            [("BK1", "测试板块", 80)],
+            1.0,
+            "20260806-160000",
+            policy,
+            buckets,
+        )
+        self.assertIn("今日可执行", html)
+        self.assertIn("等待触发", html)
+        self.assertIn("观察池", html)
+        self.assertIn("股市有风险，投资需谨慎", html)
+
+    def test_json_output_keeps_candidates_and_adds_action_buckets(self):
+        items = [candidate("1")]
+        policy = {
+            "mode": "actionable",
+            "max_recommendations": 5,
+            "max_portfolio_pct": 60,
+            "reasons": [],
+        }
+        buckets = {
+            "actionable": items,
+            "waiting_trigger": [],
+            "observation": [],
+        }
+        output = build_json_output(items, [("BK1", "测试板块", 80)],
+                                   1.0, policy, buckets)
+        self.assertEqual(output["candidates"], items)
+        self.assertEqual(output["recommendations"], items)
+        self.assertEqual(output["waiting_trigger"], [])
+        self.assertEqual(output["observation"], [])
+        self.assertEqual(output["policy"], policy)
+
+
+def run_daily_candidates_tests():
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(TestRecommendationPolicy)
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    failed = len(result.failures) + len(result.errors)
+    return result.testsRun - failed, failed
+
+
+if __name__ == "__main__":
+    _, failed = run_daily_candidates_tests()
+    raise SystemExit(1 if failed else 0)
