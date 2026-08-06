@@ -11,8 +11,8 @@ SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPT_DIR))
 
-import eastmoney_utils as emu
-import fetch_kline_eastmoney as fke
+from core import eastmoney_utils as emu
+from fetchers import kline_eastmoney as fke
 import test_golden as tg
 
 PASSED = 0
@@ -120,6 +120,38 @@ def test_diff_output_ignores_volatile_error_fields():
     test("macro diff ignores fetch_time and error string churn", len(diffs) == 0, str(diffs[:2]))
 
 
+def test_diff_output_warns_when_live_source_is_unavailable():
+    cases = [
+        (
+            "macro_snapshot.json",
+            {"summary": {"data_quality": "good"}, "data": {"pmi": 50.3}},
+            {"summary": {"data_quality": "error"}, "data": {}},
+        ),
+        (
+            "fundamental.json",
+            {"summary": {"data_quality": "good"}, "data": {"pe_ttm": 20}},
+            {"summary": {"data_quality": "error"}, "data": {}},
+        ),
+        (
+            "capital_flow.json",
+            {"meta": {"data_source": "eastmoney"}, "data": [{"date": "20260805"}]},
+            {"meta": {"data_source": "error"}, "data": []},
+        ),
+        (
+            "etf_data.json",
+            {"fund_code": "513180", "fund_name": "测试ETF", "nav": {"nav": 1.0}},
+            {"fund_code": "513180", "data_source": "eastmoney", "errors": ["network unavailable"]},
+        ),
+    ]
+    for output_name, golden, current in cases:
+        diffs = tg.diff_output(output_name, golden, current, base_config())
+        test(
+            f"{output_name} unavailable live source is warning",
+            bool(diffs) and all(item["severity"] == "warning" for item in diffs),
+            str(diffs[:2]),
+        )
+
+
 def test_diff_output_aligns_kline_and_normalizes_volume_units():
     golden = {
         "meta": {"data_source": "baostock", "record_count": 2},
@@ -169,6 +201,7 @@ def main():
     print("=" * 60)
     test_fetch_eastmoney_supports_no_proxy_fallback()
     test_diff_output_ignores_volatile_error_fields()
+    test_diff_output_warns_when_live_source_is_unavailable()
     test_diff_output_aligns_kline_and_normalizes_volume_units()
     test_diff_output_scores_uses_stable_semantics()
     total = PASSED + FAILED

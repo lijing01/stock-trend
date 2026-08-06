@@ -195,7 +195,7 @@ def run_fetch_tests():
         ("kline_600519.SH_D_qfq", _build_synthetic_kline("600519.SH")),
         ("kline_000001.SZ_D_qfq", _build_synthetic_kline("000001.SZ")),
         ("kline_513180.SH_D_qfq", _build_synthetic_kline("513180.SH", asset="FD")),
-        ("kline_00700.HK_D_qfq", _build_synthetic_kline("00700.HK")),
+        ("kline_00700.HK_D_none", _build_synthetic_kline("00700.HK")),
         ("kline_600519.SH_W_qfq", _build_synthetic_kline("600519.SH", days=104)),
     ]:
         _write_cache_entry(cache_dir, cache_key, data)
@@ -774,7 +774,8 @@ def run_new_script_tests(tmpdir):
             valid_content = f.read()
     test(
         "TF-RPT-STALE-05: 有效K线当前价优先于旧technical",
-        "| 当前价 | 7.80 |" in valid_content and "| 当前价 | 7.46 |" not in valid_content,
+        "| 当前价 | 7.80 (2026-01-02) |" in valid_content
+        and "| 当前价 | 7.46" not in valid_content,
         valid_content[:500] if valid_content else f"exit_code={rc}, stderr={stderr[:200]}",
         "report",
     )

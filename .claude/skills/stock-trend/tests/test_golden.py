@@ -366,6 +366,20 @@ def _normalize_scores(data):
     }
 
 
+def _live_output_unavailable(output_name, data):
+    if output_name in ("macro_snapshot.json", "fundamental.json"):
+        return data.get("summary", {}).get("data_quality") == "error"
+    if output_name == "capital_flow.json":
+        return data.get("meta", {}).get("data_source") == "error"
+    if output_name == "etf_data.json":
+        return (
+            bool(data.get("errors"))
+            and not data.get("fund_name")
+            and not data.get("nav")
+        )
+    return False
+
+
 def _diff_kline(golden_data, current_data, config, asset_type=None):
     golden_rows = {r.get("trade_date"): r for r in golden_data.get("data", []) if r.get("trade_date")}
     current_rows = {r.get("trade_date"): r for r in current_data.get("data", []) if r.get("trade_date")}
@@ -428,6 +442,14 @@ def _diff_kline(golden_data, current_data, config, asset_type=None):
 
 def diff_output(output_name, golden_data, current_data, config, asset_type=None):
     """Diff output files using stable semantics per file type."""
+    if _live_output_unavailable(output_name, current_data):
+        return [{
+            "category": VALUE_CHANGE,
+            "path": "availability",
+            "detail": "current live source unavailable; semantic diff deferred",
+            "severity": "warning",
+        }]
+
     if output_name == "kline.json":
         return _diff_kline(golden_data, current_data, config, asset_type)
 

@@ -58,7 +58,7 @@ P0 明确不做以下变化：
 - Modify: `.claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py:76-91`
 - Test: `.claude/skills/stock-trend/tests/test_wyckoff_backtest.py:96-106`
 
-- [ ] **Step 1: 写精确收益失败测试**
+- [x] **Step 1: 写精确收益失败测试**
 
 将现有 `test_forward_return()` 替换为：
 
@@ -74,7 +74,7 @@ def test_forward_return():
          f"got={result}, expected={expected}")
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -84,7 +84,7 @@ python3 .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
 
 Expected: `WBT-07` FAIL，实际值使用索引 9 的收盘价。
 
-- [ ] **Step 3: 修正 `_forward_return`**
+- [x] **Step 3: 修正 `_forward_return`**
 
 用以下完整函数替换原实现：
 
@@ -104,7 +104,7 @@ def _forward_return(kline, now_idx, target_date):
     return None
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run:
 
@@ -114,7 +114,7 @@ python3 .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
 
 Expected: `WBT-07` PASS，测试套件零失败。
 
-- [ ] **Step 5: 提交 R0-A 的第一部分**
+- [x] **Step 5: 提交 R0-A 的第一部分**
 
 ```bash
 git add .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
@@ -129,7 +129,7 @@ git commit -m "fix(backtest): use target-date close"
 - Modify: `.claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py:257-285`
 - Test: `.claude/skills/stock-trend/tests/test_wyckoff_backtest.py:133-158`
 
-- [ ] **Step 1: 写无可识别阶段时仍有基准的失败测试**
+- [x] **Step 1: 写无可识别阶段时仍有基准的失败测试**
 
 在测试文件顶部增加：
 
@@ -168,7 +168,7 @@ def test_baseline_does_not_depend_on_phase_detection():
 
 把后续测试编号顺延，并在 `run_wyckoff_backtest_tests()` 中调用该测试。
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -178,7 +178,7 @@ python3 .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
 
 Expected: 新基准测试 FAIL，`baseline` 为 `None`。
 
-- [ ] **Step 3: 将基准计算移到阶段识别之前**
+- [x] **Step 3: 将基准计算移到阶段识别之前**
 
 用以下循环主体替换 `run_backtest()` 中 `for sidx in sample_indices:` 对应部分：
 
@@ -212,7 +212,7 @@ Expected: 新基准测试 FAIL，`baseline` 为 `None`。
                 per_stock_raw[s["ts_code"]].append((sidx, date, sig, fwd))
 ```
 
-- [ ] **Step 4: 运行维科夫回测测试**
+- [x] **Step 4: 运行维科夫回测测试**
 
 Run:
 
@@ -222,7 +222,7 @@ python3 .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
 
 Expected: 全部 PASS，零信号时 `baseline.count > 0`。
 
-- [ ] **Step 5: 提交 R0-A 的第二部分**
+- [x] **Step 5: 提交 R0-A 的第二部分**
 
 ```bash
 git add .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
@@ -237,7 +237,7 @@ git commit -m "fix(backtest): decouple baseline from signals"
 - Create: `.claude/skills/stock-trend/scripts/core/recommendation_quality.py`
 - Create: `.claude/skills/stock-trend/tests/test_recommendation_quality.py`
 
-- [ ] **Step 1: 写数据质量失败测试**
+- [x] **Step 1: 写数据质量失败测试**
 
 创建测试文件：
 
@@ -315,7 +315,7 @@ if __name__ == "__main__":
     raise SystemExit(1 if failed else 0)
 ```
 
-- [ ] **Step 2: 运行测试确认模块不存在**
+- [x] **Step 2: 运行测试确认模块不存在**
 
 Run:
 
@@ -325,7 +325,7 @@ python3 .claude/skills/stock-trend/tests/test_recommendation_quality.py
 
 Expected: FAIL with `ModuleNotFoundError: core.recommendation_quality`。
 
-- [ ] **Step 3: 创建纯函数模块**
+- [x] **Step 3: 创建纯函数模块**
 
 创建实现文件：
 
@@ -409,7 +409,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
     }
 ```
 
-- [ ] **Step 4: 运行模块测试确认通过**
+- [x] **Step 4: 运行模块测试确认通过**
 
 Run:
 
@@ -419,7 +419,7 @@ python3 .claude/skills/stock-trend/tests/test_recommendation_quality.py
 
 Expected: 5 tests PASS。
 
-- [ ] **Step 5: 提交 R0-B 的质量模块**
+- [x] **Step 5: 提交 R0-B 的质量模块**
 
 ```bash
 git add .claude/skills/stock-trend/scripts/core/recommendation_quality.py .claude/skills/stock-trend/tests/test_recommendation_quality.py
@@ -434,7 +434,7 @@ git commit -m "feat(candidates): assess recommendation data quality"
 - Modify: `.claude/skills/stock-trend/scripts/scans/stock_scanner.py:20-30,580-735`
 - Test: `.claude/skills/stock-trend/tests/test_stock_scanner.py:88-165`
 
-- [ ] **Step 1: 写复合分不变、资格随质量变化的失败测试**
+- [x] **Step 1: 写复合分不变、资格随质量变化的失败测试**
 
 在 `TestRunPhase2Funnel` 中增加：
 
@@ -491,7 +491,7 @@ git commit -m "feat(candidates): assess recommendation data quality"
         self.assertIn("kline_stale", result[0]["data_quality"]["reasons"])
 ```
 
-- [ ] **Step 2: 运行测试确认接口不存在**
+- [x] **Step 2: 运行测试确认接口不存在**
 
 Run:
 
@@ -501,7 +501,7 @@ python3 .claude/skills/stock-trend/tests/test_stock_scanner.py -v
 
 Expected: FAIL，`run_phase2()` 不接受 `as_of_date`。
 
-- [ ] **Step 3: 集成质量评估但保持原始评分**
+- [x] **Step 3: 集成质量评估但保持原始评分**
 
 增加导入：
 
@@ -533,7 +533,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             "data_quality": data_quality,
 ```
 
-- [ ] **Step 4: 运行扫描器测试确认通过**
+- [x] **Step 4: 运行扫描器测试确认通过**
 
 Run:
 
@@ -543,7 +543,7 @@ python3 .claude/skills/stock-trend/tests/test_stock_scanner.py -v
 
 Expected: 全部 PASS；原复合分断言保持不变。
 
-- [ ] **Step 5: 提交 R0-B 集成**
+- [x] **Step 5: 提交 R0-B 集成**
 
 ```bash
 git add .claude/skills/stock-trend/scripts/scans/stock_scanner.py .claude/skills/stock-trend/tests/test_stock_scanner.py
@@ -558,7 +558,7 @@ git commit -m "feat(candidates): attach data quality metadata"
 - Create: `.claude/skills/stock-trend/tests/test_daily_candidates.py`
 - Modify: `.claude/skills/stock-trend/scripts/scans/daily_candidates.py:77-199,235-276`
 
-- [ ] **Step 1: 写推荐政策失败测试**
+- [x] **Step 1: 写推荐政策失败测试**
 
 创建测试文件：
 
@@ -677,7 +677,7 @@ if __name__ == "__main__":
     raise SystemExit(1 if failed else 0)
 ```
 
-- [ ] **Step 2: 运行测试确认函数不存在**
+- [x] **Step 2: 运行测试确认函数不存在**
 
 Run:
 
@@ -687,7 +687,7 @@ python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
 
 Expected: FAIL with missing imports。
 
-- [ ] **Step 3: 实现推荐政策纯函数**
+- [x] **Step 3: 实现推荐政策纯函数**
 
 在 `load_regime_context()` 后增加：
 
@@ -762,7 +762,7 @@ def classify_candidates(candidates, policy):
     }
 ```
 
-- [ ] **Step 4: 将政策接入主流程与 JSON**
+- [x] **Step 4: 将政策接入主流程与 JSON**
 
 在模块导入区增加：
 
@@ -940,7 +940,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets):
     )
 ```
 
-- [ ] **Step 5: 运行政策测试**
+- [x] **Step 5: 运行政策测试**
 
 Run:
 
@@ -950,7 +950,7 @@ python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
 
 Expected: 7 tests PASS。
 
-- [ ] **Step 6: 提交 R0-C**
+- [x] **Step 6: 提交 R0-C**
 
 ```bash
 git add .claude/skills/stock-trend/scripts/scans/daily_candidates.py .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -966,7 +966,7 @@ git commit -m "feat(candidates): gate recommendations by regime"
 - Modify: `.claude/skills/stock-trend/scripts/scans/daily_candidates.py:35-61,235-243`
 - Test: `.claude/skills/stock-trend/tests/test_daily_candidates.py`
 
-- [ ] **Step 1: 写绝对热点与扩池失败测试**
+- [x] **Step 1: 写绝对热点与扩池失败测试**
 
 在 `test_daily_candidates.py` 增加导入：
 
@@ -1016,7 +1016,7 @@ from scans import daily_candidates as dc
         self.assertEqual({item["code"] for item in scored}, {"1", "2"})
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run:
 
@@ -1026,7 +1026,7 @@ python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
 
 Expected: 热点阈值和新扫描参数测试 FAIL。
 
-- [ ] **Step 3: 同时保存绝对分与相对分**
+- [x] **Step 3: 同时保存绝对分与相对分**
 
 在 `rank_hot_sectors()` 中用以下代码替换打分与归一化部分：
 
@@ -1050,7 +1050,7 @@ Expected: 热点阈值和新扫描参数测试 FAIL。
     return sectors[:top_n]
 ```
 
-- [ ] **Step 4: 让 `min_hot` 使用绝对热度**
+- [x] **Step 4: 让 `min_hot` 使用绝对热度**
 
 用以下完整函数替换 `pick_hot_sectors()`：
 
@@ -1070,7 +1070,7 @@ def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10):
     ]
 ```
 
-- [ ] **Step 5: 按过滤后有效数量决定是否停止扩池**
+- [x] **Step 5: 按过滤后有效数量决定是否停止扩池**
 
 用以下完整函数替换 `scan_sectors()`：
 
@@ -1111,7 +1111,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
 
 主流程调用增加 `min_score=args.min_score`。
 
-- [ ] **Step 6: 运行每日候选测试**
+- [x] **Step 6: 运行每日候选测试**
 
 Run:
 
@@ -1121,7 +1121,7 @@ python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
 
 Expected: 9 tests PASS。
 
-- [ ] **Step 7: 提交 R0-D**
+- [x] **Step 7: 提交 R0-D**
 
 ```bash
 git add .claude/skills/stock-trend/scripts/fetchers/sector_data.py .claude/skills/stock-trend/scripts/scans/daily_candidates.py .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -1137,7 +1137,7 @@ git commit -m "fix(candidates): enforce absolute heat floor"
 - Modify: `.claude/skills/stock-trend/SKILL.md:271-288`
 - Modify: `docs/daily-recommendation-optimization.md`
 
-- [ ] **Step 1: 将新增测试接入主测试入口**
+- [x] **Step 1: 将新增测试接入主测试入口**
 
 在 `run_backtest_integration_tests()` 后增加：
 
@@ -1165,7 +1165,7 @@ def run_daily_recommendation_tests():
         run_daily_recommendation_tests()
 ```
 
-- [ ] **Step 2: 更新 `/candidates` 输出契约**
+- [x] **Step 2: 更新 `/candidates` 输出契约**
 
 将 `SKILL.md` 的 `/candidates` 输出说明更新为：
 
@@ -1181,7 +1181,7 @@ def run_daily_recommendation_tests():
 
 在 `docs/daily-recommendation-optimization.md` 的实施顺序后增加 P0 状态表，四个批次未执行时统一标记“计划完成，待实施”。
 
-- [ ] **Step 3: 运行针对性测试**
+- [x] **Step 3: 运行针对性测试**
 
 Run:
 
@@ -1194,7 +1194,7 @@ python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
 
 Expected: 全部测试零失败。
 
-- [ ] **Step 4: 运行仓库强制质量门**
+- [x] **Step 4: 运行仓库强制质量门**
 
 Run:
 
@@ -1205,7 +1205,7 @@ python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 
 Expected: 两条命令退出码均为 0；不得为了消除失败而重生成 golden 快照。
 
-- [ ] **Step 5: 核对 JSON 契约的单元测试覆盖**
+- [x] **Step 5: 核对 JSON 契约的单元测试覆盖**
 
 Run:
 
@@ -1221,7 +1221,7 @@ Expected:
 - 弱势、过期和缺失环境的 `mode` 均为 `observation`。
 - 数据质量测试覆盖 `as_of_date/coverage/eligible/reasons`。
 
-- [ ] **Step 6: 提交 P0 文档和测试入口**
+- [x] **Step 6: 提交 P0 文档和测试入口**
 
 ```bash
 git add .claude/skills/stock-trend/tests/test_stock_trend.py .claude/skills/stock-trend/SKILL.md docs/daily-recommendation-optimization.md
@@ -1234,16 +1234,16 @@ git commit -m "docs(candidates): define recommendation gates"
 
 只有同时满足以下条件，P0 才能标记完成：
 
-- [ ] 精确前向收益测试验证目标交易日收盘价。
-- [ ] 全样本基准不依赖维科夫阶段识别成功。
-- [ ] 候选输出包含数据日期、覆盖率、资格和原因。
-- [ ] 原始 `composite_score` 在 P0 中不因质量模块改变。
-- [ ] 市场环境缺失、过期或低于 60 分时正式推荐为空。
-- [ ] 中性环境最多 2 只等待触发，强势环境最多 5 只可执行。
-- [ ] 相对最强但绝对弱势的板块不能通过热点门槛。
-- [ ] 扩池停止条件使用最低分和数据资格过滤后的数量。
-- [ ] 现有 `candidates` JSON 字段保持兼容。
-- [ ] 两条仓库质量门均通过，且 golden 快照未被无理由重生成。
+- [x] 精确前向收益测试验证目标交易日收盘价。
+- [x] 全样本基准不依赖维科夫阶段识别成功。
+- [x] 候选输出包含数据日期、覆盖率、资格和原因。
+- [x] 原始 `composite_score` 在 P0 中不因质量模块改变。
+- [x] 市场环境缺失、过期或低于 60 分时正式推荐为空。
+- [x] 中性环境最多 2 只等待触发，强势环境最多 5 只可执行。
+- [x] 相对最强但绝对弱势的板块不能通过热点门槛。
+- [x] 扩池停止条件使用最低分和数据资格过滤后的数量。
+- [x] 现有 `candidates` JSON 字段保持兼容。
+- [x] 两条仓库质量门均通过，且 golden 快照未被无理由重生成。
 
 ## 后续计划拆分
 
