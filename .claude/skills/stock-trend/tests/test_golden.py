@@ -370,7 +370,14 @@ def _live_output_unavailable(output_name, data):
     if output_name in ("macro_snapshot.json", "fundamental.json"):
         return data.get("summary", {}).get("data_quality") == "error"
     if output_name == "capital_flow.json":
-        return data.get("meta", {}).get("data_source") == "error"
+        if data.get("meta", {}).get("data_source") == "error":
+            return True
+        extended = data.get("data_extended") or {}
+        return (
+            bool(data.get("warnings"))
+            and not extended.get("northbound_individual")
+            and not extended.get("northbound_market")
+        )
     if output_name == "etf_data.json":
         return (
             bool(data.get("errors"))
@@ -476,7 +483,12 @@ def diff_output(output_name, golden_data, current_data, config, asset_type=None)
     if normalizer:
         golden_data = normalizer(golden_data)
         current_data = normalizer(current_data)
-    return deep_diff(golden_data, current_data, "", config)
+    diffs = deep_diff(golden_data, current_data, "", config)
+    if output_name == "scores.json":
+        for item in diffs:
+            if item["path"].startswith("automated_source_keys"):
+                item["severity"] = "warning"
+    return diffs
 
 
 def get_symbol_dir_name(symbol):

@@ -152,6 +152,50 @@ def test_diff_output_warns_when_live_source_is_unavailable():
         )
 
 
+def test_diff_output_warns_for_partial_live_source_availability():
+    capital_golden = {
+        "meta": {"data_source": "eastmoney"},
+        "data": [{"date": "20260805"}],
+        "data_extended": {
+            "northbound_individual": {"hold_shares": 100},
+            "northbound_market": [{"net_buy_billion": 1.0}],
+        },
+    }
+    capital_current = {
+        "meta": {"data_source": "kline_estimate"},
+        "data": [{"date": "20260805"}],
+        "data_extended": {},
+        "warnings": ["northbound source unavailable"],
+    }
+    capital_diffs = tg.diff_output(
+        "capital_flow.json", capital_golden, capital_current, base_config())
+    test(
+        "capital optional live source outage is warning",
+        bool(capital_diffs)
+        and all(item["severity"] == "warning" for item in capital_diffs),
+        str(capital_diffs[:2]),
+    )
+
+    score_golden = {
+        "direction_detail": "震荡",
+        "confidence": "低",
+        "automated_sources": {"macro": {}, "sentiment": {}, "wyckoff": {}},
+    }
+    score_current = {
+        "direction_detail": "震荡",
+        "confidence": "低",
+        "automated_sources": {"macro": {}, "wyckoff": {}},
+    }
+    score_diffs = tg.diff_output(
+        "scores.json", score_golden, score_current, base_config())
+    test(
+        "score source availability drift is warning",
+        bool(score_diffs)
+        and all(item["severity"] == "warning" for item in score_diffs),
+        str(score_diffs[:2]),
+    )
+
+
 def test_diff_output_aligns_kline_and_normalizes_volume_units():
     golden = {
         "meta": {"data_source": "baostock", "record_count": 2},
@@ -202,6 +246,7 @@ def main():
     test_fetch_eastmoney_supports_no_proxy_fallback()
     test_diff_output_ignores_volatile_error_fields()
     test_diff_output_warns_when_live_source_is_unavailable()
+    test_diff_output_warns_for_partial_live_source_availability()
     test_diff_output_aligns_kline_and_normalizes_volume_units()
     test_diff_output_scores_uses_stable_semantics()
     total = PASSED + FAILED
