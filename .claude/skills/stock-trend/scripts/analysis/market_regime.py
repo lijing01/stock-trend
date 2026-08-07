@@ -27,7 +27,6 @@ import json
 import os
 import sys
 import time
-from collections import defaultdict
 from datetime import datetime, date
 from pathlib import Path
 
@@ -39,6 +38,7 @@ PORTFOLIO_YAML = SCRIPT_DIR.parent / "data" / "portfolio.yaml"
 CONTEXT_FILE = CACHE_DIR / "market_regime.json"
 HISTORY_FILE = CACHE_DIR / "market_regime_history.json"
 HISTORY_MAX_DAYS = 30
+MIN_AMOUNT_HISTORY_DAYS = 5
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -76,14 +76,20 @@ def _sort_kline(records: list[dict]) -> list[dict]:
     return records
 
 
-def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2) -> list[dict]:
+def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2,
+                      diagnostics: dict | None = None) -> list[dict]:
     """Fetch index daily K-line, ascending by trade_date.
 
-    降级链同 kline_eastmoney CLI: 东财(push2his 3节点轮换) → BaoStock.
-    本环境东财指数K线节点不稳,BaoStock(sh.000001/sz.399001)是可靠兜底.
+    降级链: 东财(push2his 节点轮换) → 腾讯 → BaoStock.
     """
-    from fetchers.kline_eastmoney import fetch_eastmoney, fetch_baostock
+    from fetchers.kline_eastmoney import (
+        fetch_baostock,
+        fetch_eastmoney,
+        fetch_tencent_a_stock,
+    )
     from core.eastmoney_utils import build_secid, rotate_em_host
+    status = diagnostics if diagnostics is not None else {}
+    errors = []
     secid = build_secid(code)
     if secid:
         for _attempt in range(max(1, retries)):
@@ -92,14 +98,44 @@ def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2) -> list[dict]:
                     lambda h: fetch_eastmoney(secid, freq="D", lmt=lmt, host=h))
                 records = _sort_kline(records)
                 if records:
+                    status.update({
+                        "source": "eastmoney",
+                        "record_count": len(records),
+                        "data_date": records[-1]["trade_date"],
+                        "errors": errors,
+                    })
                     return records
-            except Exception:
+            except Exception as exc:
+                errors.append(f"eastmoney: {exc}")
                 continue
     try:
+        records, _name = fetch_tencent_a_stock(code, "D")
+        records = _sort_kline(records)[-lmt:]
+        if records:
+            status.update({
+                "source": "tencent",
+                "record_count": len(records),
+                "data_date": records[-1]["trade_date"],
+                "errors": errors,
+            })
+            return records
+    except Exception as exc:
+        errors.append(f"tencent: {exc}")
+    try:
         records, _name = fetch_baostock(code, "D")
-        return _sort_kline(records)
-    except Exception:
-        pass
+        records = _sort_kline(records)[-lmt:]
+        if records:
+            status.update({
+                "source": "baostock",
+                "record_count": len(records),
+                "data_date": records[-1]["trade_date"],
+                "errors": errors,
+            })
+            return records
+    except Exception as exc:
+        errors.append(f"baostock: {exc}")
+    status.update({"source": "error", "record_count": 0,
+                   "data_date": "", "errors": errors})
     return []
 
 
@@ -244,8 +280,12 @@ def score_volume(today_amount_yi: float | None, amount_history_yi: list[float]) 
     if not today_amount_yi or today_amount_yi <= 0:
         return {"score": 50.0, "detail": "成交额不可用"}
     hist = [a for a in amount_history_yi if a > 0][-20:]
-    if not hist:
-        return {"score": 50.0, "detail": "成交额历史不足"}
+    if len(hist) < MIN_AMOUNT_HISTORY_DAYS:
+        return {
+            "score": 50.0,
+            "detail": f"两市 {today_amount_yi:.0f}亿,成交额历史不足 "
+                      f"{len(hist)}/{MIN_AMOUNT_HISTORY_DAYS}",
+        }
     base = sum(hist) / len(hist)
     ratio = today_amount_yi / base
     score = _clamp(50 + (ratio - 1.0) * 150)
@@ -356,6 +396,46 @@ def load_history(days: int = 30) -> dict:
     except Exception:
         pass
     return {}
+
+
+def previous_amounts(history: dict, before_date: str,
+                     fetched: dict | None = None) -> list[float]:
+    """Return prior turnover values, preferring freshly fetched dates."""
+    by_date = {}
+    for history_date, entry in sorted(history.items()):
+        if history_date >= before_date or not isinstance(entry, dict):
+            continue
+        amount = _safe_float(entry.get("amount_yi"))
+        if amount > 0:
+            by_date[history_date] = amount
+    for raw_date, raw_amount in (fetched or {}).items():
+        iso_date = (f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+                    if len(raw_date) == 8 else raw_date)
+        amount = _safe_float(raw_amount)
+        if iso_date < before_date and amount > 0:
+            by_date[iso_date] = amount
+    return [by_date[key] for key in sorted(by_date)]
+
+
+def complete_market_amounts(index_rows: dict) -> dict[str, float]:
+    """Sum turnover only for dates reported by both Shanghai and Shenzhen."""
+    by_market = {}
+    for code in AMOUNT_INDEX_CODES:
+        values = {}
+        for row in index_rows.get(code, []):
+            trade_date = row.get("trade_date")
+            amount = _safe_float(row.get("amount"))
+            if trade_date and amount > 0:
+                values[trade_date] = amount / 1e8
+        by_market[code] = values
+    complete_dates = set.intersection(*(
+        set(by_market[code]) for code in AMOUNT_INDEX_CODES
+    ))
+    return {
+        trade_date: sum(by_market[code][trade_date]
+                        for code in AMOUNT_INDEX_CODES)
+        for trade_date in sorted(complete_dates)
+    }
 
 
 def save_history(entry: dict) -> None:
@@ -523,7 +603,7 @@ def generate_report(ctx: dict) -> str:
     lines.append("")
 
     lines.append("---")
-    lines.append(f"> *数据来源: 东方财富 + AKShare | {DISCLAIMER}*")
+    lines.append(f"> *数据来源: 东方财富/腾讯 + AKShare | {DISCLAIMER}*")
     return "\n".join(lines)
 
 
@@ -563,19 +643,27 @@ def build_plan(regime: dict, holdings: list[dict]) -> list[str]:
 def collect_context() -> dict:
     """拉数据 → 评分 → 组装今日上下文."""
     # 指数
-    index_metrics = {}
-    for code in TREND_INDEX_CODES:
-        index_metrics[code] = _index_metrics(fetch_index_kline(code))
-    # 成交额历史(近20日两市合计)来自指数K线,无需历史文件
-    amount_hist = defaultdict(float)
-    for code in AMOUNT_INDEX_CODES:
-        for r in fetch_index_kline(code, lmt=60):
-            if r.get("trade_date"):
-                amount_hist[r["trade_date"]] += _safe_float(r.get("amount")) / 1e8
-    amount_dates = sorted(amount_hist.keys())
-    amount_history_yi = [amount_hist[d] for d in amount_dates]
-    today_amount_yi = amount_history_yi[-1] if amount_history_yi else None
-    raw_date = amount_dates[-1] if amount_dates else date.today().strftime("%Y%m%d")
+    index_codes = list(dict.fromkeys(TREND_INDEX_CODES + AMOUNT_INDEX_CODES))
+    index_rows = {}
+    index_diagnostics = {}
+    for code in index_codes:
+        diagnostics = {}
+        index_rows[code] = fetch_index_kline(code, lmt=80,
+                                             diagnostics=diagnostics)
+        index_diagnostics[code] = diagnostics
+    index_metrics = {
+        code: _index_metrics(index_rows.get(code, []))
+        for code in TREND_INDEX_CODES
+    }
+    # 成交额历史优先使用指数K线；腾讯仅提供当日额时补持久化历史。
+    amount_hist = complete_market_amounts(index_rows)
+    index_dates = [
+        row["trade_date"]
+        for rows in index_rows.values() for row in rows
+        if row.get("trade_date")
+    ]
+    raw_date = max(index_dates) if index_dates else date.today().strftime("%Y%m%d")
+    today_amount_yi = amount_hist.get(raw_date)
     # 归一为 ISO YYYY-MM-DD
     try:
         data_date = datetime.strptime(raw_date, "%Y%m%d").strftime("%Y-%m-%d")
@@ -587,6 +675,7 @@ def collect_context() -> dict:
     activity = fetch_market_activity()
 
     history = load_history()
+    amount_history_yi = previous_amounts(history, data_date, amount_hist)
     history_zt_counts = [int(h.get("zt", {}).get("count", 0)) for h in history.values()]
 
     # 北向(不可用降级到全市场主力净流入)
@@ -629,12 +718,30 @@ def collect_context() -> dict:
             }
             for code, m in index_metrics.items()
         },
+        "index_data_quality": index_diagnostics,
         "top_sectors": top_sectors,
         "bottom_sectors": bottom_sectors,
         "holdings": holdings,
         "plan": build_plan(regime, holdings),
     }
     return ctx
+
+
+def build_agent_output(ctx: dict) -> dict:
+    """Build the compact JSON contract consumed by agents."""
+    return {
+        "meta": {"generated_at": ctx["generated_at"],
+                 "data_date": ctx["data_date"]},
+        "regime": ctx["regime"],
+        "components": ctx["components"],
+        "amount_yi": ctx["amount_yi"],
+        "index_data_quality": ctx.get("index_data_quality", {}),
+        "zt": ctx["zt"],
+        "top_sectors": ctx["top_sectors"],
+        "bottom_sectors": ctx["bottom_sectors"],
+        "holdings": ctx["holdings"],
+        "plan": ctx["plan"],
+    }
 
 
 def main():
@@ -681,18 +788,7 @@ def main():
 
     if args.json:
         # 精简 JSON 供 Agent 消费
-        out = {
-            "meta": {"generated_at": ctx["generated_at"], "data_date": ctx["data_date"]},
-            "regime": ctx["regime"],
-            "components": ctx["components"],
-            "amount_yi": ctx["amount_yi"],
-            "zt": ctx["zt"],
-            "top_sectors": ctx["top_sectors"],
-            "bottom_sectors": ctx["bottom_sectors"],
-            "holdings": ctx["holdings"],
-            "plan": ctx["plan"],
-        }
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        print(json.dumps(build_agent_output(ctx), ensure_ascii=False, indent=2))
     else:
         report = generate_report(ctx)
         print(report)

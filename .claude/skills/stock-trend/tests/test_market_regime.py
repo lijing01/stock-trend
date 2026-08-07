@@ -23,6 +23,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).parent
 SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
@@ -30,6 +31,7 @@ SCRIPTS_DIR = SCRIPT_DIR.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from analysis import market_regime as mr
+from fetchers import kline_eastmoney as ke
 
 PASSED = 0
 FAILED = 0
@@ -100,9 +102,143 @@ def test_volume():
     r = mr.score_volume(800.0, [1000.0] * 20)
     test("缩量ratio0.8≈20", abs(r["score"] - 20.0) < 0.01, f"got {r['score']}")
 
-    # 无今日值 / 无历史 → 50
+    # 无今日值 / 历史不足 → 50
     test("无今日=50", mr.score_volume(None, [1000.0])["score"] == 50.0)
-    test("无历史=50", mr.score_volume(1000.0, [])["score"] == 50.0)
+    insufficient = mr.score_volume(1000.0, [900.0] * 4)
+    test("历史不足=50", insufficient["score"] == 50.0)
+    test("历史不足原因", "4/5" in insufficient["detail"], insufficient["detail"])
+
+
+def test_index_fallback_and_amount():
+    print("\n--- index fallback and amount ---")
+
+    quote = [""] * 36
+    quote[30] = "20260807161402"
+    quote[35] = "3940.04/564988582/1209543573294"
+    payload = {
+        "code": 0,
+        "data": {
+            "sh000001": {
+                "day": [
+                    ["2026-08-06", "3880", "3900", "3910", "3870", "500000000"],
+                    ["2026-08-07", "3896", "3940", "3941", "3886", "564988582"],
+                ],
+                "qt": {"sh000001": quote},
+            }
+        },
+    }
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        records, _ = ke.fetch_tencent_a_stock("000001.SH", "D")
+    test("腾讯指数 day 可解析", len(records) == 2, f"records={len(records)}")
+    test("腾讯指数成交额写入末日", records[-1]["amount"] == 1209543573294.0,
+         f"amount={records[-1].get('amount')}")
+
+    payload["data"]["sh000001"]["qt"]["sh000001"][30] = "20260808161402"
+    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+        mismatched, _ = ke.fetch_tencent_a_stock("000001.SH", "D")
+    test("腾讯快照日期不匹配时不写成交额",
+         mismatched[-1]["amount"] == 0, str(mismatched[-1]))
+
+    fallback_records = [
+        {"trade_date": f"202607{i + 1:02d}", "close": 3800 + i, "amount": 0}
+        for i in range(25)
+    ]
+    diagnostics = {}
+    with patch("fetchers.kline_eastmoney.fetch_eastmoney", side_effect=RuntimeError("em down")), \
+            patch("fetchers.kline_eastmoney.fetch_tencent_a_stock",
+                  return_value=(fallback_records, "上证指数")), \
+            patch("fetchers.kline_eastmoney.fetch_baostock",
+                  side_effect=AssertionError("BaoStock should not run")):
+        actual = mr.fetch_index_kline("000001.SH", diagnostics=diagnostics)
+    test("东财失败后使用腾讯", actual == fallback_records)
+    test("诊断记录腾讯来源", diagnostics.get("source") == "tencent",
+         json.dumps(diagnostics, ensure_ascii=False))
+
+    history = {
+        "2026-08-05": {"amount_yi": 1000},
+        "2026-08-06": {"amount_yi": 1100},
+        "2026-08-07": {"amount_yi": 9999},
+    }
+    previous = mr.previous_amounts(history, "2026-08-07")
+    test("成交额基准排除当日", previous == [1000.0, 1100.0], str(previous))
+
+    complete = mr.complete_market_amounts({
+        "000001.SH": [
+            {"trade_date": "20260806", "amount": 1e9},
+            {"trade_date": "20260807", "amount": 1.2e9},
+        ],
+        "399106.SZ": [
+            {"trade_date": "20260807", "amount": 1.4e9},
+        ],
+    })
+    test("两市成交额只保留双方完整日期",
+         complete == {"20260807": 26.0}, str(complete))
+
+    agent_output = mr.build_agent_output({
+        "generated_at": "2026-08-07 16:00:00",
+        "data_date": "2026-08-07",
+        "regime": {}, "components": {}, "amount_yi": 26.0, "zt": {},
+        "top_sectors": [], "bottom_sectors": [], "holdings": [], "plan": [],
+        "index_data_quality": {"000001.SH": {"source": "tencent"}},
+    })
+    test("Agent JSON 暴露指数数据质量",
+         agent_output["index_data_quality"]["000001.SH"]["source"] == "tencent")
+
+
+def test_collect_context_rejects_stale_turnover_leg():
+    print("\n--- collect_context stale turnover leg ---")
+    trend_rows = [
+        {"trade_date": f"202607{i + 1:02d}", "close": 3800 + i,
+         "amount": 0, "pct_chg": 0.1}
+        for i in range(20)
+    ] + [{"trade_date": "20260807", "close": 3900,
+          "amount": 0, "pct_chg": 0.2}]
+    rows_by_code = {
+        "000001.SH": [
+            {"trade_date": "20260806", "close": 3880, "amount": 1e9},
+            {"trade_date": "20260807", "close": 3900, "amount": 1.2e9},
+        ],
+        "000300.SH": trend_rows,
+        "399001.SZ": trend_rows,
+        "399106.SZ": [
+            {"trade_date": "20260806", "close": 2500, "amount": 1.4e9},
+        ],
+    }
+
+    def fake_index(code, lmt=80, retries=2, diagnostics=None):
+        rows = rows_by_code[code]
+        if diagnostics is not None:
+            diagnostics.update({"source": "fixture", "record_count": len(rows),
+                                "data_date": rows[-1]["trade_date"], "errors": []})
+        return rows
+
+    with patch.object(mr, "fetch_index_kline", side_effect=fake_index), \
+            patch.object(mr, "fetch_sector_rankings", return_value=[]), \
+            patch.object(mr, "fetch_zt_stats", return_value={"count": 0}), \
+            patch.object(mr, "fetch_market_activity", return_value=None), \
+            patch.object(mr, "fetch_northbound", return_value=None), \
+            patch.object(mr, "load_history", return_value={}), \
+            patch.object(mr, "load_portfolio", return_value=[]):
+        ctx = mr.collect_context()
+
+    test("单边成交额过期不回退复盘日期",
+         ctx["data_date"] == "2026-08-07", ctx["data_date"])
+    test("单边成交额过期不冒充今日两市总额",
+         ctx["amount_yi"] is None, str(ctx["amount_yi"]))
+    test("单边成交额过期保持成交额中性",
+         ctx["components"]["volume"]["detail"] == "成交额不可用",
+         ctx["components"]["volume"]["detail"])
 
 
 # ──────────────── score_breadth ────────────────
@@ -246,6 +382,7 @@ def test_report():
     test("含持仓", "③ 持仓" in md)
     test("含明日计划", "④ 明日计划" in md)
     test("含免责声明", "不构成任何投资建议" in md)
+    test("含腾讯指数数据源", "腾讯" in md)
 
     # stale_note 显示
     ctx["stale_note"] = "数据日期 2026-07-31,非今日"
@@ -321,6 +458,8 @@ def main():
 
     test_index_trend()
     test_volume()
+    test_index_fallback_and_amount()
+    test_collect_context_rejects_stale_turnover_leg()
     test_breadth()
     test_zt()
     test_capital()

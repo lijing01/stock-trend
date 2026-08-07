@@ -239,11 +239,8 @@ def fetch_tencent_a_stock(ts_code, freq):
     klines = stock_data.get(freq_key, [])
 
     if not klines:
-        # Try alternative keys
-        for key in stock_data:
-            if isinstance(stock_data[key], list) and key.startswith("qfq"):
-                klines = stock_data[key]
-                break
+        # Indices use unadjusted day/week keys rather than qfqday/qfqweek.
+        klines = stock_data.get(klt, [])
 
     if not klines:
         raise RuntimeError(f"腾讯A股K线API未返回数据: {ts_code}")
@@ -283,6 +280,24 @@ def fetch_tencent_a_stock(ts_code, freq):
         raise RuntimeError(f"腾讯A股K线API未返回有效数据: {ts_code}")
 
     records.sort(key=lambda x: x["trade_date"])
+
+    # Tencent index K-lines omit turnover, but the current quote includes it
+    # as the third component of "close/volume/amount" (amount in yuan).
+    quote = stock_data.get("qt", {}).get(stock_key, [])
+    if len(quote) > 35:
+        try:
+            amount = float(str(quote[35]).split("/")[2])
+            quote_date = str(quote[30])[:8] if len(quote) > 30 else ""
+            target = next(
+                (row for row in reversed(records)
+                 if quote_date and row["trade_date"] == quote_date),
+                None,
+            )
+            if target is not None:
+                target["amount"] = amount
+        except (IndexError, TypeError, ValueError):
+            pass
+
     name = ts_code
     return records, name
 
