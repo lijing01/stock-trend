@@ -42,6 +42,8 @@ def _dimension(name, payload, expected_date="", require_date=False):
         if meta.get("data_source") == "error" \
                 or meta.get("error") or payload.get("error"):
             quality = "error"
+        if name == "capital" and not latest_data_date(payload):
+            quality = "error"
         if quality == "error":
             available = False
     data_date = latest_data_date(payload)

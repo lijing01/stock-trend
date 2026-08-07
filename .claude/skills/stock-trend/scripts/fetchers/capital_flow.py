@@ -32,6 +32,36 @@ logging.getLogger("akshare").setLevel(logging.ERROR)
 CACHE_ROOT = Path(CACHE_DIR)
 
 
+def _valid_flow_date(value):
+    text = str(value or "").strip().replace("-", "")
+    if len(text) != 8 or not text.isdigit():
+        return False
+    try:
+        datetime.strptime(text, "%Y%m%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _valid_flows(flows):
+    if not isinstance(flows, list) or not flows:
+        return False
+    return any(
+        isinstance(row, dict)
+        and _valid_flow_date(row.get("date") or row.get("trade_date"))
+        for row in flows
+    )
+
+
+def is_valid_capital_result(result):
+    """Return whether a cached/fetched result contains usable capital rows."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("meta", {}).get("data_source") in (None, "error"):
+        return False
+    return _valid_flows(result.get("data"))
+
+
 def fetch_stock_capital_flow_tushare(ts_code, days=5, timeout=10):
     """Fetch capital flow from Tushare moneyflow API as fallback."""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as TEO
@@ -182,9 +212,67 @@ def fetch_stock_capital_flow(secid, days=5):
                 records.append(record)
             except (ValueError, IndexError):
                 continue
+        if not _valid_flows(records):
+            raise RuntimeError(
+                f"东方财富资金流向API未返回有效日期记录(host={host})")
         return records
     records, used_host = rotate_push2_host(_do_fetch, max_retries=2)
     return records
+
+
+def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code):
+    """Fetch usable stock capital rows through the configured fallback chain."""
+    suffix = "." + ts_code.split(".")[1] if "." in ts_code else ""
+    errors = []
+
+    try:
+        flows = fetch_stock_capital_flow(secid)
+        if not _valid_flows(flows):
+            raise RuntimeError("东方财富资金流向API未返回有效日期记录")
+        return {
+            "meta": {
+                "ts_code": ts_code, "asset": "E", "secid": secid,
+                "data_source": "eastmoney", "record_count": len(flows),
+            },
+            "data": flows,
+        }
+    except Exception as exc:
+        errors.append(str(exc))
+
+    if suffix in (".SH", ".SZ"):
+        print(f"Trying Tushare fallback for {ts_code}", file=sys.stderr)
+        flows = fetch_stock_capital_flow_tushare(ts_code)
+        if _valid_flows(flows):
+            return {
+                "meta": {
+                    "ts_code": ts_code, "asset": "E",
+                    "data_source": "tushare_fallback",
+                    "record_count": len(flows),
+                },
+                "data": flows,
+            }
+        errors.append("Tushare不可用或未返回有效日期记录")
+
+        print(f"Trying K-line estimation for {ts_code}", file=sys.stderr)
+        flows = estimate_capital_flow_from_kline(code)
+        if _valid_flows(flows):
+            return {
+                "meta": {
+                    "ts_code": ts_code, "asset": "E",
+                    "data_source": "kline_estimate",
+                    "record_count": len(flows),
+                },
+                "data": flows,
+            }
+        errors.append("K线估算不可用或未返回有效日期记录")
+
+    return {
+        "meta": {
+            "ts_code": ts_code, "asset": "E", "data_source": "error",
+            "error": f"资金流向获取失败: {'; '.join(filter(None, errors)) or '未知错误'}",
+        },
+        "data": [],
+    }
 
 
 def fetch_etf_capital_flow(fund_code, days=5):
@@ -314,7 +402,7 @@ def main():
     cache_key = f"capital_flow_{args.ts_code}"
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        if cached:
+        if is_valid_capital_result(cached):
             output_json(cached, output_path=args.output)
             return
 
@@ -349,57 +437,10 @@ def main():
             }
             result["data"] = []
         else:
-            data_ok = False
-            em_err = ""
-            ts_err = ""
-
-            # Try 1: East Money
-            try:
-                flows = fetch_stock_capital_flow(secid)
-                result["meta"] = {
-                    "ts_code": args.ts_code, "asset": "E", "secid": secid,
-                    "data_source": "eastmoney", "record_count": len(flows),
-                }
-                result["data"] = flows
-                data_ok = True
-            except Exception as e:
-                em_err = str(e)
-
-            # Try 2: Tushare fallback for A-shares
-            if not data_ok and suffix in (".SH", ".SZ"):
-                print(f"Trying Tushare fallback for {args.ts_code}", file=sys.stderr)
-                ts_flows = fetch_stock_capital_flow_tushare(args.ts_code)
-                if ts_flows:
-                    result["meta"] = {
-                        "ts_code": args.ts_code, "asset": "E",
-                        "data_source": "tushare_fallback", "record_count": len(ts_flows),
-                    }
-                    result["data"] = ts_flows
-                    data_ok = True
-                else:
-                    ts_err = "Tushare不可用"
-
-            # Try 3: K-line estimation for A-shares
-            if not data_ok and suffix in (".SH", ".SZ"):
-                print(f"Trying K-line estimation for {args.ts_code}", file=sys.stderr)
-                est_flows = estimate_capital_flow_from_kline(code)
-                if est_flows:
-                    result["meta"] = {
-                        "ts_code": args.ts_code, "asset": "E",
-                        "data_source": "kline_estimate", "record_count": len(est_flows),
-                    }
-                    result["data"] = est_flows
-                    data_ok = True
-
-            if not data_ok:
-                err_msg = em_err or "未知错误"
-                if ts_err:
-                    err_msg += f"; {ts_err}"
-                result["meta"] = {
-                    "ts_code": args.ts_code, "asset": "E",
-                    "data_source": "error", "error": f"资金流向获取失败: {err_msg}",
-                }
-                result["data"] = []
+            primary = fetch_stock_capital_flow_with_fallbacks(
+                args.ts_code, secid, code)
+            result["meta"] = primary["meta"]
+            result["data"] = primary["data"]
 
     is_hk = suffix == ".HK" or args.ts_code.endswith(".HK")
     if asset == "E" and not is_hk:
@@ -454,7 +495,7 @@ def main():
     result.setdefault("meta", {})["fetch_time"] = (
         datetime.now().strftime("%Y%m%d-%H%M%S"))
 
-    if result.get("meta", {}).get("data_source") not in ("error", None):
+    if is_valid_capital_result(result):
         save_cache(cache_key, result)
 
     output_json(result, output_path=args.output)

@@ -1340,6 +1340,7 @@ def run_daily_recommendation_tests():
     tests_dir = SCRIPT_DIR
     sys.path.insert(0, str(tests_dir))
     try:
+        from test_capital_flow import run_capital_flow_tests
         from test_daily_candidates import run_daily_candidates_tests
         from test_recommendation_quality import run_recommendation_quality_tests
         from test_stock_scanner import run_stock_scanner_tests
@@ -1347,6 +1348,7 @@ def run_daily_recommendation_tests():
 
         global PASSED, FAILED
         for runner in (
+            run_capital_flow_tests,
             run_recommendation_quality_tests,
             run_stock_scanner_tests,
             run_daily_candidates_tests,

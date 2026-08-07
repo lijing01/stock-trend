@@ -133,6 +133,35 @@ class TestRecommendationQuality(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertIn("capital_error", result["reasons"])
 
+    def test_nominally_successful_empty_capital_is_an_error(self):
+        empty_capital = {
+            "meta": {"data_source": "eastmoney", "record_count": 0},
+            "data": [],
+        }
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=empty_capital,
+            fundamental=payload([], quality="good"),
+            as_of_date="2026-08-06",
+        )
+        capital = result["dimensions"]["capital"]
+        self.assertFalse(capital["available"])
+        self.assertEqual(capital["stale_reason"], "capital_error")
+        self.assertIn("capital_error", result["reasons"])
+        self.assertNotIn("capital_date_missing", result["reasons"])
+
+    def test_current_dated_capital_restores_full_quality(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=payload([{"date": "20260806"}], source="eastmoney"),
+            fundamental=payload([], quality="good"),
+            as_of_date="2026-08-06",
+        )
+        self.assertTrue(result["dimensions"]["capital"]["available"])
+        self.assertEqual(result["coverage"], 1.0)
+        self.assertEqual(result["freshness_factor"], 1.0)
+        self.assertEqual(result["confidence"], 1.0)
+
     def test_quality_factors_and_confidence_are_exposed(self):
         result = assess_candidate_data(
             kline=payload([{"trade_date": "20260806"}]),
