@@ -216,6 +216,10 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             "amount": _safe_float(s.get("amount")),
             "market_cap": mcap,
             "pe": _safe_float(s.get("pe")),
+            "membership_source": s.get("membership_source", "realtime"),
+            "membership_data_date": s.get("membership_data_date", ""),
+            "membership_quality": s.get("membership_quality", "good"),
+            "membership_cache_error": s.get("membership_cache_error", ""),
         })
 
     return {
@@ -716,6 +720,21 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             fundamental=fund,
             as_of_date=as_of_date,
         )
+        membership_source = c.get("membership_source", "realtime")
+        membership_date = c.get("membership_data_date", "")
+        membership_quality = c.get("membership_quality", "good")
+        membership_cache_error = c.get("membership_cache_error", "")
+        if membership_source != "realtime" or membership_quality != "good":
+            data_quality["eligible"] = False
+            if membership_cache_error:
+                reason = "sector_membership_cache_write_failed"
+            elif as_of_date and membership_date != as_of_date:
+                reason = "sector_membership_stale"
+            else:
+                reason = "sector_membership_cached"
+            if reason not in data_quality["reasons"]:
+                data_quality["reasons"].append(reason)
+            data_quality["freshness_factor"] *= 0.8
         raw_composite = round(composite, 1)
         quality_adjusted = round(
             raw_composite
@@ -744,6 +763,10 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             "signals": signals,
             "warnings": warnings,
             "data_quality": data_quality,
+            "membership_source": membership_source,
+            "membership_data_date": membership_date,
+            "membership_quality": membership_quality,
+            "membership_cache_error": membership_cache_error,
             "sector_relative_rank": sector_rank,
             "sector_total": len(changes_in_sector),
         }

@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -25,6 +26,7 @@ from typing import Any, Optional
 from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
+CACHE_DIR = SCRIPT_DIR.parent.parent.parent.parent / ".cache" / "stock-trend"
 
 
 # ──────────────────────── East Money API Helpers ────────────────────────
@@ -109,6 +111,9 @@ def get_sector_list() -> list[dict]:
     return sectors
 
 
+MIN_RANKING_ROWS_PER_SOURCE = 5
+
+
 def get_sector_rankings() -> dict:
     """Fetch sector rankings with composite scoring data.
 
@@ -117,7 +122,12 @@ def get_sector_rankings() -> dict:
         up_count, down_count, total_count, type).
     """
     result = {
-        "meta": {"fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S")},
+        "meta": {
+            "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "sources": {},
+            "errors": [],
+            "complete": False,
+        },
         "sectors": [],
     }
     today = datetime.now().strftime("%Y%m%d")
@@ -139,7 +149,18 @@ def get_sector_rankings() -> dict:
         try:
             data = _fetch_json(url)
             items = _check_result(data).get("diff", [])
-            for item in items:
+            valid_items = [item for item in items if item.get("f12")]
+            if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE:
+                result["meta"]["sources"][sname] = "ok"
+            elif valid_items:
+                result["meta"]["sources"][sname] = "sparse"
+                result["meta"]["errors"].append(
+                    f"{sname}: only {len(valid_items)} valid rows"
+                )
+            else:
+                result["meta"]["sources"][sname] = "empty"
+                result["meta"]["errors"].append(f"{sname}: empty response")
+            for item in valid_items:
                 total = (item.get("f104", 0) or 0) + (item.get("f105", 0) or 0)
                 sector = {
                     "code": item.get("f12", ""),
@@ -155,6 +176,8 @@ def get_sector_rankings() -> dict:
                 if sector["code"]:
                     result["sectors"].append(sector)
         except Exception as e:
+            result["meta"]["sources"][sname] = "error"
+            result["meta"]["errors"].append(f"{sname}: {e}")
             print(f"  Warning: 无法获取{sname}板块排行: {e}", file=sys.stderr)
 
     # If EM API returned zero active sectors, try AKShare fallback
@@ -163,13 +186,30 @@ def get_sector_rankings() -> dict:
         if (s.get("up_count", 0) or 0) > 0 or (s.get("down_count", 0) or 0) > 0
     )
     result["meta"]["total_sectors"] = len(result["sectors"])
-    if active == 0 or result["meta"]["total_sectors"] < 5:
+    result["meta"]["complete"] = all(
+        result["meta"]["sources"].get(source) == "ok"
+        for source in ("industry", "concept")
+    )
+    if not result["meta"]["complete"] \
+            or active == 0 or result["meta"]["total_sectors"] < 5:
         try:
             from fetchers.sector_akshare import get_sector_rankings_akshare
             akshare_result = get_sector_rankings_akshare()
             if akshare_result and akshare_result.get("sectors"):
-                print(f"  [AKShare] 备选数据源: {len(akshare_result['sectors'])} sectors")
-                result = akshare_result
+                akshare_active = sum(
+                    1 for sector in akshare_result["sectors"]
+                    if (sector.get("up_count", 0) or 0) > 0
+                    or (sector.get("down_count", 0) or 0) > 0
+                )
+                if akshare_result.get("meta", {}).get("complete") is True \
+                        and akshare_active >= MIN_RANKING_ROWS_PER_SOURCE:
+                    print(
+                        "  [AKShare] 备选数据源: "
+                        f"{len(akshare_result['sectors'])} sectors"
+                    )
+                    akshare_result["meta"]["upstream_errors"] = list(
+                        result["meta"]["errors"])
+                    result = akshare_result
         except Exception as e:
             print(f"  [AKShare] 备选数据源失败: {e}", file=sys.stderr)
 
@@ -284,6 +324,82 @@ def rank_hot_sectors(rankings: dict, top_n: int = 10,
 # ──────────────────────── Sector Constituent Stocks ────────────────────────
 
 
+SECTOR_STOCKS_CACHE_DIR = CACHE_DIR / "sector_stocks"
+SECTOR_STOCKS_MAX_AGE_HOURS = 24 * 30
+
+
+def _sector_stocks_cache_path(sector_code: str) -> Path:
+    """Return a cache path constrained to the constituent-cache directory."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", sector_code or ""):
+        raise ValueError(f"invalid sector code: {sector_code!r}")
+    cache_dir = SECTOR_STOCKS_CACHE_DIR.resolve()
+    path = (cache_dir / f"{sector_code}.json").resolve()
+    if path.parent != cache_dir:
+        raise ValueError(f"invalid sector code: {sector_code!r}")
+    return path
+
+
+def save_sector_stocks_cache(sector_code: str, stocks: list[dict]) -> None:
+    """Persist a successful constituent response for outage fallback."""
+    path = _sector_stocks_cache_path(sector_code)
+    SECTOR_STOCKS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "cached_at": datetime.now().isoformat(),
+        "stocks": stocks,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def load_sector_stocks_cache(sector_code: str) -> Optional[dict]:
+    """Load a non-empty constituent snapshot younger than 30 days."""
+    path = _sector_stocks_cache_path(sector_code)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        cached_at = datetime.fromisoformat(payload["cached_at"])
+        age = datetime.now() - cached_at
+        if age.total_seconds() > SECTOR_STOCKS_MAX_AGE_HOURS * 3600:
+            return None
+        if not payload.get("stocks"):
+            return None
+        return payload
+    except (KeyError, ValueError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _tag_sector_stocks(stocks: list[dict], source: str, data_date: str,
+                       quality: str) -> list[dict]:
+    return [{
+        **stock,
+        "membership_source": source,
+        "membership_data_date": data_date,
+        "membership_quality": quality,
+    } for stock in stocks]
+
+
+def _load_tagged_sector_stocks_cache(sector_code: str,
+                                     top_n: int) -> list[dict]:
+    cached = load_sector_stocks_cache(sector_code)
+    if not cached:
+        return []
+    return _tag_sector_stocks(
+        cached["stocks"],
+        source="cache",
+        data_date=str(cached["cached_at"])[:10],
+        quality="degraded",
+    )[:top_n]
+
+
+def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
+                                     reason: str) -> list[dict]:
+    cached_stocks = _load_tagged_sector_stocks_cache(sector_code, top_n)
+    if cached_stocks:
+        return cached_stocks
+    raise RuntimeError(
+        f"获取板块{sector_code}成分股失败: {reason}; 无有效成分股且无可用快照")
+
+
 def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
     """Fetch constituent stocks for a sector.
 
@@ -294,6 +410,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
     Returns:
         List of {code, name, change_pct, amount, market_cap, pe}.
     """
+    _sector_stocks_cache_path(sector_code)
     today = datetime.now().strftime("%Y%m%d")
     # b:BKxxx filters stocks belonging to this sector
     url = (
@@ -307,7 +424,11 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
         data = _fetch_json(url)
         items = _check_result(data).get("diff", [])
     except Exception as e:
-        raise RuntimeError(f"获取板块{sector_code}成分股失败: {e}")
+        return _sector_stocks_fallback_or_raise(
+            sector_code, top_n, str(e))
+    if not items:
+        return _sector_stocks_fallback_or_raise(
+            sector_code, top_n, "实时接口返回空列表")
 
     stocks = []
     for item in items:
@@ -321,7 +442,29 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
         }
         if stock["code"]:
             stocks.append(stock)
-    return stocks
+    if not stocks:
+        return _sector_stocks_fallback_or_raise(
+            sector_code, top_n, "实时接口未返回有效股票代码")
+    cache_error = ""
+    if stocks:
+        try:
+            save_sector_stocks_cache(sector_code, stocks)
+        except OSError as exc:
+            cache_error = str(exc)
+            print(
+                f"  Warning: 板块{sector_code}成分股快照保存失败: {exc}",
+                file=sys.stderr,
+            )
+    tagged = _tag_sector_stocks(
+        stocks,
+        source="realtime",
+        data_date=datetime.now().strftime("%Y-%m-%d"),
+        quality="partial" if cache_error else "good",
+    )
+    if cache_error:
+        for stock in tagged:
+            stock["membership_cache_error"] = cache_error
+    return tagged
 
 
 def _to_float(val: Any) -> float:
@@ -496,7 +639,6 @@ def rescore_leaders_with_ddx(leaders: list[dict],
 
 # ──────────────────────── Rankings Cache ────────────────────────
 
-CACHE_DIR = SCRIPT_DIR.parent.parent.parent.parent / ".cache" / "stock-trend"
 CACHE_FILE = CACHE_DIR / "sector_rankings_cache.json"
 MAX_CACHE_AGE_HOURS = 96  # 4 days, covers long weekends
 
@@ -514,7 +656,8 @@ def _is_outside_market_hours(dt: datetime) -> bool:
     return t < _MARKET_OPEN_MINUTES[0] or t >= _MARKET_OPEN_MINUTES[1]
 
 
-def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None) -> None:
+def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
+                        data_date: str = "") -> None:
     """Save sector rankings snapshot for non-trading-day fallback.
 
     Also saves pre-computed hot_sectors if provided, so non-trading day
@@ -524,6 +667,8 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None) -> N
     Does NOT overwrite existing cache if today's data has no real sector
     activity (non-trading day). This preserves the last trading day's cache.
     """
+    if rankings.get("meta", {}).get("complete") is False:
+        return
     sectors = rankings.get("sectors", [])
     active = sum(
         1 for s in sectors
@@ -537,6 +682,7 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None) -> N
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "cached_at": datetime.now().isoformat(),
+        "data_date": data_date or rankings.get("meta", {}).get("data_date", ""),
         "rankings": rankings,
     }
     if hot_sectors:
@@ -562,6 +708,8 @@ def load_rankings_cache() -> Optional[dict]:
             return None
         # Must have at least some sectors (not an empty cache)
         rankings = payload.get("rankings", {})
+        if rankings.get("meta", {}).get("complete") is False:
+            return None
         sectors = rankings.get("sectors", [])
         if len(sectors) < 5:
             return None
@@ -582,6 +730,9 @@ def load_rankings_cache_full() -> Optional[dict]:
         cached_at = datetime.fromisoformat(payload["cached_at"])
         age = datetime.now() - cached_at
         if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            return None
+        rankings = payload.get("rankings", {})
+        if rankings.get("meta", {}).get("complete") is False:
             return None
         return payload
     except Exception:
@@ -707,7 +858,7 @@ def get_last_trading_day() -> tuple[Optional[str], str]:
 
     Three-tier lookup:
       1. Snapshot history latest date (exact, set by append_daily_snapshot)
-      2. Rankings cache cached_at (exact, set by save_rankings_cache)
+      2. Rankings cache data_date (exact, set by save_rankings_cache)
       3. Calendar fallback: today - 1 weekday (approximate)
 
     Returns:
@@ -725,16 +876,17 @@ def get_last_trading_day() -> tuple[Optional[str], str]:
         except Exception:
             pass
 
-    # Tier 2: rankings cache timestamp
+    # Tier 2: verified data date from a fresh rankings cache
     if CACHE_FILE.exists():
         try:
             payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
             cached_at_str = payload.get("cached_at", "")
-            if cached_at_str:
+            data_date = payload.get("data_date", "")
+            if cached_at_str and data_date:
                 cached_at = datetime.fromisoformat(cached_at_str)
                 age = datetime.now() - cached_at
                 if age.total_seconds() <= MAX_CACHE_AGE_HOURS * 3600:
-                    return cached_at.strftime("%Y-%m-%d"), "cache"
+                    return data_date, "cache"
         except Exception:
             pass
 

@@ -52,6 +52,8 @@ def get_sector_rankings_akshare() -> Optional[dict]:
 
     sectors = []
     now = datetime.now().strftime("%Y%m%d-%H%M%S")
+    sources = {}
+    errors = []
 
     # ── 1. 同花顺行业板块实时排行 ──
     try:
@@ -76,7 +78,15 @@ def get_sector_rankings_akshare() -> Optional[dict]:
                     "total_count": total,
                     "main_force_net": net,
                 })
+        industry_count = sum(
+            1 for sector in sectors if sector["type"] == "industry"
+        )
+        sources["industry"] = "ok" if industry_count >= 5 else (
+            "sparse" if industry_count else "empty"
+        )
     except Exception as e:
+        sources["industry"] = "error"
+        errors.append(f"industry: {e}")
         print(f"  [AKShare] Warning: 行业板块排行失败: {e}", file=sys.stderr)
 
     # ── 2. 同花顺概念列表（名称+代码，无实时行情） ──
@@ -100,17 +110,35 @@ def get_sector_rankings_akshare() -> Optional[dict]:
                         "total_count": 0,
                         "main_force_net": 0,
                     })
+        concept_count = sum(
+            1 for sector in sectors if sector["type"] == "concept"
+        )
+        sources["concept"] = "ok" if concept_count >= 5 else (
+            "sparse" if concept_count else "empty"
+        )
     except Exception as e:
+        sources["concept"] = "error"
+        errors.append(f"concept: {e}")
         print(f"  [AKShare] Warning: 概念列表失败: {e}", file=sys.stderr)
 
     if not sectors:
         return None
 
+    active = sum(
+        1 for sector in sectors
+        if sector.get("up_count", 0) or sector.get("down_count", 0)
+    )
+    complete = active >= 5 and all(
+        sources.get(source) == "ok" for source in ("industry", "concept")
+    )
     return {
         "meta": {
             "fetch_time": now,
             "total_sectors": len(sectors),
             "source": "akshare",
+            "sources": sources,
+            "errors": errors,
+            "complete": complete,
         },
         "sectors": sectors,
     }

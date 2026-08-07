@@ -69,18 +69,22 @@ def get_top_sectors(top_n: int = 15) -> tuple[list[dict], str, str]:
     print(f"[Phase 1/3] Scanning top {top_n} sectors...")
     rankings = get_sector_rankings()
     today_str = datetime.now().strftime("%Y-%m-%d")
+    ranking_date = rankings.get("meta", {}).get("data_date", "")
 
-    # Always save rankings for future non-trading-day cache fallback
-    save_rankings_cache(rankings)
+    # Cache only when the upstream payload identifies the represented trade date.
+    if ranking_date:
+        save_rankings_cache(rankings, data_date=ranking_date)
 
     hot = rank_hot_sectors(rankings, top_n=top_n, min_stocks=8, min_up_ratio=0.15)
 
     if hot:
         # ── Tier 1: real-time data ──
         print(f"  Got {len(hot)} hot sectors from {rankings['meta']['total_sectors']} total")
-        save_rankings_cache(rankings, hot_sectors=hot)
-        # Append daily snapshot for future persistence analysis
-        append_daily_snapshot(rankings)
+        if ranking_date:
+            save_rankings_cache(
+                rankings, hot_sectors=hot, data_date=ranking_date)
+            # Do not stamp an unverified payload with the wall-clock date.
+            append_daily_snapshot(rankings, override_date=ranking_date)
         return hot, today_str, "realtime"
 
     # ── Zero hot sectors: detect non-trading day vs weak market ──
@@ -93,12 +97,7 @@ def get_top_sectors(top_n: int = 15) -> tuple[list[dict], str, str]:
     print(f"  ⚠️ 0 hot sectors — non-trading day detected, trying cached rankings...")
     cache_payload = load_rankings_cache_full()
     if cache_payload:
-        cached_at_str = cache_payload.get("cached_at", "")
-        try:
-            cached_at = datetime.fromisoformat(cached_at_str)
-            cache_date_str = cached_at.strftime("%Y-%m-%d")
-        except (ValueError, TypeError):
-            cache_date_str = today_str
+        cache_date_str = cache_payload.get("data_date", "")
 
         cached_rankings = cache_payload.get("rankings", {})
         cached_sectors = cached_rankings.get("sectors", [])
@@ -113,8 +112,7 @@ def get_top_sectors(top_n: int = 15) -> tuple[list[dict], str, str]:
             if cached_hot:
                 print(f"  ✓ Cache hit — {len(cached_hot)} sectors from {cache_date_str} "
                       f"(active sectors: {cache_active})")
-                data_date = cache_date_str if cache_date_str != today_str else today_str
-                return cached_hot, data_date, "cache"
+                return cached_hot, cache_date_str, "cache"
             print(f"  ⚠️ Cached data from {cache_date_str} has no hot_sectors")
 
     # ── Tier 3: last-trading-day fallback ──

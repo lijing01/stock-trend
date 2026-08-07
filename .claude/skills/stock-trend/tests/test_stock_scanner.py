@@ -16,11 +16,14 @@ import sys
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans import stock_scanner as sc
+from fetchers import sector_data as sd
 
 
 def _make_kline(n=60, ts_code="TEST"):
@@ -90,6 +93,122 @@ class TestMetadata(unittest.TestCase):
             }), encoding="utf-8")
             loaded = sc._read_json(path)
         self.assertTrue(loaded["meta"]["fetch_time"])
+
+
+class TestSectorConstituentFallback(unittest.TestCase):
+    def setUp(self):
+        self.payload = {
+            "rc": 0,
+            "data": {"diff": [{
+                "f12": "600001", "f14": "测试股份", "f3": 1.2,
+                "f8": 2e8, "f20": 1e10, "f37": 20,
+            }]},
+        }
+
+    def test_live_sector_stocks_are_cached_with_source_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "_fetch_json", return_value=self.payload):
+            stocks = sd.get_sector_stocks("BK0001")
+            cache_file = Path(tmpdir) / "BK0001.json"
+            self.assertTrue(cache_file.exists())
+
+        self.assertEqual(stocks[0]["membership_source"], "realtime")
+        self.assertEqual(stocks[0]["membership_quality"], "good")
+
+    def test_sector_code_cannot_escape_cache_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR",
+                          Path(tmpdir) / "sector_stocks"), \
+             patch.object(sd, "_fetch_json") as fetch:
+            escaped = Path(tmpdir) / "escaped.json"
+            with self.assertRaisesRegex(ValueError, "invalid sector code"):
+                sd.save_sector_stocks_cache(
+                    "../escaped", [{"code": "600001"}])
+            with self.assertRaisesRegex(ValueError, "invalid sector code"):
+                sd.load_sector_stocks_cache("../escaped")
+            with self.assertRaisesRegex(ValueError, "invalid sector code"):
+                sd.get_sector_stocks("../escaped")
+
+            self.assertFalse(escaped.exists())
+            fetch.assert_not_called()
+
+    def test_sector_stocks_fall_back_to_snapshot_after_live_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)):
+            with patch.object(sd, "_fetch_json", return_value=self.payload):
+                sd.get_sector_stocks("BK0001")
+            with patch.object(
+                    sd, "_fetch_json", side_effect=RuntimeError("dns")):
+                stocks = sd.get_sector_stocks("BK0001")
+
+        self.assertEqual(stocks[0]["membership_source"], "cache")
+        self.assertEqual(stocks[0]["membership_quality"], "degraded")
+        self.assertTrue(stocks[0]["membership_data_date"])
+
+    def test_empty_live_sector_stocks_fall_back_to_snapshot(self):
+        empty_payload = {"rc": 0, "data": {"diff": []}}
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)):
+            with patch.object(sd, "_fetch_json", return_value=self.payload):
+                sd.get_sector_stocks("BK0001")
+            with patch.object(sd, "_fetch_json", return_value=empty_payload):
+                stocks = sd.get_sector_stocks("BK0001")
+
+        self.assertEqual(stocks[0]["membership_source"], "cache")
+        self.assertEqual(stocks[0]["membership_quality"], "degraded")
+
+    def test_empty_live_sector_stocks_without_snapshot_raise(self):
+        empty_payload = {"rc": 0, "data": {"diff": []}}
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "_fetch_json", return_value=empty_payload):
+            with self.assertRaisesRegex(RuntimeError, "无有效成分股且无可用快照"):
+                sd.get_sector_stocks("BK0001")
+
+    def test_invalid_live_sector_rows_without_snapshot_raise(self):
+        invalid_payload = {
+            "rc": 0,
+            "data": {"diff": [{"f12": "", "f14": "无代码"}]},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "_fetch_json", return_value=invalid_payload):
+            with self.assertRaisesRegex(RuntimeError, "无有效成分股且无可用快照"):
+                sd.get_sector_stocks("BK0001")
+
+    def test_live_snapshot_write_failure_is_exposed(self):
+        with patch.object(sd, "_fetch_json", return_value=self.payload), \
+             patch.object(sd, "save_sector_stocks_cache",
+                          side_effect=OSError("disk full")):
+            stocks = sd.get_sector_stocks("BK0001")
+
+        self.assertEqual(stocks[0]["membership_source"], "realtime")
+        self.assertEqual(stocks[0]["membership_quality"], "partial")
+        self.assertIn("disk full", stocks[0]["membership_cache_error"])
+
+    def test_sector_stocks_cache_accepts_boundary_and_rejects_expired(self):
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 7, 12, 0, 0)
+
+        payload = {
+            "cached_at": "2026-07-08T12:00:00",
+            "stocks": [{"code": "600001", "name": "测试股份"}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "datetime", FrozenDateTime):
+            path = Path(tmpdir) / "BK0001.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self.assertIsNotNone(sd.load_sector_stocks_cache("BK0001"))
+
+            payload["cached_at"] = "2026-07-08T11:59:59"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self.assertIsNone(sd.load_sector_stocks_cache("BK0001"))
 
 
 class TestGatePass(unittest.TestCase):
@@ -223,6 +342,56 @@ class TestRunPhase2Funnel(unittest.TestCase):
             result[0]["quality_adjusted_score"],
             result[0]["raw_composite_score"],
         )
+
+    def test_cached_sector_membership_is_observation_only(self):
+        candidate = _make_candidate("600001")
+        candidate.update({
+            "membership_source": "cache",
+            "membership_quality": "degraded",
+            "membership_data_date": "2026-08-05",
+        })
+        sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
+        sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
+        sc._fetch_capital_flow = lambda ts: {
+            "data": [{"date": "20260806", "main_net_inflow": 0}]
+        }
+
+        result = sc.run_phase2(
+            [candidate], enable_wyckoff=True, as_of_date="2026-08-06")
+
+        self.assertFalse(result[0]["data_quality"]["eligible"])
+        self.assertIn(
+            "sector_membership_stale",
+            result[0]["data_quality"]["reasons"],
+        )
+        self.assertEqual(result[0]["membership_source"], "cache")
+        self.assertLess(
+            result[0]["quality_adjusted_score"],
+            result[0]["raw_composite_score"],
+        )
+
+    def test_snapshot_write_failure_has_distinct_observation_reason(self):
+        candidate = _make_candidate("600001")
+        candidate.update({
+            "membership_source": "realtime",
+            "membership_quality": "partial",
+            "membership_data_date": "2026-08-06",
+            "membership_cache_error": "disk full",
+        })
+        sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
+        sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
+        sc._fetch_capital_flow = lambda ts: {
+            "data": [{"date": "20260806", "main_net_inflow": 0}]
+        }
+
+        result = sc.run_phase2(
+            [candidate], enable_wyckoff=True, as_of_date="2026-08-06")
+
+        self.assertIn(
+            "sector_membership_cache_write_failed",
+            result[0]["data_quality"]["reasons"],
+        )
+        self.assertEqual(result[0]["membership_cache_error"], "disk full")
 
 
 class TestFilters(unittest.TestCase):
