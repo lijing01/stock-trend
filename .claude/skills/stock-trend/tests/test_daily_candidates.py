@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tests for /candidates recommendation policy."""
+import json
 import sys
 import tempfile
 import unittest
@@ -46,6 +47,200 @@ def candidate(code, eligible=True, adjusted_score=80.0,
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_rankings_cache_persists_verified_data_date(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {"complete": True},
+            "sectors": [{"up_count": 1, "down_count": 0}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+             patch.object(sector_data, "CACHE_FILE",
+                          Path(tmpdir) / "rankings.json"):
+            sector_data.save_rankings_cache(
+                rankings, data_date="2026-08-06")
+            payload = json.loads(
+                sector_data.CACHE_FILE.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["data_date"], "2026-08-06")
+
+    def test_partial_rankings_do_not_overwrite_complete_cache(self):
+        from fetchers import sector_data
+
+        complete = {
+            "meta": {"complete": True},
+            "sectors": [{"code": "BK1", "up_count": 1, "down_count": 0}],
+        }
+        partial = {
+            "meta": {"complete": False},
+            "sectors": [{"code": "BK2", "up_count": 1, "down_count": 0}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+             patch.object(sector_data, "CACHE_FILE",
+                          Path(tmpdir) / "rankings.json"):
+            sector_data.save_rankings_cache(
+                complete, data_date="2026-08-06")
+            sector_data.save_rankings_cache(
+                partial, data_date="2026-08-07")
+            payload = json.loads(
+                sector_data.CACHE_FILE.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["data_date"], "2026-08-06")
+        self.assertEqual(payload["rankings"]["sectors"][0]["code"], "BK1")
+
+    def test_market_theme_saves_rankings_with_data_date(self):
+        from analysis import market_theme
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 6, 16, 0, 0)
+
+        rankings = {
+            "meta": {
+                "total_sectors": 1,
+                "complete": True,
+                "data_date": "2026-08-05",
+            },
+            "sectors": [{"code": "BK1", "up_count": 1, "down_count": 0}],
+        }
+        hot = [{"code": "BK1", "name": "测试板块"}]
+        with patch.object(market_theme, "datetime", FrozenDateTime), \
+             patch.object(market_theme, "get_sector_rankings",
+                          return_value=rankings), \
+             patch.object(market_theme, "rank_hot_sectors",
+                          return_value=hot), \
+             patch.object(market_theme, "save_rankings_cache") as save, \
+             patch.object(market_theme, "append_daily_snapshot"):
+            market_theme.get_top_sectors(top_n=1)
+
+        self.assertTrue(save.call_args_list)
+        for call in save.call_args_list:
+            self.assertEqual(call.kwargs["data_date"], "2026-08-05")
+
+    def test_market_theme_does_not_cache_unverified_ranking_date(self):
+        from analysis import market_theme
+
+        rankings = {
+            "meta": {"total_sectors": 1, "complete": True},
+            "sectors": [{"code": "BK1", "up_count": 1, "down_count": 0}],
+        }
+        with patch.object(market_theme, "get_sector_rankings",
+                          return_value=rankings), \
+             patch.object(market_theme, "rank_hot_sectors",
+                          return_value=[]), \
+             patch.object(market_theme, "save_rankings_cache") as save:
+            market_theme.get_top_sectors(top_n=1)
+
+        save.assert_not_called()
+
+    def test_empty_ranking_source_is_incomplete(self):
+        from fetchers import sector_data
+
+        empty = {"rc": 0, "data": {"diff": []}}
+        concept = {
+            "rc": 0,
+            "data": {
+                "diff": [
+                    {
+                        "f12": f"BK{i}",
+                        "f14": f"概念{i}",
+                        "f3": 1,
+                        "f62": 0,
+                        "f104": 1,
+                        "f105": 0,
+                    }
+                    for i in range(5)
+                ]
+            },
+        }
+        with patch.object(sector_data, "_fetch_json",
+                          side_effect=[empty, concept]), \
+             patch.object(sector_data.time, "sleep"), \
+             patch("fetchers.sector_akshare.get_sector_rankings_akshare",
+                   return_value=None):
+            rankings = sector_data.get_sector_rankings()
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(rankings["meta"]["sources"]["industry"], "empty")
+
+    def test_sparse_nonempty_ranking_sources_are_incomplete(self):
+        from fetchers import sector_data
+
+        sparse = {
+            "rc": 0,
+            "data": {"diff": [{
+                "f12": "BK1", "f14": "稀疏板块", "f3": 1,
+                "f62": 0, "f104": 1, "f105": 0,
+            }]},
+        }
+        with patch.object(sector_data, "_fetch_json",
+                          side_effect=[sparse, sparse]), \
+             patch.object(sector_data.time, "sleep"), \
+             patch("fetchers.sector_akshare.get_sector_rankings_akshare",
+                   return_value=None):
+            rankings = sector_data.get_sector_rankings()
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(rankings["meta"]["sources"]["industry"], "sparse")
+        self.assertEqual(rankings["meta"]["sources"]["concept"], "sparse")
+
+    def test_partial_akshare_fallback_is_not_promoted_to_complete(self):
+        from fetchers import sector_data
+
+        empty = {"rc": 0, "data": {"diff": []}}
+        akshare = {
+            "meta": {
+                "total_sectors": 5,
+                "complete": False,
+                "sources": {"industry": "ok", "concept": "error"},
+            },
+            "sectors": [
+                {"code": f"BK{i}", "up_count": 1, "down_count": 0}
+                for i in range(5)
+            ],
+        }
+        with patch.object(sector_data, "_fetch_json",
+                          side_effect=[empty, empty]), \
+             patch.object(sector_data.time, "sleep"), \
+             patch("fetchers.sector_akshare.get_sector_rankings_akshare",
+                   return_value=akshare):
+            rankings = sector_data.get_sector_rankings()
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertNotEqual(rankings["meta"].get("source"), "akshare")
+
+    def test_akshare_single_subsource_failure_is_incomplete(self):
+        import pandas as pd
+        from fetchers import sector_akshare
+
+        industries = pd.DataFrame([
+            {
+                "序号": i,
+                "板块": f"行业{i}",
+                "涨跌幅": 1,
+                "总成交额": 1,
+                "净流入": 1,
+                "上涨家数": 1,
+                "下跌家数": 0,
+            }
+            for i in range(5)
+        ])
+        with patch.object(sector_akshare, "HAS_AKSHARE", True), \
+             patch.object(sector_akshare.ak,
+                          "stock_board_industry_summary_ths",
+                          return_value=industries), \
+             patch.object(sector_akshare.ak,
+                          "stock_board_concept_name_ths",
+                          side_effect=RuntimeError("dns")):
+            rankings = sector_akshare.get_sector_rankings_akshare()
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(rankings["meta"]["sources"]["industry"], "ok")
+        self.assertEqual(rankings["meta"]["sources"]["concept"], "error")
+
     def test_weekend_uses_latest_trading_date(self):
         result = resolve_recommendation_date(
             now=datetime(2026, 8, 8, 10, 0),
@@ -71,6 +266,59 @@ class TestRecommendationPolicy(unittest.TestCase):
             trade_date, source = sector_data.get_last_trading_day()
         self.assertEqual(trade_date, "2026-07-31")
         self.assertEqual(source, "calendar")
+
+    def test_last_trading_day_uses_cached_data_date_not_write_time(self):
+        from fetchers import sector_data
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 6, 16, 0, 0)
+
+        payload = {
+            "cached_at": "2026-08-06T16:00:00",
+            "data_date": "2026-08-05",
+            "rankings": {"meta": {"complete": True}, "sectors": []},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_file = Path(tmpdir) / "rankings.json"
+            cache_file.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.object(sector_data, "SNAPSHOT_FILE",
+                              Path(tmpdir) / "snapshots.json"), \
+                 patch.object(sector_data, "CACHE_FILE", cache_file), \
+                 patch.object(sector_data, "datetime", FrozenDateTime):
+                trade_date, source = sector_data.get_last_trading_day()
+
+        self.assertEqual(trade_date, "2026-08-05")
+        self.assertEqual(source, "cache")
+
+    def test_market_theme_cache_fallback_uses_explicit_data_date(self):
+        from analysis import market_theme
+
+        realtime = {
+            "meta": {"total_sectors": 1, "complete": False},
+            "sectors": [{
+                "code": "BK0", "name": "休市数据",
+                "up_count": 0, "down_count": 0, "change_pct": 0,
+            }],
+        }
+        cached_hot = [{"code": "BK1", "name": "缓存板块"}]
+        cache_payload = {
+            "cached_at": "2026-08-06T16:00:00",
+            "data_date": "2026-08-05",
+            "rankings": {"sectors": [{"up_count": 1, "down_count": 0}]},
+            "hot_sectors": cached_hot,
+        }
+        with patch.object(market_theme, "get_sector_rankings",
+                          return_value=realtime), \
+             patch.object(market_theme, "rank_hot_sectors", return_value=[]), \
+             patch.object(market_theme, "load_rankings_cache_full",
+                          return_value=cache_payload):
+            hot, data_date, source = market_theme.get_top_sectors(top_n=1)
+
+        self.assertEqual(hot, cached_hot)
+        self.assertEqual(data_date, "2026-08-05")
+        self.assertEqual(source, "cache")
 
     def test_premarket_uses_previous_close_date(self):
         result = resolve_recommendation_date(
@@ -225,7 +473,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             candidate_rank_score(candidate("1", adjusted_score=63.5)), 63.5)
 
     def test_pick_hot_sectors_uses_absolute_threshold(self):
-        rankings = {"sectors": [
+        rankings = {"meta": {"complete": True}, "sectors": [
             {"code": "BK1", "name": "弱中最强", "change_pct": -1.0,
              "main_force_net": -1e8, "up_count": 2, "down_count": 8},
             {"code": "BK2", "name": "更弱", "change_pct": -3.0,
@@ -234,6 +482,155 @@ class TestRecommendationPolicy(unittest.TestCase):
         with patch("fetchers.sector_data.get_sector_rankings",
                    return_value=rankings):
             picked = dc.pick_hot_sectors(top_n=20, min_hot=45, min_stocks=1)
+        self.assertEqual(picked, [])
+
+    def test_pick_hot_sectors_uses_cache_when_live_sources_fail(self):
+        row = {
+            "code": "BK1", "name": "缓存板块", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        cached = {
+            "cached_at": "2026-08-06T15:10:00",
+            "data_date": "2026-08-06",
+            "rankings": {
+                "meta": {"total_sectors": 1},
+                "sectors": [row],
+            },
+        }
+        history = {
+            date: [{"code": "BK1", "hot_score": 70,
+                    "net_flow": 1e8}]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value={
+                       "meta": {"total_sectors": 0}, "sectors": []}), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06")
+
+        self.assertEqual(picked[0]["ranking_source"], "cache")
+        self.assertEqual(picked[0]["ranking_data_date"], "2026-08-06")
+        self.assertEqual(picked[0]["ranking_quality"], "degraded")
+
+    def test_stale_rankings_cache_is_observation_only(self):
+        row = {
+            "code": "BK1", "name": "过期缓存板块", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        cached = {
+            "cached_at": "2026-08-05T15:10:00",
+            "data_date": "2026-08-05",
+            "rankings": {
+                "meta": {"total_sectors": 1},
+                "sectors": [row],
+            },
+        }
+        history = {
+            date: [{"code": "BK1", "hot_score": 70,
+                    "net_flow": 1e8}]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value={
+                       "meta": {"total_sectors": 0}, "sectors": []}), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06")
+
+        self.assertFalse(picked[0]["sector_actionable"])
+        self.assertEqual(picked[0]["sector_type"], "stale_cache")
+
+    def test_legacy_rankings_cache_without_data_date_is_observation_only(self):
+        row = {
+            "code": "BK1", "name": "旧格式缓存", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        cached = {
+            "cached_at": "2026-08-06T15:10:00",
+            "rankings": {"meta": {"total_sectors": 1}, "sectors": [row]},
+        }
+        history = {
+            date: [{"code": "BK1", "hot_score": 70,
+                    "net_flow": 1e8}]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value={
+                       "meta": {"total_sectors": 0}, "sectors": []}), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06")
+
+        self.assertEqual(picked[0]["ranking_data_date"], "")
+        self.assertFalse(picked[0]["sector_actionable"])
+        self.assertEqual(picked[0]["sector_type"], "stale_cache")
+
+    def test_partial_live_rankings_prefer_complete_cache(self):
+        row = {
+            "code": "BK1", "name": "完整缓存", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        partial = {
+            "meta": {"total_sectors": 1, "complete": False},
+            "sectors": [{**row, "name": "部分实时"}],
+        }
+        cached = {
+            "cached_at": "2026-08-06T15:10:00",
+            "data_date": "2026-08-06",
+            "rankings": {"meta": {"total_sectors": 1}, "sectors": [row]},
+        }
+        history = {
+            date: [{"code": "BK1", "hot_score": 70,
+                    "net_flow": 1e8}]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=partial), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06")
+
+        self.assertEqual(picked[0]["name"], "完整缓存")
+        self.assertEqual(picked[0]["ranking_source"], "cache")
+
+    def test_known_partial_rankings_cache_is_rejected(self):
+        row = {
+            "code": "BK1", "name": "部分缓存", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        cached = {
+            "cached_at": "2026-08-06T15:10:00",
+            "data_date": "2026-08-06",
+            "rankings": {
+                "meta": {"total_sectors": 1, "complete": False},
+                "sectors": [row],
+            },
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value={
+                       "meta": {"total_sectors": 0, "complete": False},
+                       "sectors": [],
+                   }), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value={}):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06")
+
         self.assertEqual(picked, [])
 
     def test_scan_expands_until_eligible_count_reaches_target(self):
@@ -245,9 +642,11 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         results = {
             "BK1": [{"code": "1", "composite_score": 80,
+                      "sector_code": "BK1",
                       "quality_adjusted_score": 40,
                       "data_quality": {"eligible": True}}],
             "BK2": [{"code": "2", "composite_score": 80,
+                      "sector_code": "BK2",
                       "quality_adjusted_score": 80,
                       "data_quality": {"eligible": True}}],
         }
@@ -259,9 +658,19 @@ class TestRecommendationPolicy(unittest.TestCase):
              patch.object(dc, "run_phase2", side_effect=fake_phase2):
             scored = dc.scan_sectors(
                 ["BK1", "BK2"], batch_size=1, min_candidates=1,
-                min_score=50, as_of_date="2026-08-06")
+                min_score=50, as_of_date="2026-08-06",
+                sector_context={
+                    "BK1": {
+                        "ranking_source": "cache",
+                        "ranking_data_date": "2026-08-05",
+                        "ranking_quality": "degraded",
+                    },
+                })
         self.assertEqual(len(calls), 2)
         self.assertEqual({item["code"] for item in scored}, {"1", "2"})
+        cached_item = next(item for item in scored if item["code"] == "1")
+        self.assertEqual(cached_item["ranking_source"], "cache")
+        self.assertEqual(cached_item["ranking_data_date"], "2026-08-05")
 
     def test_missing_regime_allows_observation_only(self):
         policy = build_recommendation_policy(None, "2026-08-06")
@@ -343,10 +752,19 @@ class TestRecommendationPolicy(unittest.TestCase):
             "max_portfolio_pct": 60,
             "reasons": [],
         }
+        cached_observation = candidate("2", eligible=False)
+        cached_observation.update({
+            "ranking_source": "realtime",
+            "ranking_data_date": "2026-08-06",
+            "ranking_quality": "good",
+            "membership_source": "cache",
+            "membership_data_date": "2026-08-05",
+            "membership_quality": "degraded",
+        })
         buckets = {
             "actionable": [candidate("1")],
             "waiting_trigger": [],
-            "observation": [candidate("2", eligible=False)],
+            "observation": [cached_observation],
         }
         report = generate_report(
             buckets["actionable"] + buckets["observation"],
@@ -360,6 +778,9 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("## 观察池", report)
         self.assertIn("质量分", report)
         self.assertIn("coverage_below_70pct", report)
+        self.assertIn("排行 来源 realtime", report)
+        self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", report)
+        self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", report)
         self.assertIn("股市有风险，投资需谨慎", report)
 
     def test_html_renders_all_buckets_and_full_disclaimer(self):
@@ -369,10 +790,19 @@ class TestRecommendationPolicy(unittest.TestCase):
             "max_portfolio_pct": 60,
             "reasons": [],
         }
+        cached_observation = candidate("2", eligible=False)
+        cached_observation.update({
+            "ranking_source": "realtime",
+            "ranking_data_date": "2026-08-06",
+            "ranking_quality": "good",
+            "membership_source": "cache",
+            "membership_data_date": "2026-08-05",
+            "membership_quality": "degraded",
+        })
         buckets = {
             "actionable": [candidate("1")],
             "waiting_trigger": [],
-            "observation": [candidate("2", eligible=False)],
+            "observation": [cached_observation],
         }
         html = _generate_html(
             buckets["actionable"] + buckets["observation"],
@@ -385,6 +815,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("今日可执行", html)
         self.assertIn("等待触发", html)
         self.assertIn("观察池", html)
+        self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", html)
+        self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", html)
         self.assertIn("股市有风险，投资需谨慎", html)
 
     def test_json_output_keeps_candidates_and_adds_action_buckets(self):
@@ -400,13 +832,16 @@ class TestRecommendationPolicy(unittest.TestCase):
             "waiting_trigger": [],
             "observation": [],
         }
-        output = build_json_output(items, [("BK1", "测试板块", 80)],
-                                   1.0, policy, buckets)
+        sectors = [{"code": "BK1", "name": "测试板块",
+                    "ranking_source": "cache"}]
+        output = build_json_output(
+            items, sectors, 1.0, policy, buckets)
         self.assertEqual(output["candidates"], items)
         self.assertEqual(output["recommendations"], items)
         self.assertEqual(output["waiting_trigger"], [])
         self.assertEqual(output["observation"], [])
         self.assertEqual(output["policy"], policy)
+        self.assertEqual(output["sectors"], sectors)
         self.assertEqual(output["candidates"][0]["quality_adjusted_score"], 80.0)
 
 

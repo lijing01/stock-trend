@@ -211,12 +211,67 @@ def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
                      as_of_date=""):
     """Pick sectors above an absolute heat floor, in relative-rank order."""
     from fetchers.sector_data import (
+        append_daily_snapshot,
         get_sector_rankings,
+        load_rankings_cache_full,
         load_snapshot_history,
         rank_hot_sectors,
+        save_rankings_cache,
     )
     rankings = get_sector_rankings()
+    live_meta = rankings.get("meta", {})
+    active = sum(
+        1 for sector in rankings.get("sectors", [])
+        if (sector.get("up_count", 0) or 0) > 0
+        or (sector.get("down_count", 0) or 0) > 0
+    )
+    ranking_meta = {
+        "source": live_meta.get("source", "realtime"),
+        "data_date": as_of_date or datetime.now().strftime("%Y-%m-%d"),
+        "quality": "good",
+        "errors": live_meta.get("errors", [])
+        or live_meta.get("upstream_errors", []),
+    }
+    if active and live_meta.get("complete", False):
+        if as_of_date:
+            save_rankings_cache(rankings, data_date=as_of_date)
+            append_daily_snapshot(rankings, override_date=as_of_date)
+    else:
+        cached = load_rankings_cache_full()
+        cached_rankings = (cached or {}).get("rankings", {})
+        cache_usable = (
+            bool(cached_rankings.get("sectors"))
+            and cached_rankings.get("meta", {}).get("complete") is not False
+        )
+        if cache_usable:
+            rankings = cached["rankings"]
+            ranking_meta = {
+                "source": "cache",
+                "data_date": cached.get("data_date", ""),
+                "quality": "degraded",
+                "errors": live_meta.get("errors", [])
+                or live_meta.get("upstream_errors", []),
+            }
+        elif active:
+            ranking_meta = {
+                "source": "realtime_partial",
+                "data_date": as_of_date,
+                "quality": "partial",
+                "errors": live_meta.get("errors", []),
+            }
+        else:
+            ranking_meta = {
+                "source": "error", "data_date": "", "quality": "error",
+                "errors": live_meta.get("errors", []),
+            }
     ranked = rank_hot_sectors(rankings, top_n=top_n, min_stocks=min_stocks)
+    for sector in ranked:
+        sector.update({
+            "ranking_source": ranking_meta["source"],
+            "ranking_data_date": ranking_meta["data_date"],
+            "ranking_quality": ranking_meta["quality"],
+            "ranking_errors": ranking_meta["errors"],
+        })
     qualified = [
         sector for sector in ranked
         if sector.get("absolute_hot_score", 0) >= min_hot
@@ -232,12 +287,22 @@ def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
         except Exception:
             pass
     hs300_change = (regime or {}).get("hs300_change")
-    return enrich_sector_context(
+    enriched = enrich_sector_context(
         qualified,
         load_snapshot_history(days=10),
         hs300_change=hs300_change,
         as_of_date=expected_date,
     )
+    for sector in enriched:
+        if sector.get("ranking_source") == "cache" \
+                and expected_date \
+                and sector.get("ranking_data_date") != expected_date:
+            sector["sector_type"] = "stale_cache"
+            sector["sector_actionable"] = False
+        elif sector.get("ranking_quality") in ("partial", "error"):
+            sector["sector_type"] = "partial_realtime"
+            sector["sector_actionable"] = False
+    return enriched
 
 
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
@@ -265,6 +330,11 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     "sector_score": context.get("sector_score"),
                     "sector_persistence": context.get("persistence_score"),
                     "sector_relative_strength": context.get("relative_strength"),
+                    "ranking_source": context.get("ranking_source", ""),
+                    "ranking_data_date": context.get(
+                        "ranking_data_date", ""),
+                    "ranking_quality": context.get("ranking_quality", ""),
+                    "ranking_errors": context.get("ranking_errors", []),
                 })
             all_scored[s["code"]] = s
         eligible_count = sum(
@@ -316,6 +386,23 @@ def _signal_text(signals):
     return "、".join(parts) or "-"
 
 
+def _sector_text(item):
+    text = item.get("sector_name", "")
+    provenance = []
+    for label, prefix in (("排行", "ranking"), ("成分", "membership")):
+        source = item.get(f"{prefix}_source", "")
+        if not source:
+            continue
+        data_date = item.get(f"{prefix}_data_date", "") or "未知"
+        quality = item.get(f"{prefix}_quality", "") or "未知"
+        provenance.append(
+            f"{label} 来源 {source}｜日期 {data_date}｜质量 {quality}"
+        )
+    if provenance:
+        return f"{text}（{'；'.join(provenance)}）"
+    return text
+
+
 def _append_candidate_table(lines, title, items, empty_text):
     lines.extend(["", f"## {title}", ""])
     if not items:
@@ -333,7 +420,7 @@ def _append_candidate_table(lines, title, items, empty_text):
         detail = "、".join(reasons) if reasons else _signal_text(item.get("signals", {}))
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
-            f"{item['sector_name']} | {wyckoff.get('sub_phase', '-')} | "
+            f"{_sector_text(item)} | {wyckoff.get('sub_phase', '-')} | "
             f"{wyckoff.get('confidence', 0):.0%} | "
             f"{item['composite_score']:.1f} | "
             f"{candidate_rank_score(item):.1f} | "
@@ -480,7 +567,7 @@ def _html_candidate_rows(items):
         rows.append(
             f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
-            f"<td>{item['sector_name']}</td>"
+            f"<td>{_sector_text(item)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
@@ -557,6 +644,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets):
             "elapsed_seconds": round(elapsed, 1),
         },
         "policy": policy,
+        "sectors": sector_codes,
         "candidates": candidates,
         "recommendations": buckets["actionable"],
         "waiting_trigger": buckets["waiting_trigger"],
