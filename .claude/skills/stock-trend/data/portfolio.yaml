@@ -50,16 +50,16 @@ holdings:
     buy_price: 8.19
     quantity: 2000
 - buy_date: '2026-05-27'
-  buy_price: 0.647
+  buy_price: 0.656141623667
   close_date: null
   close_price: null
   code: '159740'
-  current_price: 0.593
+  current_price: 0.604
   name: 恒生科技ETF大成
   notes: ''
-  quantity: 250700.0
+  quantity: 290700.0
   status: active
-  stop_loss: 0.59
+  stop_loss: null
   targets:
   - 0.634
   - 0.66
@@ -67,20 +67,72 @@ holdings:
   ts_code: 159740.SZ
 - buy_date: '2026-05-26'
   buy_price: 17.703
-  close_date: null
-  close_price: null
   code: '601166'
   current_price: 18.54
+  close_date: '2026-08-09'
+  close_price: null
   name: 兴业银行
   notes: 2026-06-05 卖出 700股@18.59，获利 +621
   quantity: 800.0
-  status: active
+  status: closed
   stop_loss: 17.0
   targets:
   - 18.04
   - 18.41
   - 18.79
   ts_code: 601166.SH
+- buy_date: null
+  buy_price: 1.388071641791
+  close_date: null
+  close_price: null
+  code: '588060'
+  current_price: 1.106
+  name: 科创50ETF
+  notes: 截图同步：成本价由截图浮动盈亏反推
+  quantity: 13400.0
+  status: active
+  stop_loss: null
+  targets: []
+  ts_code: 588060.SH
+- buy_date: null
+  buy_price: 30.249030769231
+  close_date: null
+  close_price: null
+  code: '601899'
+  current_price: 35.15
+  name: 紫金矿业
+  notes: 截图同步：成本价由截图浮动盈亏反推
+  quantity: 1300.0
+  status: active
+  stop_loss: null
+  targets: []
+  ts_code: 601899.SH
+- buy_date: null
+  buy_price: 129.92805
+  close_date: null
+  close_price: null
+  code: '605499'
+  current_price: 122.8
+  name: 东鹏饮料
+  notes: 截图同步：成本价由截图浮动盈亏反推
+  quantity: 200.0
+  status: active
+  stop_loss: null
+  targets: []
+  ts_code: 605499.SH
+- buy_date: null
+  buy_price: 43.238633333333
+  close_date: null
+  close_price: null
+  code: '002230'
+  current_price: 43.53
+  name: 科大讯飞
+  notes: 截图同步：成本价由截图浮动盈亏反推
+  quantity: 900.0
+  status: active
+  stop_loss: null
+  targets: []
+  ts_code: 002230.SZ
 - buy_date: '2026-05-22'
   buy_price: 3.19
   close_date: '2026-06-04'
@@ -100,4 +152,4 @@ holdings:
 settings:
   alert_threshold_pct: 3.0
   default_stop_loss_pct: 5.0
-  cash: 109000.0
+  cash: 95392.93
