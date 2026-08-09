@@ -389,6 +389,12 @@ def test_report():
     md = mr.generate_report(ctx)
     test("stale_note 显示", "非今日" in md)
 
+    ctx["portfolio_snapshot"] = {"loaded_at": "2026-08-01 20:00:00", "active_count": 2}
+    ctx["holdings_sync_note"] = "持仓已按当前持仓记录刷新"
+    md = mr.generate_report(ctx)
+    test("持仓快照时间显示", "持仓快照: 2026-08-01 20:00:00" in md)
+    test("持仓刷新提示显示", "持仓已按当前持仓记录刷新" in md)
+
 
 # ──────────────── _index_metrics ────────────────
 
@@ -427,6 +433,42 @@ def test_persistence():
              f"got {sorted(hist.keys())}")
     mr.HISTORY_FILE = old
     mr.HISTORY_MAX_DAYS = old_max
+
+
+def test_cached_holdings_refresh():
+    print("\n--- cached holdings refresh ---")
+    old_portfolio = mr.PORTFOLIO_YAML
+    with tempfile.TemporaryDirectory() as tmp:
+        portfolio_path = Path(tmp) / "portfolio.yaml"
+        portfolio_path.write_text(
+            "holdings:\n"
+            "- code: '601166'\n  name: 兴业银行\n  status: active\n"
+            "  stop_loss: 17.0\n  targets: [18.4]\n",
+            encoding="utf-8")
+        mr.PORTFOLIO_YAML = portfolio_path
+        old_meta = mr.portfolio_snapshot_meta(mr.load_portfolio())
+        ctx = {
+            "regime": {"label": "中性"},
+            "holdings": [{"code": "601166", "name": "兴业银行", "ok": True,
+                          "close": 18.3, "ma5": 18.4, "ma20": 18.2,
+                          "above_ma5": False, "above_ma20": True,
+                          "stop_loss": 17.0, "targets": [18.4]}],
+            "portfolio_snapshot": old_meta,
+        }
+        portfolio_path.write_text(
+            "holdings:\n"
+            "- code: '601166'\n  name: 兴业银行\n  status: closed\n"
+            "- code: '588060'\n  name: 科创50ETF\n  status: active\n"
+            "  stop_loss: null\n  targets: []\n",
+            encoding="utf-8")
+        mr.refresh_cached_holdings(ctx)
+        codes = [h["code"] for h in ctx["holdings"]]
+        test("缓存重出移除已平仓标的", "601166" not in codes, str(codes))
+        test("缓存重出加入新增活跃标的", codes == ["588060"], str(codes))
+        test("新增持仓标为待实时分析", ctx["holdings"][0]["ok"] is False)
+        test("持仓变更给出提示", "持仓已按当前持仓记录刷新" in ctx.get("holdings_sync_note", ""))
+        test("计划不再引用已平仓标的", not any("兴业银行" in p for p in ctx["plan"]), str(ctx["plan"]))
+    mr.PORTFOLIO_YAML = old_portfolio
 
 
 # ──────────────── live loaders (guarded) ────────────────
@@ -468,6 +510,7 @@ def main():
     test_report()
     test_index_metrics()
     test_persistence()
+    test_cached_holdings_refresh()
     test_live_loaders()
 
     print(f"\nResults: {PASSED} passed, {FAILED} failed, {SKIPPED} skipped")

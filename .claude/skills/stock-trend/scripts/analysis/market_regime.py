@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -483,6 +484,86 @@ def load_portfolio() -> list[dict]:
     return [h for h in holdings if h.get("status") == "active"]
 
 
+def portfolio_snapshot_meta(holdings: list[dict] | None = None) -> dict:
+    """Return a versioned description of the portfolio used by a review.
+
+    Market context can be safely reused on non-trading days, but the active
+    holdings list can change at any time.  Persist both a file fingerprint and
+    the active codes so cached reviews can detect and repair that divergence.
+    """
+    active = holdings if holdings is not None else load_portfolio()
+    meta = {
+        "loaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "active_codes": [str(h.get("code", "")) for h in active],
+        "active_count": len(active),
+    }
+    try:
+        raw = PORTFOLIO_YAML.read_bytes()
+        meta["source_mtime_ns"] = PORTFOLIO_YAML.stat().st_mtime_ns
+        meta["content_sha256"] = hashlib.sha256(raw).hexdigest()
+    except OSError:
+        meta["source_mtime_ns"] = None
+        meta["content_sha256"] = None
+    return meta
+
+
+def refresh_cached_holdings(ctx: dict) -> dict:
+    """Reconcile a cached market review with the current active holdings.
+
+    This deliberately does not fetch new K-lines: ``--no-refresh`` remains a
+    market-data cache path.  Existing technical snapshots are retained for
+    unchanged codes; new holdings are shown as pending the next live review.
+    """
+    active = load_portfolio()
+    snapshot = portfolio_snapshot_meta(active)
+    cached = {str(h.get("code", "")): h for h in ctx.get("holdings", [])}
+    refreshed = []
+    for holding in active[:8]:
+        code = str(holding.get("code", ""))
+        previous = cached.get(code)
+        if previous:
+            item = dict(previous)
+            # Portfolio fields are authoritative even when its technical data
+            # comes from the cached market snapshot.
+            item["name"] = holding.get("name") or item.get("name") or code
+            item["stop_loss"] = holding.get("stop_loss")
+            item["targets"] = holding.get("targets") or []
+        else:
+            item = {
+                "code": code,
+                "name": holding.get("name") or code,
+                "close": None,
+                "pct_chg": None,
+                "ma5": None,
+                "ma20": None,
+                "above_ma5": None,
+                "above_ma20": None,
+                "stop_loss": holding.get("stop_loss"),
+                "targets": holding.get("targets") or [],
+                "ok": False,
+            }
+        refreshed.append(item)
+
+    previous_meta = ctx.get("portfolio_snapshot") or {}
+    old_codes = previous_meta.get("active_codes") or list(cached)
+    changed = (
+        old_codes != snapshot["active_codes"]
+        or previous_meta.get("content_sha256") != snapshot.get("content_sha256")
+    )
+    ctx["holdings"] = refreshed
+    ctx["portfolio_snapshot"] = snapshot
+    ctx["holdings_refreshed_at"] = snapshot["loaded_at"]
+    if changed:
+        ctx["holdings_sync_note"] = (
+            "持仓已按当前持仓记录刷新；市场与技术数据仍沿用缓存快照，"
+            "新增持仓的技术数据待下次实时复盘补齐。"
+        )
+    else:
+        ctx.pop("holdings_sync_note", None)
+    ctx["plan"] = build_plan(ctx.get("regime", {}), refreshed)
+    return ctx
+
+
 def analyze_holding(holding: dict) -> dict:
     """Lightweight holding check: 现价 vs MA5/MA20 + 今日涨跌 + 相对止损/目标."""
     code = str(holding.get("code", ""))
@@ -576,6 +657,15 @@ def generate_report(ctx: dict) -> str:
     # ③ 持仓
     lines.append("### ③ 持仓")
     lines.append("")
+    portfolio_meta = ctx.get("portfolio_snapshot") or {}
+    if portfolio_meta:
+        lines.append(
+            f"▸ 持仓快照: {portfolio_meta.get('loaded_at', '—')} | "
+            f"活跃持仓 {portfolio_meta.get('active_count', '—')} 笔")
+    if ctx.get("holdings_sync_note"):
+        lines.append(f"▸ ⚠️ {ctx['holdings_sync_note']}")
+    if portfolio_meta or ctx.get("holdings_sync_note"):
+        lines.append("")
     holdings = ctx.get("holdings", [])
     if holdings:
         lines.append("| 代码 | 名称 | 现价 | 今日% | MA5 | MA20 | 相对止损 |")
@@ -722,6 +812,8 @@ def collect_context() -> dict:
         "top_sectors": top_sectors,
         "bottom_sectors": bottom_sectors,
         "holdings": holdings,
+        "portfolio_snapshot": portfolio_snapshot_meta(holdings_raw),
+        "holdings_refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan": build_plan(regime, holdings),
     }
     return ctx
@@ -740,6 +832,9 @@ def build_agent_output(ctx: dict) -> dict:
         "top_sectors": ctx["top_sectors"],
         "bottom_sectors": ctx["bottom_sectors"],
         "holdings": ctx["holdings"],
+        "portfolio_snapshot": ctx.get("portfolio_snapshot", {}),
+        "holdings_refreshed_at": ctx.get("holdings_refreshed_at"),
+        "holdings_sync_note": ctx.get("holdings_sync_note", ""),
         "plan": ctx["plan"],
     }
 
@@ -762,9 +857,9 @@ def main():
         if not ctx:
             print("⚠️ 无今日缓存(market_regime.json),先不带 --no-refresh 跑一次")
             return
-        # 报告需要持仓/计划字段
-        if "plan" not in ctx:
-            ctx["plan"] = build_plan(ctx.get("regime", {}), ctx.get("holdings", []))
+        # 市场数据沿用缓存，但持仓状态必须以当前组合为准。
+        refresh_cached_holdings(ctx)
+        save_context(ctx)
     else:
         print("[1/5] 拉取指数K线 + 成交额...")
         print("[2/5] 拉取行业板块排行...")

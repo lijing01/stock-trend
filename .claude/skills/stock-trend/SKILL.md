@@ -310,8 +310,8 @@ open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
 ```
 3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/主力净流入、北向(不可用降级主力净流入)。
 4. 输出: 复盘报告(①市场环境 ②板块最强/最弱 ③持仓轻量分析 ④明日if-then计划) → `reports/lists/daily-review-<时间>.md` + `.html`。
-4. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。
-5. `--no-refresh` 用今日缓存重出报告(非交易日/盘中补看)。
+4. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。上下文记录持仓文件版本、活跃代码和持仓快照时间。
+5. `--no-refresh` 用今日缓存重出报告(非交易日/盘中补看)：市场数据不刷新，但会重新读取当前活跃持仓、重建持仓段落与 if-then 计划；新增持仓标记为待下次实时复盘补齐技术数据。任何“当前持仓”结论应以 `/portfolio list|status` 为准。
 
 **与 /stock-trend 联动**: 每次先跑 `/daily-review` 生成市场上下文,`/stock-trend` 报告自动含「📊 大盘/板块对比」段(个股 vs 沪深300 相对强弱 + 所属板块位置)。
 
