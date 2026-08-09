@@ -30,6 +30,38 @@ SIGNAL_LABELS = {
     "northbound_adding": "北向增持",
 }
 
+REASON_LABELS = {
+    "kline_stale": "K线数据过期",
+    "coverage_below_70pct": "数据覆盖率低于70%",
+    "secondary_data_missing": "资金面和基本面数据均缺失",
+    "capital_error": "资金面数据返回错误",
+    "fundamental_error": "基本面数据返回错误",
+    "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
+    "quality_adjusted_below_min_score": "质量调整分低于最低门槛",
+    "sector_unverified": "板块持续性未验证",
+    "manual_unverified": "手动指定板块未经持续性验证",
+    "stale_cache": "板块排行使用过期缓存",
+    "partial_realtime": "板块实时排行数据不完整",
+    "regime_missing": "市场环境数据缺失",
+    "regime_stale": "市场环境数据过期",
+    "regime_weak": "市场环境评分偏弱",
+    "intraday_provisional": "盘中数据尚未收盘确认",
+    "recommendation_limit": "超出当日推荐数量上限",
+}
+
+DATA_REASON_CODES = {
+    "kline_stale",
+    "coverage_below_70pct",
+    "secondary_data_missing",
+    "capital_error",
+    "fundamental_error",
+    "stale_cache",
+    "partial_realtime",
+    "regime_missing",
+    "regime_stale",
+    "intraday_provisional",
+}
+
 
 def candidate_rank_score(item):
     """Return the quality-adjusted rank score with legacy fallback."""
@@ -386,6 +418,70 @@ def _signal_text(signals):
     return "、".join(parts) or "-"
 
 
+def _reason_detail(code, item):
+    """Translate an internal reason code and attach the available cause data."""
+    quality = item.get("data_quality", {})
+    dimensions = quality.get("dimensions", {})
+    expected = quality.get("as_of_date", "") or "未知"
+    if code == "coverage_below_70pct":
+        return f"数据覆盖率{quality.get('coverage', 0):.0%}，低于70%门槛"
+    dimension_name = {
+        "kline_stale": "kline",
+        "capital_error": "capital",
+        "fundamental_error": "fundamental",
+    }.get(code)
+    if dimension_name:
+        dimension = dimensions.get(dimension_name, {})
+        details = []
+        if dimension.get("data_date"):
+            details.append(f"数据日期{dimension['data_date']}")
+        if code == "kline_stale":
+            details.append(f"要求覆盖至{expected}")
+        if dimension.get("source"):
+            details.append(f"来源{dimension['source']}")
+        if dimension.get("stale_reason"):
+            details.append(f"原因码{dimension['stale_reason']}")
+        suffix = f"（{'，'.join(details)}）" if details else ""
+        return f"{REASON_LABELS[code]}{suffix}"
+    return REASON_LABELS.get(code, str(code))
+
+
+def _candidate_diagnostic_text(item):
+    """Render data problems and other demotion causes in the final column."""
+    quality = item.get("data_quality", {})
+    reasons = list(item.get("observation_reasons", [])) \
+        or list(quality.get("reasons", []))
+    data_reasons = []
+    other_reasons = []
+    for code in reasons:
+        target = data_reasons if code in DATA_REASON_CODES else other_reasons
+        target.append(_reason_detail(code, item))
+
+    for label, prefix in (("板块排行", "ranking"), ("板块成分", "membership")):
+        quality_value = item.get(f"{prefix}_quality", "")
+        source = item.get(f"{prefix}_source", "")
+        errors = item.get(f"{prefix}_errors", []) or []
+        if quality_value and quality_value != "good":
+            cause = "、".join(str(error) for error in errors if error)
+            detail = f"{label}数据质量{quality_value}"
+            if source:
+                detail += f"（来源{source}）"
+            if cause:
+                detail += f"：{cause}"
+            data_reasons.append(detail)
+
+    parts = []
+    if data_reasons:
+        parts.append("数据问题/异常：" + "、".join(dict.fromkeys(data_reasons)))
+    else:
+        parts.append("数据问题/异常：无")
+    if other_reasons:
+        parts.append("其他原因：" + "、".join(dict.fromkeys(other_reasons)))
+    elif not data_reasons:
+        parts.append("信号：" + _signal_text(item.get("signals", {})))
+    return "；".join(parts)
+
+
 def _sector_text(item):
     text = item.get("sector_name", "")
     provenance = []
@@ -409,15 +505,13 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 买点 | 置信度 | 原始分 | 质量分 | 覆盖率 | 原因/信号 |",
+        "| # | 名称(代码) | 板块 | 买点 | 置信度 | 原始分 | 质量分 | 覆盖率 | 数据问题/异常及原因 |",
         "|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
-        reasons = item.get("observation_reasons", []) \
-            or quality.get("reasons", [])
-        detail = "、".join(reasons) if reasons else _signal_text(item.get("signals", {}))
+        detail = _candidate_diagnostic_text(item)
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {wyckoff.get('sub_phase', '-')} | "
@@ -561,9 +655,7 @@ def _html_candidate_rows(items):
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
-        reasons = item.get("observation_reasons", []) \
-            or quality.get("reasons", [])
-        detail = "、".join(reasons) if reasons else _signal_text(item.get("signals", {}))
+        detail = _candidate_diagnostic_text(item)
         rows.append(
             f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
@@ -625,11 +717,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 <p class="dt">{policy_note}</p>
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>原因/信号</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>原因/信号</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>原因/信号</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""

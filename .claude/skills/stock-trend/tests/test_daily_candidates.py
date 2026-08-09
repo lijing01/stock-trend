@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans.daily_candidates import (
+    _candidate_diagnostic_text,
     _generate_html,
     build_json_output,
     build_recommendation_policy,
@@ -777,7 +778,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("## 等待触发", report)
         self.assertIn("## 观察池", report)
         self.assertIn("质量分", report)
-        self.assertIn("coverage_below_70pct", report)
+        self.assertIn("数据问题/异常及原因", report)
+        self.assertIn("数据覆盖率55%，低于70%门槛", report)
         self.assertIn("排行 来源 realtime", report)
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", report)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", report)
@@ -818,6 +820,32 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", html)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", html)
         self.assertIn("股市有风险，投资需谨慎", html)
+
+    def test_final_column_explains_data_problem_and_cause(self):
+        item = candidate("1", eligible=False)
+        item["data_quality"].update({
+            "as_of_date": "2026-08-06",
+            "reasons": ["kline_stale", "coverage_below_70pct"],
+            "dimensions": {
+                "kline": {
+                    "data_date": "2026-08-05",
+                    "source": "cache",
+                    "stale_reason": "kline_stale",
+                },
+            },
+        })
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("数据问题/异常：K线数据过期", detail)
+        self.assertIn("数据日期2026-08-05", detail)
+        self.assertIn("要求覆盖至2026-08-06", detail)
+        self.assertIn("来源cache", detail)
+        self.assertIn("数据覆盖率55%，低于70%门槛", detail)
+
+    def test_final_column_marks_no_data_problem(self):
+        detail = _candidate_diagnostic_text(candidate("1"))
+        self.assertIn("数据问题/异常：无", detail)
 
     def test_json_output_keeps_candidates_and_adds_action_buckets(self):
         items = [candidate("1")]
