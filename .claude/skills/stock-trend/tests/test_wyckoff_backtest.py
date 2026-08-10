@@ -84,6 +84,13 @@ def test_classify_missing_sub():
     test("WBT-04: empty sub_phase → None", sig is None)
 
 
+def test_candidate_signal_is_not_selected():
+    analysis = _analysis("markup", "jac", 0.8, 2.0)
+    analysis["signal"] = {"status": "candidate", "age_bars": 0}
+    from analysis.wyckoff import is_buy_signal
+    test("WBT-04a: candidate event is not buy signal", not is_buy_signal(analysis))
+
+
 def test_score_100_normalize():
     sig = _classify_signal(_analysis("accumulation", "spring", 0.7, 3.0), 0.3)
     test("WBT-05: score_100 = 100 at +3", sig is not None and sig["score_100"] == 100.0)
@@ -256,6 +263,7 @@ def run_wyckoff_backtest_tests():
     test_classify_nonbuy()
     test_classify_error()
     test_classify_missing_sub()
+    test_candidate_signal_is_not_selected()
     test_score_100_normalize()
     test_slice_kline()
     test_forward_return()

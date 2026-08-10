@@ -83,6 +83,19 @@ Wyckoff 分析**仅依赖已有数据**：
     "touch_count": 5,
     "is_clear_range": true
   },
+  "ranges": [
+    {"id": "context_12", "level": "context", "support": 145.5, "resistance": 168.8, "quality_score": 0.76},
+    {"id": "minor_96", "level": "minor", "support": 160.2, "resistance": 166.1, "quality_score": 0.81}
+  ],
+  "timeframes": {
+    "context": {"range_id": "context_12", "phase": "context", "is_current": false},
+    "minor": {"range_id": "minor_96", "phase": "markup", "structure": "re_accumulation", "current_event": "sos", "is_current": true}
+  },
+  "event_history": [
+    {"type": "spring", "event_date": "2026-06-09", "detected_date": "2026-06-11", "status": "confirmed", "bars_since_event": 20},
+    {"type": "sos", "event_date": "2026-07-14", "detected_date": "2026-07-14", "status": "candidate", "bars_since_event": 0}
+  ],
+  "signal": {"status": "candidate", "age_bars": 0, "structure_level": "minor", "range_id": "minor_96"},
   "swing_points": [
     {"index": 12, "date": "2026-03-15", "type": "low", "price": 142.0, "volume_ratio": 2.1, "is_climax": true, "climax_type": "selling"},
     {"index": 25, "date": "2026-04-02", "type": "high", "price": 165.0, "volume_ratio": 1.3, "is_climax": false}
@@ -185,43 +198,27 @@ Climax 标记条件：
 输出: range {support, resistance, height, duration, touches}
 ```
 
-### 4.4 决策树分类
+### 4.4 多级别区间与事件分类
 
-```
-[1] 当前价格在箱体内或箱体边界(±ATR*0.5)?
-     ├── Yes → [2] 量价特征
-     │          ├── 箱体内成交量↓ + 下边界 hold → Accumulation
-     │          │    └── 子阶段细化:
-     │          │        最近 swing_low 放量 + 长下影 → SC
-     │          │        SC 后反弹 + 量递减 → AR
-     │          │        回测 SC 低点 + 量 < SC×0.5 → ST
-     │          │        跌破支撑+立即收回+放量 → Spring
-     │          │        地量回踩 → LPS
-     │          ├── 箱体内成交量↑ + 上边界 fail → Distribution
-     │          │    └── 子阶段细化:
-     │          │        最近 swing_high 放量+长上影 → BC
-     │          │        假突破前高+收回+放量 → UTAD
-     │          │        反弹缩量+上影线多 → LPSY
-     │          │        放量破支撑 → SOW
-     │          └── 量枯竭+窄幅 → PhaseUnknown
-     │
-     ├── No, 向上突破(close > resistance + ATR*1.0):
-     │    ├── Pullback 不破 box_top + 量缩 → Markup
-     │    │    └── 子阶段: 首次突破→JAC, 回踩→BU, 继续→Continuation
-     │    └── Pullback 跌回箱内 → 回到[2]
-     │
-     ├── No, 向下突破(close < support - ATR*1.0):
-     │    ├── 反弹不破 box_bottom + 量缩 → Markdown
-     │    │    └── 子阶段: 破位→Breakdown, 放量急跌→Panic, 缩量→StoppingVol
-     │    └── 反弹收复箱底 → 回到[2]
-     │
-     └── 无清晰区间:
-          MA20/MA60 斜率向上 + 价在 MA 上 → 倾向 Markup
-          MA20/MA60 斜率向下 + 价在 MA 下 → 倾向 Markdown
-          交叉无方向 → PhaseUnknown
-```
+引擎同时搜索 `context`（150–250根）、`swing`（60–120根）和 `minor`（20–60根）候选箱体。`context` 只作为背景；当前 `phase` 由最近、质量合格的 `minor` 或 `swing` 箱体投影，避免陈旧大箱体覆盖当前小级别结构。
 
-### 4.5 置信度计算
+同一箱体的顶层路由互斥：
+
+1. `close > resistance + 1 ATR`：只进入 Markup 分类。
+2. `close < support - 1 ATR`：只进入 Markdown 分类。
+3. `support - 0.5 ATR <= close <= resistance + 0.5 ATR`：同时计算 Accumulation/Distribution 证据；两者置信度差小于 0.15 时返回 Unknown。
+4. 上方 0.5–1 ATR 过渡区保持 Unknown；下方过渡区只接受放量 SOW。
+5. 箱体内缺少方向性量价证据时返回 Unknown，不能以 LPS/LPSY 兜底。
+
+`event_history` 保存事件发生日与可交易确认日。Spring 需要跌破后 1–3 根内收回支撑；SOS 在突破日为 candidate，只有后续保持箱顶之上才成为 confirmed。事件超出新鲜度窗口后只能作为背景，不能继续作为当前子阶段或买点。
+
+### 4.5 买点兼容与状态迁移
+
+旧字段 `phase.primary` 与 `phase.primary_sub_phase` 继续保留，以避免影响报告、扫描和回测消费者。新消费者必须额外读取 `signal`：只有 `status == "confirmed"`、`age_bars` 在子阶段有效期内、且阶段属于原有买点集合时，才允许作为正式买点。
+
+Spring 允许高量 Shakeout 与缩量供应枯竭两种变体；其发生日、确认日和当前年龄由事件模型给出。SOS 复用既有 `jac` 子阶段以保持兼容：突破日可以输出 `markup/jac + signal.status=candidate`，后续持稳才成为可交易确认信号。
+
+### 4.6 置信度计算
 
 | 因素 | 权重 | 条件 |
 |---|---|---|

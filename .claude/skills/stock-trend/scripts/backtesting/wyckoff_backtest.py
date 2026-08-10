@@ -43,7 +43,7 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from scans.stock_scanner import _resolve_ts_code, _fetch_kline, gather_candidates, _is_a_share
-from analysis.wyckoff import analyze_kline_dict, is_buy_point, normalize_score_100
+from analysis.wyckoff import analyze_kline_dict, is_buy_signal, normalize_score_100
 
 # 与 stock_scanner wyckoff 漏斗保持一致
 MIN_KLINES = 60                      # 不足 60 根 K 线丢弃
@@ -278,7 +278,7 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
             sig = _classify_signal(analysis, min_confidence)
             if sig is None:
                 continue
-            if is_buy_point(sig["phase"], sig["sub_phase"]) and sig["confidence"] >= min_confidence:
+            if is_buy_signal(analysis) and sig["confidence"] >= min_confidence:
                 per_stock_raw[s["ts_code"]].append((sidx, date, sig, fwd))
 
     # Episode dedup per stock, flatten

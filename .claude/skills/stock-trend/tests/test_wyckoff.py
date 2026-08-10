@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from analysis.wyckoff import (
     compute_atr, compute_ma, detect_swing_points, mark_climaxes,
-    detect_trading_range, analyze_vsa, compute_cause_effect,
+    detect_trading_range, detect_trading_ranges, analyze_vsa, compute_cause_effect,
     wyckoff_score, generate_trading_implication,
     classify_accumulation, classify_markup, classify_distribution, classify_markdown,
     PHASE_ACCUMULATION, PHASE_MARKUP, PHASE_DISTRIBUTION, PHASE_MARKDOWN, PHASE_UNKNOWN,
@@ -17,6 +17,8 @@ from analysis.wyckoff import (
     SUB_BC, SUB_UTAD, SUB_LPSY, SUB_SOW, SUB_PRE_MARKDOWN,
     SUB_BREAKDOWN, SUB_PANIC, SUB_STOPPING_VOL,
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
+    _route_price_location, _choose_range_phase, detect_wyckoff_events,
+    is_buy_point, is_buy_signal,
     analyze, load_kline,
 )
 
@@ -271,6 +273,90 @@ class TestMaLifecycle(unittest.TestCase):
         values = [10, 20, 30, 40, 50]
         self.assertEqual(_ma_of_last_n(values, 4, 3), 40)  # (30+40+50)/3
         self.assertEqual(_ma_of_last_n(values, 0, 3), 10)
+
+
+class TestMinorWyckoffStructure(unittest.TestCase):
+    """Regression tests for the small-scale event model (no market cache)."""
+
+    def _event_fixture(self):
+        n = 42
+        ohlcv = {
+            "open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+            "close": [100.0] * n, "volume": [100.0] * n,
+            "date": [f"202601{i + 1:02d}" for i in range(n)],
+        }
+        # Spring at index 30, reclaim at 31.
+        ohlcv["low"][30], ohlcv["close"][30], ohlcv["volume"][30] = 97.8, 98.5, 70.0
+        ohlcv["high"][31], ohlcv["close"][31] = 101.0, 100.5
+        # Latest bar is a qualified SOS, but has no later hold confirmation.
+        ohlcv["open"][-1], ohlcv["high"][-1], ohlcv["low"][-1] = 103.0, 106.0, 102.5
+        ohlcv["close"][-1], ohlcv["volume"][-1] = 105.5, 150.0
+        return ohlcv, [2.0] * n, {
+            "id": "minor_10", "level": "minor", "support": 99.0, "resistance": 103.0,
+            "support_idx": 10, "resistance_idx": 28, "touch_count": 5,
+            "duration_bars": 18, "is_clear_range": True,
+        }
+
+    def test_router_has_no_overlap(self):
+        tr = {"support": 100.0, "resistance": 110.0}
+        self.assertEqual(_route_price_location(105.0, tr, 2.0), "in_range")
+        self.assertEqual(_route_price_location(111.0, tr, 2.0), "upper_transition")
+        self.assertEqual(_route_price_location(113.0, tr, 2.0), "above_range")
+        self.assertEqual(_route_price_location(99.0, tr, 2.0), "lower_transition")
+        self.assertEqual(_route_price_location(97.0, tr, 2.0), "below_range")
+
+    def test_ambiguous_range_stays_unknown(self):
+        selected, alternatives = _choose_range_phase((SUB_LPS, 0.60), (SUB_LPSY, 0.55))
+        self.assertIsNone(selected)
+        self.assertEqual([item["phase"] for item in alternatives],
+                         [PHASE_ACCUMULATION, PHASE_DISTRIBUTION])
+
+    def test_old_swings_are_excluded_from_recent_range(self):
+        closes, atr = [100.0] * 200, [2.0] * 200
+        swings = [
+            {"index": 10, "type": "low", "price": 90.0},
+            {"index": 35, "type": "high", "price": 110.0},
+            {"index": 60, "type": "low", "price": 90.0},
+            {"index": 70, "type": "high", "price": 110.0},
+        ]
+        self.assertIsNone(detect_trading_range(swings, closes, atr, max_bars=120))
+
+    def test_minor_range_is_preserved_alongside_context_range(self):
+        closes, atr = [105.0] * 250, [2.0] * 250
+        swings = [
+            {"index": 20, "type": "low", "price": 90.0},
+            {"index": 50, "type": "high", "price": 110.0},
+            {"index": 80, "type": "low", "price": 90.0},
+            {"index": 110, "type": "high", "price": 110.0},
+            {"index": 200, "type": "low", "price": 100.0},
+            {"index": 215, "type": "high", "price": 106.0},
+            {"index": 225, "type": "low", "price": 100.0},
+            {"index": 235, "type": "high", "price": 106.0},
+            {"index": 242, "type": "low", "price": 100.0},
+        ]
+        levels = {item["level"] for item in detect_trading_ranges(swings, closes, atr)}
+        self.assertIn("context", levels)
+        self.assertIn("minor", levels)
+
+    def test_spring_history_and_current_sos_candidate_are_distinct(self):
+        ohlcv, atr, tr = self._event_fixture()
+        events = detect_wyckoff_events(ohlcv, atr, tr)
+        spring = next(item for item in events if item["type"] == "spring")
+        sos = next(item for item in events if item["type"] == "sos")
+        self.assertEqual(spring["status"], "confirmed")
+        self.assertGreater(spring["age_bars"], 8)
+        self.assertEqual(sos["status"], "candidate")
+        self.assertEqual(sos["age_bars"], 0)
+        candidate = {
+            "phase": {"primary": PHASE_MARKUP, "primary_sub_phase": SUB_JAC},
+            "signal": {"status": sos["status"], "age_bars": sos["age_bars"]},
+        }
+        self.assertFalse(is_buy_signal(candidate))
+
+    def test_buy_point_requires_confirmation_and_freshness(self):
+        self.assertTrue(is_buy_point(PHASE_MARKUP, SUB_JAC, "confirmed", 0))
+        self.assertFalse(is_buy_point(PHASE_MARKUP, SUB_JAC, "candidate", 0))
+        self.assertFalse(is_buy_point(PHASE_MARKUP, SUB_JAC, "confirmed", 9))
 
 
 if __name__ == "__main__":

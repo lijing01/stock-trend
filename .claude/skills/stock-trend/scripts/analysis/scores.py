@@ -28,7 +28,7 @@ from pathlib import Path
 
 from core.cache_utils import CACHE_DIR, load_iopv_history, save_iopv_history
 from core.eastmoney_utils import piecewise_linear
-from analysis.wyckoff import is_buy_point, normalize_score_100
+from analysis.wyckoff import is_buy_signal, normalize_score_100
 
 
 def _to_float(val, default=0.0):
@@ -716,8 +716,7 @@ def run_wyckoff_mode(args, data_dir) -> tuple:
 
     phase = wy_data.get("phase", {})
     sub = phase.get("primary_sub_phase", "")
-    p_primary = phase.get("primary", "")
-    is_buy = is_buy_point(p_primary, sub)
+    is_buy = is_buy_signal(wy_data)
 
     if score_100 >= 70:
         verdict = "强势买点" if is_buy else "偏多"
@@ -740,6 +739,7 @@ def run_wyckoff_mode(args, data_dir) -> tuple:
         "weights": {"phase": 0.70, "vsa": 0.20, "confidence": 0.10},
         "verdict": verdict,
         "is_buy_point": is_buy,
+        "signal": wy_data.get("signal", {}),
         "phase": phase,
         "range": wy_data.get("range", {}),
         "vsa_signals": vsa[:10],

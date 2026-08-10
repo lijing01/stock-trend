@@ -52,7 +52,7 @@ SUB_PHASE_NAMES = {
     SUB_SC: "抛售高潮（SC）",
     SUB_AR: "自动反弹（AR）",
     SUB_ST: "二次测试（ST）",
-    SUB_SPRING: "初支（Spring）",
+    SUB_SPRING: "Spring（弹簧效应/震仓）",
     SUB_LPS: "最后支撑点（LPS）",
     SUB_PRE_MARKUP: "拉升前准备",
     SUB_JAC: "跃过小溪（JAC）",
@@ -103,6 +103,8 @@ RANGE_CLUSTER_TOLERANCE_ATR = 1.0
 RANGE_MIN_HEIGHT_ATRS = 3
 RANGE_MIN_TOUCHES = 3
 RANGE_MIN_BARS = 20
+RANGE_WINDOWS = (("context", 250, 20), ("swing", 120, 20), ("minor", 60, 8))
+EVENT_MAX_AGE = {SUB_SPRING: 8, SUB_ST: 8, SUB_JAC: 8, SUB_BU: 10, SUB_LPS: 10}
 
 # Maximum lookback for finding breakout
 FIND_BREAKOUT_MAX_BARS = 60
@@ -252,22 +254,33 @@ def mark_climaxes(swings: list, highs: list, lows: list, closes: list,
 
 
 def detect_trading_range(swings: list, closes: list, atr_values: list,
-                          min_touches: int = RANGE_MIN_TOUCHES, min_bars: int = RANGE_MIN_BARS) -> dict | None:
-    """Aggregate swing high/low points into a trading range."""
+                          min_touches: int = RANGE_MIN_TOUCHES,
+                          min_bars: int = RANGE_MIN_BARS,
+                          max_bars: int | None = None,
+                          min_height_atrs: float = RANGE_MIN_HEIGHT_ATRS) -> dict | None:
+    """Aggregate recent swing points into one trading range.
+
+    ``max_bars`` is deliberately part of the public helper: a 250-bar range
+    may provide market context, but must not keep deciding a 20-60 bar setup.
+    """
+    if max_bars and closes:
+        first_allowed = max(0, len(closes) - max_bars)
+        swings = [s for s in swings if s["index"] >= first_allowed]
     if len(swings) < min_touches:
         return None
     highs_sorted = sorted(set(s["price"] for s in swings if s["type"] == "high"))
     lows_sorted = sorted(set(s["price"] for s in swings if s["type"] == "low"))
     if not highs_sorted or not lows_sorted:
         return None
-    median_atr = _median([a for a in atr_values if a is not None]) or 0
+    atr_start = max(0, len(atr_values) - max_bars) if max_bars else 0
+    median_atr = _median([a for a in atr_values[atr_start:] if a is not None]) or 0
     tolerance = median_atr * RANGE_CLUSTER_TOLERANCE_ATR
     resistance = _cluster_peak(highs_sorted, tolerance)
     support = _cluster_peak(lows_sorted, tolerance)
     if resistance is None or support is None or resistance <= support:
         return None
     range_height = resistance - support
-    if range_height < median_atr * RANGE_MIN_HEIGHT_ATRS:
+    if range_height < median_atr * min_height_atrs:
         return None
     touch_count = 0
     for s in swings:
@@ -293,6 +306,43 @@ def detect_trading_range(swings: list, closes: list, atr_values: list,
     }
 
 
+def detect_trading_ranges(swings: list, closes: list, atr_values: list) -> list[dict]:
+    """Return non-duplicate context/swing/minor ranges ordered by relevance."""
+    ranges = []
+    latest_idx = len(closes) - 1
+    for level, window, min_bars in RANGE_WINDOWS:
+        candidate = detect_trading_range(
+            swings, closes, atr_values, min_bars=min_bars, max_bars=window,
+            min_height_atrs=1.5 if level == "minor" else RANGE_MIN_HEIGHT_ATRS,
+        )
+        if not candidate:
+            continue
+        candidate = dict(candidate)
+        candidate["id"] = f"{level}_{candidate['support_idx']}"
+        candidate["level"] = level
+        candidate["window_bars"] = window
+        candidate["recency_score"] = round(
+            max(0.0, 1.0 - (latest_idx - candidate["resistance_idx"]) / max(window, 1)), 2
+        )
+        candidate["quality_score"] = round(min(1.0, candidate["touch_count"] / 6.0) * 0.6
+                                           + candidate["recency_score"] * 0.4, 2)
+        ranges.append(candidate)
+    return ranges
+
+
+def _select_current_range(ranges: list[dict], close: float, atr: float) -> dict | None:
+    """Prefer the smallest relevant range; retain wider ranges as context."""
+    relevant = []
+    for trading_range in ranges:
+        buffer_size = max(atr * 2.0, trading_range["resistance"] * 0.02)
+        if trading_range["support"] - buffer_size <= close <= trading_range["resistance"] + buffer_size:
+            relevant.append(trading_range)
+    if not relevant:
+        return ranges[-1] if ranges else None
+    level_rank = {"minor": 3, "swing": 2, "context": 1}
+    return max(relevant, key=lambda item: (level_rank[item["level"]], item["quality_score"]))
+
+
 def _cluster_peak(prices: list, tolerance: float) -> float | None:
     """Find most dense price cluster within tolerance, return its center."""
     if not prices:
@@ -316,6 +366,52 @@ def _median(values: list) -> float | None:
     return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
 
 
+def _volume_trend_ratio(volumes: list, latest_idx: int, window: int = 20) -> float:
+    """Recent/older average volume ratio; 1.0 when evidence is insufficient."""
+    recent = volumes[max(0, latest_idx - window + 1):latest_idx + 1]
+    if len(recent) < 10:
+        return 1.0
+    half = len(recent) // 2
+    older_avg = sum(recent[:half]) / half
+    newer_avg = sum(recent[half:]) / (len(recent) - half)
+    return newer_avg / older_avg if older_avg else 1.0
+
+
+def _close_location(close: float, trading_range: dict) -> float:
+    height = trading_range["resistance"] - trading_range["support"]
+    return (close - trading_range["support"]) / height if height > 0 else 0.5
+
+
+def _route_price_location(close: float, trading_range: dict, atr: float) -> str:
+    """Mutually exclusive location router used by the top-level classifier."""
+    support, resistance = trading_range["support"], trading_range["resistance"]
+    buffer_size = max(atr, 0.0)
+    if close > resistance + buffer_size:
+        return "above_range"
+    if close < support - buffer_size:
+        return "below_range"
+    if close >= resistance + buffer_size * 0.5:
+        return "upper_transition"
+    if close <= support - buffer_size * 0.5:
+        return "lower_transition"
+    if support - buffer_size * 0.5 <= close <= resistance + buffer_size * 0.5:
+        return "in_range"
+    return "in_range"
+
+
+def _choose_range_phase(accumulation: tuple | None, distribution: tuple | None,
+                        min_margin: float = 0.15) -> tuple[tuple | None, list[dict]]:
+    """Arbitrate competing in-range evidence instead of relying on call order."""
+    candidates = [(PHASE_ACCUMULATION, accumulation), (PHASE_DISTRIBUTION, distribution)]
+    valid = [(phase, result) for phase, result in candidates if result]
+    valid.sort(key=lambda item: item[1][1], reverse=True)
+    ranked = [{"phase": phase, "confidence": round(result[1], 2)} for phase, result in valid]
+    if not valid or (len(valid) > 1 and valid[0][1][1] - valid[1][1][1] < min_margin):
+        return None, ranked
+    phase, (sub_phase, confidence) = valid[0]
+    return (phase, sub_phase, confidence), ranked[1:]
+
+
 def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
                            highs: list, trading_range: dict | None, atr_values: list,
                            latest_idx: int) -> tuple | None:
@@ -331,13 +427,11 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
     latest_atr = atr_values[latest_idx] or 0
     latest_vol = volumes[latest_idx]
 
-    if latest_close > range_resistance + latest_atr * 1.0:
-        return None
-    if latest_close < range_support - latest_atr * 1.0:
+    if not (range_support - latest_atr * 0.5 <= latest_close <= range_resistance + latest_atr * 0.5):
         return None
 
     recent_swing_lows = [s for s in swings if s["type"] == "low"
-                         and s["index"] > trading_range["resistance_idx"] * 0.7
+                         and s["index"] >= trading_range["support_idx"]
                          and s["price"] >= range_support - latest_atr * 2
                          and s["price"] <= range_resistance + latest_atr * 2]
     if not recent_swing_lows:
@@ -347,7 +441,9 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
         return None
 
     latest_swing_low = recent_swing_lows[-1]
-    if latest_swing_low["is_climax"] and latest_swing_low.get("climax_type") == "selling":
+    if (latest_idx - latest_swing_low["index"] <= EVENT_MAX_AGE[SUB_SPRING]
+            and latest_swing_low["is_climax"]
+            and latest_swing_low.get("climax_type") == "selling"):
         return (SUB_SC, 0.8)
 
     if len(recent_swing_lows) >= 1:
@@ -361,21 +457,27 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
     if len(recent_swing_lows) >= 2:
         prev_low = recent_swing_lows[-2]
         curr_low = latest_swing_low
-        if (curr_low["volume_ratio"] < prev_low["volume_ratio"] * 0.7
+        if (latest_idx - curr_low["index"] <= EVENT_MAX_AGE[SUB_ST]
+                and curr_low["volume_ratio"] < prev_low["volume_ratio"] * 0.7
                 and abs(curr_low["price"] - prev_low["price"]) <= latest_atr * 2):
             return (SUB_ST, 0.8)
 
     spring_candidates = [s for s in recent_swing_lows
+                         if latest_idx - s["index"] <= EVENT_MAX_AGE[SUB_SPRING]
                          if s["price"] < range_support - latest_atr * 0.3
                          and s["price"] >= range_support - latest_atr * 2.0]
-    if spring_candidates and any(s["volume_ratio"] > 1.5 for s in spring_candidates):
+    if spring_candidates and any(s["volume_ratio"] > 1.5 or s["volume_ratio"] < 0.8
+                                 for s in spring_candidates):
         return (SUB_SPRING, 0.7)
 
     near_support = abs(latest_close - range_support) <= latest_atr * 0.5
     if near_support and latest_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.6:
         return (SUB_LPS, 0.7)
 
-    return (SUB_LPS, 0.5)
+    volume_ratio = _volume_trend_ratio(volumes, latest_idx)
+    if volume_ratio <= 0.8 and _close_location(latest_close, trading_range) >= 0.55:
+        return (SUB_PRE_MARKUP, 0.6)
+    return None
 
 
 def classify_markup(swings: list, closes: list, volumes: list, highs: list,
@@ -388,14 +490,14 @@ def classify_markup(swings: list, closes: list, volumes: list, highs: list,
     latest_close = closes[latest_idx]
     latest_atr = atr_values[latest_idx] or 0
 
-    if latest_close <= range_resistance:
+    if latest_close <= range_resistance + latest_atr * 0.3:
         return None
 
     trend_high = max(closes[max(0, latest_idx - 20) : latest_idx + 1])
     retrace_from_high = (trend_high - latest_close) / latest_atr if latest_atr > 0 else 0
     bars_since_breakout = _find_first_breakout_bar(closes, trading_range, latest_idx)
 
-    if bars_since_breakout is not None and bars_since_breakout <= 5:
+    if bars_since_breakout is not None and bars_since_breakout <= EVENT_MAX_AGE[SUB_JAC]:
         breakout_volumes = volumes[latest_idx - bars_since_breakout : latest_idx + 1]
         avg_vol = sum(breakout_volumes) / len(breakout_volumes) if breakout_volumes else 0
         baseline_vol = _ma_of_last_n(volumes, latest_idx - bars_since_breakout, 50) if latest_idx - bars_since_breakout >= 50 else 1
@@ -443,10 +545,12 @@ def classify_distribution(swings: list, closes: list, volumes: list,
     if latest_close < range_support - latest_atr * 1.0:
         return None
     if latest_close < range_support - latest_atr * 0.5:
-        return (SUB_SOW, 0.6)
+        if volumes[latest_idx] > _ma_of_last_n(volumes, latest_idx, 50) * 1.3:
+            return (SUB_SOW, 0.7)
+        return None
 
     recent_swing_highs = [s for s in swings if s["type"] == "high"
-                          and s["index"] > trading_range["resistance_idx"] * 0.7
+                          and s["index"] >= trading_range["support_idx"]
                           and s["price"] >= range_support - latest_atr * 2
                           and s["price"] <= range_resistance + latest_atr * 2]
     if not recent_swing_highs:
@@ -468,11 +572,10 @@ def classify_distribution(swings: list, closes: list, volumes: list,
     if near_resistance and volumes[latest_idx] < _ma_of_last_n(volumes, latest_idx, 50) * 0.6:
         return (SUB_LPSY, 0.65)
 
-    near_support = abs(latest_close - range_support) <= latest_atr * 0.5
-    if near_support:
-        return (SUB_SOW, 0.5)
-
-    return (SUB_LPSY, 0.4)
+    volume_ratio = _volume_trend_ratio(volumes, latest_idx)
+    if volume_ratio >= 1.2 and _close_location(latest_close, trading_range) <= 0.45:
+        return (SUB_PRE_MARKDOWN, 0.6)
+    return None
 
 
 def classify_markdown(swings: list, closes: list, volumes: list, lows: list,
@@ -673,9 +776,123 @@ def normalize_score_100(score_3: float) -> float:
     return max(0.0, min(100.0, (score_3 + 3.0) / 6.0 * 100.0))
 
 
-def is_buy_point(phase: str, sub_phase: str) -> bool:
-    """True when phase/sub_phase is a buy point (accumulation tail / markup early)."""
-    return phase in BUY_PHASES and sub_phase in BUY_SUB_PHASES
+def is_buy_point(phase: str, sub_phase: str, signal_status: str = "confirmed",
+                 signal_age_bars: int = 0) -> bool:
+    """Whether a phase event is a current, confirmed Wyckoff buy point.
+
+    The optional arguments preserve compatibility for callers holding the old
+    two-field schema. New engine output always supplies both fields.
+    """
+    max_age = EVENT_MAX_AGE.get(sub_phase, 0)
+    return (phase in BUY_PHASES and sub_phase in BUY_SUB_PHASES
+            and signal_status == "confirmed" and signal_age_bars <= max_age)
+
+
+def is_buy_signal(analysis: dict | None) -> bool:
+    """Read confirmation/freshness from an analysis result for downstream gates."""
+    if not analysis:
+        return False
+    phase_info = analysis.get("phase", {})
+    signal = analysis.get("signal", {})
+    return is_buy_point(
+        phase_info.get("primary", ""), phase_info.get("primary_sub_phase", ""),
+        signal.get("status", "confirmed"), int(signal.get("age_bars", 0) or 0),
+    )
+
+
+def _event_record(event_type: str, index: int, detected_idx: int, dates: list,
+                  status: str, level: str, trading_range: dict, confidence: float) -> dict:
+    return {
+        "type": event_type,
+        "event_index": index,
+        "event_date": dates[index] if index < len(dates) else "",
+        "detected_date": dates[detected_idx] if detected_idx < len(dates) else "",
+        "detected_index": detected_idx,
+        "bars_since_event": 0,  # filled for the current as-of date below
+        "status": status,
+        "structure_level": level,
+        "range_id": trading_range.get("id", ""),
+        "confidence": round(confidence, 2),
+    }
+
+
+def detect_wyckoff_events(ohlcv: dict, atr_values: list,
+                          trading_range: dict | None) -> list[dict]:
+    """Detect confirmed/candidate Spring and SOS events without future leakage.
+
+    A Spring becomes confirmed only on the bar that reclaims support; an SOS is
+    a candidate on its breakout bar and becomes confirmed after an observable
+    hold above the box. Historical events retain both occurrence and detection
+    dates so backtests can trade only after confirmation.
+    """
+    if not trading_range:
+        return []
+    opens, highs, lows, closes, volumes, dates = (
+        ohlcv["open"], ohlcv["high"], ohlcv["low"], ohlcv["close"],
+        ohlcv["volume"], ohlcv["date"],
+    )
+    support, resistance = trading_range["support"], trading_range["resistance"]
+    start = max(trading_range.get("support_idx", 0), 14)
+    events = []
+    for i in range(start, len(closes)):
+        atr = atr_values[i] or 0.0
+        if atr <= 0:
+            continue
+        base_vol = _ma_of_last_n(volumes, i, 50)
+        vol_ratio = volumes[i] / base_vol if base_vol else 1.0
+        # Spring / shakeout: temporary undercut, followed by reclaim within 3 bars.
+        # Historical shakeouts can undercut a wide context range by more than
+        # two current ATRs. Keep them in history, while freshness still stops
+        # them from becoming today's signal.
+        max_penetration = max(atr * 2.0, (resistance - support) * 0.8)
+        if support - max_penetration <= lows[i] < support - atr * 0.3:
+            reclaim_idx = next((j for j in range(i, min(i + 4, len(closes)))
+                                if closes[j] >= support), None)
+            status = "confirmed" if reclaim_idx is not None else "candidate"
+            detected_idx = reclaim_idx if reclaim_idx is not None else i
+            event = _event_record(
+                "spring", i, detected_idx, dates, status, trading_range.get("level", "single"),
+                trading_range, 0.75 if vol_ratio > 1.2 else 0.62,
+            )
+            event["variant"] = "shakeout_high_volume" if vol_ratio > 1.2 else "spring_low_volume"
+            events.append(event)
+
+        # SOS: breakout, wide spread, volume expansion and high close.
+        spread = highs[i] - lows[i]
+        close_position = (closes[i] - lows[i]) / spread if spread > 0 else 0.0
+        breakout = closes[i] > resistance + max(atr * 0.3, resistance * 0.005)
+        strength = spread >= atr * 1.2 and vol_ratio >= 1.2 and close_position >= 0.7
+        if breakout:
+            hold_idx = next((j for j in range(i + 1, min(i + 4, len(closes)))
+                             if closes[j] > resistance), None)
+            status = "confirmed" if strength and hold_idx is not None else "candidate"
+            detected_idx = hold_idx if status == "confirmed" else i
+            events.append(_event_record(
+                "sos", i, detected_idx, dates, status, trading_range.get("level", "single"),
+                trading_range, 0.8 if status == "confirmed" else (0.65 if strength else 0.45),
+            ))
+    latest_idx = len(closes) - 1
+    for event in events:
+        event["bars_since_event"] = latest_idx - event["event_index"]
+        event["age_bars"] = latest_idx - event["detected_index"]
+    return events
+
+
+def _current_event(events: list[dict]) -> dict | None:
+    """Choose the most recent event that is still relevant to a current signal."""
+    valid = []
+    for event in events:
+        max_age = EVENT_MAX_AGE.get(SUB_JAC if event["type"] == "sos" else SUB_SPRING, 0)
+        if event.get("age_bars", 0) <= max_age:
+            valid.append(event)
+    return max(valid, key=lambda event: event["event_index"]) if valid else None
+
+
+def _compose_confidence(structure_confidence: float, trading_range: dict | None,
+                        directional_vsa_count: int) -> float:
+    touch_score = min((trading_range or {}).get("touch_count", 0) / 5.0, 1.0)
+    vsa_score = min(directional_vsa_count / 3.0, 1.0)
+    return round(min(1.0, max(0.0, structure_confidence * 0.5 + touch_score * 0.3 + vsa_score * 0.2)), 2)
 
 
 def generate_trading_implication(phase: str, sub_phase: str) -> str:
@@ -688,7 +905,7 @@ def generate_trading_implication(phase: str, sub_phase: str) -> str:
             SUB_SC: "抛售高潮出现，卖压集中释放，短期可能形成低点区域。不宜追空，等待二次测试确认。",
             SUB_AR: "自动反弹阶段，卖压暂缓。观察反弹量能，若缩量则可能再次测试支撑。",
             SUB_ST: "二次测试缩量确认支撑，吸筹信号增强。关注后续能否放量突破箱体。",
-            SUB_SPRING: "初支（Spring）形态，短暂击穿支撑后快速收回，主力试盘特征。可考虑轻仓试多。",
+            SUB_SPRING: "Spring（弹簧效应/震仓）形态，短暂击穿支撑后快速收回，主力试盘特征。可考虑轻仓试多。",
             SUB_LPS: "最后支撑点附近缩量止跌，吸筹接近尾声。做好突破入场准备。",
             SUB_PRE_MARKUP: "拉升前准备阶段，震荡收窄、成交量极度萎缩。等待放量突破信号。",
         }
@@ -757,40 +974,51 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         if idx < len(ohlcv["date"]):
             s["date"] = ohlcv["date"][idx]
 
-    trading_range = detect_trading_range(swings, closes, atr_values)
-
     latest_idx = len(closes) - 1
+    ranges = detect_trading_ranges(swings, closes, atr_values)
+    trading_range = _select_current_range(ranges, closes[-1], atr_values[-1] or 0.0)
     phase = PHASE_UNKNOWN
     sub_phase = ""
     confidence = 0.0
+    secondary_possibilities = []
+    signal = {"status": "none", "age_bars": 0, "structure_level": "", "range_id": ""}
 
     if trading_range:
-        result = classify_accumulation(swings, closes, volumes, lows, highs,
-                                       trading_range, atr_values, latest_idx)
-        if result:
-            sub_phase, confidence = result
-            phase = PHASE_ACCUMULATION
-
-        if not result:
-            result = classify_distribution(swings, closes, volumes, lows, highs,
-                                           trading_range, atr_values, latest_idx)
-            if result:
-                sub_phase, confidence = result
-                phase = PHASE_DISTRIBUTION
-
-        if not result:
+        location = _route_price_location(
+            closes[latest_idx], trading_range, atr_values[latest_idx] or 0.0,
+        )
+        selected = None
+        if location == "above_range":
             result = classify_markup(swings, closes, volumes, highs,
                                      trading_range, atr_values, latest_idx)
             if result:
-                sub_phase, confidence = result
-                phase = PHASE_MARKUP
-
-        if phase == PHASE_UNKNOWN:
+                selected = (PHASE_MARKUP, *result)
+        elif location == "below_range":
             result = classify_markdown(swings, closes, volumes, lows, highs,
                                        trading_range, atr_values, latest_idx)
             if result:
-                sub_phase, confidence = result
-                phase = PHASE_MARKDOWN
+                selected = (PHASE_MARKDOWN, *result)
+        elif location == "in_range":
+            accumulation = classify_accumulation(
+                swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
+            )
+            distribution = classify_distribution(
+                swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
+            )
+            selected, secondary_possibilities = _choose_range_phase(accumulation, distribution)
+        elif location == "lower_transition":
+            result = classify_distribution(
+                swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
+            )
+            if result and result[0] == SUB_SOW:
+                selected = (PHASE_DISTRIBUTION, *result)
+        if selected:
+            phase, sub_phase, confidence = selected
+            signal.update({
+                "status": "confirmed",
+                "structure_level": trading_range.get("level", "single"),
+                "range_id": trading_range.get("id", ""),
+            })
     else:
         if len(closes) >= 50:
             ma20 = compute_ma(closes, 20)
@@ -804,10 +1032,40 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
                 sub_phase = SUB_BREAKDOWN
                 confidence = 0.3
 
-    if phase == PHASE_UNKNOWN and trading_range:
-        confidence = 0.3
-
     vsa_signals = analyze_vsa(ohlcv, atr_values)
+    event_history = []
+    seen_events = set()
+    # A context Spring must remain auditable even when a newer minor range is
+    # responsible for today's SOS. Prefer minor/swing metadata for duplicates.
+    for candidate_range in reversed(ranges):
+        for event in detect_wyckoff_events(ohlcv, atr_values, candidate_range):
+            key = (event["type"], event["event_index"])
+            if key not in seen_events:
+                seen_events.add(key)
+                event_history.append(event)
+    event_history.sort(key=lambda event: (event["event_index"], event["type"]))
+    active_event = _current_event(event_history)
+    if active_event:
+        if active_event["type"] == "spring":
+            phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
+        else:
+            phase, sub_phase = PHASE_MARKUP, SUB_JAC
+        confidence = active_event["confidence"]
+        signal = {
+            "status": active_event["status"],
+            "age_bars": active_event["age_bars"],
+            "event_date": active_event["event_date"],
+            "detected_date": active_event["detected_date"],
+            "structure_level": active_event["structure_level"],
+            "range_id": active_event["range_id"],
+            "event": active_event["type"],
+        }
+
+    bullish_phases = {PHASE_ACCUMULATION, PHASE_MARKUP}
+    expected_vsa = {"absorption", "no_supply", "stopping_volume"} if phase in bullish_phases else {"no_demand", "upthrust"}
+    directional_vsa_count = sum(1 for item in vsa_signals[-10:] if item.get("type") in expected_vsa)
+    if phase != PHASE_UNKNOWN:
+        confidence = _compose_confidence(confidence, trading_range, directional_vsa_count)
 
     current_price = closes[-1]
     cause_effect = compute_cause_effect(trading_range, current_price) if trading_range else {}
@@ -820,10 +1078,45 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     if sub_phase:
         sub_name = SUB_PHASE_NAMES.get(sub_phase, sub_phase)
         key_signals.append(f"子阶段: {sub_name}")
+    if active_event:
+        key_signals.append(
+            f"当前事件: {active_event['type'].upper()}（{active_event['status']}，{active_event['age_bars']} 根K）"
+        )
     for vs in vsa_signals[-3:]:
         key_signals.append(vs["description"])
 
     vsa_signals_sorted = sorted(vsa_signals, key=lambda s: s["bar_index"], reverse=True)
+
+    timeframe_map = {}
+    for level in ("context", "swing", "minor"):
+        candidate = next((item for item in ranges if item["level"] == level), None)
+        if not candidate:
+            continue
+        timeframe_map[level] = {
+            "range_id": candidate["id"],
+            "support": candidate["support"],
+            "resistance": candidate["resistance"],
+            "quality_score": candidate["quality_score"],
+            "is_current": candidate.get("id") == (trading_range or {}).get("id"),
+        }
+    if "context" in timeframe_map:
+        timeframe_map["context"]["phase"] = phase if not trading_range or trading_range.get("level") == "context" else "context"
+    if "minor" in timeframe_map:
+        timeframe_map["minor"].update({
+            "phase": phase if trading_range and trading_range.get("level") == "minor" else PHASE_UNKNOWN,
+            "structure": "re_accumulation" if active_event and active_event["type"] == "sos" else "range",
+            "current_event": active_event["type"] if active_event else "",
+        })
+
+    structures = []
+    if trading_range:
+        structures.append({
+            "range_id": trading_range.get("id", ""),
+            "level": trading_range.get("level", "single"),
+            "structure": "re_accumulation" if active_event and active_event["type"] == "sos" else "trading_range",
+            "phase": phase,
+            "is_current": True,
+        })
 
     result = {
         "meta": {
@@ -837,11 +1130,16 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "primary": phase,
             "primary_name": PHASE_NAMES.get(phase, "未知阶段"),
             "confidence": round(confidence, 2),
-            "secondary_possibilities": [],
+            "secondary_possibilities": secondary_possibilities,
             "primary_sub_phase": sub_phase,
             "sub_phase_name": SUB_PHASE_NAMES.get(sub_phase, ""),
         },
         "range": trading_range or {"is_clear_range": False},
+        "ranges": ranges,
+        "timeframes": timeframe_map,
+        "structures": structures,
+        "event_history": event_history,
+        "signal": signal,
         "swing_points": swings[-20:],
         "vsa_signals": vsa_signals_sorted[:10],
         "cause_effect": cause_effect,

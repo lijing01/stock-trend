@@ -27,7 +27,7 @@ from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
 from core.recommendation_quality import assess_candidate_data
 from analysis.wyckoff import (
     analyze_kline_dict,
-    BUY_PHASES, BUY_SUB_PHASES, normalize_score_100,
+    BUY_PHASES, BUY_SUB_PHASES, is_buy_signal, normalize_score_100,
     SUB_LPS, SUB_PRE_MARKUP, SUB_JAC,
 )
 
@@ -564,12 +564,8 @@ def wyckoff_gate_pass(analysis):
     """
     if not analysis:
         return False
-    phase = analysis.get("phase", {}).get("primary", "")
-    sub = analysis.get("phase", {}).get("primary_sub_phase", "")
     conf = _safe_float(analysis.get("phase", {}).get("confidence"))
-    return (phase in WYCKOFF_BUY_PHASES
-            and sub in WYCKOFF_BUY_SUB_PHASES
-            and conf >= WYCKOFF_MIN_CONFIDENCE)
+    return is_buy_signal(analysis) and conf >= WYCKOFF_MIN_CONFIDENCE
 
 
 def score_wyckoff(analysis):

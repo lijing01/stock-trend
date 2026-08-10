@@ -233,6 +233,14 @@ class TestGatePass(unittest.TestCase):
     def test_low_confidence_rejected(self):
         self.assertFalse(sc.wyckoff_gate_pass(_wk(sub="lps", conf=0.2)))
 
+    def test_candidate_and_stale_signals_rejected(self):
+        candidate = _wk(phase="markup", sub="jac", conf=0.8)
+        candidate["signal"] = {"status": "candidate", "age_bars": 0}
+        self.assertFalse(sc.wyckoff_gate_pass(candidate))
+        stale = _wk(phase="markup", sub="jac", conf=0.8)
+        stale["signal"] = {"status": "confirmed", "age_bars": 9}
+        self.assertFalse(sc.wyckoff_gate_pass(stale))
+
     def test_none_and_unknown(self):
         self.assertFalse(sc.wyckoff_gate_pass(None))
         self.assertFalse(sc.wyckoff_gate_pass(_wk(phase="phase_unknown", sub="", conf=0.3)))
