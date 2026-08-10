@@ -380,6 +380,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         sector = enrich_sector_context(ranked, {}, hs300_change=0.0)[0]
         self.assertEqual(sector["sector_type"], "single_day_pulse")
         self.assertFalse(sector["sector_actionable"])
+        self.assertEqual(sector["persistence_status"], "history_insufficient")
+        self.assertEqual(sector["capital_evidence"], "unknown")
 
     def test_sector_missing_latest_days_is_not_a_mainline(self):
         ranked = [{
@@ -704,6 +706,46 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(policy["mode"], "waiting_trigger")
         self.assertEqual(len(buckets["waiting_trigger"]), 2)
         self.assertEqual(len(buckets["observation"]), 1)
+
+    def test_divergence_requires_verified_sector_capital(self):
+        policy = build_recommendation_policy(
+            {"score": 65, "data_date": "2026-08-06", "capital_score": 20},
+            "2026-08-06")
+        unverified = candidate("unknown")
+        verified = candidate("verified")
+        verified["sector_capital_evidence"] = "verified"
+        buckets = classify_candidates([unverified, verified], policy)
+        self.assertEqual([item["code"] for item in buckets["waiting_trigger"]],
+                         ["verified"])
+        self.assertIn("breadth_capital_divergence",
+                      buckets["observation"][0]["observation_reasons"])
+
+    def test_zero_capital_score_still_enables_divergence_gate(self):
+        policy = build_recommendation_policy(
+            {"score": 65, "data_date": "2026-08-06", "capital_score": 0},
+            "2026-08-06")
+        self.assertTrue(policy["requires_sector_capital_proof"])
+
+    def test_neutral_market_builds_non_recommendation_confirmation_list(self):
+        policy = build_recommendation_policy(
+            {"score": 65, "data_date": "2026-08-06", "capital_score": 50},
+            "2026-08-06")
+        item = candidate("watch", sector_actionable=False)
+        buckets = classify_candidates([item], policy)
+        self.assertEqual([row["code"] for row in buckets["next_day_confirmation"]],
+                         ["watch"])
+        self.assertIn("次日板块跑赢沪深300",
+                      buckets["next_day_confirmation"][0]["confirmation_conditions"])
+
+    def test_confirmation_list_does_not_duplicate_waiting_candidate(self):
+        policy = build_recommendation_policy(
+            {"score": 65, "data_date": "2026-08-06", "capital_score": 50},
+            "2026-08-06")
+        item = candidate("waiting")
+        buckets = classify_candidates([item], policy)
+        self.assertEqual([row["code"] for row in buckets["waiting_trigger"]],
+                         ["waiting"])
+        self.assertEqual(buckets["next_day_confirmation"], [])
 
     def test_strong_regime_never_promotes_ineligible_candidate(self):
         regime = {"score": 85, "data_date": "2026-08-06"}

@@ -24,7 +24,7 @@ from datetime import datetime
 
 from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
-from core.recommendation_quality import assess_candidate_data
+from core.recommendation_quality import assess_candidate_data, latest_data_date
 from analysis.wyckoff import (
     analyze_kline_dict,
     BUY_PHASES, BUY_SUB_PHASES, is_buy_signal, normalize_score_100,
@@ -232,14 +232,16 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
 # ──────────────────────── Phase 2: Scoring ────────────────────────
 
 
-def _fetch_kline(ts_code):
-    """Fetch 60-day K-line for a stock via eastmoney CLI."""
+def _fetch_kline(ts_code, as_of_date=""):
+    """Fetch a current 60-day K-line, refreshing stale caches when required."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "kline.json"
 
-    # Check cache first
+    # A cache is a hit only when it covers the recommendation date.  A
+    # post-close scan must not score T-1 data merely because it has enough bars.
     cached = _read_json(str(cache_path))
-    if cached and cached.get("data") and len(cached["data"]) >= 30:
+    if cached and cached.get("data") and len(cached["data"]) >= 30 \
+            and (not as_of_date or latest_data_date(cached) >= as_of_date):
         return cached
 
     # Fetch via subprocess
@@ -250,7 +252,20 @@ def _fetch_kline(ts_code):
     ]
     result = run_script(cmd, label=f"kline_{ts_code}")
     if result["success"]:
-        return _read_json(str(cache_path))
+        refreshed = _read_json(str(cache_path))
+        if refreshed and (not as_of_date
+                          or latest_data_date(refreshed) >= as_of_date):
+            return refreshed
+        if refreshed:
+            refreshed.setdefault("meta", {})["refresh_error"] = (
+                f"K线刷新后仍未覆盖{as_of_date}")
+            return refreshed
+    # Keep a stale cache observable to the quality gate instead of dropping it
+    # and losing the source/date diagnostic.
+    if cached:
+        cached.setdefault("meta", {})["refresh_error"] = (
+            result.get("error") or f"K线刷新失败，未覆盖{as_of_date}")
+        return cached
     return None
 
 
@@ -602,7 +617,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
 
     def _fetch_one_kline(c):
         ts_code = c["ts_code"]
-        return ts_code, _fetch_kline(ts_code)
+        return ts_code, _fetch_kline(ts_code, as_of_date=as_of_date)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_fetch_one_kline, c) for c in candidates]

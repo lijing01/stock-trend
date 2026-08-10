@@ -37,6 +37,8 @@ REASON_LABELS = {
     "capital_error": "资金面数据返回错误",
     "fundamental_error": "基本面数据返回错误",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
+    "history_insufficient": "板块历史快照不足，尚不能验证持续性",
+    "breadth_capital_divergence": "普涨但市场资金背离，需板块资金或共振确认",
     "quality_adjusted_below_min_score": "质量调整分低于最低门槛",
     "sector_unverified": "板块持续性未验证",
     "manual_unverified": "手动指定板块未经持续性验证",
@@ -166,6 +168,7 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
         if not persistence_values:
             persistence = short_persistence
         classification_persistence = avg3 if avg3 is not None else short_persistence
+        history_insufficient = len(dates) < 3 or days < 3
         if latest_present and len(dates) >= 3 \
                 and all(row is not None for row in recent_entries) \
                 and classification_persistence >= 60 \
@@ -210,6 +213,7 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
                 capital_positive_days / denominator * 70
                 + min(capital_streak / 3, 1) * 30
             )
+        capital_evidence = "verified" if net_flows else "unknown"
         sector_score = round(
             float(sector.get("absolute_hot_score", 0)) * 0.30
             + persistence * 0.30
@@ -229,6 +233,12 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
             "capital_persistence": round(capital_persistence, 1),
             "capital_positive_days": capital_positive_days,
             "capital_streak": capital_streak,
+            "capital_evidence": capital_evidence,
+            "persistence_status": (
+                "history_insufficient" if history_insufficient
+                else ("verified" if sector_type in ("mainline", "emerging")
+                      else "single_day_pulse")
+            ),
             "resonance_score": round(resonance, 1),
             "sector_score": sector_score,
             "sector_type": sector_type,
@@ -359,6 +369,8 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                 s.update({
                     "sector_type": context.get("sector_type", ""),
                     "sector_actionable": context.get("sector_actionable", False),
+                    "sector_persistence_status": context.get("persistence_status", ""),
+                    "sector_capital_evidence": context.get("capital_evidence", "unknown"),
                     "sector_score": context.get("sector_score"),
                     "sector_persistence": context.get("persistence_score"),
                     "sector_relative_strength": context.get("relative_strength"),
@@ -540,6 +552,7 @@ def load_regime_context():
             "hs300_change": (
                 d.get("indices", {}).get("000300.SH", {}).get("pct_chg")
             ),
+            "capital_score": d.get("components", {}).get("capital", {}).get("score"),
         }
     except Exception:
         return None
@@ -567,14 +580,18 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
             "mode": "observation", "max_recommendations": 0,
             "max_portfolio_pct": 0, "reasons": ["regime_weak"],
         }
+    capital_score = regime.get("capital_score")
+    divergence = capital_score is not None and float(capital_score) < 35
     if score < 80:
         return {
             "mode": "waiting_trigger", "max_recommendations": 2,
             "max_portfolio_pct": 30, "reasons": [],
+            "requires_sector_capital_proof": divergence,
         }
     return {
         "mode": "actionable", "max_recommendations": 5,
         "max_portfolio_pct": 60, "reasons": [],
+        "requires_sector_capital_proof": divergence,
     }
 
 
@@ -584,11 +601,25 @@ def classify_candidates(candidates, policy):
         if item.get("data_quality", {}).get("eligible", False)
         and item.get("sector_actionable", True)
         and item.get("score_eligible", True)
+        and (not policy.get("requires_sector_capital_proof", False)
+             or item.get("sector_capital_evidence") == "verified")
     ]
     limit = policy.get("max_recommendations", 0)
     actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
     waiting = eligible[:limit] if policy.get("mode") == "waiting_trigger" else []
     promoted = {item["code"] for item in actionable + waiting}
+    confirmations = []
+    if policy.get("mode") == "waiting_trigger":
+        confirmations = [item for item in candidates
+                         if item.get("data_quality", {}).get("eligible", False)
+                         and item.get("score_eligible", True)
+                         and item.get("wyckoff")
+                         and item.get("code") not in promoted][:2]
+        confirmations = [
+            dict(item, confirmation_conditions=(
+                "次日板块跑赢沪深300、守住当日低点，且放量或资金/共振确认"))
+            for item in confirmations
+        ]
     observation = []
     for item in candidates:
         if item.get("code") in promoted:
@@ -596,7 +627,11 @@ def classify_candidates(candidates, policy):
         copy = dict(item)
         reasons = list(item.get("data_quality", {}).get("reasons", []))
         if not item.get("sector_actionable", True):
-            reasons.append(item.get("sector_type") or "sector_unverified")
+            reasons.append(item.get("sector_persistence_status")
+                           or item.get("sector_type") or "sector_unverified")
+        if policy.get("requires_sector_capital_proof", False) \
+                and item.get("sector_capital_evidence") != "verified":
+            reasons.append("breadth_capital_divergence")
         if not item.get("score_eligible", True):
             reasons.append("quality_adjusted_below_min_score")
         if not reasons and policy.get("reasons"):
@@ -608,11 +643,18 @@ def classify_candidates(candidates, policy):
     return {
         "actionable": actionable,
         "waiting_trigger": waiting,
+        "next_day_confirmation": confirmations,
         "observation": observation,
     }
 
 
 def generate_report(candidates, sector_codes, elapsed, policy, buckets):
+    funnel = (
+        f"板块 {len(sector_codes)} → 候选 {len(candidates)} → "
+        f"维科夫买点 {sum(1 for item in candidates if item.get('wyckoff'))} → "
+        f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
+        f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
+    )
     lines = [
         "# 每日候选股",
         "",
@@ -623,6 +665,8 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets):
         f"**推荐模式**: {policy['mode']} | "
         f"推荐上限 {policy['max_recommendations']} 只 | "
         f"组合仓位上限 {policy['max_portfolio_pct']}%",
+        "",
+        f"**筛选漏斗**: {funnel}",
     ]
     regime = load_regime_context()
     if regime and regime.get("score") is not None:
@@ -637,6 +681,9 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets):
         lines, "今日可执行", buckets["actionable"], "今日无可执行推荐。")
     _append_candidate_table(
         lines, "等待触发", buckets["waiting_trigger"], "暂无等待触发标的。")
+    _append_candidate_table(
+        lines, "次日确认观察（非推荐）", buckets.get("next_day_confirmation", []),
+        "暂无可供次日确认的观察标的。")
     _append_candidate_table(
         lines, "观察池", buckets["observation"], "观察池为空。")
     lines.extend([
@@ -676,11 +723,18 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets):
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
     actionable_rows = _html_candidate_rows(buckets["actionable"])
     waiting_rows = _html_candidate_rows(buckets["waiting_trigger"])
+    confirmation_rows = _html_candidate_rows(buckets.get("next_day_confirmation", []))
     observation_rows = _html_candidate_rows(buckets["observation"])
     policy_note = (
         f"推荐模式 {policy['mode']} | 推荐上限 "
         f"{policy['max_recommendations']}只 | 组合仓位上限 "
         f"{policy['max_portfolio_pct']}%"
+    )
+    funnel_note = (
+        f"筛选漏斗：板块 {len(sector_codes)} → 候选 {len(candidates)} → "
+        f"维科夫买点 {sum(1 for item in candidates if item.get('wyckoff'))} → "
+        f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
+        f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
     )
 
     regime_html = ""
@@ -716,10 +770,13 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {regime_html}
 
 <p class="dt">{policy_note}</p>
+<p class="dt">{funnel_note}</p>
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 
@@ -740,6 +797,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets):
         "candidates": candidates,
         "recommendations": buckets["actionable"],
         "waiting_trigger": buckets["waiting_trigger"],
+        "next_day_confirmation": buckets.get("next_day_confirmation", []),
         "observation": buckets["observation"],
     }
 

@@ -94,6 +94,16 @@ class TestMetadata(unittest.TestCase):
             loaded = sc._read_json(path)
         self.assertTrue(loaded["meta"]["fetch_time"])
 
+    def test_stale_kline_cache_is_refreshed_for_recommendation_date(self):
+        stale = _make_dated_kline(trade_date="20260807")
+        fresh = _make_dated_kline(trade_date="20260810")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[stale, fresh]), \
+             patch.object(sc, "run_script", return_value={"success": True}):
+            result = sc._fetch_kline("600001.SH", as_of_date="2026-08-10")
+        self.assertEqual(result["data"][-1]["trade_date"], "20260810")
+
 
 class TestSectorConstituentFallback(unittest.TestCase):
     def setUp(self):
@@ -282,7 +292,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
         }
         sc.analyze_kline_dict = lambda kline: wk_map.get(kline["meta"]["ts_code"], _wk())
 
-        def fake_kline(ts_code):
+        def fake_kline(ts_code, as_of_date=""):
             n = 60 if ts_code in wk_map else 20   # 600003 数据不足 → 弃
             return _make_kline(n, ts_code)
 
@@ -302,7 +312,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
     def test_no_wyckoff_dim_when_disabled(self):
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
-        sc._fetch_kline = lambda ts: _make_kline(60, ts)
+        sc._fetch_kline = lambda ts, as_of_date="": _make_kline(60, ts)
         scored = sc.run_phase2([_make_candidate("600001")], enable_wyckoff=False)
         self.assertEqual(len(scored), 1)
         self.assertNotIn("wyckoff", scored[0]["dimensions"])
@@ -310,7 +320,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
     def test_quality_adjusted_score_is_separate_from_raw_score(self):
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
-        sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
+        sc._fetch_kline = lambda ts, as_of_date="": _make_dated_kline(60, ts)
         sc._fetch_capital_flow = lambda ts: {
             "data": [{"date": "20260806", "main_net_inflow": 0}]
         }
@@ -333,7 +343,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
     def test_stale_kline_remains_observable_but_not_eligible(self):
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
-        sc._fetch_kline = lambda ts: _make_dated_kline(
+        sc._fetch_kline = lambda ts, as_of_date="": _make_dated_kline(
             60, ts, trade_date="20260805")
         sc._fetch_capital_flow = lambda ts: {
             "data": [{"date": "20260806", "main_net_inflow": 0}]
@@ -359,7 +369,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
             "membership_data_date": "2026-08-05",
         })
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
-        sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
+        sc._fetch_kline = lambda ts, as_of_date="": _make_dated_kline(60, ts)
         sc._fetch_capital_flow = lambda ts: {
             "data": [{"date": "20260806", "main_net_inflow": 0}]
         }
@@ -387,7 +397,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
             "membership_cache_error": "disk full",
         })
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
-        sc._fetch_kline = lambda ts: _make_dated_kline(60, ts)
+        sc._fetch_kline = lambda ts, as_of_date="": _make_dated_kline(60, ts)
         sc._fetch_capital_flow = lambda ts: {
             "data": [{"date": "20260806", "main_net_inflow": 0}]
         }
