@@ -435,8 +435,13 @@ def _build_market_context(ts_code: str, kline: dict) -> dict:
     sector_name = ""
     if ts_code:
         try:
-            from fetchers.sector_mapper import get_stock_sectors
-            sectors = get_stock_sectors(str(ts_code).split(".")[0])
+            # Report rendering must remain offline and bounded.  Building the
+            # reverse sector map performs hundreds of network requests, while
+            # this optional context can safely be omitted until /daily-review
+            # or sector_mapper has populated the cache.
+            from fetchers.sector_mapper import load_mapping
+            mapping = load_mapping() or {}
+            sectors = mapping.get("mapping", {}).get(str(ts_code).split(".")[0], [])
             if sectors:
                 sector_name = sectors[0].get("name", "")
         except Exception:
