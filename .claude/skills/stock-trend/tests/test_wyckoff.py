@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from analysis.wyckoff import (
@@ -19,7 +20,7 @@ from analysis.wyckoff import (
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     is_buy_point, is_buy_signal,
-    analyze, load_kline,
+    analyze, analyze_kline_dict, load_kline,
 )
 
 
@@ -357,6 +358,50 @@ class TestMinorWyckoffStructure(unittest.TestCase):
         self.assertTrue(is_buy_point(PHASE_MARKUP, SUB_JAC, "confirmed", 0))
         self.assertFalse(is_buy_point(PHASE_MARKUP, SUB_JAC, "candidate", 0))
         self.assertFalse(is_buy_point(PHASE_MARKUP, SUB_JAC, "confirmed", 9))
+
+    def test_candidate_sos_does_not_become_primary_jac(self):
+        ohlcv, _, trading_range = self._event_fixture()
+        trading_range["quality_score"] = 1.0
+        rows = [
+            {
+                "open": ohlcv["open"][i], "high": ohlcv["high"][i],
+                "low": ohlcv["low"][i], "close": ohlcv["close"][i],
+                "vol": ohlcv["volume"][i], "date": ohlcv["date"][i],
+            }
+            for i in range(len(ohlcv["close"]))
+        ]
+
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[trading_range]), \
+                patch("analysis.wyckoff.classify_markup", return_value=None):
+            result = analyze_kline_dict({"meta": {"ts_code": "TEST"}, "data": rows})
+
+        self.assertEqual(result["signal"]["status"], "candidate")
+        self.assertNotEqual(result["phase"]["primary_sub_phase"], SUB_JAC)
+
+
+class TestLongTermWyckoffContext(unittest.TestCase):
+    @staticmethod
+    def _trending_kline(count=80):
+        rows = []
+        for i in range(count):
+            close = 100.0 + i * 0.2
+            rows.append(_make_row(
+                close - 0.1, close + 0.5, close - 0.5, close, 100.0,
+                date=f"2026{i // 28 + 1:02d}{i % 28 + 1:02d}",
+            ))
+        return {"meta": {"ts_code": "TEST"}, "data": rows}
+
+    def test_ma_fallback_is_trend_context_not_primary_phase(self):
+        result = analyze_kline_dict(self._trending_kline())
+
+        self.assertEqual(result["phase"]["primary"], PHASE_UNKNOWN)
+        self.assertEqual(result["trend_context"]["direction"], PHASE_MARKUP)
+
+    def test_long_term_is_present_but_ineligible_below_250_bars(self):
+        result = analyze_kline_dict(self._trending_kline(249))
+
+        self.assertIn("long_term", result)
+        self.assertFalse(result["long_term"]["eligible"])
 
 
 if __name__ == "__main__":

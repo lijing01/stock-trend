@@ -104,7 +104,10 @@ RANGE_MIN_HEIGHT_ATRS = 3
 RANGE_MIN_TOUCHES = 3
 RANGE_MIN_BARS = 20
 RANGE_WINDOWS = (("context", 250, 20), ("swing", 120, 20), ("minor", 60, 8))
-EVENT_MAX_AGE = {SUB_SPRING: 8, SUB_ST: 8, SUB_JAC: 8, SUB_BU: 10, SUB_LPS: 10}
+EVENT_MAX_AGE = {
+    SUB_SPRING: 8, SUB_ST: 8, SUB_JAC: 8, SUB_BU: 10, SUB_LPS: 10,
+    SUB_BC: 8, SUB_UTAD: 8,
+}
 
 # Maximum lookback for finding breakout
 FIND_BREAKOUT_MAX_BARS = 60
@@ -465,7 +468,9 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
     spring_candidates = [s for s in recent_swing_lows
                          if latest_idx - s["index"] <= EVENT_MAX_AGE[SUB_SPRING]
                          if s["price"] < range_support - latest_atr * 0.3
-                         and s["price"] >= range_support - latest_atr * 2.0]
+                         and s["price"] >= range_support - latest_atr * 2.0
+                         and any(close >= range_support
+                                 for close in closes[s["index"]:latest_idx + 1])]
     if spring_candidates and any(s["volume_ratio"] > 1.5 or s["volume_ratio"] < 0.8
                                  for s in spring_candidates):
         return (SUB_SPRING, 0.7)
@@ -558,11 +563,14 @@ def classify_distribution(swings: list, closes: list, volumes: list,
 
     latest_swing_high = recent_swing_highs[-1]
 
-    if latest_swing_high["is_climax"] and latest_swing_high.get("climax_type") == "buying":
+    if (latest_idx - latest_swing_high["index"] <= EVENT_MAX_AGE[SUB_BC]
+            and latest_swing_high["is_climax"]
+            and latest_swing_high.get("climax_type") == "buying"):
         return (SUB_BC, 0.8)
 
     utad_candidates = [s for s in recent_swing_highs
-                       if s["price"] > range_resistance + latest_atr * 0.3
+                       if latest_idx - s["index"] <= EVENT_MAX_AGE[SUB_UTAD]
+                       and s["price"] > range_resistance + latest_atr * 0.3
                        and latest_close < range_resistance + latest_atr * 0.3]
     if utad_candidates:
         has_climax = any(s.get("is_climax") for s in utad_candidates)
@@ -982,6 +990,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     confidence = 0.0
     secondary_possibilities = []
     signal = {"status": "none", "age_bars": 0, "structure_level": "", "range_id": ""}
+    trend_context = {"direction": PHASE_UNKNOWN, "source": "none"}
 
     if trading_range:
         location = _route_price_location(
@@ -1024,13 +1033,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             ma20 = compute_ma(closes, 20)
             ma60 = compute_ma(closes, 60)
             if ma20[-1] and ma60[-1] and closes[-1] > ma20[-1] and ma20[-1] > ma60[-1]:
-                phase = PHASE_MARKUP
-                sub_phase = SUB_CONTINUATION
-                confidence = 0.3
+                trend_context = {"direction": PHASE_MARKUP, "source": "ma20_ma60"}
             elif ma20[-1] and ma60[-1] and closes[-1] < ma20[-1] and ma20[-1] < ma60[-1]:
-                phase = PHASE_MARKDOWN
-                sub_phase = SUB_BREAKDOWN
-                confidence = 0.3
+                trend_context = {"direction": PHASE_MARKDOWN, "source": "ma20_ma60"}
 
     vsa_signals = analyze_vsa(ohlcv, atr_values)
     event_history = []
@@ -1046,11 +1051,12 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     event_history.sort(key=lambda event: (event["event_index"], event["type"]))
     active_event = _current_event(event_history)
     if active_event:
-        if active_event["type"] == "spring":
-            phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
-        else:
-            phase, sub_phase = PHASE_MARKUP, SUB_JAC
-        confidence = active_event["confidence"]
+        if active_event["status"] == "confirmed":
+            if active_event["type"] == "spring":
+                phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
+            else:
+                phase, sub_phase = PHASE_MARKUP, SUB_JAC
+            confidence = active_event["confidence"]
         signal = {
             "status": active_event["status"],
             "age_bars": active_event["age_bars"],
@@ -1108,6 +1114,15 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "current_event": active_event["type"] if active_event else "",
         })
 
+    context_range = next((item for item in ranges if item["level"] == "context"), None)
+    long_term_eligible = len(closes) >= 250
+    long_term = {
+        "eligible": long_term_eligible,
+        "minimum_bars": 250,
+        "phase": phase if long_term_eligible and trading_range is context_range else PHASE_UNKNOWN,
+        "range": context_range if long_term_eligible and context_range else {"is_clear_range": False},
+    }
+
     structures = []
     if trading_range:
         structures.append({
@@ -1137,6 +1152,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "range": trading_range or {"is_clear_range": False},
         "ranges": ranges,
         "timeframes": timeframe_map,
+        "long_term": long_term,
+        "trend_context": trend_context,
         "structures": structures,
         "event_history": event_history,
         "signal": signal,
