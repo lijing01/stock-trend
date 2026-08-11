@@ -51,6 +51,9 @@ def _wk(phase="accumulation", sub="lps", conf=0.6, score=2.0):
         "wyckoff_score": score,
         "wyckoff_signals": {"verdict": "bullish", "key_signals": [],
                             "trading_implication": "做好突破入场准备。"},
+        "long_term": {"eligible": True, "phase": "accumulation",
+                      "phase_name": "吸筹阶段", "confidence": 0.7,
+                      "range": {"support": 8.0, "resistance": 12.0}},
     }
 
 
@@ -307,6 +310,8 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertAlmostEqual(item["dimensions"]["wyckoff"], 88.3, delta=0.1)
         self.assertEqual(item["wyckoff"]["sub_phase"], "子阶段:lps")
         self.assertEqual(item["wyckoff"]["confidence"], 0.6)
+        self.assertEqual(item["wyckoff"]["alignment"]["recommendation_gate"], "actionable")
+        self.assertEqual(item["wyckoff"]["long_term"]["phase"], "accumulation")
         # 复合分重配后包含 wyckoff 权重
         self.assertGreater(item["composite_score"], 50.0)
 

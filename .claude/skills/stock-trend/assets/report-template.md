@@ -131,6 +131,14 @@
 **阶段判定**: {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）
 **当前子阶段**: {{wyckoff_sub_phase_name}}
 
+### 长短周期结论
+
+| 周期 | 维科夫判断 |
+|---|---|
+| 中线结构 | {{wyckoff_long_term_phase}}（置信度: {{wyckoff_long_term_confidence}}） |
+| 短线触发 | {{wyckoff_short_term_phase}} / {{wyckoff_short_term_trigger}}（{{wyckoff_short_term_status}}） |
+| 周期结论 | {{wyckoff_alignment_label}} |
+
 | 项目 | 数值 |
 |---|---|
 | 交易区间 | {{wyckoff_support}} - {{wyckoff_resistance}} |

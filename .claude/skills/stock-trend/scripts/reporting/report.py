@@ -839,6 +839,21 @@ def build_context(args):
         context["wyckoff_sub_phase"] = w_phase.get("primary_sub_phase", "")
         context["wyckoff_sub_phase_name"] = w_phase.get("sub_phase_name", "")
 
+        short_term = wyckoff_data.get("short_term", {})
+        long_term = wyckoff_data.get("long_term", {})
+        alignment = wyckoff_data.get("alignment", {})
+        context["wyckoff_short_term_phase"] = short_term.get(
+            "phase_name", w_phase.get("primary_name", "未确认"))
+        context["wyckoff_short_term_trigger"] = short_term.get(
+            "sub_phase_name", w_phase.get("sub_phase_name", "未确认"))
+        context["wyckoff_short_term_status"] = short_term.get(
+            "signal_status", wyckoff_data.get("signal", {}).get("status", "未确认"))
+        context["wyckoff_long_term_phase"] = long_term.get("phase_name", "长期结构未确认")
+        context["wyckoff_long_term_confidence"] = (
+            f"{long_term.get('confidence', 0) * 100:.0f}%"
+            if long_term.get("eligible") else "数据不足")
+        context["wyckoff_alignment_label"] = alignment.get("label", "长期结构未确认")
+
         if w_range.get("is_clear_range"):
             context["wyckoff_support"] = w_range.get("support", "—")
             context["wyckoff_resistance"] = w_range.get("resistance", "—")

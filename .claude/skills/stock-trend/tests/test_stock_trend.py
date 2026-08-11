@@ -617,6 +617,21 @@ def run_new_script_tests(tmpdir):
 
     # TF-RPT-01: generate_report.py 模板渲染测试
     tech_path, kline_path, scores_path = _write_report_fixture(tmpdir, "render")
+    wyckoff_path = os.path.join(tmpdir, "render_wyckoff.json")
+    _write_json(wyckoff_path, {
+        "meta": {},
+        "phase": {"primary": "markup", "primary_name": "拉升阶段",
+                  "primary_sub_phase": "jac", "sub_phase_name": "JAC",
+                  "confidence": 0.7},
+        "range": {"is_clear_range": False}, "vsa_signals": [], "cause_effect": {},
+        "wyckoff_score": 2.0, "wyckoff_signals": {"trading_implication": "测试"},
+        "short_term": {"phase_name": "拉升阶段", "sub_phase_name": "JAC",
+                       "confidence": 0.7, "signal_status": "confirmed"},
+        "long_term": {"eligible": True, "phase": "accumulation",
+                      "phase_name": "吸筹阶段", "confidence": 0.65,
+                      "range": {"support": 1200, "resistance": 1300}},
+        "alignment": {"label": "中线吸筹，短线突破确认", "recommendation_gate": "actionable"},
+    })
     md_path = os.path.join(tmpdir, "test_report.md")
     html_path = os.path.join(tmpdir, "test_report.html")
     rc, stdout, stderr = run_script(
@@ -624,6 +639,7 @@ def run_new_script_tests(tmpdir):
         "--technical", tech_path,
         "--kline", kline_path,
         "--scores-file", scores_path,
+        "--wyckoff-data", wyckoff_path,
         "--stock-name", "贵州茅台",
         "--date", "2026-05-29",
         "--output-md", md_path,
@@ -644,6 +660,7 @@ def run_new_script_tests(tmpdir):
             test("TF-RPT-01d: MD含场景A", "场景 A：继续上冲" in md_content, md_content[:200], "report")
             test("TF-RPT-01e: MD含场景B", "场景 B：回调到位" in md_content, md_content[:200], "report")
             test("TF-RPT-01f: MD含执行时间窗", "执行时间窗" in md_content, md_content[:200], "report")
+            test("TF-RPT-01j: MD含长短周期结论", "中线吸筹，短线突破确认" in md_content, md_content[:500], "report")
 
         if html_exists:
             with open(html_path, "r", encoding="utf-8") as f:

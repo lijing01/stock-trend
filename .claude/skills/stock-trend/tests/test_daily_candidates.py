@@ -37,7 +37,11 @@ def candidate(code, eligible=True, adjusted_score=80.0,
         "sector_actionable": sector_actionable,
         "sector_type": "mainline" if sector_actionable else "single_day_pulse",
         "score_eligible": score_eligible,
-        "wyckoff": {"sub_phase": "LPS", "confidence": 0.6},
+        "wyckoff": {
+            "sub_phase": "LPS", "confidence": 0.6,
+            "long_term": {"eligible": True, "phase_name": "吸筹阶段"},
+            "alignment": {"label": "中线吸筹，短线买点确认", "recommendation_gate": "actionable"},
+        },
         "signals": {},
         "data_quality": {
             "eligible": eligible,
@@ -825,7 +829,22 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("排行 来源 realtime", report)
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", report)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", report)
+        self.assertIn("中线吸筹，短线买点确认", report)
         self.assertIn("股市有风险，投资需谨慎", report)
+
+    def test_countertrend_wyckoff_candidate_is_observation_only(self):
+        item = candidate("countertrend")
+        item["wyckoff"]["alignment"] = {
+            "label": "中线偏空，短线买点属逆势反弹",
+            "recommendation_gate": "observation",
+        }
+        buckets = classify_candidates([item], {
+            "mode": "actionable", "max_recommendations": 5,
+            "max_portfolio_pct": 60, "reasons": [],
+        })
+
+        self.assertEqual(buckets["actionable"], [])
+        self.assertIn("wyckoff_countertrend", buckets["observation"][0]["observation_reasons"])
 
     def test_html_renders_all_buckets_and_full_disclaimer(self):
         policy = {

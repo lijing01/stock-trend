@@ -20,7 +20,7 @@ from analysis.wyckoff import (
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     is_buy_point, is_buy_signal,
-    analyze, analyze_kline_dict, load_kline,
+    analyze, analyze_kline_dict, build_period_alignment, load_kline,
 )
 
 
@@ -402,6 +402,35 @@ class TestLongTermWyckoffContext(unittest.TestCase):
 
         self.assertIn("long_term", result)
         self.assertFalse(result["long_term"]["eligible"])
+
+    def test_period_alignment_blocks_countertrend_short_buy_signal(self):
+        alignment = build_period_alignment(
+            {"phase": PHASE_MARKUP, "sub_phase": SUB_JAC,
+             "confidence": 0.7, "signal_status": "confirmed"},
+            {"eligible": True, "phase": PHASE_DISTRIBUTION,
+             "confidence": 0.7},
+        )
+
+        self.assertEqual(alignment["status"], "countertrend")
+        self.assertEqual(alignment["recommendation_gate"], "observation")
+
+    def test_long_term_phase_is_classified_from_context_not_short_trigger(self):
+        context = {"id": "context_1", "level": "context", "support": 90.0,
+                   "resistance": 110.0, "quality_score": 0.8, "support_idx": 0,
+                   "resistance_idx": 200, "duration_bars": 200, "is_clear_range": True}
+        minor = {"id": "minor_1", "level": "minor", "support": 99.0,
+                 "resistance": 106.0, "quality_score": 0.8, "support_idx": 200,
+                 "resistance_idx": 245, "duration_bars": 45, "is_clear_range": True}
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[context, minor]), \
+                patch("analysis.wyckoff.detect_wyckoff_events", return_value=[]), \
+                patch("analysis.wyckoff._classify_range_phase", side_effect=[
+                    ((PHASE_MARKUP, SUB_JAC, 0.7), []),
+                    ((PHASE_ACCUMULATION, SUB_LPS, 0.65), []),
+                ]):
+            result = analyze_kline_dict(self._trending_kline(250))
+
+        self.assertEqual(result["short_term"]["phase"], PHASE_MARKUP)
+        self.assertEqual(result["long_term"]["phase"], PHASE_ACCUMULATION)
 
 
 if __name__ == "__main__":

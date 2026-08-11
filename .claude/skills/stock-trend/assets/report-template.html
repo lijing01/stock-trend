@@ -167,6 +167,14 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
     <p><strong>阶段判定:</strong> {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）<br>
     <strong>当前子阶段:</strong> {{wyckoff_sub_phase_name}}</p>
 
+    <h3>长短周期结论</h3>
+    <table>
+        <tr><th>周期</th><th>维科夫判断</th></tr>
+        <tr><td>中线结构</td><td>{{wyckoff_long_term_phase}}（置信度: {{wyckoff_long_term_confidence}}）</td></tr>
+        <tr><td>短线触发</td><td>{{wyckoff_short_term_phase}} / {{wyckoff_short_term_trigger}}（{{wyckoff_short_term_status}}）</td></tr>
+        <tr><td>周期结论</td><td>{{wyckoff_alignment_label}}</td></tr>
+    </table>
+
     <table>
         <tr><th>项目</th><th>数值</th></tr>
         <tr><td>交易区间</td><td>{{wyckoff_support}} - {{wyckoff_resistance}}</td></tr>

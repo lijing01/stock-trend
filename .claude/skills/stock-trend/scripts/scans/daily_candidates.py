@@ -49,6 +49,7 @@ REASON_LABELS = {
     "regime_weak": "市场环境评分偏弱",
     "intraday_provisional": "盘中数据尚未收盘确认",
     "recommendation_limit": "超出当日推荐数量上限",
+    "wyckoff_countertrend": "维科夫长短周期逆势，降级为观察",
 }
 
 DATA_REASON_CODES = {
@@ -517,8 +518,8 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 买点 | 置信度 | 原始分 | 质量分 | 覆盖率 | 数据问题/异常及原因 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 短线买点 | 中线结构 | 周期结论 | 置信度 | 原始分 | 质量分 | 覆盖率 | 数据问题/异常及原因 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -527,6 +528,8 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {wyckoff.get('sub_phase', '-')} | "
+            f"{wyckoff.get('long_term', {}).get('phase_name', '未确认')} | "
+            f"{wyckoff.get('alignment', {}).get('label', '未确认')} | "
             f"{wyckoff.get('confidence', 0):.0%} | "
             f"{item['composite_score']:.1f} | "
             f"{candidate_rank_score(item):.1f} | "
@@ -603,6 +606,8 @@ def classify_candidates(candidates, policy):
         and item.get("score_eligible", True)
         and (not policy.get("requires_sector_capital_proof", False)
              or item.get("sector_capital_evidence") == "verified")
+        and item.get("wyckoff", {}).get("alignment", {}).get(
+            "recommendation_gate", "short_term_only") != "observation"
     ]
     limit = policy.get("max_recommendations", 0)
     actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
@@ -634,6 +639,9 @@ def classify_candidates(candidates, policy):
             reasons.append("breadth_capital_divergence")
         if not item.get("score_eligible", True):
             reasons.append("quality_adjusted_below_min_score")
+        if item.get("wyckoff", {}).get("alignment", {}).get(
+                "recommendation_gate") == "observation":
+            reasons.append("wyckoff_countertrend")
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
         if not reasons:
@@ -708,6 +716,8 @@ def _html_candidate_rows(items):
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
             f"<td>{_sector_text(item)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
+            f"<td>{wyckoff.get('long_term', {}).get('phase_name', '未确认')}</td>"
+            f"<td>{wyckoff.get('alignment', {}).get('label', '未确认')}</td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
             f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
@@ -772,13 +782,13 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <p class="dt">{policy_note}</p>
 <p class="dt">{funnel_note}</p>
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>买点</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>置信度</th><th>原始分</th><th>质量分</th><th>覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""

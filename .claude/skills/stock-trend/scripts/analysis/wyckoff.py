@@ -415,6 +415,65 @@ def _choose_range_phase(accumulation: tuple | None, distribution: tuple | None,
     return (phase, sub_phase, confidence), ranked[1:]
 
 
+def _classify_range_phase(swings: list, closes: list, volumes: list, highs: list,
+                          lows: list, atr_values: list, trading_range: dict | None,
+                          latest_idx: int) -> tuple[tuple | None, list[dict]]:
+    """Classify one structural range without borrowing another range's phase."""
+    if not trading_range:
+        return None, []
+    location = _route_price_location(
+        closes[latest_idx], trading_range, atr_values[latest_idx] or 0.0,
+    )
+    if location == "above_range":
+        result = classify_markup(swings, closes, volumes, highs, trading_range,
+                                 atr_values, latest_idx)
+        return ((PHASE_MARKUP, *result), []) if result else (None, [])
+    if location == "below_range":
+        result = classify_markdown(swings, closes, volumes, lows, highs, trading_range,
+                                   atr_values, latest_idx)
+        return ((PHASE_MARKDOWN, *result), []) if result else (None, [])
+    if location == "in_range":
+        accumulation = classify_accumulation(
+            swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
+        )
+        distribution = classify_distribution(
+            swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
+        )
+        return _choose_range_phase(accumulation, distribution)
+    if location == "lower_transition":
+        result = classify_distribution(
+            swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
+        )
+        if result and result[0] == SUB_SOW:
+            return (PHASE_DISTRIBUTION, *result), []
+    return None, []
+
+
+def build_period_alignment(short_term: dict, long_term: dict) -> dict:
+    """Turn independent structural and tactical views into a recommendation gate."""
+    long_phase = long_term.get("phase", PHASE_UNKNOWN)
+    short_phase = short_term.get("phase", PHASE_UNKNOWN)
+    confirmed_buy = is_buy_point(
+        short_phase, short_term.get("sub_phase", ""),
+        short_term.get("signal_status", "confirmed"),
+        int(short_term.get("signal_age_bars", 0) or 0),
+    )
+    if not long_term.get("eligible") or long_phase == PHASE_UNKNOWN:
+        return {"status": "long_term_unavailable", "recommendation_gate": "short_term_only",
+                "label": "长期结构未确认，按短线信号处理"}
+    if long_phase in {PHASE_DISTRIBUTION, PHASE_MARKDOWN} and confirmed_buy:
+        return {"status": "countertrend", "recommendation_gate": "observation",
+                "label": "中线偏空，短线买点属逆势反弹"}
+    if long_phase in {PHASE_ACCUMULATION, PHASE_MARKUP} and confirmed_buy:
+        return {"status": "aligned_bullish", "recommendation_gate": "actionable",
+                "label": "中线偏多，短线买点确认"}
+    if long_phase in {PHASE_ACCUMULATION, PHASE_MARKUP}:
+        return {"status": "waiting_trigger", "recommendation_gate": "waiting_trigger",
+                "label": "中线偏多，等待短线触发"}
+    return {"status": "aligned_bearish", "recommendation_gate": "observation",
+            "label": "中线与短线结构均不支持做多"}
+
+
 def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
                            highs: list, trading_range: dict | None, atr_values: list,
                            latest_idx: int) -> tuple | None:
@@ -993,34 +1052,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     trend_context = {"direction": PHASE_UNKNOWN, "source": "none"}
 
     if trading_range:
-        location = _route_price_location(
-            closes[latest_idx], trading_range, atr_values[latest_idx] or 0.0,
+        selected, secondary_possibilities = _classify_range_phase(
+            swings, closes, volumes, highs, lows, atr_values, trading_range, latest_idx,
         )
-        selected = None
-        if location == "above_range":
-            result = classify_markup(swings, closes, volumes, highs,
-                                     trading_range, atr_values, latest_idx)
-            if result:
-                selected = (PHASE_MARKUP, *result)
-        elif location == "below_range":
-            result = classify_markdown(swings, closes, volumes, lows, highs,
-                                       trading_range, atr_values, latest_idx)
-            if result:
-                selected = (PHASE_MARKDOWN, *result)
-        elif location == "in_range":
-            accumulation = classify_accumulation(
-                swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
-            )
-            distribution = classify_distribution(
-                swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
-            )
-            selected, secondary_possibilities = _choose_range_phase(accumulation, distribution)
-        elif location == "lower_transition":
-            result = classify_distribution(
-                swings, closes, volumes, lows, highs, trading_range, atr_values, latest_idx,
-            )
-            if result and result[0] == SUB_SOW:
-                selected = (PHASE_DISTRIBUTION, *result)
         if selected:
             phase, sub_phase, confidence = selected
             signal.update({
@@ -1093,6 +1127,41 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
 
     vsa_signals_sorted = sorted(vsa_signals, key=lambda s: s["bar_index"], reverse=True)
 
+    context_range = next((item for item in ranges if item["level"] == "context"), None)
+    long_term_eligible = len(closes) >= 250
+    long_phase, long_sub_phase, long_confidence, long_secondary = (
+        PHASE_UNKNOWN, "", 0.0, [])
+    if long_term_eligible and context_range:
+        long_selected, long_secondary = _classify_range_phase(
+            swings, closes, volumes, highs, lows, atr_values, context_range, latest_idx,
+        )
+        if long_selected:
+            long_phase, long_sub_phase, long_confidence = long_selected
+            long_confidence = _compose_confidence(
+                long_confidence, context_range, directional_vsa_count,
+            )
+    long_term = {
+        "eligible": long_term_eligible,
+        "minimum_bars": 250,
+        "phase": long_phase,
+        "phase_name": PHASE_NAMES.get(long_phase, "未知阶段"),
+        "sub_phase": long_sub_phase,
+        "sub_phase_name": SUB_PHASE_NAMES.get(long_sub_phase, ""),
+        "confidence": round(long_confidence, 2),
+        "secondary_possibilities": long_secondary,
+        "range": context_range if long_term_eligible and context_range else {"is_clear_range": False},
+    }
+    short_term = {
+        "phase": phase,
+        "phase_name": PHASE_NAMES.get(phase, "未知阶段"),
+        "sub_phase": sub_phase,
+        "sub_phase_name": SUB_PHASE_NAMES.get(sub_phase, ""),
+        "confidence": round(confidence, 2),
+        "signal_status": signal.get("status", "none"),
+        "signal_age_bars": signal.get("age_bars", 0),
+        "range_level": (trading_range or {}).get("level", ""),
+    }
+
     timeframe_map = {}
     for level in ("context", "swing", "minor"):
         candidate = next((item for item in ranges if item["level"] == level), None)
@@ -1106,22 +1175,13 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "is_current": candidate.get("id") == (trading_range or {}).get("id"),
         }
     if "context" in timeframe_map:
-        timeframe_map["context"]["phase"] = phase if not trading_range or trading_range.get("level") == "context" else "context"
+        timeframe_map["context"]["phase"] = long_phase
     if "minor" in timeframe_map:
         timeframe_map["minor"].update({
             "phase": phase if trading_range and trading_range.get("level") == "minor" else PHASE_UNKNOWN,
             "structure": "re_accumulation" if active_event and active_event["type"] == "sos" else "range",
             "current_event": active_event["type"] if active_event else "",
         })
-
-    context_range = next((item for item in ranges if item["level"] == "context"), None)
-    long_term_eligible = len(closes) >= 250
-    long_term = {
-        "eligible": long_term_eligible,
-        "minimum_bars": 250,
-        "phase": phase if long_term_eligible and trading_range is context_range else PHASE_UNKNOWN,
-        "range": context_range if long_term_eligible and context_range else {"is_clear_range": False},
-    }
 
     structures = []
     if trading_range:
@@ -1152,7 +1212,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "range": trading_range or {"is_clear_range": False},
         "ranges": ranges,
         "timeframes": timeframe_map,
+        "short_term": short_term,
         "long_term": long_term,
+        "alignment": build_period_alignment(short_term, long_term),
         "trend_context": trend_context,
         "structures": structures,
         "event_history": event_history,
