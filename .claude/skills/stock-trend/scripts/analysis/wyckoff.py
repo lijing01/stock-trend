@@ -1140,15 +1140,32 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             long_confidence = _compose_confidence(
                 long_confidence, context_range, directional_vsa_count,
             )
+    long_reason_code = ""
+    long_reason = ""
+    if not long_term_eligible:
+        long_reason_code = "insufficient_history"
+        long_reason = f"日K线仅{len(closes)}根，少于中期结构要求的250根"
+    elif not context_range:
+        long_reason_code = "context_range_missing"
+        long_reason = "250日内未识别出符合触碰、宽度和持续时间要求的长期箱体"
+    elif long_phase == PHASE_UNKNOWN and len(long_secondary) > 1:
+        long_reason_code = "phase_evidence_ambiguous"
+        long_reason = "长期箱体已识别，但吸筹与派发证据接近，暂不强行分类"
+    elif long_phase == PHASE_UNKNOWN:
+        long_reason_code = "phase_evidence_insufficient"
+        long_reason = "长期箱体已识别，但未出现足以确认吸筹或派发阶段的事件证据"
     long_term = {
         "eligible": long_term_eligible,
         "minimum_bars": 250,
+        "bars_available": len(closes),
         "phase": long_phase,
         "phase_name": PHASE_NAMES.get(long_phase, "未知阶段"),
         "sub_phase": long_sub_phase,
         "sub_phase_name": SUB_PHASE_NAMES.get(long_sub_phase, ""),
         "confidence": round(long_confidence, 2),
         "secondary_possibilities": long_secondary,
+        "reason_code": long_reason_code,
+        "reason": long_reason,
         "range": context_range if long_term_eligible and context_range else {"is_clear_range": False},
     }
     short_term = {

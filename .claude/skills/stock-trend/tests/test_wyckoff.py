@@ -402,6 +402,58 @@ class TestLongTermWyckoffContext(unittest.TestCase):
 
         self.assertIn("long_term", result)
         self.assertFalse(result["long_term"]["eligible"])
+        self.assertEqual(result["long_term"]["bars_available"], 249)
+        self.assertEqual(result["long_term"]["minimum_bars"], 250)
+        self.assertEqual(
+            result["long_term"]["reason_code"], "insufficient_history")
+        self.assertIn("249", result["long_term"]["reason"])
+
+    def test_long_term_explains_missing_context_range(self):
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[]):
+            result = analyze_kline_dict(self._trending_kline(250))
+
+        self.assertTrue(result["long_term"]["eligible"])
+        self.assertEqual(
+            result["long_term"]["reason_code"], "context_range_missing")
+        self.assertIn("长期箱体", result["long_term"]["reason"])
+
+    def test_long_term_explains_unclassified_context_range(self):
+        context = {"id": "context_1", "level": "context", "support": 90.0,
+                   "resistance": 110.0, "quality_score": 0.8, "support_idx": 0,
+                   "resistance_idx": 200, "duration_bars": 200,
+                   "is_clear_range": True}
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[context]), \
+                patch("analysis.wyckoff.detect_wyckoff_events", return_value=[]), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=(None, [])):
+            result = analyze_kline_dict(self._trending_kline(250))
+
+        self.assertEqual(
+            result["long_term"]["reason_code"],
+            "phase_evidence_insufficient",
+        )
+        self.assertIn("事件证据", result["long_term"]["reason"])
+
+    def test_long_term_explains_ambiguous_context_evidence(self):
+        context = {"id": "context_1", "level": "context", "support": 90.0,
+                   "resistance": 110.0, "quality_score": 0.8, "support_idx": 0,
+                   "resistance_idx": 200, "duration_bars": 200,
+                   "is_clear_range": True}
+        ambiguous = [
+            {"phase": PHASE_ACCUMULATION, "confidence": 0.6},
+            {"phase": PHASE_DISTRIBUTION, "confidence": 0.55},
+        ]
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[context]), \
+                patch("analysis.wyckoff.detect_wyckoff_events", return_value=[]), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=(None, ambiguous)):
+            result = analyze_kline_dict(self._trending_kline(250))
+
+        self.assertEqual(
+            result["long_term"]["reason_code"],
+            "phase_evidence_ambiguous",
+        )
+        self.assertIn("证据接近", result["long_term"]["reason"])
 
     def test_period_alignment_blocks_countertrend_short_buy_signal(self):
         alignment = build_period_alignment(
@@ -431,6 +483,7 @@ class TestLongTermWyckoffContext(unittest.TestCase):
 
         self.assertEqual(result["short_term"]["phase"], PHASE_MARKUP)
         self.assertEqual(result["long_term"]["phase"], PHASE_ACCUMULATION)
+        self.assertEqual(result["long_term"]["reason_code"], "")
 
 
 if __name__ == "__main__":

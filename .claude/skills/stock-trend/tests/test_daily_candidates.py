@@ -39,7 +39,11 @@ def candidate(code, eligible=True, adjusted_score=80.0,
         "score_eligible": score_eligible,
         "wyckoff": {
             "sub_phase": "LPS", "confidence": 0.6,
-            "long_term": {"eligible": True, "phase_name": "吸筹阶段"},
+            "long_term": {
+                "eligible": True, "phase_name": "吸筹阶段",
+                "confidence": 0.7, "bars_available": 251,
+                "minimum_bars": 250, "reason_code": "", "reason": "",
+            },
             "alignment": {"label": "中线吸筹，短线买点确认", "recommendation_gate": "actionable"},
         },
         "signals": {},
@@ -824,6 +828,11 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("## 等待触发", report)
         self.assertIn("## 观察池", report)
         self.assertIn("质量分", report)
+        self.assertIn("短线置信度", report)
+        self.assertIn("中线置信度", report)
+        self.assertIn("K线根数/要求", report)
+        self.assertIn("251/250", report)
+        self.assertIn("数据维度覆盖率", report)
         self.assertIn("数据问题/异常及原因", report)
         self.assertIn("数据覆盖率55%，低于70%门槛", report)
         self.assertIn("排行 来源 realtime", report)
@@ -880,7 +889,35 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("观察池", html)
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", html)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", html)
+        self.assertIn("短线置信度", html)
+        self.assertIn("中线置信度", html)
+        self.assertIn("251/250", html)
         self.assertIn("股市有风险，投资需谨慎", html)
+
+    def test_report_explains_unavailable_long_term_structure(self):
+        item = candidate("1")
+        item["wyckoff"]["long_term"] = {
+            "eligible": True,
+            "phase_name": "无法判定",
+            "confidence": 0.0,
+            "bars_available": 251,
+            "minimum_bars": 250,
+            "reason_code": "context_range_missing",
+            "reason": "250日内未识别出符合要求的长期箱体",
+        }
+        buckets = {
+            "actionable": [], "waiting_trigger": [], "observation": [item],
+        }
+        report = generate_report(
+            [item], [{"code": "BK1"}], 1.0,
+            {"mode": "observation", "max_recommendations": 0,
+             "max_portfolio_pct": 0, "reasons": []},
+            buckets,
+        )
+
+        self.assertIn(
+            "无法判定（250日内未识别出符合要求的长期箱体）", report)
+        self.assertIn("| 60% | - | 251/250 |", report)
 
     def test_final_column_explains_data_problem_and_cause(self):
         item = candidate("1", eligible=False)
