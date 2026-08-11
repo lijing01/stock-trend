@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -124,6 +125,35 @@ class TestRunWyckoffMode(unittest.TestCase):
                                 output="/tmp/out.json", code=None)
         with self.assertRaises(SystemExit):
             sc.run_wyckoff_mode(ns, None)
+
+    def test_composite_preserves_technical_quality(self):
+        """维科夫样本不足不能覆盖技术指标的数据质量。"""
+        technical = {
+            "summary": {
+                "total_score": 1.0,
+                "direction": "偏多",
+                "confidence": 0.7,
+                "data_quality": "good",
+            },
+            "latest": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tech_path = self._write(tmp, technical, "technical.json")
+            wy_path = self._write(tmp, _wy_fixture(quality="limited"))
+            out_path = str(Path(tmp) / "scores.json")
+            result = subprocess.run(
+                [sys.executable, str(Path(sc.__file__)),
+                 "--technical", tech_path, "--wyckoff-data", wy_path,
+                 "-o", out_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(out_path, encoding="utf-8") as f:
+                output = json.load(f)
+
+            self.assertEqual(output["data_quality"], "good")
+            self.assertEqual(output["wyckoff_data_quality"], "limited")
+            self.assertEqual(output["automated_sources"]["wyckoff"], "limited")
 
 
 class TestToFloat(unittest.TestCase):

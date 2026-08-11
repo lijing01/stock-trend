@@ -869,6 +869,7 @@ def main():
     # Extract technical score from summary
     tech_score = summary.get("total_score", 0)
     data_quality = summary.get("data_quality")
+    wyckoff_data_quality = None
 
     # Non-technical scores: use provided values or derive from automated data
     # Agent-provided scores always take precedence
@@ -1018,13 +1019,14 @@ def main():
                 wy_data = json.load(f)
             if "error" not in wy_data.get("meta", {}):
                 w_score = wy_data.get("wyckoff_score", 0)
-                data_quality = wy_data.get("meta", {}).get("data_quality", "good")
-                if data_quality == "limited":
+                wyckoff_data_quality = wy_data.get("meta", {}).get(
+                    "data_quality", "good")
+                if wyckoff_data_quality == "limited":
                     w_score *= 0.5
-                elif data_quality == "insufficient":
+                elif wyckoff_data_quality == "insufficient":
                     w_score = 0.0
                 scores["wyckoff"] = round(max(-3.0, min(3.0, w_score)), 2)
-                automated_sources["wyckoff"] = data_quality
+                automated_sources["wyckoff"] = wyckoff_data_quality
         except Exception:
             pass
 
@@ -1388,6 +1390,7 @@ def main():
         "risks": unique_risks,
         "special": special,
         "data_quality": data_quality,
+        "wyckoff_data_quality": wyckoff_data_quality,
         # Automated data sources used for scoring
         "automated_sources": automated_sources,
         # Validation results

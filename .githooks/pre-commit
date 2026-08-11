@@ -1,7 +1,7 @@
 #!/bin/bash
 # pre-commit hook for stock-trend skill
 # Checks Python syntax, template variables, and SKILL.md integrity
-# Pass --no-verify to bypass (emergencies only)
+# Set STOCK_TREND_SKIP_GOLDEN=1 only when a documented external blocker exists.
 
 set -o nounset
 set -o pipefail
@@ -195,27 +195,23 @@ if [ -n "$ANY_SCRIPT_STAGED" ]; then
 
     GOLDEN_TEST="$SKILL_DIR/tests/test_golden.py"
     if [ -f "$GOLDEN_TEST" ]; then
-        GOLDEN_DIFF_OUTPUT=$(python3 "$GOLDEN_TEST" --diff 2>&1)
-        GOLDEN_EXIT=$?
-
-        if [ "$GOLDEN_EXIT" -ne 0 ]; then
-            # Check if commit message contains [skip-golden]
-            COMMIT_MSG=$(git log -1 --format=%s 2>/dev/null || true)
-            if echo "$COMMIT_MSG" | grep -q '\[skip-golden\]'; then
-                msg_warn "Golden diff 检查跳过 ([skip-golden])"
-            else
+        if [ "${STOCK_TREND_SKIP_GOLDEN:-}" = "1" ]; then
+            msg_warn "Golden diff 检查跳过 (STOCK_TREND_SKIP_GOLDEN=1)"
+        else
+            GOLDEN_DIFF_OUTPUT=$(python3 "$GOLDEN_TEST" --diff 2>&1)
+            GOLDEN_EXIT=$?
+            if [ "$GOLDEN_EXIT" -ne 0 ]; then
                 msg_fail "Golden snapshot diff 未通过"
                 echo "$GOLDEN_DIFF_OUTPUT" | head -20
                 has_errors=1
-            fi
-        else
-            # Count warnings
-            WARN_COUNT=$(echo "$GOLDEN_DIFF_OUTPUT" | grep -c "warning" || true)
-            if [ "$WARN_COUNT" -gt 0 ]; then
-                msg_warn "Golden diff 通过但有 ${WARN_COUNT} 个警告"
-                has_warnings=1
             else
-                msg_pass "Golden snapshot diff 通过"
+                WARN_COUNT=$(echo "$GOLDEN_DIFF_OUTPUT" | grep -c "warning" || true)
+                if [ "$WARN_COUNT" -gt 0 ]; then
+                    msg_warn "Golden diff 通过但有 ${WARN_COUNT} 个警告"
+                    has_warnings=1
+                else
+                    msg_pass "Golden snapshot diff 通过"
+                fi
             fi
         fi
     else

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Golden snapshot generation & diff tool for stock-trend pipeline outputs.
 
-Compares committed golden reference files against current cache outputs,
-using deep recursive diff with configurable numeric thresholds.
+Uses committed golden files as frozen inputs, then recomputes deterministic
+technical/Wyckoff/score outputs before comparing stable semantics.  Golden
+regeneration remains the explicit live-data workflow.
 
 Usage:
     python3 test_golden.py --diff          # Compare golden vs current cache
@@ -401,13 +402,20 @@ def _diff_kline(golden_data, current_data, config, asset_type=None):
 
     normalized_golden = {"data": []}
     normalized_current = {"data": []}
+    source_without_historical_turnover = {"tencent_a", "tencent_hk"}
+    turnover_unavailable = (
+        golden_data.get("meta", {}).get("data_source")
+        in source_without_historical_turnover
+        or current_data.get("meta", {}).get("data_source")
+        in source_without_historical_turnover
+    )
     latest_common_date = common_dates[-1]
     for trade_date in common_dates:
         golden_row = golden_rows[trade_date]
         current_row = current_rows[trade_date]
         golden_vol, current_vol = _normalized_volume_pair(golden_row.get("vol"), current_row.get("vol"))
         golden_amount, current_amount = _normalized_amount_pair(golden_row.get("amount"), current_row.get("amount"))
-        skip_live_turnover = trade_date == latest_common_date
+        skip_live_turnover = trade_date == latest_common_date or turnover_unavailable
         skip_volume = (
             skip_live_turnover or
             golden_amount == 0 and current_amount == 0
@@ -500,43 +508,41 @@ def get_symbol_dir_name(symbol):
 
 
 def prepare_current_outputs(config, current_dir):
-    """Generate fresh current outputs in an isolated cache directory."""
+    """Recompute deterministic outputs from committed golden input files."""
     symbols = config.get("symbols", [])
     env = os.environ.copy()
     env["STOCK_TREND_CACHE_DIR"] = str(current_dir)
-
-    for cache_file in CACHE_DIR.glob("*.json"):
-        shutil.copy2(cache_file, current_dir / cache_file.name)
 
     for symbol in symbols:
         code = symbol["code"]
         numeric_code = code.split(".")[0]
         symbol_dir = current_dir / numeric_code
         symbol_dir.mkdir(parents=True, exist_ok=True)
-        shared_symbol_dir = CACHE_DIR / numeric_code
+        golden_symbol_dir = GOLDEN_DIR / numeric_code
+        for script in config.get("scripts", []):
+            output = script["output"]
+            source = golden_symbol_dir / output
+            if source.exists():
+                shutil.copy2(source, symbol_dir / output)
 
-        shared_kline = load_json_safe(shared_symbol_dir / "kline.json")
-        if shared_kline:
-            adj = "none" if code.endswith(".HK") else "qfq"
-            cache_key = f"kline_{code}_D_{adj}"
-            seed_path = current_dir / f"{cache_key}.json"
-            with open(seed_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "cache_timestamp": time.time(),
-                    "cache_key": cache_key,
-                    **shared_kline,
-                }, f, ensure_ascii=False, indent=2)
+        kline_path = symbol_dir / "kline.json"
+        technical_path = symbol_dir / "technical.json"
+        wyckoff_path = symbol_dir / "wyckoff.json"
+        if not kline_path.exists():
+            continue
 
-        resolve_output = symbol_dir / "resolve.json"
         subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "core/resolve_code.py"), numeric_code, "-o", str(resolve_output)],
-            capture_output=True, text=True, timeout=20, env=env,
-        )
-        subprocess.run(
-            [sys.executable, str(SCRIPTS_DIR / "pipeline/runner.py"), "--code", numeric_code],
+            [sys.executable, str(SCRIPTS_DIR / "analysis/technical.py"),
+             str(kline_path), "-o", str(technical_path)]
+            + (["--etf"] if symbol.get("asset") == "etf" else []),
             capture_output=True, text=True, timeout=90, env=env,
         )
-        if (symbol_dir / "technical.json").exists():
+        subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "analysis/wyckoff.py"),
+             str(kline_path), "-o", str(wyckoff_path)],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        if technical_path.exists():
             subprocess.run(
                 [sys.executable, str(SCRIPTS_DIR / "analysis/scores.py"), "--code", numeric_code],
                 capture_output=True, text=True, timeout=30, env=env,

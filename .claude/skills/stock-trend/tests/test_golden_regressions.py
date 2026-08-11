@@ -220,6 +220,27 @@ def test_diff_output_aligns_kline_and_normalizes_volume_units():
     )
 
 
+def test_diff_output_ignores_unavailable_tencent_historical_turnover():
+    golden = {
+        "meta": {"data_source": "eastmoney"},
+        "data": [{"trade_date": "20250527", "open": 10.0, "close": 10.2,
+                  "high": 10.3, "low": 9.9, "vol": 1000.0,
+                  "amount": 102000.0}],
+    }
+    current = {
+        "meta": {"data_source": "tencent_a"},
+        "data": [{"trade_date": "20250527", "open": 10.0, "close": 10.2,
+                  "high": 10.3, "low": 9.9, "vol": 1000.0,
+                  "amount": 0}],
+    }
+    diffs = tg.diff_output("kline.json", golden, current, base_config())
+    test(
+        "Tencent fallback turnover is treated as unavailable",
+        all(item["severity"] != "fail" for item in diffs),
+        str(diffs[:2]),
+    )
+
+
 def test_diff_output_scores_uses_stable_semantics():
     golden = {
         "composite_score": 0.097,
@@ -248,6 +269,7 @@ def main():
     test_diff_output_warns_when_live_source_is_unavailable()
     test_diff_output_warns_for_partial_live_source_availability()
     test_diff_output_aligns_kline_and_normalizes_volume_units()
+    test_diff_output_ignores_unavailable_tencent_historical_turnover()
     test_diff_output_scores_uses_stable_semantics()
     total = PASSED + FAILED
     print(f"\n{'=' * 60}")
