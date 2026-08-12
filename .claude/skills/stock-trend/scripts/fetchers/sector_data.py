@@ -391,6 +391,13 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
     )[:top_n]
 
 
+def get_sector_stocks_cached(sector_code: str,
+                             top_n: int = 50) -> list[dict]:
+    """Return cached constituents without attempting a live request."""
+    _sector_stocks_cache_path(sector_code)
+    return _load_tagged_sector_stocks_cache(sector_code, top_n)
+
+
 def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
                                      reason: str) -> list[dict]:
     cached_stocks = _load_tagged_sector_stocks_cache(sector_code, top_n)

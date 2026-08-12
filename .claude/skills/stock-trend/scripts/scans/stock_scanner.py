@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from core.cache_utils import run_script, CACHE_DIR
+from core.cache_utils import run_script, CACHE_DIR, get_market_day_ttl
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
 from core.recommendation_quality import assess_candidate_data, latest_data_date
 from analysis.wyckoff import (
@@ -32,6 +32,7 @@ from analysis.wyckoff import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
+SOURCE_FAILURE_THRESHOLD = 2
 
 # ──────────────────────── Helpers ────────────────────────
 
@@ -116,11 +117,42 @@ def _piecewise_linear(val, anchors):
     return 0
 
 
+def _source_state(source_health, source):
+    if source_health is None:
+        return None
+    return source_health.setdefault(source, {
+        "state": "healthy", "failures": 0,
+    })
+
+
+def _source_unavailable(source_health, source):
+    state = _source_state(source_health, source)
+    return bool(state and state.get("state") == "unavailable")
+
+
+def _source_succeeded(source_health, source):
+    state = _source_state(source_health, source)
+    if state is not None:
+        state.update({"state": "healthy", "failures": 0})
+
+
+def _source_failed(source_health, source):
+    state = _source_state(source_health, source)
+    if state is None:
+        return
+    state["failures"] = state.get("failures", 0) + 1
+    state["state"] = (
+        "unavailable" if state["failures"] >= SOURCE_FAILURE_THRESHOLD
+        else "degraded"
+    )
+
+
 # ──────────────────────── Phase 1: Gather + Filter ────────────────────────
 
 
 def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
-                      max_workers: int = 4) -> dict:
+                      max_workers: int = 4, sector_context=None,
+                      source_health=None, metrics=None) -> dict:
     """Phase 1: Gather constituent A-stocks from hot sectors, dedup, hard filter.
 
     Returns dict with:
@@ -129,17 +161,35 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         sector_map: {code: {name, hot_score}} for later reference
     """
     # Import sector_data inline to avoid circular imports
-    from fetchers.sector_data import get_sector_rankings, rank_hot_sectors, get_sector_stocks
+    from fetchers.sector_data import (
+        get_sector_rankings, get_sector_stocks, get_sector_stocks_cached,
+        rank_hot_sectors,
+    )
 
     # Get sector rankings to enrich with hot scores
     sector_scores = {}
-    try:
-        rankings = get_sector_rankings()
-        hot_sectors = rank_hot_sectors(rankings, top_n=len(rankings.get("sectors", [])))
-        for s in hot_sectors:
-            sector_scores[s["code"]] = s.get("hot_score", 50)
-    except Exception:
-        pass
+    hot_sectors = []
+    if sector_context:
+        for code, context in sector_context.items():
+            sector_scores[code] = context.get(
+                "hot_score", context.get("relative_hot_score", 50))
+            hot_sectors.append({
+                "code": code,
+                "name": context.get("name", code),
+                "hot_score": sector_scores[code],
+            })
+    else:
+        try:
+            rankings = get_sector_rankings()
+            if metrics is not None:
+                metrics["sector_ranking_requests"] = (
+                    metrics.get("sector_ranking_requests", 0) + 1)
+            hot_sectors = rank_hot_sectors(
+                rankings, top_n=len(rankings.get("sectors", [])))
+            for s in hot_sectors:
+                sector_scores[s["code"]] = s.get("hot_score", 50)
+        except Exception:
+            pass
 
     # Parallel fetch constituent stocks per sector
     sector_map = {}
@@ -147,7 +197,24 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
 
     def _fetch_one_sector(code):
         try:
-            stocks = get_sector_stocks(code, top_n=top_n_per_sector)
+            cache_only = _source_unavailable(source_health, "sector_membership")
+            stocks = (
+                get_sector_stocks_cached(code, top_n=top_n_per_sector)
+                if cache_only else
+                get_sector_stocks(code, top_n=top_n_per_sector)
+            )
+            if metrics is not None:
+                key = ("sector_membership_cache_hits" if cache_only or (
+                    stocks and stocks[0].get("membership_source") == "cache")
+                    else "sector_membership_requests")
+                metrics[key] = metrics.get(key, 0) + 1
+            if not stocks:
+                raise RuntimeError("无可用成分股缓存")
+            if stocks[0].get("membership_source") == "cache":
+                if not cache_only:
+                    _source_failed(source_health, "sector_membership")
+            else:
+                _source_succeeded(source_health, "sector_membership")
             hot_score = sector_scores.get(code, 50)
             # Try to get sector name from the first stock or rankings
             name = code  # fallback
@@ -158,6 +225,10 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             return {"code": code, "name": name, "hot_score": hot_score,
                     "stocks": stocks, "error": None}
         except Exception as e:
+            _source_failed(source_health, "sector_membership")
+            if metrics is not None:
+                metrics["sector_membership_failures"] = (
+                    metrics.get("sector_membership_failures", 0) + 1)
             return {"code": code, "name": code, "hot_score": 50,
                     "stocks": [], "error": str(e)}
 
@@ -232,7 +303,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
 # ──────────────────────── Phase 2: Scoring ────────────────────────
 
 
-def _fetch_kline(ts_code, as_of_date=""):
+def _fetch_kline(ts_code, as_of_date="", cache_only=False):
     """Fetch a current 60-day K-line, refreshing stale caches when required."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "kline.json"
@@ -242,6 +313,8 @@ def _fetch_kline(ts_code, as_of_date=""):
     cached = _read_json(str(cache_path))
     if cached and cached.get("data") and len(cached["data"]) >= 30 \
             and (not as_of_date or latest_data_date(cached) >= as_of_date):
+        return cached
+    if cache_only:
         return cached
 
     # Fetch via subprocess
@@ -269,10 +342,43 @@ def _fetch_kline(ts_code, as_of_date=""):
     return None
 
 
-def _fetch_capital_flow(ts_code):
+def _cache_file_is_fresh(path, ttl_seconds):
+    """Check output-file freshness without launching a fetcher process."""
+    try:
+        return time.time() - Path(path).stat().st_mtime < ttl_seconds
+    except OSError:
+        return False
+
+
+def _usable_capital_payload(payload):
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("meta", {}).get("data_source") not in (None, "error")
+        and payload.get("data")
+    )
+
+
+def _usable_fundamental_payload(payload):
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("meta", {}).get("data_source") not in (None, "error")
+        and payload.get("summary")
+        and payload.get("summary", {}).get("data_quality") not in (None, "error")
+    )
+
+
+def _fetch_capital_flow(ts_code, cache_only=False):
     """Fetch capital flow for a stock via CLI."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "capital_flow.json"
+
+    cached = _read_json(str(cache_path))
+    if _usable_capital_payload(cached) and (
+            cache_only or _cache_file_is_fresh(
+                cache_path, get_market_day_ttl())):
+        return cached
+    if cache_only:
+        return cached
 
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/capital_flow.py"),
@@ -284,13 +390,19 @@ def _fetch_capital_flow(ts_code):
     return None
 
 
-def _fetch_fundamental(ts_code):
+def _fetch_fundamental(ts_code, cache_only=False):
     """Fetch fundamental data, prefer cache."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "fundamental.json"
 
     cached = _read_json(str(cache_path))
-    if cached and cached.get("summary"):
+    if cached and cached.get("summary") and (
+            cache_only or _cache_file_is_fresh(
+                cache_path,
+                get_market_day_ttl(
+                    trading_ttl=1800, after_hours_ttl=57600))):
+        return cached
+    if cache_only:
         return cached
 
     cmd = [
@@ -601,7 +713,7 @@ def score_wyckoff(analysis):
 
 
 def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
-               as_of_date=""):
+               as_of_date="", source_health=None, metrics=None):
     """Phase 2: Fetch data and compute multi-dimension scores for all candidates.
 
     enable_wyckoff: run Wyckoff gate (P0-2 funnel) — drops candidates not at a
@@ -615,9 +727,36 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     print(f"  Fetching K-line data...", file=sys.stderr)
     kline_data = {}
 
+    stage_start = time.monotonic()
+
     def _fetch_one_kline(c):
         ts_code = c["ts_code"]
-        return ts_code, _fetch_kline(ts_code, as_of_date=as_of_date)
+        cache_only = _source_unavailable(source_health, "kline")
+        try:
+            kline = _fetch_kline(
+                ts_code, as_of_date=as_of_date, cache_only=cache_only)
+        except TypeError as exc:
+            if "cache_only" not in str(exc):
+                raise
+            kline = _fetch_kline(ts_code, as_of_date=as_of_date)
+        kline_current = bool(
+            kline and kline.get("data")
+            and (not as_of_date or latest_data_date(kline) >= as_of_date)
+            and not kline.get("meta", {}).get("refresh_error")
+        )
+        if kline and kline.get("data"):
+            if cache_only and metrics is not None:
+                metrics["kline_cache_hits"] = metrics.get("kline_cache_hits", 0) + 1
+            if not cache_only:
+                if kline_current:
+                    _source_succeeded(source_health, "kline")
+                else:
+                    _source_failed(source_health, "kline")
+        else:
+            _source_failed(source_health, "kline")
+            if metrics is not None:
+                metrics["kline_failures"] = metrics.get("kline_failures", 0) + 1
+        return ts_code, kline
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_fetch_one_kline, c) for c in candidates]
@@ -625,51 +764,116 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             ts_code, kline = fut.result()
             kline_data[ts_code] = kline
 
+    if metrics is not None:
+        metrics["kline_seconds"] = metrics.get("kline_seconds", 0.0) + (
+            time.monotonic() - stage_start)
+
+    # Wyckoff is a cheap in-memory gate compared with capital/fundamental I/O.
+    # Apply it before requesting those dimensions.
+    analysis_by_ts = {}
+    eligible_candidates = []
+    wyckoff_start = time.monotonic()
+    for candidate in candidates:
+        ts_code = candidate["ts_code"]
+        kline = kline_data.get(ts_code)
+        records = kline.get("data", []) if kline else []
+        if len(records) < 20:
+            continue
+        if enable_wyckoff:
+            if len(records) < WYCKOFF_MIN_BARS:
+                continue
+            analysis = analyze_kline_dict(kline)
+            if not wyckoff_gate_pass(analysis):
+                continue
+            analysis_by_ts[ts_code] = analysis
+        eligible_candidates.append(candidate)
+    if metrics is not None:
+        metrics["wyckoff_seconds"] = metrics.get("wyckoff_seconds", 0.0) + (
+            time.monotonic() - wyckoff_start)
+        metrics["wyckoff_pass_count"] = (
+            metrics.get("wyckoff_pass_count", 0) + len(eligible_candidates))
+
     # Fetch capital flow in parallel (only for stocks with K-line data)
     print(f"  Fetching capital flow data...", file=sys.stderr)
     capital_data = {}
 
+    stage_start = time.monotonic()
+
     def _fetch_one_cap(c):
         ts_code = c["ts_code"]
-        return ts_code, _fetch_capital_flow(ts_code)
+        cache_only = _source_unavailable(source_health, "capital")
+        try:
+            data = _fetch_capital_flow(ts_code, cache_only=cache_only)
+        except TypeError as exc:
+            if "cache_only" not in str(exc):
+                raise
+            data = _fetch_capital_flow(ts_code)
+        if _usable_capital_payload(data) and not cache_only:
+            _source_succeeded(source_health, "capital")
+        elif not cache_only:
+            _source_failed(source_health, "capital")
+        return ts_code, data
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_fetch_one_cap, c) for c in candidates]
+        futures = [pool.submit(_fetch_one_cap, c) for c in eligible_candidates]
         for fut in as_completed(futures):
             ts_code, cap = fut.result()
             capital_data[ts_code] = cap
+    if metrics is not None:
+        metrics["capital_seconds"] = metrics.get("capital_seconds", 0.0) + (
+            time.monotonic() - stage_start)
+        metrics["capital_requests"] = metrics.get("capital_requests", 0) + len(
+            eligible_candidates)
 
     # Fetch fundamental data (prefer cache, parallel for misses)
     print(f"  Fetching fundamental data...", file=sys.stderr)
     fundamental_data = {}
 
+    stage_start = time.monotonic()
+
     def _fetch_one_fund(c):
         ts_code = c["ts_code"]
-        return ts_code, _fetch_fundamental(ts_code)
+        cache_only = _source_unavailable(source_health, "fundamental")
+        try:
+            data = _fetch_fundamental(ts_code, cache_only=cache_only)
+        except TypeError as exc:
+            if "cache_only" not in str(exc):
+                raise
+            data = _fetch_fundamental(ts_code)
+        if _usable_fundamental_payload(data) and not cache_only:
+            _source_succeeded(source_health, "fundamental")
+        elif not cache_only:
+            _source_failed(source_health, "fundamental")
+        return ts_code, data
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_fetch_one_fund, c) for c in candidates]
+        futures = [pool.submit(_fetch_one_fund, c) for c in eligible_candidates]
         for fut in as_completed(futures):
             ts_code, fund = fut.result()
             fundamental_data[ts_code] = fund
+    if metrics is not None:
+        metrics["fundamental_seconds"] = metrics.get(
+            "fundamental_seconds", 0.0) + (time.monotonic() - stage_start)
+        metrics["fundamental_requests"] = metrics.get(
+            "fundamental_requests", 0) + len(eligible_candidates)
 
     # Pre-compute sector change ranks
     sector_changes = {}
-    for c in candidates:
+    for c in eligible_candidates:
         sc = c.get("sector_code", "")
         cp = c.get("change_pct", 0)
         sector_changes.setdefault(sc, []).append(cp)
 
     # Build sector scores map
     sector_scores = {}
-    for c in candidates:
+    for c in eligible_candidates:
         sc = c.get("sector_code", "")
         if sc not in sector_scores:
             sector_scores[sc] = c.get("sector_hot_score", 50)
 
     # Compute scores
     scored = []
-    for c in candidates:
+    for c in eligible_candidates:
         ts = c["ts_code"]
         kline = kline_data.get(ts)
         cap = capital_data.get(ts)
@@ -684,14 +888,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         if len(records) < 20:
             continue
 
-        # Wyckoff funnel (P0-2): gate on buy-point sub-phases before scoring.
-        wk = None
-        if enable_wyckoff:
-            if len(records) < WYCKOFF_MIN_BARS:
-                continue  # too little data for reliable phase detection
-            wk = analyze_kline_dict(kline)
-            if not wyckoff_gate_pass(wk):
-                continue
+        wk = analysis_by_ts.get(ts) if enable_wyckoff else None
 
         dim_momentum = score_momentum(c, kline)
         dim_volume = score_volume_price(c, kline)

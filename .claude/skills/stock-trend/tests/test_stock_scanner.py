@@ -107,6 +107,74 @@ class TestMetadata(unittest.TestCase):
             result = sc._fetch_kline("600001.SH", as_of_date="2026-08-10")
         self.assertEqual(result["data"][-1]["trade_date"], "20260810")
 
+    def test_valid_capital_cache_skips_subprocess(self):
+        payload = {
+            "meta": {"data_source": "eastmoney", "fetch_time": "20260812-160000"},
+            "data": [{"date": "20260812", "main_net_inflow": 1}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=payload), \
+             patch.object(sc, "run_script") as run:
+            path = Path(tmpdir) / "600001"
+            path.mkdir()
+            cache_file = path / "capital_flow.json"
+            cache_file.write_text(json.dumps(payload), encoding="utf-8")
+            result = sc._fetch_capital_flow("600001.SH")
+        self.assertEqual(result, payload)
+        run.assert_not_called()
+
+    def test_error_fundamental_payload_opens_circuit(self):
+        candidates = [_make_candidate("600001"), _make_candidate("600002")]
+        health = {}
+        error_payload = {
+            "meta": {"data_source": "akshare"},
+            "summary": {"data_quality": "error"},
+        }
+        with patch.object(
+                sc, "_fetch_kline",
+                side_effect=lambda ts, **kwargs: _make_kline(60, ts)), \
+             patch.object(sc, "_fetch_capital_flow", return_value=None), \
+             patch.object(sc, "_fetch_fundamental",
+                          return_value=error_payload):
+            sc.run_phase2(
+                candidates, enable_wyckoff=False,
+                source_health=health, max_workers=1)
+        self.assertEqual(health["fundamental"]["state"], "unavailable")
+
+
+class TestGatherPerformance(unittest.TestCase):
+    def test_supplied_sector_context_skips_ranking_request(self):
+        stocks = [{
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+        }]
+        context = {"BK0001": {"name": "测试板块", "hot_score": 88}}
+        with patch.object(sd, "get_sector_rankings") as rankings, \
+             patch.object(sd, "get_sector_stocks", return_value=stocks):
+            result = sc.gather_candidates(
+                ["BK0001"], sector_context=context)
+        rankings.assert_not_called()
+        self.assertEqual(result["candidates"][0]["sector_hot_score"], 88)
+
+    def test_cache_only_result_does_not_reset_open_circuit(self):
+        stocks = [{
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+            "membership_source": "cache", "membership_quality": "degraded",
+        }]
+        health = {"sector_membership": {
+            "state": "unavailable", "failures": 2,
+        }}
+        with patch.object(sd, "get_sector_stocks") as live, \
+             patch.object(sd, "get_sector_stocks_cached", return_value=stocks):
+            sc.gather_candidates(
+                ["BK0001"], sector_context={"BK0001": {}},
+                source_health=health)
+        live.assert_not_called()
+        self.assertEqual(
+            health["sector_membership"]["state"], "unavailable")
+
 
 class TestSectorConstituentFallback(unittest.TestCase):
     def setUp(self):
@@ -314,6 +382,25 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertEqual(item["wyckoff"]["long_term"]["phase"], "accumulation")
         # 复合分重配后包含 wyckoff 权重
         self.assertGreater(item["composite_score"], 50.0)
+
+    def test_expensive_dimensions_only_fetch_for_wyckoff_passes(self):
+        candidates = [_make_candidate("600001"), _make_candidate("600002")]
+        sc._fetch_kline = lambda ts, as_of_date="", cache_only=False: _make_kline(60, ts)
+        sc.analyze_kline_dict = lambda kline: (
+            _wk(sub="lps", conf=0.6) if
+            kline["meta"]["ts_code"] == "600001.SH" else
+            _wk(phase="distribution", sub="lpsy", conf=0.7)
+        )
+        capital_calls = []
+        fundamental_calls = []
+        sc._fetch_capital_flow = lambda ts, cache_only=False: capital_calls.append(ts)
+        sc._fetch_fundamental = lambda ts, cache_only=False: fundamental_calls.append(ts)
+
+        result = sc.run_phase2(candidates, enable_wyckoff=True)
+
+        self.assertEqual([item["code"] for item in result], ["600001"])
+        self.assertEqual(capital_calls, ["600001.SH"])
+        self.assertEqual(fundamental_calls, ["600001.SH"])
 
     def test_no_wyckoff_dim_when_disabled(self):
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)

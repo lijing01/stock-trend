@@ -683,6 +683,45 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(cached_item["ranking_source"], "cache")
         self.assertEqual(cached_item["ranking_data_date"], "2026-08-05")
 
+    def test_scan_reuses_context_and_only_analyzes_new_stock_codes(self):
+        gather_calls = []
+        phase2_codes = []
+
+        def fake_gather(batch, top_n_per_sector, sector_context=None,
+                        source_health=None, metrics=None):
+            gather_calls.append((list(batch), sector_context))
+            code = "600001" if batch[0] == "BK1" else "600002"
+            candidates = [{"code": "600001", "sector_code": batch[0]}]
+            if code != "600001":
+                candidates.append({"code": code, "sector_code": batch[0]})
+            return {"candidates": candidates}
+
+        def fake_phase2(candidates, enable_wyckoff, as_of_date,
+                        source_health=None, metrics=None):
+            phase2_codes.append([item["code"] for item in candidates])
+            return [{
+                "code": item["code"], "sector_code": item["sector_code"],
+                "composite_score": 80, "quality_adjusted_score": 80,
+                "data_quality": {"eligible": True},
+            } for item in candidates]
+
+        context = {
+            "BK1": {"name": "板块一", "sector_score": 80,
+                    "sector_actionable": True},
+            "BK2": {"name": "板块二", "sector_score": 70,
+                    "sector_actionable": True},
+        }
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            result = dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=5,
+                sector_context=context)
+
+        self.assertEqual(phase2_codes, [["600001"], ["600002"]])
+        self.assertTrue(all(call[1] is context for call in gather_calls))
+        self.assertEqual({item["code"] for item in result},
+                         {"600001", "600002"})
+
     def test_missing_regime_allows_observation_only(self):
         policy = build_recommendation_policy(None, "2026-08-06")
         self.assertEqual(policy["mode"], "observation")

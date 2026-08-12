@@ -350,20 +350,68 @@ def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
 
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
-                 sector_context=None):
+                 sector_context=None, source_health=None, metrics=None):
     """Expand until enough score-qualified, data-eligible candidates exist."""
     all_scored = {}
+    analyzed_codes = set()
+    metrics = metrics if metrics is not None else {}
+    metrics.setdefault("batch_count", 0)
+    metrics.setdefault("raw_candidate_count", 0)
+    metrics.setdefault("unique_candidate_count", 0)
     for i in range(0, len(sector_codes), batch_size):
         batch = sector_codes[i:i + batch_size]
+        metrics["batch_count"] += 1
         try:
-            phase1 = gather_candidates(batch, top_n_per_sector=per_sector)
+            try:
+                phase1 = gather_candidates(
+                    batch, top_n_per_sector=per_sector,
+                    sector_context=sector_context,
+                    source_health=source_health, metrics=metrics)
+            except TypeError as exc:
+                # Preserve compatibility with callers/tests that inject the
+                # historical two-argument gather function.
+                if not any(name in str(exc) for name in (
+                        "sector_context", "source_health", "metrics")):
+                    raise
+                phase1 = gather_candidates(
+                    batch, top_n_per_sector=per_sector)
         except Exception as e:
             print(f"  ⚠️ 板块 {batch} 汇聚失败: {e}", file=sys.stderr)
             continue
         if not phase1["candidates"]:
             continue
-        scored = run_phase2(
-            phase1["candidates"], enable_wyckoff=True, as_of_date=as_of_date)
+        raw_candidates = phase1["candidates"]
+        metrics["raw_candidate_count"] += len(raw_candidates)
+        for candidate in raw_candidates:
+            existing = all_scored.get(candidate.get("code"))
+            if existing is not None:
+                memberships = existing.setdefault("sector_memberships", [])
+                affiliation = {
+                    "code": candidate.get("sector_code", ""),
+                    "name": candidate.get("sector_name", ""),
+                }
+                if affiliation not in memberships:
+                    memberships.append(affiliation)
+        new_candidates = [
+            candidate for candidate in raw_candidates
+            if candidate.get("code") not in analyzed_codes
+        ]
+        if not new_candidates:
+            continue
+        analyzed_codes.update(
+            candidate.get("code") for candidate in new_candidates)
+        metrics["unique_candidate_count"] = len(analyzed_codes)
+        try:
+            scored = run_phase2(
+                new_candidates, enable_wyckoff=True, as_of_date=as_of_date,
+                source_health=source_health, metrics=metrics)
+        except TypeError as exc:
+            if not any(name in str(exc) for name in (
+                    "source_health", "metrics")):
+                raise
+            scored = run_phase2(
+                new_candidates, enable_wyckoff=True,
+                as_of_date=as_of_date)
         for s in scored:
             context = (sector_context or {}).get(s.get("sector_code", ""), {})
             if context:
@@ -381,6 +429,10 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     "ranking_quality": context.get("ranking_quality", ""),
                     "ranking_errors": context.get("ranking_errors", []),
                 })
+            s.setdefault("sector_memberships", [{
+                "code": s.get("sector_code", ""),
+                "name": s.get("sector_name", ""),
+            }])
             all_scored[s["code"]] = s
         eligible_count = sum(
             1 for item in all_scored.values()
@@ -822,13 +874,15 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 </div></body></html>"""
 
 
-def build_json_output(candidates, sector_codes, elapsed, policy, buckets):
+def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
+                      performance=None):
     return {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "sector_count": len(sector_codes),
             "candidate_count": len(candidates),
             "elapsed_seconds": round(elapsed, 1),
+            "performance": performance or {},
         },
         "policy": policy,
         "sectors": sector_codes,
@@ -856,6 +910,8 @@ def main():
     args = parser.parse_args()
 
     start = time.time()
+    performance = {}
+    source_health = {}
     regime = load_regime_context()
     from fetchers.sector_data import get_last_trading_day
     last_trading_date, _ = get_last_trading_day()
@@ -880,8 +936,12 @@ def main():
               file=sys.stderr)
     else:
         print("[1/3] 拉取热点板块...", file=sys.stderr)
+        ranking_start = time.monotonic()
         sector_codes = pick_hot_sectors(
             regime=regime, as_of_date=expected_date)
+        performance["sector_ranking_seconds"] = round(
+            time.monotonic() - ranking_start, 3)
+        performance["sector_ranking_requests"] = 1
         if not sector_codes:
             print("⚠️ 无热点板块,候选为空", file=sys.stderr)
             sys.exit(1)
@@ -901,6 +961,8 @@ def main():
         min_score=args.min_score,
         as_of_date=expected_date,
         sector_context={c["code"]: c for c in sector_codes},
+        source_health=source_health,
+        metrics=performance,
     )
 
     # 过滤 + 排序 + 归一化到 top
@@ -908,9 +970,16 @@ def main():
     buckets = classify_candidates(candidates, policy)
 
     elapsed = time.time() - start
+    performance["source_health"] = source_health
+    performance = {
+        key: round(value, 3) if isinstance(value, float) else value
+        for key, value in performance.items()
+    }
 
     if args.json:
-        out = build_json_output(candidates, sector_codes, elapsed, policy, buckets)
+        out = build_json_output(
+            candidates, sector_codes, elapsed, policy, buckets,
+            performance=performance)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
