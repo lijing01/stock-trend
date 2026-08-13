@@ -74,6 +74,28 @@ class TestRecommendationQuality(unittest.TestCase):
         )
         self.assertFalse(result["dimensions"]["fundamental"]["available"])
 
+    def test_fundamental_placeholder_data_dict_is_not_malformed(self):
+        # fundamental.py intentionally emits `data: {}` (metrics live in
+        # summary, not rows); a non-list data placeholder must not be flagged
+        # malformed, or every fundamental dimension degrades to error.
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=payload([{"date": "20260806"}]),
+            fundamental={
+                "meta": {"data_source": "akshare",
+                         "fetch_time": "20260806-160000"},
+                "summary": {"data_quality": "partial"},
+                "data": {},
+                "errors": [],
+            },
+            as_of_date="2026-08-06",
+        )
+        fundamental = result["dimensions"]["fundamental"]
+        self.assertTrue(fundamental["available"])
+        self.assertEqual(fundamental["quality"], "partial")
+        self.assertNotIn("fundamental_error", result["reasons"])
+        self.assertEqual(result["coverage"], 1.0)
+
     def test_dimension_metadata_is_normalized(self):
         result = assess_candidate_data(
             kline=payload(

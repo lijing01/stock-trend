@@ -41,7 +41,15 @@ def _dimension(name, payload, expected_date="", require_date=False):
         and (
             ("meta" in payload and not isinstance(meta, dict))
             or ("summary" in payload and not isinstance(summary, dict))
-            or ("data" in payload and not isinstance(payload.get("data"), list))
+            or (
+                # Row-based dimensions (kline/capital) must expose a list of
+                # rows. Fundamental is metrics-in-summary with a placeholder
+                # `data: {}` — a non-list here is its normal shape, not
+                # malformed.
+                name in ("kline", "capital")
+                and "data" in payload
+                and not isinstance(payload.get("data"), list)
+            )
         )
     )
     meta = meta if isinstance(meta, dict) else {}
