@@ -16,15 +16,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
+import copy
 import json
+import math
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from core.cache_utils import run_script, CACHE_DIR, get_market_day_ttl
+from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
 from core.recommendation_quality import assess_candidate_data, latest_data_date
+from core.source_health import (
+    LIVE_ATTEMPT_TIMEOUT_SECONDS,
+    MAX_PROVIDER_ATTEMPTS,
+    RunSourceHealth,
+    bounded_source_map,
+    classify_failure,
+    live_attempt,
+    source_result,
+)
 from analysis.wyckoff import (
     analyze_kline_dict,
     BUY_PHASES, BUY_SUB_PHASES, build_period_alignment, is_buy_signal, normalize_score_100,
@@ -61,6 +72,90 @@ def _safe_float(val, default=0.0):
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
+def _optional_number(value):
+    """Return a finite ordering value, leaving missing values as None."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def sector_membership_sort_key(membership):
+    """Deterministic primary-sector preference; missing evidence ranks last."""
+    descending = (
+        membership.get("sector_score"),
+        membership.get("persistence_score"),
+        membership.get("relative_strength"),
+    )
+    rank = _optional_number(membership.get("ranking_position"))
+    membership_degraded = (
+        membership.get("membership_source", "realtime") != "realtime"
+        or membership.get("membership_quality", "good") != "good"
+        or bool(membership.get("membership_cache_error"))
+    )
+    return (
+        not bool(membership.get("sector_actionable", False)),
+        membership_degraded,
+        *tuple(
+            -number if (number := _optional_number(value)) is not None
+            else float("inf")
+            for value in descending
+        ),
+        rank if rank is not None else float("inf"),
+        str(membership.get("code", "")),
+    )
+
+
+def select_primary_sector_membership(memberships):
+    """Return the strongest membership without mutating the evidence list."""
+    usable = [membership for membership in memberships
+              if membership.get("code")]
+    return min(usable, key=sector_membership_sort_key) if usable else {}
+
+
+def build_sector_membership(sector_code, sector_name="", context=None,
+                            stock=None):
+    """Build the complete sector evidence attached to one stock membership."""
+    context = context or {}
+    stock = stock or {}
+    return {
+        "code": sector_code,
+        "name": context.get("name", sector_name or sector_code),
+        "hot_score": context.get(
+            "hot_score", context.get("relative_hot_score", 50)),
+        "sector_actionable": context.get("sector_actionable", False),
+        "sector_score": context.get("sector_score"),
+        "persistence_status": context.get("persistence_status", ""),
+        "persistence_score": context.get("persistence_score"),
+        "relative_strength": context.get("relative_strength"),
+        "ranking_position": context.get("ranking_position"),
+        "ranking_source": context.get("ranking_source", ""),
+        "ranking_data_date": context.get("ranking_data_date", ""),
+        "ranking_quality": context.get("ranking_quality", ""),
+        "ranking_errors": context.get("ranking_errors", []),
+        "membership_source": stock.get("membership_source", "realtime"),
+        "membership_data_date": stock.get("membership_data_date", ""),
+        "membership_quality": stock.get("membership_quality", "good"),
+        "membership_cache_error": stock.get("membership_cache_error", ""),
+        "sector_type": context.get("sector_type", ""),
+        "capital_evidence": context.get("capital_evidence", "unknown"),
+    }
+
+
+def merge_sector_memberships(*membership_groups):
+    """Merge memberships by sector code, retaining the newest full record."""
+    merged = {}
+    for group in membership_groups:
+        for membership in group or []:
+            code = membership.get("code", "")
+            if not code:
+                continue
+            merged[code] = {**merged.get(code, {}), **membership}
+    return [merged[code] for code in sorted(merged)]
 
 
 def _is_a_share(code):
@@ -120,23 +215,31 @@ def _piecewise_linear(val, anchors):
 def _source_state(source_health, source):
     if source_health is None:
         return None
+    if isinstance(source_health, RunSourceHealth):
+        return source_health.snapshot()[source]
     return source_health.setdefault(source, {
         "state": "healthy", "failures": 0,
     })
 
 
 def _source_unavailable(source_health, source):
+    if isinstance(source_health, RunSourceHealth):
+        return source_health.unavailable(source)
     state = _source_state(source_health, source)
     return bool(state and state.get("state") == "unavailable")
 
 
 def _source_succeeded(source_health, source):
+    if isinstance(source_health, RunSourceHealth):
+        return
     state = _source_state(source_health, source)
     if state is not None:
         state.update({"state": "healthy", "failures": 0})
 
 
 def _source_failed(source_health, source):
+    if isinstance(source_health, RunSourceHealth):
+        return
     state = _source_state(source_health, source)
     if state is None:
         return
@@ -145,6 +248,34 @@ def _source_failed(source_health, source):
         "unavailable" if state["failures"] >= SOURCE_FAILURE_THRESHOLD
         else "degraded"
     )
+
+
+def _evidenced_fetch(fetcher, *args, usable=None, **kwargs):
+    """Call an optionally evidence-aware fetcher, including test doubles."""
+    try:
+        result = fetcher(*args, with_evidence=True, **kwargs)
+    except TypeError as exc:
+        if "with_evidence" not in str(exc):
+            raise
+        payload = fetcher(*args, **kwargs)
+        reason = "" if usable is None or usable(payload) else "empty"
+        return source_result(payload, live_attempt(
+            attempted=True, provider_attempts=1, reason=reason))
+    if isinstance(result, dict) and set(("payload", "live_attempt")) <= set(result):
+        return result
+    reason = "" if usable is None or usable(result) else "empty"
+    return source_result(result, live_attempt(
+        attempted=True, provider_attempts=1, reason=reason))
+
+
+def _cache_fetch(fetcher, *args, **kwargs):
+    """Call cache-only while retaining compatibility with older test doubles."""
+    try:
+        return fetcher(*args, cache_only=True, **kwargs)
+    except TypeError as exc:
+        if "cache_only" not in str(exc):
+            raise
+        return fetcher(*args, **kwargs)
 
 
 # ──────────────────────── Phase 1: Gather + Filter ────────────────────────
@@ -169,7 +300,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     # Get sector rankings to enrich with hot scores
     sector_scores = {}
     hot_sectors = []
-    if sector_context:
+    if sector_context is not None:
         for code, context in sector_context.items():
             sector_scores[code] = context.get(
                 "hot_score", context.get("relative_hot_score", 50))
@@ -232,30 +363,100 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             return {"code": code, "name": code, "hot_score": 50,
                     "stocks": [], "error": str(e)}
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_fetch_one_sector, c): c for c in sector_codes}
-        for fut in as_completed(futures):
-            result = fut.result()
-            sector_code = result["code"]
-            sector_map[sector_code] = {
-                "name": result["name"],
-                "hot_score": result["hot_score"],
-            }
-            for s in result["stocks"]:
-                all_stocks.append((s, sector_code))
+    def _membership_payload(code, stocks, error=None):
+        name = code
+        for sector in hot_sectors:
+            if sector.get("code") == code:
+                name = sector.get("name", code)
+                break
+        return {
+            "code": code, "name": name,
+            "hot_score": sector_scores.get(code, 50),
+            "stocks": stocks or [], "error": error,
+        }
+
+    def _fetch_membership_live(code):
+        try:
+            wrapped = get_sector_stocks(
+                code, top_n=top_n_per_sector,
+                timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_membership"],
+                retries=MAX_PROVIDER_ATTEMPTS["sector_membership"] - 1,
+                with_evidence=True, deadline=source_health.live_deadline)
+            if isinstance(wrapped, dict) and set(
+                    ("payload", "live_attempt")) <= set(wrapped):
+                stocks = wrapped["payload"]
+                attempt = wrapped["live_attempt"]
+            else:
+                stocks = wrapped
+                attempt = live_attempt(
+                    attempted=True, provider_attempts=1,
+                    reason="" if stocks else "empty")
+            return source_result(_membership_payload(code, stocks), attempt)
+        except Exception as exc:
+            attempts = getattr(exc, "provider_attempts", 0)
+            return source_result(
+                _membership_payload(code, [], str(exc)),
+                live_attempt(
+                    attempted=attempts > 0, provider_attempts=attempts,
+                    reason=getattr(exc, "reason", "")
+                    or classify_failure(exc)),
+            )
+
+    def _fetch_membership_cache(code):
+        return _membership_payload(
+            code, get_sector_stocks_cached(code, top_n=top_n_per_sector))
+
+    if isinstance(source_health, RunSourceHealth):
+        fetched = bounded_source_map(
+            "sector_membership", sector_codes, source_health,
+            _fetch_membership_live, _fetch_membership_cache,
+            source_health.live_deadline, max_workers=max_workers,
+            cache_usable=lambda payload: bool(payload.get("stocks")))
+        results = [result for _, result in fetched]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_fetch_one_sector, c): c for c in sector_codes}
+            results = [future.result() for future in as_completed(futures)]
+
+    for result in results:
+        sector_code = result["code"]
+        context = (sector_context or {}).get(sector_code, {})
+        sector_map[sector_code] = {
+            "name": result["name"],
+            "hot_score": result["hot_score"],
+            **context,
+        }
+        for s in result["stocks"]:
+            all_stocks.append((s, sector_code))
 
     # Dedup + filter
-    seen_codes = set()
-    candidates = []
+    stocks_by_code = {}
+    memberships_by_code = {}
     excluded = []
 
     for s, sector_code in all_stocks:
         code = s.get("code", "")
         name = s.get("name", "")
+        context = (sector_context or {}).get(sector_code, {})
+        membership = build_sector_membership(
+            sector_code,
+            sector_name=sector_map.get(sector_code, {}).get(
+                "name", sector_code),
+            context=context,
+            stock=s,
+        )
+        memberships_by_code.setdefault(code, []).append(membership)
+        stocks_by_code.setdefault(code, s)
 
-        if code in seen_codes:
-            continue
-        seen_codes.add(code)
+    candidates = []
+    for code in sorted(stocks_by_code):
+        s = stocks_by_code[code]
+        name = s.get("name", "")
+        memberships = merge_sector_memberships(
+            memberships_by_code.get(code, []))
+        primary = select_primary_sector_membership(memberships)
+        sector_code = primary.get("code", "")
 
         # A-share filter
         if not _is_a_share(code):
@@ -281,16 +482,20 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             "ts_code": _resolve_ts_code(code),
             "name": name,
             "sector_code": sector_code,
-            "sector_name": sector_map.get(sector_code, {}).get("name", sector_code),
-            "sector_hot_score": sector_map.get(sector_code, {}).get("hot_score", 50),
+            "sector_name": primary.get("name", sector_code),
+            "sector_hot_score": primary.get("hot_score", 50),
             "change_pct": _safe_float(s.get("change_pct")),
             "amount": _safe_float(s.get("amount")),
             "market_cap": mcap,
             "pe": _safe_float(s.get("pe")),
-            "membership_source": s.get("membership_source", "realtime"),
-            "membership_data_date": s.get("membership_data_date", ""),
-            "membership_quality": s.get("membership_quality", "good"),
-            "membership_cache_error": s.get("membership_cache_error", ""),
+            "membership_source": primary.get(
+                "membership_source", "realtime"),
+            "membership_data_date": primary.get(
+                "membership_data_date", ""),
+            "membership_quality": primary.get("membership_quality", "good"),
+            "membership_cache_error": primary.get(
+                "membership_cache_error", ""),
+            "sector_memberships": memberships,
         })
 
     return {
@@ -303,7 +508,184 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
 # ──────────────────────── Phase 2: Scoring ────────────────────────
 
 
-def _fetch_kline(ts_code, as_of_date="", cache_only=False):
+def _remaining_timeout(source, live_deadline=None):
+    timeout = LIVE_ATTEMPT_TIMEOUT_SECONDS[source]
+    if live_deadline is not None:
+        timeout = min(timeout, max(0.001, live_deadline - time.monotonic()))
+    return timeout
+
+
+def _cache_verdict(reasons):
+    """Return the common, JSON-safe result for pure cache validators."""
+    reasons = list(dict.fromkeys(reasons))
+    error_reasons = {
+        "invalid_payload", "source_missing", "source_error",
+        "payload_error", "quality_missing", "quality_error",
+        "insufficient_data", "flow_metrics_missing",
+    }
+    return {
+        "valid": not reasons,
+        "reasons": reasons,
+        "stale": any(reason in {
+            "wrong_trading_date", "cache_expired",
+        } for reason in reasons),
+        "error": any(reason in error_reasons for reason in reasons),
+    }
+
+
+def _payload_validation_reasons(payload, allow_nonfatal_errors=False):
+    """Validate shared source, quality, and error metadata."""
+    if not isinstance(payload, dict) or not payload:
+        return ["invalid_payload"]
+    meta = payload.get("meta", {})
+    summary = payload.get("summary", {})
+    meta = meta if isinstance(meta, dict) else {}
+    summary = summary if isinstance(summary, dict) else {}
+    source = (
+        meta.get("data_source") or meta.get("source")
+        or payload.get("source")
+    )
+    reasons = []
+    if not source:
+        reasons.append("source_missing")
+    elif str(source).lower() == "error":
+        reasons.append("source_error")
+    if any((
+        payload.get("error"),
+        meta.get("error"), meta.get("errors"), meta.get("refresh_error"),
+        summary.get("error"), summary.get("errors"),
+    )):
+        reasons.append("payload_error")
+    if payload.get("errors") and not allow_nonfatal_errors:
+        reasons.append("payload_error")
+    quality = (
+        summary.get("data_quality") or payload.get("data_quality")
+        or meta.get("data_quality")
+    )
+    if quality == "error":
+        reasons.append("quality_error")
+    cache_validation = meta.get("cache_validation")
+    if isinstance(cache_validation, dict) and not cache_validation.get(
+            "valid", False):
+        reasons.extend(cache_validation.get("reasons") or ["payload_error"])
+    return reasons
+
+
+def _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds):
+    if cache_age_seconds is not None and ttl_seconds is not None:
+        if cache_age_seconds >= ttl_seconds:
+            reasons.append("cache_expired")
+
+
+def _validate_kline_cache(payload, expected_trading_date=""):
+    """Pure validation for a K-line cache candidate."""
+    reasons = _payload_validation_reasons(payload)
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    required = ("open", "high", "low", "close")
+    usable_rows = [
+        row for row in rows
+        if isinstance(row, dict)
+        and latest_data_date({"data": [row]})
+        and all(
+            isinstance(row.get(field), (int, float))
+            and not isinstance(row.get(field), bool)
+            and math.isfinite(float(row[field]))
+            for field in required
+        )
+    ] if isinstance(rows, list) else []
+    if len(usable_rows) < WYCKOFF_MIN_BARS:
+        reasons.append("insufficient_data")
+    data_date = latest_data_date({"data": usable_rows})
+    if expected_trading_date and data_date < expected_trading_date:
+        reasons.append("wrong_trading_date")
+    return _cache_verdict(reasons)
+
+
+def _validate_capital_cache(payload, expected_trading_date="",
+                            cache_age_seconds=None, ttl_seconds=None):
+    """Pure validation for a capital-flow cache candidate."""
+    reasons = _payload_validation_reasons(payload)
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list) or not rows:
+        reasons.append("insufficient_data")
+    else:
+        flow_fields = (
+            "main_net_inflow", "main_inflow", "main_outflow",
+            "retail_net_inflow", "retail_inflow", "retail_outflow",
+            "total_net_inflow",
+        )
+        def _row_date(row):
+            return latest_data_date({"data": [row]})
+
+        has_numeric_flow = any(
+            isinstance(row, dict)
+            and (not expected_trading_date
+                 or _row_date(row) >= expected_trading_date)
+            and any(
+                isinstance(row.get(field), (int, float))
+                and not isinstance(row.get(field), bool)
+                and math.isfinite(float(row[field]))
+                for field in flow_fields
+            )
+            for row in rows
+        )
+        if not has_numeric_flow:
+            reasons.append("flow_metrics_missing")
+    data_date = latest_data_date(payload)
+    if expected_trading_date and data_date < expected_trading_date:
+        reasons.append("wrong_trading_date")
+    _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds)
+    return _cache_verdict(reasons)
+
+
+def _validate_fundamental_cache(payload, expected_trading_date="",
+                                cache_age_seconds=None, ttl_seconds=None):
+    """Pure validation for a fundamental cache candidate."""
+    reasons = _payload_validation_reasons(
+        payload, allow_nonfatal_errors=True)
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    if not isinstance(summary, dict) or not summary:
+        reasons.append("insufficient_data")
+    elif not summary.get("data_quality"):
+        reasons.append("quality_missing")
+    _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds)
+    return _cache_verdict(reasons)
+
+
+def _cache_file_age_seconds(path):
+    """Return cache file age, keeping wall-clock access outside validators."""
+    try:
+        return max(0.0, time.time() - Path(path).stat().st_mtime)
+    except OSError:
+        return float("inf")
+
+
+def _cache_ttl_seconds(source, now=None):
+    """Return session-aware TTL; lunch remains part of the trading session."""
+    now = now or datetime.now()
+    in_session = (
+        now.weekday() < 5
+        and (now.hour, now.minute) >= (9, 30)
+        and (now.hour, now.minute) <= (15, 0)
+    )
+    if source == "fundamental":
+        return 1800 if in_session else 57600
+    return 300 if in_session else 57600
+
+
+def _with_cache_verdict(payload, verdict):
+    """Attach an invalid-cache diagnosis without mutating the loaded value."""
+    if not isinstance(payload, dict):
+        payload = {"invalid_payload": payload}
+    diagnosed = copy.deepcopy(payload)
+    if not isinstance(diagnosed.get("meta"), dict):
+        diagnosed["meta"] = {}
+    diagnosed["meta"]["cache_validation"] = verdict
+    return diagnosed
+
+
+def _fetch_kline(ts_code, as_of_date="", cache_only=False,
+                 with_evidence=False, live_deadline=None):
     """Fetch a current 60-day K-line, refreshing stale caches when required."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "kline.json"
@@ -311,11 +693,16 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False):
     # A cache is a hit only when it covers the recommendation date.  A
     # post-close scan must not score T-1 data merely because it has enough bars.
     cached = _read_json(str(cache_path))
-    if cached and cached.get("data") and len(cached["data"]) >= 30 \
-            and (not as_of_date or latest_data_date(cached) >= as_of_date):
-        return cached
+    cache_verdict = _validate_kline_cache(cached, as_of_date)
+    if cache_verdict["valid"]:
+        result = source_result(cached, live_attempt(
+            attempted=False, cache_used=True, stale=False))
+        return result if with_evidence else cached
     if cache_only:
-        return cached
+        cached = _with_cache_verdict(cached, cache_verdict)
+        result = source_result(cached, live_attempt(
+            attempted=False, cache_used=bool(cached), stale=bool(cached)))
+        return result if with_evidence else cached
 
     # Fetch via subprocess
     cmd = [
@@ -323,96 +710,163 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False):
         ts_code, "--asset", "E", "--freq", "D",
         "-o", str(cache_path),
     ]
-    result = run_script(cmd, label=f"kline_{ts_code}")
+    result = run_script(
+        cmd, label=f"kline_{ts_code}",
+        timeout=_remaining_timeout("kline", live_deadline))
+    attempt = live_attempt(
+        attempted=True, provider_attempts=1, subprocess_started=True)
     if result["success"]:
         refreshed = _read_json(str(cache_path))
-        if refreshed and (not as_of_date
-                          or latest_data_date(refreshed) >= as_of_date):
-            return refreshed
+        refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
+        if refreshed_verdict["valid"]:
+            wrapped = source_result(refreshed, attempt)
+            return wrapped if with_evidence else refreshed
         if refreshed:
+            refreshed = _with_cache_verdict(refreshed, refreshed_verdict)
             refreshed.setdefault("meta", {})["refresh_error"] = (
                 f"K线刷新后仍未覆盖{as_of_date}")
-            return refreshed
+            attempt["reason"] = "empty"
+            attempt["cache_used"] = True
+            attempt["stale"] = True
+            wrapped = source_result(refreshed, attempt)
+            return wrapped if with_evidence else refreshed
     # Keep a stale cache observable to the quality gate instead of dropping it
     # and losing the source/date diagnostic.
     if cached:
+        cached = _with_cache_verdict(cached, cache_verdict)
         cached.setdefault("meta", {})["refresh_error"] = (
             result.get("error") or f"K线刷新失败，未覆盖{as_of_date}")
-        return cached
-    return None
+        attempt.update({
+            "reason": classify_failure(
+                result.get("stderr") or result.get("error")),
+            "cache_used": True, "stale": True,
+        })
+        wrapped = source_result(cached, attempt)
+        return wrapped if with_evidence else cached
+    attempt["reason"] = classify_failure(
+        result.get("stderr") or result.get("error"))
+    wrapped = source_result(None, attempt)
+    return wrapped if with_evidence else None
 
 
 def _cache_file_is_fresh(path, ttl_seconds):
     """Check output-file freshness without launching a fetcher process."""
     try:
-        return time.time() - Path(path).stat().st_mtime < ttl_seconds
+        return _cache_file_age_seconds(path) < ttl_seconds
     except OSError:
         return False
 
 
 def _usable_capital_payload(payload):
-    return bool(
-        isinstance(payload, dict)
-        and payload.get("meta", {}).get("data_source") not in (None, "error")
-        and payload.get("data")
-    )
+    return _validate_capital_cache(payload)["valid"]
 
 
 def _usable_fundamental_payload(payload):
-    return bool(
-        isinstance(payload, dict)
-        and payload.get("meta", {}).get("data_source") not in (None, "error")
-        and payload.get("summary")
-        and payload.get("summary", {}).get("data_quality") not in (None, "error")
-    )
+    return _validate_fundamental_cache(payload)["valid"]
 
 
-def _fetch_capital_flow(ts_code, cache_only=False):
+def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
+                        live_deadline=None, expected_trading_date=""):
     """Fetch capital flow for a stock via CLI."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "capital_flow.json"
 
     cached = _read_json(str(cache_path))
-    if _usable_capital_payload(cached) and (
-            cache_only or _cache_file_is_fresh(
-                cache_path, get_market_day_ttl())):
-        return cached
+    ttl_seconds = _cache_ttl_seconds("capital")
+    cache_age_seconds = (
+        0 if _cache_file_is_fresh(cache_path, ttl_seconds) else ttl_seconds
+    )
+    cache_verdict = _validate_capital_cache(
+        cached, expected_trading_date,
+        cache_age_seconds=cache_age_seconds,
+        ttl_seconds=ttl_seconds)
+    if cache_verdict["valid"]:
+        wrapped = source_result(cached, live_attempt(
+            attempted=False, cache_used=True, stale=False))
+        return wrapped if with_evidence else cached
     if cache_only:
-        return cached
+        cached = _with_cache_verdict(cached, cache_verdict)
+        wrapped = source_result(cached, live_attempt(
+            attempted=False, cache_used=bool(cached), stale=bool(cached)))
+        return wrapped if with_evidence else cached
 
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/capital_flow.py"),
         ts_code, "--asset", "E", "-o", str(cache_path),
     ]
-    result = run_script(cmd, label=f"cap_{ts_code}")
+    result = run_script(
+        cmd, label=f"cap_{ts_code}",
+        timeout=_remaining_timeout("capital", live_deadline))
+    attempt = live_attempt(
+        attempted=True, provider_attempts=1, subprocess_started=True)
     if result["success"]:
-        return _read_json(str(cache_path))
-    return None
+        payload = _read_json(str(cache_path))
+        refreshed_verdict = _validate_capital_cache(
+            payload, expected_trading_date)
+        if not refreshed_verdict["valid"]:
+            attempt["reason"] = "empty"
+            payload = _with_cache_verdict(payload, refreshed_verdict)
+        wrapped = source_result(payload, attempt)
+        return wrapped if with_evidence else payload
+    attempt["reason"] = classify_failure(
+        result.get("stderr") or result.get("error"))
+    if cached:
+        cached = _with_cache_verdict(cached, cache_verdict)
+        attempt.update({"cache_used": True, "stale": True})
+    wrapped = source_result(cached, attempt)
+    return wrapped if with_evidence else cached
 
 
-def _fetch_fundamental(ts_code, cache_only=False):
+def _fetch_fundamental(ts_code, cache_only=False, with_evidence=False,
+                       live_deadline=None, expected_trading_date=""):
     """Fetch fundamental data, prefer cache."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "fundamental.json"
 
     cached = _read_json(str(cache_path))
-    if cached and cached.get("summary") and (
-            cache_only or _cache_file_is_fresh(
-                cache_path,
-                get_market_day_ttl(
-                    trading_ttl=1800, after_hours_ttl=57600))):
-        return cached
+    ttl_seconds = _cache_ttl_seconds("fundamental")
+    cache_age_seconds = (
+        0 if _cache_file_is_fresh(cache_path, ttl_seconds) else ttl_seconds
+    )
+    cache_verdict = _validate_fundamental_cache(
+        cached, expected_trading_date,
+        cache_age_seconds=cache_age_seconds,
+        ttl_seconds=ttl_seconds)
+    if cache_verdict["valid"]:
+        wrapped = source_result(cached, live_attempt(
+            attempted=False, cache_used=True, stale=False))
+        return wrapped if with_evidence else cached
     if cache_only:
-        return cached
+        cached = _with_cache_verdict(cached, cache_verdict)
+        wrapped = source_result(cached, live_attempt(
+            attempted=False, cache_used=bool(cached), stale=bool(cached)))
+        return wrapped if with_evidence else cached
 
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/fundamental.py"),
         ts_code, "--asset", "E", "-o", str(cache_path),
     ]
-    result = run_script(cmd, label=f"fund_{ts_code}")
+    result = run_script(
+        cmd, label=f"fund_{ts_code}",
+        timeout=_remaining_timeout("fundamental", live_deadline))
+    attempt = live_attempt(
+        attempted=True, provider_attempts=1, subprocess_started=True)
     if result["success"]:
-        return _read_json(str(cache_path))
-    return None
+        payload = _read_json(str(cache_path))
+        refreshed_verdict = _validate_fundamental_cache(
+            payload, expected_trading_date)
+        if not refreshed_verdict["valid"]:
+            attempt["reason"] = "empty"
+            payload = _with_cache_verdict(payload, refreshed_verdict)
+        wrapped = source_result(payload, attempt)
+        return wrapped if with_evidence else payload
+    attempt["reason"] = classify_failure(
+        result.get("stderr") or result.get("error"))
+    if cached:
+        cached = _with_cache_verdict(cached, cache_verdict)
+        attempt.update({"cache_used": True, "stale": True})
+    wrapped = source_result(cached, attempt)
+    return wrapped if with_evidence else cached
 
 
 def _compute_close_prices(kline_data):
@@ -667,6 +1121,87 @@ def score_sector_strength(candidate, sector_scores, sector_ranks):
     return max(0.0, min(100.0, score))
 
 
+def build_sector_peer_cohorts(candidates):
+    """Build deterministic change cohorts from unique Phase 1 candidates."""
+    cohorts = {}
+    seen = set()
+    for candidate in sorted(candidates, key=lambda item: str(item.get("code", ""))):
+        code = candidate.get("code", "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        memberships = candidate.get("sector_memberships") or [{
+            "code": candidate.get("sector_code", ""),
+        }]
+        for membership in merge_sector_memberships(memberships):
+            sector_code = membership.get("code", "")
+            if sector_code:
+                cohorts.setdefault(sector_code, []).append(
+                    _safe_float(candidate.get("change_pct")))
+    return {code: sorted(values) for code, values in sorted(cohorts.items())}
+
+
+def score_sector_membership(candidate, membership, peer_cohorts):
+    """Pure sector score used by both initial scoring and later rebinding."""
+    sector_code = membership.get("code", "")
+    rebound = {
+        **candidate,
+        "sector_code": sector_code,
+        "sector_hot_score": membership.get(
+            "hot_score", membership.get("sector_score", 50)),
+    }
+    return score_sector_strength(
+        rebound,
+        {sector_code: rebound["sector_hot_score"]},
+        peer_cohorts,
+    )
+
+
+def composite_from_dimensions(dimensions):
+    """Apply the existing scanner weights to dimension scores."""
+    if "wyckoff" in dimensions:
+        return (
+            dimensions["momentum"] * 0.25
+            + dimensions["volume_price"] * 0.15
+            + dimensions["capital"] * 0.15
+            + dimensions["fundamental"] * 0.10
+            + dimensions["sector_strength"] * 0.10
+            + dimensions["wyckoff"] * 0.25
+        )
+    return (
+        dimensions["momentum"] * 0.30
+        + dimensions["volume_price"] * 0.20
+        + dimensions["capital"] * 0.20
+        + dimensions["fundamental"] * 0.15
+        + dimensions["sector_strength"] * 0.15
+    )
+
+
+def apply_membership_quality(base_quality, membership, as_of_date=""):
+    """Overlay membership freshness on an immutable base-quality snapshot."""
+    quality = copy.deepcopy(base_quality)
+    quality.setdefault("reasons", [])
+    quality.setdefault("freshness_factor", 1.0)
+    source = membership.get("membership_source", "realtime")
+    data_date = membership.get("membership_data_date", "")
+    membership_quality = membership.get("membership_quality", "good")
+    cache_error = membership.get("membership_cache_error", "")
+    date_mismatch = bool(as_of_date and data_date != as_of_date)
+    if source != "realtime" or membership_quality != "good" \
+            or date_mismatch:
+        quality["eligible"] = False
+        if cache_error:
+            reason = "sector_membership_cache_write_failed"
+        elif membership_quality == "degraded" or date_mismatch:
+            reason = "sector_membership_stale"
+        else:
+            reason = "sector_membership_cached"
+        if reason not in quality["reasons"]:
+            quality["reasons"].append(reason)
+        quality["freshness_factor"] *= 0.8
+    return quality
+
+
 # ──────────────────────── Wyckoff gate (P0-2 funnel) ────────────────────────
 
 
@@ -723,6 +1258,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     if not candidates:
         return []
 
+    peer_cohorts = build_sector_peer_cohorts(candidates)
+
     # Pre-fetch all K-line data in parallel
     print(f"  Fetching K-line data...", file=sys.stderr)
     kline_data = {}
@@ -758,11 +1295,31 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 metrics["kline_failures"] = metrics.get("kline_failures", 0) + 1
         return ts_code, kline
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_fetch_one_kline, c) for c in candidates]
-        for fut in as_completed(futures):
-            ts_code, kline = fut.result()
-            kline_data[ts_code] = kline
+    if isinstance(source_health, RunSourceHealth):
+        def _live_kline(candidate):
+            return _evidenced_fetch(
+                _fetch_kline, candidate["ts_code"], as_of_date=as_of_date,
+                live_deadline=source_health.live_deadline,
+                usable=lambda payload: bool(
+                    payload and payload.get("data")
+                    and (not as_of_date
+                         or latest_data_date(payload) >= as_of_date)
+                    and not payload.get("meta", {}).get("refresh_error")))
+
+        fetched = bounded_source_map(
+            "kline", candidates, source_health, _live_kline,
+            lambda candidate: _cache_fetch(
+                _fetch_kline, candidate["ts_code"],
+                as_of_date=as_of_date),
+            source_health.live_deadline, max_workers=max_workers)
+        kline_data.update({item["ts_code"]: payload
+                           for item, payload in fetched})
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_fetch_one_kline, c) for c in candidates]
+            for fut in as_completed(futures):
+                ts_code, kline = fut.result()
+                kline_data[ts_code] = kline
 
     if metrics is not None:
         metrics["kline_seconds"] = metrics.get("kline_seconds", 0.0) + (
@@ -796,29 +1353,76 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     # Fetch capital flow in parallel (only for stocks with K-line data)
     print(f"  Fetching capital flow data...", file=sys.stderr)
     capital_data = {}
+    prefetched_fundamental = None
 
     stage_start = time.monotonic()
+
+    def _fetch_capital_for_run(ts_code, **kwargs):
+        try:
+            return _fetch_capital_flow(
+                ts_code, expected_trading_date=as_of_date, **kwargs)
+        except TypeError as exc:
+            if "expected_trading_date" not in str(exc):
+                raise
+            return _fetch_capital_flow(ts_code, **kwargs)
+
+    def _fetch_fundamental_for_run(ts_code, **kwargs):
+        try:
+            return _fetch_fundamental(
+                ts_code, expected_trading_date=as_of_date, **kwargs)
+        except TypeError as exc:
+            if "expected_trading_date" not in str(exc):
+                raise
+            return _fetch_fundamental(ts_code, **kwargs)
 
     def _fetch_one_cap(c):
         ts_code = c["ts_code"]
         cache_only = _source_unavailable(source_health, "capital")
         try:
-            data = _fetch_capital_flow(ts_code, cache_only=cache_only)
+            data = _fetch_capital_for_run(ts_code, cache_only=cache_only)
         except TypeError as exc:
             if "cache_only" not in str(exc):
                 raise
-            data = _fetch_capital_flow(ts_code)
+            data = _fetch_capital_for_run(ts_code)
         if _usable_capital_payload(data) and not cache_only:
             _source_succeeded(source_health, "capital")
         elif not cache_only:
             _source_failed(source_health, "capital")
         return ts_code, data
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_fetch_one_cap, c) for c in eligible_candidates]
-        for fut in as_completed(futures):
-            ts_code, cap = fut.result()
-            capital_data[ts_code] = cap
+    if isinstance(source_health, RunSourceHealth):
+        with ThreadPoolExecutor(max_workers=2) as dimension_pool:
+            capital_future = dimension_pool.submit(
+                bounded_source_map,
+                "capital", eligible_candidates, source_health,
+                lambda candidate: _evidenced_fetch(
+                    _fetch_capital_for_run, candidate["ts_code"],
+                    live_deadline=source_health.live_deadline,
+                    usable=_usable_capital_payload),
+                lambda candidate: _cache_fetch(
+                    _fetch_capital_for_run, candidate["ts_code"]),
+                source_health.live_deadline, max_workers)
+            fundamental_future = dimension_pool.submit(
+                bounded_source_map,
+                "fundamental", eligible_candidates, source_health,
+                lambda candidate: _evidenced_fetch(
+                    _fetch_fundamental_for_run, candidate["ts_code"],
+                    live_deadline=source_health.live_deadline,
+                    usable=_usable_fundamental_payload),
+                lambda candidate: _cache_fetch(
+                    _fetch_fundamental_for_run, candidate["ts_code"]),
+                source_health.live_deadline, max_workers)
+            fetched = capital_future.result()
+            prefetched_fundamental = fundamental_future.result()
+        capital_data.update({item["ts_code"]: payload
+                             for item, payload in fetched})
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_fetch_one_cap, c)
+                       for c in eligible_candidates]
+            for fut in as_completed(futures):
+                ts_code, cap = fut.result()
+                capital_data[ts_code] = cap
     if metrics is not None:
         metrics["capital_seconds"] = metrics.get("capital_seconds", 0.0) + (
             time.monotonic() - stage_start)
@@ -835,41 +1439,34 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         ts_code = c["ts_code"]
         cache_only = _source_unavailable(source_health, "fundamental")
         try:
-            data = _fetch_fundamental(ts_code, cache_only=cache_only)
+            data = _fetch_fundamental_for_run(
+                ts_code, cache_only=cache_only)
         except TypeError as exc:
             if "cache_only" not in str(exc):
                 raise
-            data = _fetch_fundamental(ts_code)
+            data = _fetch_fundamental_for_run(ts_code)
         if _usable_fundamental_payload(data) and not cache_only:
             _source_succeeded(source_health, "fundamental")
         elif not cache_only:
             _source_failed(source_health, "fundamental")
         return ts_code, data
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_fetch_one_fund, c) for c in eligible_candidates]
-        for fut in as_completed(futures):
-            ts_code, fund = fut.result()
-            fundamental_data[ts_code] = fund
+    if isinstance(source_health, RunSourceHealth):
+        fundamental_data.update({item["ts_code"]: payload
+                                 for item, payload
+                                 in (prefetched_fundamental or [])})
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_fetch_one_fund, c)
+                       for c in eligible_candidates]
+            for fut in as_completed(futures):
+                ts_code, fund = fut.result()
+                fundamental_data[ts_code] = fund
     if metrics is not None:
         metrics["fundamental_seconds"] = metrics.get(
             "fundamental_seconds", 0.0) + (time.monotonic() - stage_start)
         metrics["fundamental_requests"] = metrics.get(
             "fundamental_requests", 0) + len(eligible_candidates)
-
-    # Pre-compute sector change ranks
-    sector_changes = {}
-    for c in eligible_candidates:
-        sc = c.get("sector_code", "")
-        cp = c.get("change_pct", 0)
-        sector_changes.setdefault(sc, []).append(cp)
-
-    # Build sector scores map
-    sector_scores = {}
-    for c in eligible_candidates:
-        sc = c.get("sector_code", "")
-        if sc not in sector_scores:
-            sector_scores[sc] = c.get("sector_hot_score", 50)
 
     # Compute scores
     scored = []
@@ -894,27 +1491,37 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         dim_volume = score_volume_price(c, kline)
         dim_capital = score_capital(c, cap)
         dim_fundamental = score_fundamental_quick(c, fund)
-        dim_sector = score_sector_strength(c, sector_scores, sector_changes)
+        memberships = c.get("sector_memberships") or [
+            build_sector_membership(
+                c.get("sector_code", ""), c.get("sector_name", ""),
+                context={
+                    "hot_score": c.get("sector_hot_score", 50),
+                    "sector_actionable": c.get("sector_actionable", False),
+                },
+                stock=c,
+            )
+        ]
+        primary_membership = select_primary_sector_membership(memberships)
+        dim_sector = score_sector_membership(
+            c, primary_membership, peer_cohorts)
 
-        dims = {
-            "momentum": round(dim_momentum, 1),
-            "volume_price": round(dim_volume, 1),
-            "capital": round(dim_capital, 1),
-            "fundamental": round(dim_fundamental, 1),
-            "sector_strength": round(dim_sector, 1),
+        raw_dimensions = {
+            "momentum": dim_momentum,
+            "volume_price": dim_volume,
+            "capital": dim_capital,
+            "fundamental": dim_fundamental,
+            "sector_strength": dim_sector,
         }
 
         if enable_wyckoff:
             dim_wyckoff = score_wyckoff(wk)
-            dims["wyckoff"] = round(dim_wyckoff, 1)
+            raw_dimensions["wyckoff"] = dim_wyckoff
             # Rebalance: wyckoff takes 25%, others shrink proportionally.
-            composite = (dim_momentum * 0.25 + dim_volume * 0.15
-                         + dim_capital * 0.15 + dim_fundamental * 0.10
-                         + dim_sector * 0.10 + dim_wyckoff * 0.25)
-        else:
-            composite = (dim_momentum * 0.30 + dim_volume * 0.20
-                         + dim_capital * 0.20 + dim_fundamental * 0.15
-                         + dim_sector * 0.15)
+        composite = composite_from_dimensions(raw_dimensions)
+        dims = {
+            name: round(value, 1)
+            for name, value in raw_dimensions.items()
+        }
 
         # Detect signals
         signals = _detect_signals(c, kline, cap, fund)
@@ -922,27 +1529,21 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         # Detect warnings
         warnings = _detect_warnings(c, kline, cap, fund, dim_momentum, dim_volume,
                                      dim_fundamental)
-        data_quality = assess_candidate_data(
+        base_data_quality = assess_candidate_data(
             kline=kline,
             capital=cap,
             fundamental=fund,
             as_of_date=as_of_date,
         )
-        membership_source = c.get("membership_source", "realtime")
-        membership_date = c.get("membership_data_date", "")
-        membership_quality = c.get("membership_quality", "good")
-        membership_cache_error = c.get("membership_cache_error", "")
-        if membership_source != "realtime" or membership_quality != "good":
-            data_quality["eligible"] = False
-            if membership_cache_error:
-                reason = "sector_membership_cache_write_failed"
-            elif as_of_date and membership_date != as_of_date:
-                reason = "sector_membership_stale"
-            else:
-                reason = "sector_membership_cached"
-            if reason not in data_quality["reasons"]:
-                data_quality["reasons"].append(reason)
-            data_quality["freshness_factor"] *= 0.8
+        data_quality = apply_membership_quality(
+            base_data_quality, primary_membership, as_of_date=as_of_date)
+        membership_source = primary_membership.get(
+            "membership_source", "realtime")
+        membership_date = primary_membership.get("membership_data_date", "")
+        membership_quality = primary_membership.get(
+            "membership_quality", "good")
+        membership_cache_error = primary_membership.get(
+            "membership_cache_error", "")
         raw_composite = round(composite, 1)
         quality_adjusted = round(
             raw_composite
@@ -952,8 +1553,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         )
 
         # Sector-relative rank (within sector, by change_pct)
-        sector_code = c.get("sector_code", "")
-        changes_in_sector = sorted(sector_changes.get(sector_code, [c["change_pct"]]),
+        sector_code = primary_membership.get(
+            "code", c.get("sector_code", ""))
+        changes_in_sector = sorted(peer_cohorts.get(sector_code, [c["change_pct"]]),
                                    reverse=True)
         sector_rank = changes_in_sector.index(c["change_pct"]) + 1 if c["change_pct"] in changes_in_sector else len(changes_in_sector)
 
@@ -962,19 +1564,25 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             "ts_code": ts,
             "name": c["name"],
             "sector_code": sector_code,
-            "sector_name": c["sector_name"],
-            "sector_hot_score": c["sector_hot_score"],
+            "sector_name": primary_membership.get(
+                "name", c.get("sector_name", sector_code)),
+            "sector_hot_score": primary_membership.get(
+                "hot_score", c.get("sector_hot_score", 50)),
             "composite_score": raw_composite,
             "raw_composite_score": raw_composite,
             "quality_adjusted_score": quality_adjusted,
+            "raw_dimensions": raw_dimensions,
             "dimensions": dims,
             "signals": signals,
             "warnings": warnings,
+            "base_data_quality": copy.deepcopy(base_data_quality),
             "data_quality": data_quality,
             "membership_source": membership_source,
             "membership_data_date": membership_date,
             "membership_quality": membership_quality,
             "membership_cache_error": membership_cache_error,
+            "sector_memberships": merge_sector_memberships(memberships),
+            "change_pct": c.get("change_pct", 0),
             "sector_relative_rank": sector_rank,
             "sector_total": len(changes_in_sector),
         }

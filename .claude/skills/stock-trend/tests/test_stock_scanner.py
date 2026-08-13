@@ -87,6 +87,254 @@ class TestNormalize(unittest.TestCase):
 
 
 class TestMetadata(unittest.TestCase):
+    def _valid_kline(self, trade_date="20260813"):
+        payload = _make_dated_kline(trade_date=trade_date)
+        payload["meta"].update({
+            "data_source": "eastmoney", "data_quality": "good",
+        })
+        return payload
+
+    def _valid_capital(self, trade_date="20260813"):
+        return {
+            "meta": {
+                "data_source": "eastmoney", "data_quality": "good",
+                "fetch_time": "20260813-160000",
+            },
+            "data": [{"date": trade_date, "main_net_inflow": 1}],
+        }
+
+    def _valid_fundamental(self):
+        return {
+            "meta": {
+                "data_source": "akshare", "fetch_time": "20260813-160000",
+            },
+            "summary": {"data_quality": "good", "roe": 12},
+        }
+
+    def test_cache_validators_reject_error_and_incomplete_payloads(self):
+        kline = self._valid_kline()
+        kline["errors"] = ["partial provider failure"]
+        capital = self._valid_capital()
+        capital["meta"]["data_source"] = "error"
+        fundamental = self._valid_fundamental()
+        fundamental["summary"]["data_quality"] = "error"
+
+        self.assertFalse(sc._validate_kline_cache(
+            kline, "2026-08-13")["valid"])
+        self.assertFalse(sc._validate_capital_cache(
+            capital, "2026-08-13", cache_age_seconds=1,
+            ttl_seconds=300)["valid"])
+        self.assertFalse(sc._validate_fundamental_cache(
+            fundamental, cache_age_seconds=1,
+            ttl_seconds=1800)["valid"])
+
+        missing_fundamental_quality = self._valid_fundamental()
+        del missing_fundamental_quality["summary"]["data_quality"]
+        self.assertFalse(sc._validate_fundamental_cache(
+            missing_fundamental_quality, cache_age_seconds=1,
+            ttl_seconds=1800)["valid"])
+
+        insufficient = self._valid_kline()
+        insufficient["data"] = insufficient["data"][:29]
+        verdict = sc._validate_kline_cache(
+            insufficient, "2026-08-13")
+        self.assertFalse(verdict["valid"])
+        self.assertIn("insufficient_data", verdict["reasons"])
+
+    def test_kline_validator_requires_sixty_bars_for_production_wyckoff(self):
+        payload = self._valid_kline()
+        payload["data"] = payload["data"][:59]
+        verdict = sc._validate_kline_cache(payload, "2026-08-13")
+        self.assertFalse(verdict["valid"])
+        self.assertIn("insufficient_data", verdict["reasons"])
+
+    def test_capital_validator_requires_numeric_flow_evidence(self):
+        date_only = self._valid_capital()
+        date_only["data"] = [{"date": "20260813"}]
+        verdict = sc._validate_capital_cache(
+            date_only, "2026-08-13", cache_age_seconds=1,
+            ttl_seconds=300)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("flow_metrics_missing", verdict["reasons"])
+
+        zero_flow = self._valid_capital()
+        zero_flow["data"][0]["main_net_inflow"] = 0
+        self.assertTrue(sc._validate_capital_cache(
+            zero_flow, "2026-08-13", cache_age_seconds=1,
+            ttl_seconds=300)["valid"])
+
+    def test_capital_numeric_flow_must_be_on_expected_date_row(self):
+        payload = self._valid_capital()
+        payload["data"] = [
+            {"date": "20260812", "main_net_inflow": 10},
+            {"date": "20260813"},
+        ]
+        verdict = sc._validate_capital_cache(
+            payload, "2026-08-13", cache_age_seconds=1,
+            ttl_seconds=300)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("flow_metrics_missing", verdict["reasons"])
+
+    def test_kline_validator_counts_only_structurally_usable_dated_rows(self):
+        payload = self._valid_kline()
+        payload["data"][-1] = {"trade_date": "20260813", "close": 10}
+        verdict = sc._validate_kline_cache(payload, "2026-08-13")
+        self.assertFalse(verdict["valid"])
+        self.assertIn("insufficient_data", verdict["reasons"])
+
+    def test_fundamental_partial_allows_optional_subsource_errors(self):
+        payload = self._valid_fundamental()
+        payload["summary"]["data_quality"] = "partial"
+        payload["errors"] = ["valuation history unavailable"]
+        verdict = sc._validate_fundamental_cache(
+            payload, cache_age_seconds=1, ttl_seconds=1800)
+        self.assertTrue(verdict["valid"])
+
+        payload["error"] = "fatal"
+        self.assertFalse(sc._validate_fundamental_cache(
+            payload, cache_age_seconds=1,
+            ttl_seconds=1800)["valid"])
+
+    def test_cache_validators_do_not_crash_on_malformed_nested_values(self):
+        malformed = [
+            [],
+            {"meta": [], "summary": [], "data": []},
+            {"meta": "bad", "summary": "bad", "data": "bad"},
+        ]
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                self.assertFalse(sc._validate_kline_cache(
+                    payload, "2026-08-13")["valid"])
+                self.assertFalse(sc._validate_capital_cache(
+                    payload, "2026-08-13", 1, 300)["valid"])
+                self.assertFalse(sc._validate_fundamental_cache(
+                    payload, "2026-08-13", 1, 1800)["valid"])
+
+    def test_lunch_break_uses_intraday_cache_ttls(self):
+        lunch = datetime(2026, 8, 13, 12, 0)
+        self.assertEqual(sc._cache_ttl_seconds("capital", lunch), 300)
+        self.assertEqual(
+            sc._cache_ttl_seconds("fundamental", lunch), 1800)
+        after_close = datetime(2026, 8, 13, 16, 0)
+        self.assertEqual(
+            sc._cache_ttl_seconds("capital", after_close), 57600)
+        self.assertEqual(
+            sc._cache_ttl_seconds("fundamental", after_close), 57600)
+
+    def test_capital_validator_enforces_expected_trading_date_and_ttl(self):
+        payload = self._valid_capital("20260812")
+        wrong_date = sc._validate_capital_cache(
+            payload, "2026-08-13", cache_age_seconds=1,
+            ttl_seconds=300)
+        self.assertFalse(wrong_date["valid"])
+        self.assertIn("wrong_trading_date", wrong_date["reasons"])
+
+        payload = self._valid_capital("20260813")
+        self.assertTrue(sc._validate_capital_cache(
+            payload, "2026-08-13", cache_age_seconds=299,
+            ttl_seconds=300)["valid"])
+        expired = sc._validate_capital_cache(
+            payload, "2026-08-13", cache_age_seconds=301,
+            ttl_seconds=300)
+        self.assertFalse(expired["valid"])
+        self.assertIn("cache_expired", expired["reasons"])
+
+    def test_fundamental_validator_supports_intraday_and_after_hours_ttl(self):
+        payload = self._valid_fundamental()
+        self.assertTrue(sc._validate_fundamental_cache(
+            payload, cache_age_seconds=1799,
+            ttl_seconds=1800)["valid"])
+        self.assertFalse(sc._validate_fundamental_cache(
+            payload, cache_age_seconds=1801,
+            ttl_seconds=1800)["valid"])
+        self.assertTrue(sc._validate_fundamental_cache(
+            payload, cache_age_seconds=57599,
+            ttl_seconds=57600)["valid"])
+        self.assertFalse(sc._validate_fundamental_cache(
+            payload, cache_age_seconds=57601,
+            ttl_seconds=57600)["valid"])
+
+    def test_validators_use_injected_latest_trading_day_on_closed_days(self):
+        cases = [
+            ("weekend", "2026-08-14"),
+            ("holiday", "2026-09-30"),
+            ("pre_holiday", "2026-09-30"),
+        ]
+        for label, expected in cases:
+            with self.subTest(label=label):
+                compact = expected.replace("-", "")
+                self.assertTrue(sc._validate_kline_cache(
+                    self._valid_kline(compact), expected)["valid"])
+                self.assertTrue(sc._validate_capital_cache(
+                    self._valid_capital(compact), expected,
+                    cache_age_seconds=1,
+                    ttl_seconds=57600)["valid"])
+
+    def test_valid_kline_cache_skips_subprocess(self):
+        cached = self._valid_kline()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=cached), \
+             patch.object(sc, "run_script") as run:
+            result = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13")
+        self.assertEqual(result, cached)
+        run.assert_not_called()
+
+    def test_wrong_date_capital_cache_invokes_fetcher(self):
+        cached = self._valid_capital("20260812")
+        refreshed = self._valid_capital("20260813")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[cached, refreshed]), \
+             patch.object(sc, "_cache_file_age_seconds", return_value=1), \
+             patch.object(sc, "_cache_ttl_seconds", return_value=300), \
+             patch.object(sc, "run_script",
+                          return_value={"success": True}) as run:
+            result = sc._fetch_capital_flow(
+                "600001.SH", expected_trading_date="2026-08-13")
+        self.assertEqual(result, refreshed)
+        run.assert_called_once()
+
+    def test_invalid_cache_only_payload_is_diagnostic_and_non_actionable(self):
+        capital = self._valid_capital("20260812")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=capital), \
+             patch.object(sc, "_cache_file_age_seconds", return_value=600), \
+             patch.object(sc, "_cache_ttl_seconds", return_value=300), \
+             patch.object(sc, "run_script") as run:
+            diagnostic = sc._fetch_capital_flow(
+                "600001.SH", cache_only=True,
+                expected_trading_date="2026-08-13")
+
+        run.assert_not_called()
+        self.assertFalse(
+            diagnostic["meta"]["cache_validation"]["valid"])
+        quality = sc.assess_candidate_data(
+            self._valid_kline(), diagnostic, self._valid_fundamental(),
+            as_of_date="2026-08-13")
+        self.assertFalse(quality["eligible"])
+        self.assertIn("capital_error", quality["reasons"])
+
+    def test_malformed_cache_only_payload_is_diagnostic_and_non_actionable(self):
+        malformed = {"meta": [], "summary": "bad", "data": "bad"}
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=malformed), \
+             patch.object(sc, "run_script") as run:
+            diagnostic = sc._fetch_capital_flow(
+                "600001.SH", cache_only=True,
+                expected_trading_date="2026-08-13")
+
+        run.assert_not_called()
+        self.assertFalse(
+            diagnostic["meta"]["cache_validation"]["valid"])
+        quality = sc.assess_candidate_data(
+            self._valid_kline(), diagnostic, self._valid_fundamental(),
+            as_of_date="2026-08-13")
+        self.assertFalse(quality["eligible"])
+
     def test_read_json_backfills_fetch_time_for_legacy_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "kline.json"
@@ -142,6 +390,62 @@ class TestMetadata(unittest.TestCase):
                 source_health=health, max_workers=1)
         self.assertEqual(health["fundamental"]["state"], "unavailable")
 
+    def test_error_kline_cache_does_not_skip_subprocess_refresh(self):
+        cached = _make_dated_kline(trade_date="20260813")
+        cached["meta"].update({
+            "data_source": "error", "data_quality": "error",
+            "error": "provider parse failed",
+        })
+        refreshed = _make_dated_kline(trade_date="20260813")
+        refreshed["meta"]["data_source"] = "eastmoney"
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json",
+                          side_effect=[cached, refreshed]), \
+             patch.object(sc, "run_script",
+                          return_value={"success": True}) as run:
+            result = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13")
+
+        run.assert_called_once()
+        self.assertEqual(result["meta"]["data_source"], "eastmoney")
+
+    def test_error_fundamental_cache_does_not_skip_subprocess_refresh(self):
+        cached = {
+            "meta": {"data_source": "akshare"},
+            "summary": {"data_quality": "error", "error": "empty frame"},
+        }
+        refreshed = {
+            "meta": {"data_source": "akshare"},
+            "summary": {"data_quality": "good"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json",
+                          side_effect=[cached, refreshed]), \
+             patch.object(sc, "_cache_file_is_fresh", return_value=True), \
+             patch.object(sc, "run_script",
+                          return_value={"success": True}) as run:
+            result = sc._fetch_fundamental("600001.SH")
+
+        run.assert_called_once()
+        self.assertEqual(result["summary"]["data_quality"], "good")
+
+    def test_valid_fundamental_cache_skips_subprocess(self):
+        cached = {
+            "meta": {"data_source": "akshare"},
+            "summary": {"data_quality": "good"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=cached), \
+             patch.object(sc, "_cache_file_is_fresh", return_value=True), \
+             patch.object(sc, "run_script") as run:
+            result = sc._fetch_fundamental("600001.SH")
+
+        self.assertEqual(result, cached)
+        run.assert_not_called()
+
 
 class TestGatherPerformance(unittest.TestCase):
     def test_supplied_sector_context_skips_ranking_request(self):
@@ -174,6 +478,121 @@ class TestGatherPerformance(unittest.TestCase):
         live.assert_not_called()
         self.assertEqual(
             health["sector_membership"]["state"], "unavailable")
+
+    def test_same_batch_duplicate_retains_complete_membership_evidence(self):
+        shared = {
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+            "membership_source": "realtime",
+            "membership_data_date": "2026-08-13",
+            "membership_quality": "good",
+        }
+        context = {
+            "BK1": {
+                "name": "板块一", "hot_score": 70,
+                "sector_score": 70, "sector_actionable": True,
+                "persistence_score": 60, "relative_strength": 0.6,
+                "ranking_position": 2, "ranking_source": "realtime",
+                "ranking_data_date": "2026-08-13",
+                "ranking_quality": "good",
+            },
+            "BK2": {
+                "name": "板块二", "hot_score": 90,
+                "sector_score": 90, "sector_actionable": True,
+                "persistence_score": 80, "relative_strength": 1.1,
+                "ranking_position": 1, "ranking_source": "realtime",
+                "ranking_data_date": "2026-08-13",
+                "ranking_quality": "good",
+            },
+        }
+        with patch.object(
+                sd, "get_sector_stocks",
+                side_effect=lambda *_args, **_kwargs: [dict(shared)]):
+            result = sc.gather_candidates(
+                ["BK1", "BK2"], sector_context=context, max_workers=1)
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["sector_code"], "BK2")
+        memberships = {m["code"]: m for m in candidate["sector_memberships"]}
+        self.assertEqual(set(memberships), {"BK1", "BK2"})
+        self.assertEqual(memberships["BK1"]["ranking_position"], 2)
+        self.assertEqual(memberships["BK2"]["ranking_position"], 1)
+
+    def test_fresh_actionable_membership_beats_stale_higher_score(self):
+        memberships = [{
+            "code": "BK1", "sector_actionable": True,
+            "sector_score": 99, "membership_source": "cache",
+            "membership_quality": "degraded",
+        }, {
+            "code": "BK2", "sector_actionable": True,
+            "sector_score": 70, "membership_source": "realtime",
+            "membership_quality": "good",
+        }]
+
+        primary = sc.select_primary_sector_membership(memberships)
+
+        self.assertEqual(primary["code"], "BK2")
+
+class TestSourceEvidenceAdapters(unittest.TestCase):
+    def test_subprocess_timeout_is_capped_by_absolute_deadline(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=None), \
+             patch.object(sc, "run_script", return_value={
+                 "success": False, "stderr": "Timeout"}) as run:
+            sc._fetch_capital_flow(
+                "600001.SH", with_evidence=True,
+                live_deadline=sc.time.monotonic() + 0.05)
+
+        timeout = run.call_args.kwargs["timeout"]
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 0.05)
+    def test_fetch_json_failure_reports_exact_attempts_and_reason(self):
+        with patch.object(
+                sd.urllib.request, "urlopen",
+                side_effect=OSError("Name or service not known")), \
+             patch.object(sd.time, "sleep"):
+            with self.assertRaises(sd.ProviderFetchError) as raised:
+                sd._fetch_json(
+                    "https://push2.eastmoney.com/test", retries=2,
+                    with_evidence=True)
+
+        self.assertEqual(raised.exception.provider_attempts, 3)
+        self.assertEqual(raised.exception.reason, "dns")
+
+    def test_membership_cache_fallback_preserves_live_failure_evidence(self):
+        stocks = [{"code": "600001", "name": "测试", "market_cap": 1e10}]
+        error = sd.ProviderFetchError("dns", 2, "dns")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "_fetch_json", side_effect=error):
+            sd.save_sector_stocks_cache("BK1", stocks)
+            wrapped = sd.get_sector_stocks("BK1", with_evidence=True)
+
+        self.assertEqual(wrapped["payload"][0]["membership_source"], "cache")
+        self.assertEqual(wrapped["live_attempt"]["provider_attempts"], 2)
+        self.assertEqual(wrapped["live_attempt"]["reason"], "dns")
+        self.assertTrue(wrapped["live_attempt"]["cache_used"])
+
+    def test_ranking_adapter_aggregates_exact_provider_attempts(self):
+        rows = [{
+            "f12": f"BK{i}", "f14": f"板块{i}", "f3": 1,
+            "f104": 3, "f105": 2,
+        } for i in range(5)]
+        payload = {"rc": 0, "data": {"diff": rows}}
+        attempts = [
+            sc.source_result(payload, sc.live_attempt(
+                attempted=True, provider_attempts=2)),
+            sc.source_result(payload, sc.live_attempt(
+                attempted=True, provider_attempts=1)),
+        ]
+        with patch.object(sd, "_fetch_json", side_effect=attempts), \
+             patch.object(sd.time, "sleep"):
+            wrapped = sd.get_sector_rankings(with_evidence=True)
+
+        self.assertEqual(wrapped["live_attempt"]["provider_attempts"], 3)
+        self.assertEqual(wrapped["live_attempt"]["reason"], "")
 
 
 class TestSectorConstituentFallback(unittest.TestCase):
@@ -341,6 +760,41 @@ class TestScoreWyckoff(unittest.TestCase):
 
 
 class TestRunPhase2Funnel(unittest.TestCase):
+    def test_expected_trading_date_reaches_all_cache_validators(self):
+        seen = {"kline": [], "capital": [], "fundamental": []}
+
+        def fetch_kline(ts, as_of_date="", cache_only=False):
+            seen["kline"].append(as_of_date)
+            return _make_dated_kline(60, ts, "20260813")
+
+        def fetch_capital(ts, cache_only=False, expected_trading_date=""):
+            seen["capital"].append(expected_trading_date)
+            return {
+                "meta": {"data_source": "eastmoney"},
+                "data": [{"date": "20260813", "main_net_inflow": 1}],
+            }
+
+        def fetch_fundamental(ts, cache_only=False,
+                              expected_trading_date=""):
+            seen["fundamental"].append(expected_trading_date)
+            return {
+                "meta": {"data_source": "akshare",
+                         "fetch_time": "20260813-160000"},
+                "summary": {"data_quality": "good"},
+            }
+
+        with patch.object(sc, "_fetch_kline", side_effect=fetch_kline), \
+             patch.object(sc, "_fetch_capital_flow", side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental",
+                          side_effect=fetch_fundamental):
+            sc.run_phase2(
+                [_make_candidate()], as_of_date="2026-08-13",
+                max_workers=1)
+
+        self.assertEqual(seen["kline"], ["2026-08-13"])
+        self.assertEqual(seen["capital"], ["2026-08-13"])
+        self.assertEqual(seen["fundamental"], ["2026-08-13"])
+
     def setUp(self):
         self.orig_kline = sc._fetch_kline
         self.orig_cap = sc._fetch_capital_flow
@@ -410,16 +864,47 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertNotIn("wyckoff", scored[0]["dimensions"])
         self.assertNotIn("wyckoff", scored[0])
 
+    def test_composite_uses_raw_dimension_values_before_rounding(self):
+        sc._fetch_kline = lambda ts, as_of_date="": _make_kline(60, ts)
+        raw = {
+            "momentum": 60.0,
+            "volume_price": 50.0,
+            "capital": 40.0,
+            "fundamental": 30.0,
+            "sector_strength": 19.66,
+        }
+        with patch.object(sc, "score_momentum", return_value=raw["momentum"]), \
+             patch.object(sc, "score_volume_price",
+                          return_value=raw["volume_price"]), \
+             patch.object(sc, "score_capital", return_value=raw["capital"]), \
+             patch.object(sc, "score_fundamental_quick",
+                          return_value=raw["fundamental"]), \
+             patch.object(sc, "score_sector_membership",
+                          return_value=raw["sector_strength"]):
+            item = sc.run_phase2(
+                [_make_candidate("600001")], enable_wyckoff=False)[0]
+
+        expected = round(
+            raw["momentum"] * 0.30 + raw["volume_price"] * 0.20
+            + raw["capital"] * 0.20 + raw["fundamental"] * 0.15
+            + raw["sector_strength"] * 0.15,
+            1,
+        )
+        self.assertEqual(item["composite_score"], expected)
+        self.assertEqual(item["dimensions"]["momentum"], 60.0)
+
     def test_quality_adjusted_score_is_separate_from_raw_score(self):
         sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
         sc._fetch_kline = lambda ts, as_of_date="": _make_dated_kline(60, ts)
         sc._fetch_capital_flow = lambda ts: {
             "data": [{"date": "20260806", "main_net_inflow": 0}]
         }
+        candidate = _make_candidate("600001")
+        candidate["membership_data_date"] = "2026-08-06"
         baseline = sc.run_phase2(
-            [_make_candidate("600001")], enable_wyckoff=True)[0]
+            [candidate], enable_wyckoff=True)[0]
         assessed = sc.run_phase2(
-            [_make_candidate("600001")],
+            [candidate],
             enable_wyckoff=True,
             as_of_date="2026-08-06",
         )[0]
@@ -479,6 +964,26 @@ class TestRunPhase2Funnel(unittest.TestCase):
             result[0]["quality_adjusted_score"],
             result[0]["raw_composite_score"],
         )
+
+    def test_realtime_membership_with_wrong_date_is_observation_only(self):
+        candidate = _make_candidate("600001")
+        candidate.update({
+            "membership_source": "realtime",
+            "membership_quality": "good",
+            "membership_data_date": "2026-08-05",
+        })
+        sc._fetch_kline = lambda ts, as_of_date="": _make_dated_kline(60, ts)
+        sc._fetch_capital_flow = lambda ts: {
+            "data": [{"date": "20260806", "main_net_inflow": 0}]
+        }
+
+        item = sc.run_phase2(
+            [candidate], enable_wyckoff=False,
+            as_of_date="2026-08-06")[0]
+
+        self.assertFalse(item["data_quality"]["eligible"])
+        self.assertIn(
+            "sector_membership_stale", item["data_quality"]["reasons"])
 
     def test_snapshot_write_failure_has_distinct_observation_reason(self):
         candidate = _make_candidate("600001")

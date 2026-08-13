@@ -18,6 +18,18 @@ def payload(rows, quality="good", source="fixture", fetched_at="20260806-160000"
 
 
 class TestRecommendationQuality(unittest.TestCase):
+    def test_malformed_nested_payloads_are_non_actionable_not_exceptions(self):
+        malformed = {"meta": [], "summary": "bad", "data": "bad"}
+        result = assess_candidate_data(
+            kline=malformed,
+            capital=malformed,
+            fundamental=malformed,
+            as_of_date="2026-08-13",
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["coverage"], 0)
+        self.assertIn("kline_stale", result["reasons"])
+
     def test_latest_date_accepts_trade_date_and_date(self):
         data = {"data": [{"trade_date": "20260805"}, {"date": "2026-08-06"}]}
         self.assertEqual(latest_data_date(data), "2026-08-06")

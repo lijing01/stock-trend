@@ -15,18 +15,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import queue
 import re
 import sys
+import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import date as datetime_date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
+from core.source_health import classify_failure, live_attempt, source_result
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CACHE_DIR = SCRIPT_DIR.parent.parent.parent.parent / ".cache" / "stock-trend"
+TRADING_CALENDAR_FILE = CACHE_DIR / "trading_calendar.json"
 
 
 # ──────────────────────── East Money API Helpers ────────────────────────
@@ -35,36 +39,57 @@ CACHE_DIR = SCRIPT_DIR.parent.parent.parent.parent / ".cache" / "stock-trend"
 import random as _random
 
 
-def _fetch_json(url: str, timeout: int = 15, retries: int = 3) -> dict:
-    """Fetch JSON from East Money API with host rotation and no-proxy fallback."""
+class ProviderFetchError(RuntimeError):
+    """Provider failure retaining exact attempt count and classification."""
+
+    def __init__(self, message, provider_attempts, reason):
+        super().__init__(message)
+        self.provider_attempts = provider_attempts
+        self.reason = reason
+
+
+def _fetch_json(url: str, timeout: int = 15, retries: int = 3,
+                with_evidence: bool = False,
+                deadline: float | None = None) -> dict:
+    """Fetch JSON with bounded host rotation and optional attempt evidence."""
     last_error = None
+    provider_attempts = 0
     for attempt in range(retries + 1):
+        remaining = (deadline - time.monotonic()
+                     if deadline is not None else timeout)
+        if remaining <= 0:
+            last_error = TimeoutError("live deadline exhausted")
+            break
         host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
         actual_url = url
         if host != "push2.eastmoney.com":
             actual_url = url.replace("https://push2.eastmoney.com",
                                      f"https://{host}", 1)
         try:
+            provider_attempts += 1
             req = urllib.request.Request(actual_url, headers=EM_HEADERS)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            with urllib.request.urlopen(
+                    req, timeout=min(timeout, remaining)) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                if with_evidence:
+                    return source_result(payload, live_attempt(
+                        attempted=True,
+                        provider_attempts=provider_attempts))
+                return payload
         except Exception as e:
             last_error = e
-            # Try without proxy on first attempt (corporate proxy often blocks)
-            if attempt == 0:
-                try:
-                    proxyless = urllib.request.ProxyHandler({})
-                    opener = urllib.request.build_opener(proxyless)
-                    req = urllib.request.Request(actual_url, headers=EM_HEADERS)
-                    with opener.open(req, timeout=timeout) as resp:
-                        return json.loads(resp.read().decode("utf-8"))
-                except Exception:
-                    pass  # fall through to retry + host rotation
             if attempt < retries:
                 # Exponential backoff with random jitter: 1.5^attempt * (1-2s)
                 sleep_sec = 1.5 ** attempt + _random.uniform(0.5, 1.5)
-                time.sleep(sleep_sec)
-    raise RuntimeError(f"东方财富API请求失败(重试{retries}次): {last_error}")
+                if deadline is not None:
+                    sleep_sec = min(
+                        sleep_sec, max(0, deadline - time.monotonic()))
+                if sleep_sec:
+                    time.sleep(sleep_sec)
+    reason = classify_failure(last_error)
+    raise ProviderFetchError(
+        f"东方财富API请求失败(尝试{provider_attempts}次): {last_error}",
+        provider_attempts, reason)
 
 
 def _check_result(result: dict) -> dict:
@@ -114,7 +139,9 @@ def get_sector_list() -> list[dict]:
 MIN_RANKING_ROWS_PER_SOURCE = 5
 
 
-def get_sector_rankings() -> dict:
+def get_sector_rankings(timeout: int = 15, retries: int = 3,
+                        with_evidence: bool = False,
+                        deadline: float | None = None) -> dict:
     """Fetch sector rankings with composite scoring data.
 
     Returns:
@@ -132,11 +159,17 @@ def get_sector_rankings() -> dict:
     }
     today = datetime.now().strftime("%Y%m%d")
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
+    provider_attempts = 0
+    failure_reason = ""
 
     for idx, (stype, sname) in enumerate([("2", "industry"), ("3", "concept")]):
         # Stagger concurrent requests to avoid rate limiting
         if idx > 0:
-            time.sleep(_random.uniform(0.3, 0.8))
+            delay = _random.uniform(0.3, 0.8)
+            if deadline is not None:
+                delay = min(delay, max(0, deadline - time.monotonic()))
+            if delay:
+                time.sleep(delay)
         # f2=最新价, f3=涨跌幅, f4=涨跌额, f8=换手率/成交额,
         # f12=代码, f14=名称, f20=总市值,
         # f104=涨家数, f105=跌家数, f62=主力净流入
@@ -147,7 +180,15 @@ def get_sector_rankings() -> dict:
             f"&fid=f3&_={today}"
         )
         try:
-            data = _fetch_json(url)
+            fetched = _fetch_json(
+                url, timeout=timeout, retries=retries,
+                with_evidence=with_evidence, deadline=deadline)
+            if with_evidence:
+                provider_attempts += fetched["live_attempt"][
+                    "provider_attempts"]
+                data = fetched["payload"]
+            else:
+                data = fetched
             items = _check_result(data).get("diff", [])
             valid_items = [item for item in items if item.get("f12")]
             if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE:
@@ -176,6 +217,9 @@ def get_sector_rankings() -> dict:
                 if sector["code"]:
                     result["sectors"].append(sector)
         except Exception as e:
+            provider_attempts += getattr(e, "provider_attempts", 0)
+            failure_reason = getattr(e, "reason", "") \
+                or classify_failure(e)
             result["meta"]["sources"][sname] = "error"
             result["meta"]["errors"].append(f"{sname}: {e}")
             print(f"  Warning: 无法获取{sname}板块排行: {e}", file=sys.stderr)
@@ -190,7 +234,7 @@ def get_sector_rankings() -> dict:
         result["meta"]["sources"].get(source) == "ok"
         for source in ("industry", "concept")
     )
-    if not result["meta"]["complete"] \
+    if not with_evidence and not result["meta"]["complete"] \
             or active == 0 or result["meta"]["total_sectors"] < 5:
         try:
             from fetchers.sector_akshare import get_sector_rankings_akshare
@@ -213,7 +257,18 @@ def get_sector_rankings() -> dict:
         except Exception as e:
             print(f"  [AKShare] 备选数据源失败: {e}", file=sys.stderr)
 
-    return result
+    if not with_evidence:
+        return result
+    if result["meta"]["complete"] and active:
+        failure_reason = ""
+    elif not failure_reason:
+        failure_reason = "empty"
+    result["meta"]["live_attempt"] = live_attempt(
+        attempted=provider_attempts > 0,
+        provider_attempts=provider_attempts,
+        reason=failure_reason,
+    )
+    return source_result(result, result["meta"]["live_attempt"])
 
 
 def compute_hot_score(sector: dict) -> float:
@@ -407,7 +462,10 @@ def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
         f"获取板块{sector_code}成分股失败: {reason}; 无有效成分股且无可用快照")
 
 
-def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
+def get_sector_stocks(sector_code: str, top_n: int = 50,
+                      timeout: int = 15, retries: int = 3,
+                      with_evidence: bool = False,
+                      deadline: float | None = None) -> list[dict]:
     """Fetch constituent stocks for a sector.
 
     Args:
@@ -427,15 +485,43 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
         f"&pn=1&pz={top_n}&po=0&np=1&fltt=2"
         f"&fid=f3&_={today}"
     )
+    provider_attempts = 0
+    failure_reason = ""
     try:
-        data = _fetch_json(url)
+        fetched = _fetch_json(
+            url, timeout=timeout, retries=retries,
+            with_evidence=with_evidence, deadline=deadline)
+        if with_evidence:
+            provider_attempts = fetched["live_attempt"]["provider_attempts"]
+            data = fetched["payload"]
+        else:
+            data = fetched
         items = _check_result(data).get("diff", [])
     except Exception as e:
-        return _sector_stocks_fallback_or_raise(
-            sector_code, top_n, str(e))
+        provider_attempts += getattr(e, "provider_attempts", 0)
+        failure_reason = getattr(e, "reason", "") or classify_failure(e)
+        cached = _load_tagged_sector_stocks_cache(sector_code, top_n)
+        if cached:
+            wrapped = source_result(cached, live_attempt(
+                attempted=provider_attempts > 0,
+                provider_attempts=provider_attempts,
+                reason=failure_reason,
+                cache_used=True, stale=True))
+            return wrapped if with_evidence else cached
+        raise RuntimeError(
+            f"获取板块{sector_code}成分股失败: {e}; "
+            "无有效成分股且无可用快照") from e
     if not items:
-        return _sector_stocks_fallback_or_raise(
-            sector_code, top_n, "实时接口返回空列表")
+        failure_reason = "empty"
+        cached = _load_tagged_sector_stocks_cache(sector_code, top_n)
+        if cached:
+            wrapped = source_result(cached, live_attempt(
+                attempted=True, provider_attempts=provider_attempts,
+                reason=failure_reason, cache_used=True, stale=True))
+            return wrapped if with_evidence else cached
+        raise RuntimeError(
+            f"获取板块{sector_code}成分股失败: 实时接口返回空列表; "
+            "无有效成分股且无可用快照")
 
     stocks = []
     for item in items:
@@ -450,8 +536,16 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
         if stock["code"]:
             stocks.append(stock)
     if not stocks:
-        return _sector_stocks_fallback_or_raise(
-            sector_code, top_n, "实时接口未返回有效股票代码")
+        failure_reason = "empty"
+        cached = _load_tagged_sector_stocks_cache(sector_code, top_n)
+        if cached:
+            wrapped = source_result(cached, live_attempt(
+                attempted=True, provider_attempts=provider_attempts,
+                reason=failure_reason, cache_used=True, stale=True))
+            return wrapped if with_evidence else cached
+        raise RuntimeError(
+            f"获取板块{sector_code}成分股失败: "
+            "实时接口未返回有效股票代码; 无有效成分股且无可用快照")
     cache_error = ""
     if stocks:
         try:
@@ -471,6 +565,9 @@ def get_sector_stocks(sector_code: str, top_n: int = 50) -> list[dict]:
     if cache_error:
         for stock in tagged:
             stock["membership_cache_error"] = cache_error
+    if with_evidence:
+        return source_result(tagged, live_attempt(
+            attempted=True, provider_attempts=provider_attempts))
     return tagged
 
 
@@ -860,7 +957,71 @@ def load_snapshot_history(days: int = 10) -> dict[str, list[dict]]:
     return {d: history[d] for d in recent}
 
 
-def get_last_trading_day() -> tuple[Optional[str], str]:
+def _strict_calendar_date(value) -> Optional[str]:
+    """Return a strict calendar-valid YYYY-MM-DD value, else None."""
+    if not isinstance(value, str) or len(value) != 10:
+        return None
+    try:
+        parsed = datetime_date.fromisoformat(value)
+    except ValueError:
+        return None
+    return value if parsed.isoformat() == value else None
+
+
+def _load_authoritative_trading_dates(now=None) -> set[str]:
+    """Load the exchange calendar with a short bounded AKShare refresh."""
+    now = now or datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    try:
+        cached = json.loads(TRADING_CALENDAR_FILE.read_text(encoding="utf-8"))
+        if cached.get("checked_date") == today:
+            cached_dates = cached.get("trading_dates")
+            if isinstance(cached_dates, list):
+                normalized = [_strict_calendar_date(value)
+                              for value in cached_dates]
+                if normalized and all(normalized):
+                    return set(normalized)
+    except (OSError, ValueError, TypeError):
+        pass
+
+    result_queue = queue.Queue(maxsize=1)
+
+    def _fetch():
+        try:
+            import akshare as ak
+            frame = ak.tool_trade_date_hist_sina()
+            dates = set()
+            for value in frame["trade_date"].tolist():
+                text = str(value)[:10] if value is not None else ""
+                normalized = _strict_calendar_date(text)
+                if normalized:
+                    dates.add(normalized)
+            result_queue.put(dates)
+        except Exception:
+            result_queue.put(set())
+
+    thread = threading.Thread(target=_fetch, daemon=True)
+    thread.start()
+    thread.join(timeout=2.0)
+    if thread.is_alive():
+        return set()
+    try:
+        dates = result_queue.get_nowait()
+    except queue.Empty:
+        return set()
+    if dates:
+        try:
+            TRADING_CALENDAR_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TRADING_CALENDAR_FILE.write_text(json.dumps({
+                "checked_date": today,
+                "trading_dates": sorted(dates),
+            }, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+    return dates
+
+
+def get_last_trading_day(now=None) -> tuple[Optional[str], str]:
     """Determine last trading day from best available source.
 
     Three-tier lookup:
@@ -872,6 +1033,22 @@ def get_last_trading_day() -> tuple[Optional[str], str]:
         (date_str YYYY-MM-DD or None, source_label)
         source_label: "snapshot" | "cache" | "calendar" | ""
     """
+    current = now or datetime.now()
+
+    # An explicit current-time request is the recommendation main-path signal
+    # to consult the authoritative exchange calendar.  If unavailable, retain
+    # the existing cache/snapshot fallback without inventing an open/closed
+    # status from stale market data.
+    if now is not None and current.weekday() < 5:
+        trading_dates = _load_authoritative_trading_dates(current)
+        today = current.strftime("%Y-%m-%d")
+        eligible = [value for value in trading_dates if value <= today]
+        if eligible:
+            return max(eligible), (
+                "calendar_open" if today in trading_dates
+                else "calendar_closed"
+            )
+
     # Tier 1: snapshot history latest date
     if SNAPSHOT_FILE.exists():
         try:
@@ -898,12 +1075,11 @@ def get_last_trading_day() -> tuple[Optional[str], str]:
             pass
 
     # Tier 3: calendar fallback (weekend regression)
-    today = datetime.now()
-    if today.weekday() == 5:   # Saturday → Friday
-        prev = today - timedelta(days=1)
+    if current.weekday() == 5:   # Saturday → Friday
+        prev = current - timedelta(days=1)
         return prev.strftime("%Y-%m-%d"), "calendar"
-    elif today.weekday() == 6:  # Sunday → Friday
-        prev = today - timedelta(days=2)
+    elif current.weekday() == 6:  # Sunday → Friday
+        prev = current - timedelta(days=2)
         return prev.strftime("%Y-%m-%d"), "calendar"
     # Weekday but might be holiday — can't detect without calendar API
     return None, ""

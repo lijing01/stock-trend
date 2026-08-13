@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Tests for /candidates recommendation policy."""
 import json
+import io
 import sys
 import tempfile
+import types
 import unittest
+import copy
+from contextlib import redirect_stderr
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans.daily_candidates import (
     _candidate_diagnostic_text,
+    _complete_performance,
+    _emit_performance_summary,
     _generate_html,
+    _is_final_valid_candidate,
+    _freeze_output_envelope,
     build_json_output,
     build_recommendation_policy,
     candidate_rank_score,
@@ -24,6 +32,7 @@ from scans.daily_candidates import (
     resolve_recommendation_date,
 )
 from scans import daily_candidates as dc
+from scans import stock_scanner as sc
 
 
 def candidate(code, eligible=True, adjusted_score=80.0,
@@ -56,6 +65,134 @@ def candidate(code, eligible=True, adjusted_score=80.0,
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_final_valid_count_uses_same_predicate_as_scan_early_stop(self):
+        valid = candidate("valid", adjusted_score=70)
+        low_score = candidate("low", adjusted_score=49)
+        stale = candidate("stale", eligible=False, adjusted_score=90)
+        pulse = candidate(
+            "pulse", adjusted_score=90, sector_actionable=False)
+        items = [valid, low_score, stale, pulse]
+        buckets = {
+            "actionable": [valid], "waiting_trigger": [],
+            "observation": [low_score, stale, pulse],
+        }
+
+        performance = _complete_performance(
+            {}, None, items, buckets, min_score=50, total_seconds=1.25)
+
+        self.assertEqual(
+            performance["final_valid_count"],
+            sum(_is_final_valid_candidate(item, 50) for item in items),
+        )
+        self.assertEqual(performance["final_valid_count"], 1)
+
+    def test_performance_audit_renders_in_markdown_html_and_stderr(self):
+        policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "max_portfolio_pct": 60, "reasons": [],
+        }
+        items = [candidate("1")]
+        buckets = {
+            "actionable": items, "waiting_trigger": [],
+            "observation": [],
+        }
+        source_row = {
+            "logical_live_requests": 1, "provider_attempts": 2,
+            "cache_hits": 0, "failures": 0, "circuit_breaks": 0,
+            "failure_reasons": {}, "state": "healthy",
+        }
+        performance = {
+            "sector_ranking_seconds": 0.1,
+            "sector_membership_seconds": 0.2,
+            "kline_seconds": 0.3, "wyckoff_seconds": 0.01,
+            "capital_seconds": 0.2, "fundamental_seconds": 0.2,
+            "report_seconds": 0.0, "total_seconds": 1.1,
+            "batch_count": 1, "raw_candidate_count": 2,
+            "unique_candidate_count": 1, "wyckoff_pass_count": 1,
+            "final_candidate_count": 1, "final_valid_count": 1,
+            "actionable_count": 1,
+            "sources": {
+                name: dict(source_row) for name in (
+                    "sector_ranking", "sector_membership", "kline",
+                    "capital", "fundamental")
+            },
+        }
+
+        report = generate_report(
+            items, [{"code": "BK1"}], 1.1, policy, buckets,
+            performance=performance)
+        html = _generate_html(
+            items, [{"code": "BK1"}], 1.1, "20260806-160000",
+            policy, buckets, performance=performance)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _emit_performance_summary(performance)
+
+        self.assertIn("## 性能与数据源审计", report)
+        self.assertIn("板块成分", report)
+        self.assertIn("sector_membership", report)
+        self.assertIn("性能与数据源审计", html)
+        self.assertIn("sector_membership", html)
+        self.assertIn("[performance]", stderr.getvalue())
+        self.assertIn("final_valid=1", stderr.getvalue())
+        for field in (
+                "sector_ranking", "sector_membership", "kline", "wyckoff",
+                "capital", "fundamental", "report", "total"):
+            self.assertIn(f"{field}=", stderr.getvalue())
+
+    def test_stderr_sorts_failure_reasons(self):
+        performance = {
+            **{field: 0.0 for field in dc._PERFORMANCE_PHASE_FIELDS},
+            "sources": {"kline": {
+                "logical_live_requests": 2, "provider_attempts": 2,
+                "cache_hits": 0, "failures": 2, "circuit_breaks": 1,
+                "failure_reasons": {"timeout": 1, "dns": 1},
+                "state": "unavailable",
+            }},
+        }
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _emit_performance_summary(performance)
+
+        self.assertIn('reasons={"dns":1,"timeout":1}', stderr.getvalue())
+
+    def test_renderers_do_not_mutate_frozen_performance_snapshot(self):
+        policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "max_portfolio_pct": 60, "reasons": [],
+        }
+        items = [candidate("1")]
+        buckets = {
+            "actionable": items, "waiting_trigger": [], "observation": [],
+        }
+        performance = _complete_performance(
+            {}, None, items, buckets, 50, 1.0)
+        performance["report_seconds"] = 0.125
+        before = copy.deepcopy(performance)
+
+        generate_report(
+            items, [{"code": "BK1"}], 1.0, policy, buckets,
+            performance=performance)
+        _generate_html(
+            items, [{"code": "BK1"}], 1.0, "20260806-160000",
+            policy, buckets, performance=performance)
+
+        self.assertEqual(performance, before)
+
+    def test_output_envelope_times_all_formats_once_and_freezes_one_snapshot(self):
+        performance = {"report_seconds": 0.0, "total_seconds": 1.0}
+        with patch.object(dc.time, "monotonic", side_effect=[10.0, 10.25]):
+            outputs, snapshot = _freeze_output_envelope(
+                performance,
+                [("markdown", lambda: "md"), ("html", lambda: "html")],
+                run_started_at=9.0,
+            )
+
+        self.assertEqual(outputs, {"markdown": "md", "html": "html"})
+        self.assertEqual(snapshot["report_seconds"], 0.25)
+        self.assertEqual(snapshot["total_seconds"], 1.25)
+        self.assertEqual(performance["report_seconds"], 0.0)
+
     def test_rankings_cache_persists_verified_data_date(self):
         from fetchers import sector_data
 
@@ -721,6 +858,404 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertTrue(all(call[1] is context for call in gather_calls))
         self.assertEqual({item["code"] for item in result},
                          {"600001", "600002"})
+
+    def test_multi_batch_scan_fetches_ranking_snapshot_exactly_once(self):
+        """One scan run owns one immutable full-market ranking snapshot."""
+        from fetchers import sector_data
+
+        rankings = {"sectors": [
+            {"code": "BK1", "name": "板块一"},
+            {"code": "BK2", "name": "板块二"},
+        ]}
+
+        def stocks(code, top_n=25):
+            suffix = "1" if code == "BK1" else "2"
+            return [{
+                "code": f"60000{suffix}", "name": f"测试{suffix}",
+                "market_cap": 1e10, "change_pct": 1.0,
+                "amount": 1e8, "pe": 20,
+            }]
+
+        def score(candidates, **_kwargs):
+            return [{
+                **item, "composite_score": 80,
+                "quality_adjusted_score": 80,
+                "data_quality": {"eligible": True},
+            } for item in candidates]
+
+        with patch.object(sector_data, "get_sector_rankings",
+                          return_value=rankings) as ranking_fetch, \
+             patch.object(sector_data, "rank_hot_sectors",
+                          return_value=rankings["sectors"]), \
+             patch.object(sector_data, "get_sector_stocks",
+                          side_effect=stocks), \
+             patch.object(dc, "run_phase2", side_effect=score):
+            dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=99)
+
+        self.assertEqual(ranking_fetch.call_count, 1)
+
+    def test_empty_ranking_snapshot_is_not_refetched_per_batch(self):
+        """An unavailable shared snapshot remains explicit for the full scan."""
+        from fetchers import sector_data
+
+        def stocks(code, top_n=25):
+            suffix = "1" if code == "BK1" else "2"
+            return [{
+                "code": f"60000{suffix}", "name": f"测试{suffix}",
+                "market_cap": 1e10, "change_pct": 1.0,
+                "amount": 1e8, "pe": 20,
+            }]
+
+        with patch.object(
+                sector_data, "get_sector_rankings",
+                return_value={
+                    "meta": {"source": "error", "errors": ["dns"]},
+                    "sectors": [],
+                }) as ranking_fetch, \
+             patch.object(sector_data, "rank_hot_sectors", return_value=[]), \
+             patch.object(sector_data, "get_sector_stocks",
+                          side_effect=stocks), \
+             patch.object(dc, "run_phase2", return_value=[]):
+            dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=99)
+
+        self.assertEqual(ranking_fetch.call_count, 1)
+
+    def test_cross_batch_duplicate_rebinds_to_later_stronger_sector(self):
+        contexts = {
+            "BK1": {
+                "name": "弱板块", "sector_actionable": True,
+                "sector_score": 60, "persistence_score": 55,
+                "relative_strength": 0.5, "ranking_position": 1,
+                "ranking_source": "realtime",
+                "ranking_data_date": "2026-08-13",
+                "ranking_quality": "good",
+            },
+            "BK2": {
+                "name": "强板块", "sector_actionable": True,
+                "sector_score": 90, "persistence_score": 80,
+                "relative_strength": 1.2, "ranking_position": 2,
+                "ranking_source": "realtime",
+                "ranking_data_date": "2026-08-13",
+                "ranking_quality": "good",
+            },
+        }
+
+        def gather(batch, **_kwargs):
+            code = batch[0]
+            return {"candidates": [{
+                "code": "600001", "ts_code": "600001.SH",
+                "sector_code": code, "sector_name": contexts[code]["name"],
+                "membership_source": "realtime",
+                "membership_data_date": "2026-08-13",
+                "membership_quality": "good",
+            }]}
+
+        def score(candidates, **_kwargs):
+            return [{
+                **item, "composite_score": 80,
+                "raw_composite_score": 80,
+                "quality_adjusted_score": 80,
+                "base_data_quality": {
+                    "eligible": True, "reasons": [],
+                    "freshness_factor": 1.0,
+                },
+                "data_quality": {
+                    "eligible": True, "reasons": [],
+                    "freshness_factor": 1.0,
+                },
+            } for item in candidates]
+
+        with patch.object(dc, "gather_candidates", side_effect=gather), \
+             patch.object(dc, "run_phase2", side_effect=score):
+            result = dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=99,
+                sector_context=contexts)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["sector_code"], "BK2")
+        memberships = {m["code"]: m for m in result[0]["sector_memberships"]}
+        self.assertEqual(set(memberships), {"BK1", "BK2"})
+        self.assertEqual(memberships["BK2"]["ranking_position"], 2)
+        self.assertEqual(result[0]["sector_score"], 90)
+        self.assertEqual(result[0]["sector_relative_strength"], 1.2)
+
+    def test_cross_batch_duplicate_fetches_each_stock_source_once(self):
+        contexts = {
+            "BK1": {"name": "板块一", "ranking_position": 1,
+                    "sector_actionable": True, "sector_score": 70},
+            "BK2": {"name": "板块二", "ranking_position": 2,
+                    "sector_actionable": True, "sector_score": 90},
+        }
+
+        def gather(batch, **_kwargs):
+            return {"candidates": [{
+                "code": "600001", "ts_code": "600001.SH",
+                "sector_code": batch[0], "sector_name": batch[0],
+            }]}
+
+        kline_calls = []
+        capital_calls = []
+        fundamental_calls = []
+
+        def kline(ts_code, **_kwargs):
+            kline_calls.append(ts_code)
+            return {
+                "meta": {"ts_code": ts_code},
+                "data": [{"trade_date": f"202601{i:02d}", "close": 10,
+                          "open": 10, "high": 10, "low": 10, "vol": 1,
+                          "pre_close": 10} for i in range(1, 29)],
+            }
+
+        with patch.object(dc, "gather_candidates", side_effect=gather), \
+             patch.object(sc, "_fetch_kline", side_effect=kline), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=lambda ts, **_kwargs:
+                          capital_calls.append(ts)), \
+             patch.object(sc, "_fetch_fundamental",
+                          side_effect=lambda ts, **_kwargs:
+                          fundamental_calls.append(ts)):
+            dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=99,
+                sector_context=contexts)
+
+        self.assertEqual(kline_calls, ["600001.SH"])
+        self.assertLessEqual(len(capital_calls), 1)
+        self.assertLessEqual(len(fundamental_calls), 1)
+
+    def test_shuffled_sector_input_uses_same_ranked_early_stop_frontier(self):
+        contexts = {
+            f"BK{i}": {
+                "name": f"板块{i}", "ranking_position": i,
+                "sector_actionable": True, "sector_score": 100 - i,
+            }
+            for i in range(1, 5)
+        }
+
+        def execute(order):
+            batches = []
+
+            def gather(batch, **_kwargs):
+                batches.append(tuple(batch))
+                return {"candidates": [{
+                    "code": f"6000{code[-1]}", "sector_code": code,
+                } for code in batch]}
+
+            def score(candidates, **_kwargs):
+                return [{
+                    **item, "composite_score": 80,
+                    "quality_adjusted_score": 80,
+                    "data_quality": {"eligible": True},
+                } for item in candidates]
+
+            with patch.object(dc, "gather_candidates", side_effect=gather), \
+                 patch.object(dc, "run_phase2", side_effect=score):
+                result = dc.scan_sectors(
+                    order, batch_size=2, min_candidates=1,
+                    sector_context=contexts)
+            return batches, {item["code"] for item in result}
+
+        ordered = execute(["BK1", "BK2", "BK3", "BK4"])
+        shuffled = execute(["BK4", "BK2", "BK1", "BK3"])
+
+        self.assertEqual(ordered, shuffled)
+        self.assertEqual(ordered[0], [("BK1", "BK2")])
+
+    def test_primary_sector_rebinding_reapplies_membership_to_base_quality(self):
+        base_quality = {
+            "eligible": True, "reasons": [], "freshness_factor": 1.0,
+        }
+        stale = {
+            "code": "BK1", "name": "旧成分板块",
+            "sector_actionable": False, "sector_score": 95,
+            "ranking_position": 1, "membership_source": "cache",
+            "membership_data_date": "2026-08-12",
+            "membership_quality": "degraded",
+        }
+        fresh = {
+            "code": "BK2", "name": "实时成分板块",
+            "sector_actionable": True, "sector_score": 80,
+            "ranking_position": 2, "membership_source": "realtime",
+            "membership_data_date": "2026-08-13",
+            "membership_quality": "good",
+        }
+        item = {
+            "code": "600001", "sector_code": "BK1",
+            "sector_memberships": [stale, fresh],
+            "base_data_quality": base_quality,
+            "data_quality": {
+                "eligible": False,
+                "reasons": ["sector_membership_stale"],
+                "freshness_factor": 0.8,
+            },
+            "raw_composite_score": 80,
+            "quality_adjusted_score": 64,
+        }
+
+        rebind = getattr(dc, "_rebind_primary_sector", None)
+        self.assertIsNotNone(
+            rebind, "primary-sector rebinding contract is not implemented")
+        rebound = rebind(item, peer_cohorts={})
+
+        self.assertEqual(rebound["sector_code"], "BK2")
+        self.assertTrue(rebound["data_quality"]["eligible"])
+        self.assertNotIn(
+            "sector_membership_stale", rebound["data_quality"]["reasons"])
+        self.assertEqual(rebound["data_quality"]["freshness_factor"], 1.0)
+        self.assertEqual(rebound["quality_adjusted_score"], 80)
+
+    def test_fresh_to_stale_rebinding_does_not_reuse_old_membership_quality(self):
+        item = {
+            "code": "600001", "sector_code": "BK1",
+            "sector_memberships": [{
+                "code": "BK2", "name": "过期板块",
+                "sector_actionable": False, "sector_score": 90,
+                "ranking_position": 1, "membership_source": "cache",
+                "membership_data_date": "2026-08-12",
+                "membership_quality": "degraded",
+            }],
+            "base_data_quality": {
+                "eligible": True, "reasons": [],
+                "freshness_factor": 1.0,
+            },
+            "data_quality": {
+                "eligible": True, "reasons": [],
+                "freshness_factor": 1.0,
+            },
+            "raw_composite_score": 80,
+            "quality_adjusted_score": 80,
+        }
+
+        rebind = getattr(dc, "_rebind_primary_sector", None)
+        self.assertIsNotNone(
+            rebind, "primary-sector rebinding contract is not implemented")
+        rebound = rebind(item, peer_cohorts={})
+
+        self.assertEqual(rebound["sector_code"], "BK2")
+        self.assertFalse(rebound["data_quality"]["eligible"])
+        self.assertIn(
+            "sector_membership_stale", rebound["data_quality"]["reasons"])
+        self.assertLess(rebound["data_quality"]["freshness_factor"], 1.0)
+        self.assertLess(
+            rebound["quality_adjusted_score"],
+            rebound["raw_composite_score"],
+        )
+
+    def test_expected_trading_date_uses_calendar_result_across_sessions(self):
+        cases = [
+            (datetime(2026, 8, 13, 10, 0), "2026-08-12", "2026-08-13"),
+            (datetime(2026, 8, 13, 16, 0), "2026-08-12", "2026-08-13"),
+            (datetime(2026, 8, 15, 10, 0), "2026-08-14", "2026-08-14"),
+        ]
+        for now, last_trading_date, expected in cases:
+            with self.subTest(now=now):
+                self.assertEqual(
+                    resolve_recommendation_date(
+                        now=now, last_trading_date=last_trading_date),
+                    expected,
+                )
+
+    def test_weekday_holiday_uses_injected_trading_calendar_result(self):
+        self.assertEqual(
+            resolve_recommendation_date(
+                now=datetime(2026, 10, 1, 10, 0),
+                last_trading_date="2026-09-30",
+                is_trading_day=False,
+            ),
+            "2026-09-30",
+        )
+
+    def test_calendar_status_marks_weekday_holiday_closed_for_main_path(self):
+        from fetchers import sector_data
+
+        now = datetime(2026, 10, 1, 10, 0)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "SNAPSHOT_FILE",
+                          Path(tmpdir) / "snapshots.json"), \
+             patch.object(sector_data, "CACHE_FILE",
+                          Path(tmpdir) / "rankings.json"), \
+             patch.object(
+                 sector_data, "_load_authoritative_trading_dates",
+                 return_value={"2026-09-30"}):
+            sector_data.SNAPSHOT_FILE.write_text(json.dumps({
+                "2026-09-30": [],
+            }), encoding="utf-8")
+            last_date, source = sector_data.get_last_trading_day(now=now)
+
+        status = dc._is_current_trading_day(last_date, source, now=now)
+        self.assertFalse(status)
+        self.assertEqual(
+            resolve_recommendation_date(
+                now=now,
+                last_trading_date=last_date,
+                is_trading_day=status,
+            ),
+            "2026-09-30",
+        )
+
+    def test_stale_snapshot_does_not_rewind_main_path_expected_date(self):
+        from fetchers import sector_data
+
+        now = datetime(2026, 8, 13, 10, 0)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "SNAPSHOT_FILE",
+                          Path(tmpdir) / "snapshots.json"), \
+             patch.object(sector_data, "CACHE_FILE",
+                          Path(tmpdir) / "rankings.json"), \
+             patch.object(
+                 sector_data, "_load_authoritative_trading_dates",
+                 return_value=set()):
+            sector_data.SNAPSHOT_FILE.write_text(json.dumps({
+                "2026-07-01": [],
+            }), encoding="utf-8")
+            last_date, source = sector_data.get_last_trading_day(now=now)
+
+        status = dc._is_current_trading_day(last_date, source, now=now)
+        self.assertIsNone(status)
+        self.assertEqual(
+            resolve_recommendation_date(
+                now=now,
+                last_trading_date=last_date,
+                is_trading_day=status,
+            ),
+            "2026-08-13",
+        )
+
+    def test_malformed_same_day_calendar_cache_is_refetched_and_normalized(self):
+        from fetchers import sector_data
+
+        class FakeSeries:
+            def tolist(self):
+                return ["2026-09-30", "not-a-date", "2026-02-30"]
+
+        fake_akshare = types.SimpleNamespace(
+            tool_trade_date_hist_sina=lambda: {"trade_date": FakeSeries()})
+        now = datetime(2026, 10, 1, 10, 0)
+
+        for malformed_dates in ("2026-09-30", ["not-a-date"]):
+            with self.subTest(malformed_dates=malformed_dates), \
+                 tempfile.TemporaryDirectory() as tmpdir, \
+                 patch.object(sector_data, "SNAPSHOT_FILE",
+                              Path(tmpdir) / "snapshots.json"), \
+                 patch.object(sector_data, "CACHE_FILE",
+                              Path(tmpdir) / "rankings.json"), \
+                 patch.object(sector_data, "TRADING_CALENDAR_FILE",
+                              Path(tmpdir) / "calendar.json"), \
+                 patch.dict(sys.modules, {"akshare": fake_akshare}):
+                sector_data.TRADING_CALENDAR_FILE.write_text(json.dumps({
+                    "checked_date": "2026-10-01",
+                    "trading_dates": malformed_dates,
+                }), encoding="utf-8")
+
+                last_date, source = sector_data.get_last_trading_day(now=now)
+                saved = json.loads(
+                    sector_data.TRADING_CALENDAR_FILE.read_text(
+                        encoding="utf-8"))
+
+            self.assertEqual(last_date, "2026-09-30")
+            self.assertEqual(source, "calendar_closed")
+            self.assertEqual(saved["trading_dates"], ["2026-09-30"])
 
     def test_missing_regime_allows_observation_only(self):
         policy = build_recommendation_policy(None, "2026-08-06")

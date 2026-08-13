@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import argparse
+import copy
 import time
 from datetime import datetime, timedelta, time as datetime_time
 from pathlib import Path
@@ -24,7 +25,25 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from scans.stock_scanner import gather_candidates, run_phase2
+from scans.stock_scanner import (
+    apply_membership_quality,
+    build_sector_membership,
+    build_sector_peer_cohorts,
+    composite_from_dimensions,
+    gather_candidates,
+    merge_sector_memberships,
+    run_phase2,
+    score_sector_membership,
+    select_primary_sector_membership,
+)
+from core.source_health import (
+    LIVE_ATTEMPT_TIMEOUT_SECONDS,
+    MAX_PROVIDER_ATTEMPTS,
+    RunSourceHealth,
+    SOURCES as SOURCE_HEALTH_NAMES,
+    classify_failure,
+    live_attempt,
+)
 SIGNAL_LABELS = {
     "volume_breakout": "放量突破",
     "northbound_adding": "北向增持",
@@ -71,6 +90,199 @@ def candidate_rank_score(item):
     return item.get("quality_adjusted_score", item.get("composite_score", 0))
 
 
+def _is_final_valid_candidate(item, min_score):
+    """Single eligibility predicate shared by scan stopping and final audit."""
+    return bool(
+        candidate_rank_score(item) >= min_score
+        and item.get("data_quality", {}).get("eligible", False)
+        and item.get("sector_actionable", True)
+    )
+
+
+_PERFORMANCE_PHASE_FIELDS = (
+    "sector_ranking_seconds", "sector_membership_seconds", "kline_seconds",
+    "wyckoff_seconds", "capital_seconds", "fundamental_seconds",
+    "report_seconds", "total_seconds",
+)
+_PERFORMANCE_FUNNEL_FIELDS = (
+    "batch_count", "raw_candidate_count", "unique_candidate_count",
+    "wyckoff_pass_count", "final_candidate_count", "final_valid_count",
+    "actionable_count",
+)
+_SOURCE_AUDIT_FIELDS = (
+    "logical_live_requests", "provider_attempts", "cache_hits", "failures",
+    "circuit_breaks", "failure_reasons", "state",
+)
+
+
+def _complete_performance(performance, source_health, candidates, buckets,
+                          min_score, total_seconds):
+    """Finalize the additive public performance contract from run evidence."""
+    completed = performance
+    for field in _PERFORMANCE_PHASE_FIELDS:
+        completed.setdefault(field, 0.0)
+    for field in _PERFORMANCE_FUNNEL_FIELDS:
+        completed.setdefault(field, 0)
+    completed["final_candidate_count"] = len(candidates)
+    completed["final_valid_count"] = sum(
+        _is_final_valid_candidate(item, min_score) for item in candidates)
+    completed["actionable_count"] = len(buckets.get("actionable", []))
+    completed["total_seconds"] = max(0.0, float(total_seconds))
+
+    snapshot = (source_health.snapshot()
+                if isinstance(source_health, RunSourceHealth)
+                else completed.get("sources", {}))
+    sources = {}
+    for source in SOURCE_HEALTH_NAMES:
+        state = snapshot.get(source, {})
+        sources[source] = {
+            field: (dict(state.get(field, {}))
+                    if field == "failure_reasons"
+                    else state.get(field, "healthy" if field == "state" else 0))
+            for field in _SOURCE_AUDIT_FIELDS
+        }
+        sources[source]["requests"] = sources[source][
+            "logical_live_requests"]
+    completed["sources"] = sources
+    # Historical alias retained for additive compatibility.
+    completed["source_health"] = sources
+    for field in _PERFORMANCE_PHASE_FIELDS:
+        completed[field] = round(max(0.0, float(completed[field])), 3)
+    return completed
+
+
+def _freeze_output_envelope(performance, builders, run_started_at=None):
+    """Assemble requested formats once, then freeze a shared timing snapshot."""
+    assembly_started = time.monotonic()
+    outputs = {name: builder() for name, builder in builders}
+    assembly_finished = time.monotonic()
+    assembly_seconds = max(0.0, assembly_finished - assembly_started)
+    snapshot = copy.deepcopy(performance)
+    snapshot["report_seconds"] = round(assembly_seconds, 3)
+    prior_total = max(0.0, float(performance.get("total_seconds", 0.0)))
+    total_seconds = prior_total + assembly_seconds
+    if run_started_at is not None:
+        total_seconds = max(
+            total_seconds, max(0.0, assembly_finished - run_started_at))
+    snapshot["total_seconds"] = round(total_seconds, 3)
+    return outputs, snapshot
+
+
+def _attach_performance_audit(output, performance, output_format):
+    """Attach the already-frozen audit without rerendering the report body."""
+    if output_format == "markdown":
+        audit = "\n".join(_performance_markdown(performance))
+        marker = "\n---\n"
+        return output.replace(marker, f"\n{audit}\n{marker}", 1)
+    if output_format == "html":
+        return output.replace(
+            "\n<footer>", f"\n{_performance_html(performance)}\n<footer>", 1)
+    return output
+
+
+def _performance_markdown(performance):
+    if not performance:
+        return []
+    phase_labels = (
+        ("板块排行", "sector_ranking_seconds"),
+        ("板块成分", "sector_membership_seconds"),
+        ("K线", "kline_seconds"), ("维科夫", "wyckoff_seconds"),
+        ("资金", "capital_seconds"), ("基本面", "fundamental_seconds"),
+        ("报告", "report_seconds"), ("总计", "total_seconds"),
+    )
+    lines = ["", "## 性能与数据源审计", "", "| 阶段 | 秒 |", "|---|---:|"]
+    lines.extend(
+        f"| {label} | {float(performance.get(field, 0)):.3f} |"
+        for label, field in phase_labels)
+    lines.extend([
+        "",
+        "**漏斗**: "
+        f"批次 {performance.get('batch_count', 0)} → "
+        f"原始 {performance.get('raw_candidate_count', 0)} → "
+        f"去重 {performance.get('unique_candidate_count', 0)} → "
+        f"维科夫 {performance.get('wyckoff_pass_count', 0)} → "
+        f"最终 {performance.get('final_candidate_count', 0)} → "
+        f"有效 {performance.get('final_valid_count', 0)} → "
+        f"可执行 {performance.get('actionable_count', 0)}",
+        "",
+        "| 数据源 | 逻辑请求 | Provider尝试 | 缓存命中 | 失败 | 熔断 | 状态 | 失败原因 |",
+        "|---|---:|---:|---:|---:|---:|---|---|",
+    ])
+    for source in SOURCE_HEALTH_NAMES:
+        state = performance.get("sources", {}).get(source, {})
+        reasons = json.dumps(
+            state.get("failure_reasons", {}), ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"))
+        lines.append(
+            f"| {source} | {state.get('logical_live_requests', 0)} | "
+            f"{state.get('provider_attempts', 0)} | "
+            f"{state.get('cache_hits', 0)} | {state.get('failures', 0)} | "
+            f"{state.get('circuit_breaks', 0)} | "
+            f"{state.get('state', 'healthy')} | {reasons} |")
+    return lines
+
+
+def _performance_html(performance):
+    if not performance:
+        return ""
+    rows = []
+    for source in SOURCE_HEALTH_NAMES:
+        state = performance.get("sources", {}).get(source, {})
+        reasons = json.dumps(
+            state.get("failure_reasons", {}), ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"))
+        rows.append(
+            f"<tr><td>{source}</td>"
+            f"<td>{state.get('logical_live_requests', 0)}</td>"
+            f"<td>{state.get('provider_attempts', 0)}</td>"
+            f"<td>{state.get('cache_hits', 0)}</td>"
+            f"<td>{state.get('failures', 0)}</td>"
+            f"<td>{state.get('circuit_breaks', 0)}</td>"
+            f"<td>{state.get('state', 'healthy')}</td><td>{reasons}</td></tr>")
+    phase_text = " | ".join(
+        f"{field.removesuffix('_seconds')}={float(performance.get(field, 0)):.3f}s"
+        for field in _PERFORMANCE_PHASE_FIELDS)
+    funnel_text = " | ".join(
+        f"{field}={performance.get(field, 0)}"
+        for field in _PERFORMANCE_FUNNEL_FIELDS)
+    return (
+        "<section><h2 style='font-size:18px;margin:18px 0 8px'>"
+        "性能与数据源审计</h2>"
+        f"<p class='dt'>{phase_text}</p><p class='dt'>{funnel_text}</p>"
+        "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
+        "<th>Provider尝试</th><th>缓存</th><th>失败</th><th>熔断</th>"
+        "<th>状态</th><th>失败原因</th></tr></thead><tbody>"
+        f"{''.join(rows)}</tbody></table></section>")
+
+
+def _emit_performance_summary(performance):
+    """Emit one deterministic, machine-greppable stderr audit line."""
+    source_text = ",".join(
+        f"{source}:req={state.get('logical_live_requests', 0)}/"
+        f"attempt={state.get('provider_attempts', 0)}/"
+        f"cache={state.get('cache_hits', 0)}/fail={state.get('failures', 0)}/"
+        f"circuit={state.get('circuit_breaks', 0)}/"
+        f"state={state.get('state', 'healthy')}/"
+        f"reasons={json.dumps(state.get('failure_reasons', {}), ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        for source, state in sorted(performance.get("sources", {}).items()))
+    phase_text = " ".join(
+        f"{field.removesuffix('_seconds')}="
+        f"{float(performance.get(field, 0)):.3f}s"
+        for field in _PERFORMANCE_PHASE_FIELDS)
+    print(
+        f"[performance] {phase_text} "
+        f"batches={performance.get('batch_count', 0)} "
+        f"raw={performance.get('raw_candidate_count', 0)} "
+        f"unique={performance.get('unique_candidate_count', 0)} "
+        f"wyckoff={performance.get('wyckoff_pass_count', 0)} "
+        f"final={performance.get('final_candidate_count', 0)} "
+        f"final_valid={performance.get('final_valid_count', 0)} "
+        f"actionable={performance.get('actionable_count', 0)} "
+        f"sources=[{source_text}]",
+        file=sys.stderr,
+    )
+
+
 def is_recommendation_session(now=None):
     """Treat the whole 09:30-15:00 window as provisional, including lunch."""
     now = now or datetime.now()
@@ -80,10 +292,28 @@ def is_recommendation_session(now=None):
     return datetime_time(9, 30) <= current <= datetime_time(15, 0)
 
 
-def resolve_recommendation_date(now=None, regime_date="", last_trading_date=""):
+def _is_current_trading_day(last_trading_date, source, now=None):
+    """Infer today's verified trading status from the shared calendar result."""
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    if source == "calendar_closed" and last_trading_date:
+        return False
+    if source == "calendar_open":
+        return True
+    if source in ("snapshot", "cache") \
+            and last_trading_date == now.strftime("%Y-%m-%d"):
+        return True
+    return None
+
+
+def resolve_recommendation_date(now=None, regime_date="", last_trading_date="",
+                                is_trading_day=None):
     """Resolve the closing-data date that a recommendation may rely on."""
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
+    if is_trading_day is False and last_trading_date:
+        return last_trading_date
     # Without a trading calendar, only the immediately preceding weekday is
     # safe to treat as the last close. Holiday uncertainty therefore degrades
     # to observation through the later K-line/regime date checks.
@@ -250,8 +480,114 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
     return enriched
 
 
+def _candidate_memberships(candidate, sector_context=None):
+    """Return complete membership evidence for a gathered candidate."""
+    memberships = candidate.get("sector_memberships")
+    if memberships:
+        return merge_sector_memberships(memberships)
+    sector_code = candidate.get("sector_code", "")
+    context = (sector_context or {}).get(sector_code, {})
+    if not context:
+        context = {
+            "name": candidate.get("sector_name", sector_code),
+            "hot_score": candidate.get("sector_hot_score", 50),
+            "sector_actionable": candidate.get("sector_actionable", False),
+            "sector_score": candidate.get("sector_score"),
+            "persistence_status": candidate.get(
+                "sector_persistence_status", ""),
+            "persistence_score": candidate.get("sector_persistence"),
+            "relative_strength": candidate.get("sector_relative_strength"),
+            "ranking_position": candidate.get("ranking_position"),
+            "ranking_source": candidate.get("ranking_source", ""),
+            "ranking_data_date": candidate.get("ranking_data_date", ""),
+            "ranking_quality": candidate.get("ranking_quality", ""),
+            "ranking_errors": candidate.get("ranking_errors", []),
+        }
+    return [build_sector_membership(
+        sector_code,
+        candidate.get("sector_name", sector_code),
+        context=context,
+        stock=candidate,
+    )]
+
+
+def _rebind_primary_sector(item, peer_cohorts=None, as_of_date=""):
+    """Rebind to the strongest membership and recompute sector-only effects."""
+    rebound = copy.deepcopy(item)
+    memberships = merge_sector_memberships(
+        rebound.get("sector_memberships", []))
+    primary = select_primary_sector_membership(memberships)
+    if not primary:
+        return rebound
+
+    rebound.update({
+        "sector_code": primary.get("code", ""),
+        "sector_name": primary.get("name", ""),
+        "sector_hot_score": primary.get(
+            "hot_score", primary.get("sector_score", 50)),
+        "sector_type": primary.get("sector_type", ""),
+        "sector_actionable": primary.get("sector_actionable", False),
+        "sector_persistence_status": primary.get("persistence_status", ""),
+        "sector_capital_evidence": primary.get(
+            "capital_evidence", "unknown"),
+        "sector_score": primary.get("sector_score"),
+        "sector_persistence": primary.get("persistence_score"),
+        "sector_relative_strength": primary.get("relative_strength"),
+        "ranking_position": primary.get("ranking_position"),
+        "ranking_source": primary.get("ranking_source", ""),
+        "ranking_data_date": primary.get("ranking_data_date", ""),
+        "ranking_quality": primary.get("ranking_quality", ""),
+        "ranking_errors": primary.get("ranking_errors", []),
+        "membership_source": primary.get("membership_source", "realtime"),
+        "membership_data_date": primary.get("membership_data_date", ""),
+        "membership_quality": primary.get("membership_quality", "good"),
+        "membership_cache_error": primary.get("membership_cache_error", ""),
+        "sector_memberships": memberships,
+    })
+
+    dimensions = rebound.get("dimensions")
+    raw_dimensions = rebound.get("raw_dimensions")
+    if raw_dimensions is None and dimensions:
+        raw_dimensions = dict(dimensions)
+    if raw_dimensions and "sector_strength" in raw_dimensions:
+        raw_dimensions["sector_strength"] = score_sector_membership(
+            rebound, primary, peer_cohorts or {})
+        rebound["raw_dimensions"] = raw_dimensions
+        rebound["dimensions"] = {
+            name: round(value, 1)
+            for name, value in raw_dimensions.items()
+        }
+        raw_score = round(composite_from_dimensions(raw_dimensions), 1)
+        rebound["composite_score"] = raw_score
+        rebound["raw_composite_score"] = raw_score
+
+    base_quality = rebound.get("base_data_quality")
+    if base_quality is None:
+        base_quality = rebound.get("data_quality", {})
+    rebound["base_data_quality"] = copy.deepcopy(base_quality)
+    rebound["data_quality"] = apply_membership_quality(
+        base_quality, primary, as_of_date=as_of_date)
+    raw_score = rebound.get(
+        "raw_composite_score", rebound.get("composite_score", 0))
+    quality = rebound["data_quality"]
+    rebound["quality_adjusted_score"] = round(
+        raw_score
+        * quality.get("coverage_factor", 1.0)
+        * quality.get("freshness_factor", 1.0),
+        1,
+    )
+    cohort = sorted((peer_cohorts or {}).get(primary.get("code", ""), []),
+                    reverse=True)
+    if cohort:
+        change = rebound.get("change_pct", 0)
+        rebound["sector_relative_rank"] = (
+            cohort.index(change) + 1 if change in cohort else len(cohort))
+        rebound["sector_total"] = len(cohort)
+    return rebound
+
+
 def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
-                     as_of_date=""):
+                     as_of_date="", source_health=None):
     """Pick sectors above an absolute heat floor, in relative-rank order."""
     from fetchers.sector_data import (
         append_daily_snapshot,
@@ -261,13 +597,56 @@ def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
         rank_hot_sectors,
         save_rankings_cache,
     )
-    rankings = get_sector_rankings()
+    ranking_token = None
+    if isinstance(source_health, RunSourceHealth) \
+            and time.monotonic() < source_health.live_deadline:
+        ranking_token = source_health.try_acquire_live_permit(
+            "sector_ranking")
+    try:
+        if isinstance(source_health, RunSourceHealth) \
+                and ranking_token is not None:
+            wrapped = get_sector_rankings(
+                timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_ranking"],
+                retries=max(
+                    0, MAX_PROVIDER_ATTEMPTS["sector_ranking"] // 2 - 1),
+                with_evidence=True,
+                deadline=source_health.live_deadline)
+            rankings = wrapped["payload"]
+            ranking_attempt = wrapped["live_attempt"]
+        elif source_health is None or not isinstance(
+                source_health, RunSourceHealth):
+            rankings = get_sector_rankings()
+        else:
+            rankings = {"meta": {}, "sectors": []}
+    except Exception as exc:
+        rankings = {"meta": {"errors": [str(exc)]}, "sectors": []}
+        if ranking_token is not None:
+            attempts = getattr(exc, "provider_attempts", 0)
+            if attempts:
+                source_health.mark_started(ranking_token)
+                source_health.complete_failure(ranking_token, live_attempt(
+                    attempted=True, provider_attempts=attempts,
+                    reason=getattr(exc, "reason", "")
+                    or classify_failure(exc)))
+            else:
+                source_health.release_unstarted(
+                    ranking_token, "live_deadline")
+            ranking_token = None
     live_meta = rankings.get("meta", {})
     active = sum(
         1 for sector in rankings.get("sectors", [])
         if (sector.get("up_count", 0) or 0) > 0
         or (sector.get("down_count", 0) or 0) > 0
     )
+    if ranking_token is not None:
+        if ranking_attempt.get("attempted"):
+            source_health.mark_started(ranking_token)
+        if ranking_attempt.get("reason"):
+            source_health.complete_failure(ranking_token, ranking_attempt)
+        elif ranking_attempt.get("attempted"):
+            source_health.complete_success(ranking_token, ranking_attempt)
+        else:
+            source_health.release_unstarted(ranking_token, "live_deadline")
     ranking_meta = {
         "source": live_meta.get("source", "realtime"),
         "data_date": as_of_date or datetime.now().strftime("%Y-%m-%d"),
@@ -288,6 +667,9 @@ def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
         )
         if cache_usable:
             rankings = cached["rankings"]
+            if isinstance(source_health, RunSourceHealth):
+                source_health.record_cache_hit(
+                    "sector_ranking", stale=True, reason="cache_only")
             ranking_meta = {
                 "source": "cache",
                 "data_date": cached.get("data_date", ""),
@@ -352,15 +734,57 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
                  sector_context=None, source_health=None, metrics=None):
     """Expand until enough score-qualified, data-eligible candidates exist."""
-    all_scored = {}
-    analyzed_codes = set()
     metrics = metrics if metrics is not None else {}
+    if sector_context is None:
+        from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
+        try:
+            rankings = get_sector_rankings()
+            ranked = rank_hot_sectors(
+                rankings, top_n=len(rankings.get("sectors", [])))
+            meta = rankings.get("meta", {})
+            metrics["ranking_snapshot_source"] = meta.get(
+                "source", "realtime")
+            metrics["ranking_snapshot_errors"] = meta.get(
+                "errors", meta.get("upstream_errors", []))
+            sector_context = {}
+            for position, sector in enumerate(ranked, start=1):
+                sector_context[sector.get("code", "")] = {
+                    **sector,
+                    "ranking_position": sector.get(
+                        "ranking_position", position),
+                    "ranking_source": sector.get(
+                        "ranking_source", meta.get("source", "realtime")),
+                    "ranking_data_date": sector.get(
+                        "ranking_data_date", meta.get("data_date", "")),
+                    "ranking_quality": sector.get(
+                        "ranking_quality", meta.get("quality", "")),
+                }
+        except Exception as exc:
+            metrics["ranking_snapshot_source"] = "error"
+            metrics["ranking_snapshot_errors"] = [str(exc)]
+            sector_context = {}
+
+    def sector_order_key(code):
+        position = (sector_context or {}).get(code, {}).get(
+            "ranking_position")
+        try:
+            position = float(position)
+        except (TypeError, ValueError):
+            position = float("inf")
+        return position, str(code)
+
+    ordered_sector_codes = sorted(
+        dict.fromkeys(sector_codes), key=sector_order_key)
+    all_scored = {}
+    phase1_candidates = {}
+    analyzed_codes = set()
     metrics.setdefault("batch_count", 0)
     metrics.setdefault("raw_candidate_count", 0)
     metrics.setdefault("unique_candidate_count", 0)
-    for i in range(0, len(sector_codes), batch_size):
-        batch = sector_codes[i:i + batch_size]
+    for i in range(0, len(ordered_sector_codes), batch_size):
+        batch = ordered_sector_codes[i:i + batch_size]
         metrics["batch_count"] += 1
+        membership_started = time.monotonic()
         try:
             try:
                 phase1 = gather_candidates(
@@ -378,75 +802,76 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         except Exception as e:
             print(f"  ⚠️ 板块 {batch} 汇聚失败: {e}", file=sys.stderr)
             continue
-        if not phase1["candidates"]:
-            continue
-        raw_candidates = phase1["candidates"]
+        finally:
+            metrics["sector_membership_seconds"] = metrics.get(
+                "sector_membership_seconds", 0.0) + (
+                    time.monotonic() - membership_started)
+        raw_candidates = phase1.get("candidates", [])
         metrics["raw_candidate_count"] += len(raw_candidates)
         for candidate in raw_candidates:
-            existing = all_scored.get(candidate.get("code"))
-            if existing is not None:
-                memberships = existing.setdefault("sector_memberships", [])
-                affiliation = {
-                    "code": candidate.get("sector_code", ""),
-                    "name": candidate.get("sector_name", ""),
-                }
-                if affiliation not in memberships:
-                    memberships.append(affiliation)
+            code = candidate.get("code", "")
+            candidate["sector_memberships"] = _candidate_memberships(
+                candidate, sector_context)
+            existing = phase1_candidates.get(code)
+            if existing is None:
+                phase1_candidates[code] = candidate
+            else:
+                existing["sector_memberships"] = merge_sector_memberships(
+                    existing.get("sector_memberships", []),
+                    candidate.get("sector_memberships", []),
+                )
         new_candidates = [
-            candidate for candidate in raw_candidates
+            phase1_candidates[candidate.get("code")]
+            for candidate in raw_candidates
             if candidate.get("code") not in analyzed_codes
         ]
-        if not new_candidates:
-            continue
-        analyzed_codes.update(
-            candidate.get("code") for candidate in new_candidates)
-        metrics["unique_candidate_count"] = len(analyzed_codes)
-        try:
-            scored = run_phase2(
-                new_candidates, enable_wyckoff=True, as_of_date=as_of_date,
-                source_health=source_health, metrics=metrics)
-        except TypeError as exc:
-            if not any(name in str(exc) for name in (
-                    "source_health", "metrics")):
-                raise
-            scored = run_phase2(
-                new_candidates, enable_wyckoff=True,
+        if new_candidates:
+            analyzed_codes.update(
+                candidate.get("code") for candidate in new_candidates)
+            metrics["unique_candidate_count"] = len(analyzed_codes)
+            try:
+                scored = run_phase2(
+                    new_candidates, enable_wyckoff=True,
+                    as_of_date=as_of_date,
+                    source_health=source_health, metrics=metrics)
+            except TypeError as exc:
+                if not any(name in str(exc) for name in (
+                        "source_health", "metrics")):
+                    raise
+                scored = run_phase2(
+                    new_candidates, enable_wyckoff=True,
+                    as_of_date=as_of_date)
+            for scored_item in scored:
+                code = scored_item.get("code", "")
+                raw = phase1_candidates.get(code, {})
+                scored_item["sector_memberships"] = merge_sector_memberships(
+                    scored_item.get("sector_memberships", [])
+                    or _candidate_memberships(scored_item, sector_context),
+                    raw.get("sector_memberships", []),
+                )
+                all_scored[code] = scored_item
+
+        peer_cohorts = build_sector_peer_cohorts(
+            list(phase1_candidates.values()))
+        for code, scored_item in list(all_scored.items()):
+            raw = phase1_candidates.get(code, {})
+            scored_item["sector_memberships"] = merge_sector_memberships(
+                scored_item.get("sector_memberships", []),
+                raw.get("sector_memberships", []),
+            )
+            all_scored[code] = _rebind_primary_sector(
+                scored_item, peer_cohorts=peer_cohorts,
                 as_of_date=as_of_date)
-        for s in scored:
-            context = (sector_context or {}).get(s.get("sector_code", ""), {})
-            if context:
-                s.update({
-                    "sector_type": context.get("sector_type", ""),
-                    "sector_actionable": context.get("sector_actionable", False),
-                    "sector_persistence_status": context.get("persistence_status", ""),
-                    "sector_capital_evidence": context.get("capital_evidence", "unknown"),
-                    "sector_score": context.get("sector_score"),
-                    "sector_persistence": context.get("persistence_score"),
-                    "sector_relative_strength": context.get("relative_strength"),
-                    "ranking_source": context.get("ranking_source", ""),
-                    "ranking_data_date": context.get(
-                        "ranking_data_date", ""),
-                    "ranking_quality": context.get("ranking_quality", ""),
-                    "ranking_errors": context.get("ranking_errors", []),
-                })
-            s.setdefault("sector_memberships", [{
-                "code": s.get("sector_code", ""),
-                "name": s.get("sector_name", ""),
-            }])
-            all_scored[s["code"]] = s
         eligible_count = sum(
-            1 for item in all_scored.values()
-            if candidate_rank_score(item) >= min_score
-            and item.get("data_quality", {}).get("eligible", False)
-            and item.get("sector_actionable", True)
-        )
+            _is_final_valid_candidate(item, min_score)
+            for item in all_scored.values())
         print(
             f"  批次完成,候选 {len(all_scored)} 只,有效 {eligible_count} 只",
             file=sys.stderr,
         )
         if eligible_count >= min_candidates:
             break
-    return list(all_scored.values())
+    return [all_scored[code] for code in sorted(all_scored)]
 
 
 def select_candidate_pool(scored, top, min_score):
@@ -734,7 +1159,8 @@ def classify_candidates(candidates, policy):
     }
 
 
-def generate_report(candidates, sector_codes, elapsed, policy, buckets):
+def generate_report(candidates, sector_codes, elapsed, policy, buckets,
+                    performance=None):
     funnel = (
         f"板块 {len(sector_codes)} → 候选 {len(candidates)} → "
         f"维科夫买点 {sum(1 for item in candidates if item.get('wyckoff'))} → "
@@ -772,6 +1198,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets):
         "暂无可供次日确认的观察标的。")
     _append_candidate_table(
         lines, "观察池", buckets["observation"], "观察池为空。")
+    lines.extend(_performance_markdown(performance))
     lines.extend([
         "", "---", "",
         "*候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。*",
@@ -807,7 +1234,8 @@ def _html_candidate_rows(items):
     return "".join(rows)
 
 
-def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets):
+def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
+                   performance=None):
     """Lightweight HTML mirror of the MD report."""
     regime = load_regime_context()
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
@@ -837,6 +1265,8 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets):
             f"<span style='font-size:14px;color:#86868b'> (数据 {regime['data_date']})</span></div>"
             f"{weak_note}"
         )
+
+    performance_html = _performance_html(performance)
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -869,6 +1299,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+{performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""
@@ -910,14 +1341,21 @@ def main():
     args = parser.parse_args()
 
     start = time.time()
+    monotonic_start = time.monotonic()
     performance = {}
-    source_health = {}
+    source_health = RunSourceHealth()
     regime = load_regime_context()
     from fetchers.sector_data import get_last_trading_day
-    last_trading_date, _ = get_last_trading_day()
+    current_time = datetime.now()
+    last_trading_date, trading_date_source = get_last_trading_day(
+        now=current_time)
+    is_trading_day = _is_current_trading_day(
+        last_trading_date, trading_date_source, now=current_time)
     expected_date = resolve_recommendation_date(
+        now=current_time,
         regime_date=(regime or {}).get("data_date", ""),
         last_trading_date=last_trading_date or "",
+        is_trading_day=is_trading_day,
     )
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
@@ -938,7 +1376,8 @@ def main():
         print("[1/3] 拉取热点板块...", file=sys.stderr)
         ranking_start = time.monotonic()
         sector_codes = pick_hot_sectors(
-            regime=regime, as_of_date=expected_date)
+            regime=regime, as_of_date=expected_date,
+            source_health=source_health)
         performance["sector_ranking_seconds"] = round(
             time.monotonic() - ranking_start, 3)
         performance["sector_ranking_requests"] = 1
@@ -970,38 +1409,52 @@ def main():
     buckets = classify_candidates(candidates, policy)
 
     elapsed = time.time() - start
-    performance["source_health"] = source_health
-    performance = {
-        key: round(value, 3) if isinstance(value, float) else value
-        for key, value in performance.items()
-    }
+    performance = _complete_performance(
+        performance, source_health, candidates, buckets, args.min_score,
+        time.monotonic() - monotonic_start)
 
     if args.json:
-        out = build_json_output(
-            candidates, sector_codes, elapsed, policy, buckets,
-            performance=performance)
+        outputs, performance = _freeze_output_envelope(
+            performance,
+            [("json", lambda: build_json_output(
+                candidates, sector_codes, elapsed, policy, buckets))],
+            run_started_at=monotonic_start,
+        )
+        out = outputs["json"]
+        out["meta"]["performance"] = performance
+        _emit_performance_summary(performance)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
 
-    # 报告
-    report = generate_report(candidates, sector_codes, elapsed, policy, buckets)
+    # Assemble every requested format exactly once before freezing one shared
+    # performance envelope.  Serialization and file writes are outside it.
+    builders = [("markdown", lambda: generate_report(
+        candidates, sector_codes, elapsed, policy, buckets))]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.html:
+        builders.append(("html", lambda: _generate_html(
+            candidates, sector_codes, elapsed, ts, policy, buckets)))
+    outputs, performance = _freeze_output_envelope(
+        performance, builders, run_started_at=monotonic_start)
+    report = _attach_performance_audit(
+        outputs["markdown"], performance, "markdown")
     print(report)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = REPORTS_DIR / f"candidates-{ts}.md"
     path.write_text(report, encoding="utf-8")
     print(f"\n候选报告: {path}")
 
     if args.html:
         try:
-            html = _generate_html(
-                candidates, sector_codes, elapsed, ts, policy, buckets)
+            html = _attach_performance_audit(
+                outputs["html"], performance, "html")
             html_path = REPORTS_DIR / f"candidates-{ts}.html"
             html_path.write_text(html, encoding="utf-8")
             print(f"HTML: {html_path}")
         except Exception as e:
             print(f"⚠️ HTML 生成失败: {e}")
 
+    _emit_performance_summary(performance)
     print(f"Done in {elapsed:.1f}s")
 
 

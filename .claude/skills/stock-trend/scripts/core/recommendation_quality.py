@@ -19,6 +19,8 @@ def _iso_date(value):
 
 def latest_data_date(payload):
     rows = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return ""
     dates = [
         _iso_date(row.get("trade_date") or row.get("date"))
         for row in rows
@@ -33,18 +35,38 @@ def _dimension(name, payload, expected_date="", require_date=False):
     available = returned
     quality = "missing"
     meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    malformed = bool(
+        isinstance(payload, dict)
+        and (
+            ("meta" in payload and not isinstance(meta, dict))
+            or ("summary" in payload and not isinstance(summary, dict))
+            or ("data" in payload and not isinstance(payload.get("data"), list))
+        )
+    )
+    meta = meta if isinstance(meta, dict) else {}
+    summary = summary if isinstance(summary, dict) else {}
+    cache_validation = meta.get("cache_validation", {}) \
+        if isinstance(meta, dict) else {}
     if available:
         quality = (
-            payload.get("summary", {}).get("data_quality")
+            summary.get("data_quality")
             or payload.get("data_quality")
             or "good"
         )
+        if malformed:
+            quality = "error"
         if meta.get("data_source") == "error" \
                 or meta.get("error") or payload.get("error"):
             quality = "error"
+        if isinstance(cache_validation, dict) \
+                and cache_validation.get("valid") is False:
+            quality = (
+                "error" if cache_validation.get("error") else "stale"
+            )
         if name == "capital" and not latest_data_date(payload):
             quality = "error"
-        if quality == "error":
+        if quality in ("error", "stale"):
             available = False
     data_date = latest_data_date(payload)
     source = meta.get("data_source") or meta.get("source")
@@ -63,6 +85,8 @@ def _dimension(name, payload, expected_date="", require_date=False):
     stale_reason = ""
     if returned and quality == "error":
         stale_reason = f"{name}_error"
+    elif returned and quality == "stale":
+        stale_reason = f"{name}_stale"
     elif require_date and available and not data_date:
         stale_reason = f"{name}_date_missing"
     elif available and not fresh:
@@ -108,6 +132,12 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
         if dimensions[name]["returned"] and dimensions[name]["quality"] == "error"
     ]
     reasons.extend(returned_errors)
+    returned_stale = [
+        f"{name}_stale" for name in ("capital", "fundamental")
+        if dimensions[name]["returned"]
+        and dimensions[name]["stale_reason"] == f"{name}_stale"
+    ]
+    reasons.extend(returned_stale)
     has_stale_or_error = any(
         status["stale_reason"] for status in dimensions.values()
     )
@@ -124,6 +154,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
             and coverage >= MIN_COVERAGE
             and secondary_available
             and not returned_errors
+            and not returned_stale
         ),
         "dimensions": dimensions,
         "reasons": reasons,
