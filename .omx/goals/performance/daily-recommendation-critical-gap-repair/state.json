@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "workflow": "performance-goal",
+  "slug": "daily-recommendation-critical-gap-repair",
+  "objective": "Close the critical daily recommendation performance gaps in the approved plan while preserving recommendation quality and compatibility",
+  "status": "complete",
+  "createdAt": "2026-08-13T03:25:04.974Z",
+  "updatedAt": "2026-08-13T06:00:27.700Z",
+  "evaluator": {
+    "command": "python3 .claude/skills/stock-trend/tests/test_daily_recommendation_performance.py && python3 .claude/skills/stock-trend/tests/test_daily_candidates.py && python3 .claude/skills/stock-trend/tests/test_stock_scanner.py && python3 .claude/skills/stock-trend/tests/test_stock_trend.py && python3 .claude/skills/stock-trend/tests/test_golden.py --diff",
+    "contract": "PASS only when deterministic request/deadline/ordering/cache-quality assertions pass, targeted suites pass, both repository quality gates pass, JSON compatibility is preserved, and P2 remains out of scope"
+  },
+  "artifactPaths": {
+    "state": ".omx/goals/performance/daily-recommendation-critical-gap-repair/state.json",
+    "ledger": ".omx/goals/performance/daily-recommendation-critical-gap-repair/ledger.jsonl",
+    "evaluator": ".omx/goals/performance/daily-recommendation-critical-gap-repair/evaluator.md"
+  },
+  "startedAt": "2026-08-13T03:25:09.250Z",
+  "lastValidation": {
+    "status": "pass",
+    "evidence": "Final evaluator passed: performance 15/15; daily 70/70; scanner 61/61; main suite 320/320; golden 21 pass 0 fail. Real benchmarks: 40.21s first network, 40.10s warm, 16.69s offline; all within user-confirmed 60s threshold.",
+    "recordedAt": "2026-08-13T05:59:58.153Z"
+  },
+  "completedAt": "2026-08-13T06:00:27.700Z"
+}
