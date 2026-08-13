@@ -104,29 +104,29 @@ class TestRunSourceHealthContract(unittest.TestCase):
         self.assertEqual(state["failures"], 0)
         self.assertEqual(state["in_flight"], 0)
 
-    def test_failure_threshold_and_in_flight_window_bound_requests_to_three(self):
+    def test_failure_threshold_degrades_throttles_and_keeps_admitting(self):
         contract = _source_health_contract(self)
         health = contract.RunSourceHealth(
             failure_threshold=2, max_in_flight=2)
-        started = []
-        while True:
-            token = health.try_acquire_live_permit("fundamental")
-            if token is None:
-                break
-            health.mark_started(token)
-            started.append(token)
-            if len(started) > 1:
-                health.complete_failure(
-                    started[-2], _attempt(reason="timeout"))
-            if len(started) >= 3:
-                health.complete_failure(
-                    started[-1], _attempt(reason="timeout"))
-                break
+        # Two concurrent failures trip the threshold.
+        token_a = health.try_acquire_live_permit("fundamental")
+        health.mark_started(token_a)
+        token_b = health.try_acquire_live_permit("fundamental")
+        health.mark_started(token_b)
+        health.complete_failure(token_a, _attempt(reason="timeout"))
+        health.complete_failure(token_b, _attempt(reason="timeout"))
 
         state = health.snapshot()["fundamental"]
-        self.assertEqual(state["logical_live_requests"], 3)
-        self.assertEqual(state["state"], "unavailable")
+        # A transient blip degrades (throttle + retry) instead of hard-stopping.
+        self.assertEqual(state["state"], "degraded")
+        self.assertEqual(state["failures"], 2)
+        self.assertEqual(state["circuit_breaks"], 0)
+        # Degraded throttles concurrency to max(1, cap//2) but still admits:
+        # a live fetch may succeed and reset the failure streak.
+        first = health.try_acquire_live_permit("fundamental")
+        self.assertIsNotNone(first)
         self.assertIsNone(health.try_acquire_live_permit("fundamental"))
+        health.release_unstarted(first, "test")
 
     def test_failure_classifier_distinguishes_required_reason_codes(self):
         contract = _source_health_contract(self)
@@ -161,7 +161,8 @@ class TestRunSourceHealthContract(unittest.TestCase):
         health.record_cache_hit("kline", stale=True)
         snapshot = health.snapshot()
 
-        self.assertEqual(snapshot["kline"]["state"], "unavailable")
+        # Two failures degrade kline but do not hard-stop it.
+        self.assertEqual(snapshot["kline"]["state"], "degraded")
         self.assertEqual(snapshot["kline"]["cache_hits"], 1)
         self.assertEqual(snapshot["capital"]["state"], "healthy")
 
@@ -210,14 +211,15 @@ class TestRunSourceHealthContract(unittest.TestCase):
         self.assertEqual(state["in_flight"], 0)
         self.assertEqual(dict(results), {1: -1, 2: -2})
 
-    def test_events_explain_unavailable_cache_only_and_stale_data(self):
+    def test_events_explain_degraded_cache_only_and_stale_data(self):
         contract = _source_health_contract(self)
         health = contract.RunSourceHealth(
             failure_threshold=1, max_in_flight=2)
         token = health.try_acquire_live_permit("sector_ranking")
         health.mark_started(token)
         health.complete_failure(token, _attempt(reason="dns"))
-        self.assertIsNone(
+        # Degraded keeps admitting live work.
+        self.assertIsNotNone(
             health.try_acquire_live_permit("sector_ranking"))
         contract.bounded_source_map(
             "sector_ranking", ["ranking"], health,
@@ -226,12 +228,13 @@ class TestRunSourceHealthContract(unittest.TestCase):
             max_workers=1)
 
         events = health.events()
+        event_names = [event.get("event") for event in events]
         reasons = [event.get("reason") for event in events]
-        self.assertIn("source_unavailable", reasons)
+        self.assertIn("source_degraded", event_names)
         self.assertIn("cache_only", reasons)
         self.assertIn("data_stale", reasons)
 
-    def test_cache_miss_is_not_counted_and_circuit_opens_once(self):
+    def test_cache_miss_is_not_counted_and_threshold_degrades_not_hard_stops(self):
         contract = _source_health_contract(self)
         health = contract.RunSourceHealth(
             failure_threshold=1, max_in_flight=2)
@@ -246,8 +249,12 @@ class TestRunSourceHealthContract(unittest.TestCase):
         self.assertEqual(state["cache_hits"], 0)
         self.assertEqual(
             sum(event["event"] == "cache_miss" for event in events), 2)
+        # The threshold degrades; only the much higher hard threshold opens
+        # the circuit.
         self.assertEqual(
-            sum(event["event"] == "circuit_opened" for event in events), 1)
+            sum(event["event"] == "circuit_opened" for event in events), 0)
+        self.assertEqual(
+            sum(event["event"] == "source_degraded" for event in events), 1)
 
     def test_membership_empty_cache_wrapper_is_a_cache_miss(self):
         contract = _source_health_contract(self)
@@ -269,7 +276,7 @@ class TestRunSourceHealthContract(unittest.TestCase):
 class TestProductionPerformanceContract(unittest.TestCase):
     def test_production_deadline_and_budget_constants_bound_critical_path(self):
         contract = _source_health_contract(self)
-        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 45)
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 75)
         self.assertGreater(contract.FINALIZATION_RESERVE_SECONDS, 0)
         self.assertEqual(set(contract.LIVE_ATTEMPT_TIMEOUT_SECONDS), set(SOURCES))
         self.assertEqual(set(contract.MAX_PROVIDER_ATTEMPTS), set(SOURCES))

@@ -19,9 +19,16 @@ FINALIZATION_RESERVE_SECONDS = 5
 LIVE_ATTEMPT_TIMEOUT_SECONDS = {
     "sector_ranking": 3,
     "sector_membership": 3,
-    "kline": 10,
-    "capital": 8,
-    "fundamental": 8,
+    # kline fetchers walk EM host rotation → Tencent → BaoStock; a slow EM
+    # host can take several seconds before the fallback completes. 15s keeps
+    # the subprocess under the fetcher's own 15s urlopen timeout while still
+    # releasing the slot in time.
+    "kline": 15,
+    # capital/fundamental fetchers each walk several AKShare endpoints
+    # (~8s standalone); the old 8s timeout tripped under concurrency and
+    # orphaned those dimensions to stale cache.
+    "capital": 15,
+    "fundamental": 15,
 }
 MAX_PROVIDER_ATTEMPTS = {
     "sector_ranking": 4,
