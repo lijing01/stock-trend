@@ -14,7 +14,7 @@ SOURCES = (
     "sector_ranking", "sector_membership", "kline", "capital",
     "fundamental",
 )
-SCAN_DEADLINE_SECONDS = 45
+SCAN_DEADLINE_SECONDS = 75
 FINALIZATION_RESERVE_SECONDS = 5
 LIVE_ATTEMPT_TIMEOUT_SECONDS = {
     "sector_ranking": 3,
@@ -30,6 +30,20 @@ MAX_PROVIDER_ATTEMPTS = {
     "capital": 1,
     "fundamental": 1,
 }
+# Per-source live concurrency. kline is the long tail (subprocess fetchers
+# with a multi-host fallback chain), so it gets more slots than the quick
+# ranking/membership dimensions.
+MAX_IN_FLIGHT = {
+    "sector_ranking": 2,
+    "sector_membership": 2,
+    "kline": 4,
+    "capital": 2,
+    "fundamental": 2,
+}
+# A source only hard-stops after this many *consecutive* live failures.
+# Below that it stays "degraded" and keeps retrying so a transient blip
+# (e.g. 1-2 kline timeouts) never orphans the rest of the run to stale cache.
+HARD_FAILURE_THRESHOLD = 8
 
 
 def classify_failure(error: BaseException | str | None) -> str:
@@ -107,9 +121,15 @@ class RunSourceHealth:
     """Thread-safe per-run circuit state for independent data sources."""
 
     def __init__(self, failure_threshold: int = 2,
-                 max_in_flight: int = 2):
+                 max_in_flight: int = 2,
+                 hard_failure_threshold: int = HARD_FAILURE_THRESHOLD,
+                 per_source_max: dict | None = None):
         self.failure_threshold = failure_threshold
         self.max_in_flight = max_in_flight
+        self.hard_failure_threshold = hard_failure_threshold
+        self._per_source_max = dict(MAX_IN_FLIGHT)
+        if per_source_max:
+            self._per_source_max.update(per_source_max)
         self._lock = threading.RLock()
         self._states = {source: _new_source_state() for source in SOURCES}
         self._events: list[dict] = []
@@ -122,6 +142,15 @@ class RunSourceHealth:
     def _state(self, source: str) -> dict:
         return self._states.setdefault(source, _new_source_state())
 
+    def _inflight_cap(self, source: str) -> int:
+        base = self._per_source_max.get(source, self.max_in_flight)
+        # Throttle concurrency while degraded, but never fully stop: a
+        # transient blip must keep retrying so a live fetch can still succeed
+        # and reset the failure streak.
+        if self._state(source)["state"] == "degraded":
+            return max(1, base // 2)
+        return base
+
     def try_acquire_live_permit(self, source: str) -> _Permit | None:
         """Reserve admission capacity; counters change only after start."""
         with self._lock:
@@ -132,7 +161,7 @@ class RunSourceHealth:
                     "reason": "source_unavailable",
                 })
                 return None
-            if state["in_flight"] >= self.max_in_flight:
+            if state["in_flight"] >= self._inflight_cap(source):
                 return None
             self._sequence += 1
             state["in_flight"] += 1
@@ -187,7 +216,10 @@ class RunSourceHealth:
                 reason = evidence.get("reason") or "unknown"
                 reasons = state["failure_reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
-                if state["consecutive_live_failures"] >= self.failure_threshold:
+                crossed_threshold = (
+                    state["consecutive_live_failures"]
+                    == self.failure_threshold)
+                if state["consecutive_live_failures"] >= self.hard_failure_threshold:
                     if state["state"] != "unavailable":
                         state["circuit_breaks"] += 1
                         self._events.append({
@@ -197,7 +229,16 @@ class RunSourceHealth:
                         })
                     state["state"] = "unavailable"
                 else:
+                    # Degrade (throttle concurrency) but keep retrying: a
+                    # transient blip must not hard-stop the source for the
+                    # rest of the run.
                     state["state"] = "degraded"
+                    if crossed_threshold:
+                        self._events.append({
+                            "event": "source_degraded",
+                            "source": token.source,
+                            "reason": reason,
+                        })
                 event = "failure"
             self._events.append({
                 "event": event, "source": token.source,

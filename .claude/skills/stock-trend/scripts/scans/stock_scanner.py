@@ -43,7 +43,10 @@ from analysis.wyckoff import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
+# Match RunSourceHealth semantics: degrade (and keep retrying) after the first
+# failures; only hard-stop after many consecutive failures.
 SOURCE_FAILURE_THRESHOLD = 2
+SOURCE_HARD_FAILURE_THRESHOLD = 8
 
 # ──────────────────────── Helpers ────────────────────────
 
@@ -245,7 +248,8 @@ def _source_failed(source_health, source):
         return
     state["failures"] = state.get("failures", 0) + 1
     state["state"] = (
-        "unavailable" if state["failures"] >= SOURCE_FAILURE_THRESHOLD
+        "unavailable"
+        if state["failures"] >= SOURCE_HARD_FAILURE_THRESHOLD
         else "degraded"
     )
 

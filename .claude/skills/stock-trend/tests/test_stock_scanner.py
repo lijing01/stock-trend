@@ -372,7 +372,7 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(result, payload)
         run.assert_not_called()
 
-    def test_error_fundamental_payload_opens_circuit(self):
+    def test_error_fundamental_payload_degrades_but_keeps_retrying(self):
         candidates = [_make_candidate("600001"), _make_candidate("600002")]
         health = {}
         error_payload = {
@@ -388,7 +388,30 @@ class TestMetadata(unittest.TestCase):
             sc.run_phase2(
                 candidates, enable_wyckoff=False,
                 source_health=health, max_workers=1)
-        self.assertEqual(health["fundamental"]["state"], "unavailable")
+        # Two failures degrade the source (throttle + retry) but must not
+        # hard-stop it: that would orphan the rest of the run to stale cache.
+        self.assertEqual(health["fundamental"]["state"], "degraded")
+
+    def test_error_fundamental_payload_hard_stops_after_many_failures(self):
+        candidates = [
+            _make_candidate(f"6000{i:02d}") for i in range(1, 10)]
+        health = {}
+        error_payload = {
+            "meta": {"data_source": "akshare"},
+            "summary": {"data_quality": "error"},
+        }
+        with patch.object(
+                sc, "_fetch_kline",
+                side_effect=lambda ts, **kwargs: _make_kline(60, ts)), \
+             patch.object(sc, "_fetch_capital_flow", return_value=None), \
+             patch.object(sc, "_fetch_fundamental",
+                          return_value=error_payload):
+            sc.run_phase2(
+                candidates, enable_wyckoff=False,
+                source_health=health, max_workers=1)
+        # A genuinely dead source still hard-stops after the higher threshold.
+        self.assertEqual(
+            health["fundamental"]["state"], "unavailable")
 
     def test_error_kline_cache_does_not_skip_subprocess_refresh(self):
         cached = _make_dated_kline(trade_date="20260813")
