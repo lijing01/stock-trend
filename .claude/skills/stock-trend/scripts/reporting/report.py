@@ -853,6 +853,9 @@ def build_context(args):
             "sub_phase_name", w_phase.get("sub_phase_name", "未确认"))
         context["wyckoff_short_term_status"] = short_term.get(
             "signal_status", wyckoff_data.get("signal", {}).get("status", "未确认"))
+        minor_phase = short_term.get("minor_phase") or w_phase.get("minor_phase") or {}
+        context["wyckoff_minor_phase_name"] = minor_phase.get("name", "")
+        context["wyckoff_minor_phase_desc"] = minor_phase.get("description", "")
         context["wyckoff_long_term_phase"] = long_term.get("phase_name", "长期结构未确认")
         context["wyckoff_long_term_confidence"] = (
             f"{long_term.get('confidence', 0) * 100:.0f}%"

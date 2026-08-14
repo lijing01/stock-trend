@@ -130,6 +130,7 @@
 
 **阶段判定**: {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）
 **当前子阶段**: {{wyckoff_sub_phase_name}}
+{{#wyckoff_minor_phase_name}}**细分子阶段**: {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}
 
 ### 长短周期结论
 
