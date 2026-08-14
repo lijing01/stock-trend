@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from analysis.wyckoff import (
     compute_atr, compute_ma, detect_swing_points, mark_climaxes,
     detect_trading_range, detect_trading_ranges, analyze_vsa, compute_cause_effect,
-    wyckoff_score, generate_trading_implication,
+    wyckoff_score, generate_trading_implication, build_minor_phase,
     classify_accumulation, classify_markup, classify_distribution, classify_markdown,
     PHASE_ACCUMULATION, PHASE_MARKUP, PHASE_DISTRIBUTION, PHASE_MARKDOWN, PHASE_UNKNOWN,
     SUB_SC, SUB_AR, SUB_ST, SUB_LPS, SUB_SPRING, SUB_PRE_MARKUP,
@@ -86,6 +86,30 @@ class TestWyckoffScore(unittest.TestCase):
         self.assertAlmostEqual(wyckoff_score(PHASE_ACCUMULATION, SUB_LPS), 2.0)
         self.assertAlmostEqual(wyckoff_score(PHASE_MARKDOWN, SUB_BREAKDOWN), -2.5)
 
+
+class TestMinorPhase(unittest.TestCase):
+    def test_maps_existing_subphases_to_wyckoff_a_to_e_with_chinese_meaning(self):
+        cases = [
+            (PHASE_ACCUMULATION, SUB_SC, "A", "下跌动能开始衰竭"),
+            (PHASE_ACCUMULATION, SUB_SPRING, "C", "下探测试抛压"),
+            (PHASE_ACCUMULATION, SUB_LPS, "D", "需求占优"),
+            (PHASE_MARKUP, SUB_JAC, "E", "价格已离开整理区"),
+            (PHASE_DISTRIBUTION, SUB_UTAD, "C", "上冲测试需求后回落"),
+            (PHASE_MARKDOWN, SUB_BREAKDOWN, "E", "价格向下离开整理区"),
+        ]
+
+        for phase, sub_phase, code, description in cases:
+            with self.subTest(phase=phase, sub_phase=sub_phase):
+                minor = build_minor_phase(phase, sub_phase)
+                self.assertEqual(minor["code"], code)
+                self.assertIn(f"阶段{code}", minor["name"])
+                self.assertIn(description, minor["description"])
+
+    def test_unconfirmed_structure_has_explicit_chinese_explanation(self):
+        minor = build_minor_phase(PHASE_UNKNOWN, "")
+        self.assertEqual(minor["code"], "-")
+        self.assertEqual(minor["name"], "小级别阶段未确认")
+        self.assertIn("A–E", minor["description"])
 
 class TestTradingImplication(unittest.TestCase):
     def test_accumulation_st(self):

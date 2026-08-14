@@ -48,6 +48,11 @@ def candidate(code, eligible=True, adjusted_score=80.0,
         "score_eligible": score_eligible,
         "wyckoff": {
             "sub_phase": "LPS", "confidence": 0.6,
+            "minor_phase": {
+                "code": "D",
+                "name": "阶段D：需求确认",
+                "description": "需求占优，回踩缩量后等待向上确认",
+            },
             "long_term": {
                 "eligible": True, "phase_name": "吸筹阶段",
                 "confidence": 0.7, "bars_available": 251,
@@ -1413,6 +1418,9 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", report)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", report)
         self.assertIn("中线吸筹，短线买点确认", report)
+        self.assertIn("小级别维科夫阶段", report)
+        self.assertIn("阶段D：需求确认", report)
+        self.assertIn("需求占优，回踩缩量后等待向上确认", report)
         self.assertIn("股市有风险，投资需谨慎", report)
 
     def test_countertrend_wyckoff_candidate_is_observation_only(self):
@@ -1466,6 +1474,9 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("短线置信度", html)
         self.assertIn("中线置信度", html)
         self.assertIn("251/250", html)
+        self.assertIn("小级别维科夫阶段", html)
+        self.assertIn("阶段D：需求确认", html)
+        self.assertIn("需求占优，回踩缩量后等待向上确认", html)
         self.assertIn("股市有风险，投资需谨慎", html)
 
     def test_report_explains_unavailable_long_term_structure(self):
@@ -1543,6 +1554,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(output["policy"], policy)
         self.assertEqual(output["sectors"], sectors)
         self.assertEqual(output["candidates"][0]["quality_adjusted_score"], 80.0)
+        self.assertEqual(output["candidates"][0]["wyckoff"]["minor_phase"]["code"], "D")
 
 
 def run_daily_candidates_tests():

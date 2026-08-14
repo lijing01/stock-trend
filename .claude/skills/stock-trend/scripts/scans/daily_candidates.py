@@ -997,6 +997,14 @@ def _long_term_structure_text(wyckoff):
     return f"{phase_name}（{reason}）" if reason else phase_name
 
 
+def _minor_phase_text(wyckoff):
+    """Render the short-term Wyckoff A–E phase with its Chinese meaning."""
+    minor = wyckoff.get("minor_phase", {})
+    name = minor.get("name", "小级别阶段未确认")
+    description = minor.get("description", "")
+    return f"{name}（{description}）" if description else name
+
+
 def _long_term_confidence_text(wyckoff):
     """Avoid presenting 0% as evidence when the long-term phase is unavailable."""
     long_term = wyckoff.get("long_term", {})
@@ -1019,8 +1027,8 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 短线买点 | 中线结构 | 周期结论 | 短线置信度 | 中线置信度 | K线根数/要求 | 原始分 | 质量分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 短线买点 | 中线结构 | 周期结论 | 短线置信度 | 中线置信度 | K线根数/要求 | 原始分 | 质量分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -1028,7 +1036,8 @@ def _append_candidate_table(lines, title, items, empty_text):
         detail = _candidate_diagnostic_text(item)
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
-            f"{_sector_text(item)} | {wyckoff.get('sub_phase', '-')} | "
+            f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
+            f"{wyckoff.get('sub_phase', '-')} | "
             f"{_long_term_structure_text(wyckoff)} | "
             f"{wyckoff.get('alignment', {}).get('label', '未确认')} | "
             f"{wyckoff.get('confidence', 0):.0%} | "
@@ -1210,7 +1219,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
 
 def _html_candidate_rows(items):
     if not items:
-        return '<tr><td colspan="13">无</td></tr>'
+        return '<tr><td colspan="14">无</td></tr>'
     rows = []
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -1220,6 +1229,7 @@ def _html_candidate_rows(items):
             f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
             f"<td>{_sector_text(item)}</td>"
+            f"<td>{_minor_phase_text(wyckoff)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
             f"<td>{_long_term_structure_text(wyckoff)}</td>"
             f"<td>{wyckoff.get('alignment', {}).get('label', '未确认')}</td>"
@@ -1292,13 +1302,13 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <p class="dt">{policy_note}</p>
 <p class="dt">{funnel_note}</p>
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 {performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>

@@ -68,6 +68,36 @@ SUB_PHASE_NAMES = {
     SUB_STOPPING_VOL: "止跌量",
 }
 
+# 小级别 A–E 阶段是对既有短线子阶段的展示映射；不参与识别、评分或买点门控。
+MINOR_PHASES = {
+    (PHASE_ACCUMULATION, SUB_SC): ("A", "阶段A：止跌与建底", "下跌动能开始衰竭，观察止跌与反弹，不宜急于确认反转"),
+    (PHASE_ACCUMULATION, SUB_AR): ("A", "阶段A：止跌与建底", "下跌动能开始衰竭，观察止跌与反弹，不宜急于确认反转"),
+    (PHASE_ACCUMULATION, SUB_ST): ("B", "阶段B：区间构筑", "箱体内反复测试供需，等待方向证据"),
+    (PHASE_ACCUMULATION, SUB_SPRING): ("C", "阶段C：震仓测试", "下探测试抛压，关注是否快速收回箱体"),
+    (PHASE_ACCUMULATION, SUB_LPS): ("D", "阶段D：需求确认", "需求占优，回踩缩量后等待向上确认"),
+    (PHASE_ACCUMULATION, SUB_PRE_MARKUP): ("D", "阶段D：需求确认", "需求占优，等待突破箱体上沿确认"),
+    (PHASE_MARKUP, SUB_JAC): ("E", "阶段E：离开箱体", "价格已离开整理区，顺势跟随并防范假突破"),
+    (PHASE_MARKUP, SUB_BU): ("E", "阶段E：离开箱体", "突破后回踩确认，守住箱体上沿则趋势延续"),
+    (PHASE_MARKUP, SUB_CONTINUATION): ("E", "阶段E：离开箱体", "趋势延续中，持有为主并跟踪量价是否衰竭"),
+    (PHASE_DISTRIBUTION, SUB_BC): ("A", "阶段A：供给显现", "上涨动能开始衰竭，观察冲高后的供给压力"),
+    (PHASE_DISTRIBUTION, SUB_UTAD): ("C", "阶段C：上冲测试", "上冲测试需求后回落，警惕假突破"),
+    (PHASE_DISTRIBUTION, SUB_LPSY): ("D", "阶段D：供给确认", "反弹无力且供给占优，风险控制优先"),
+    (PHASE_DISTRIBUTION, SUB_SOW): ("D", "阶段D：供给确认", "弱势信号出现，反弹应观察供给是否继续释放"),
+    (PHASE_DISTRIBUTION, SUB_PRE_MARKDOWN): ("D", "阶段D：供给确认", "箱体下沿承压，等待破位风险确认"),
+    (PHASE_MARKDOWN, SUB_BREAKDOWN): ("E", "阶段E：离开箱体", "价格向下离开整理区，避免逆势接刀"),
+    (PHASE_MARKDOWN, SUB_PANIC): ("E", "阶段E：离开箱体", "下跌加速，等待恐慌释放和止跌证据"),
+    (PHASE_MARKDOWN, SUB_STOPPING_VOL): ("A", "阶段A：止跌与建底", "止跌量出现，需继续观察是否形成新的建底结构"),
+}
+
+
+def build_minor_phase(phase: str, sub_phase: str) -> dict:
+    """Return the display-only A–E label for an existing short-term signal."""
+    code, name, description = MINOR_PHASES.get(
+        (phase, sub_phase),
+        ("-", "小级别阶段未确认", "未识别到足以归类 A–E 的小级别结构"),
+    )
+    return {"code": code, "name": name, "description": description}
+
 # Phase → score mapping
 PHASE_SCORES = {
     (PHASE_ACCUMULATION, SUB_SC): 0.5,
@@ -1177,6 +1207,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "signal_status": signal.get("status", "none"),
         "signal_age_bars": signal.get("age_bars", 0),
         "range_level": (trading_range or {}).get("level", ""),
+        "minor_phase": build_minor_phase(phase, sub_phase),
     }
 
     timeframe_map = {}
@@ -1225,6 +1256,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "secondary_possibilities": secondary_possibilities,
             "primary_sub_phase": sub_phase,
             "sub_phase_name": SUB_PHASE_NAMES.get(sub_phase, ""),
+            "minor_phase": build_minor_phase(phase, sub_phase),
         },
         "range": trading_range or {"is_clear_range": False},
         "ranges": ranges,
