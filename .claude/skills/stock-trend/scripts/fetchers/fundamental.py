@@ -79,6 +79,54 @@ def _fetch_em_quote_fallback(code):
     return out
 
 
+def fetch_a_share_fundamentals_tushare(code):
+    """Tushare fallback for A-share fundamentals when AKShare fails entirely.
+
+    Uses ``pro.daily_basic`` to recover at least PE/PB/market cap. Returns a
+    dict with the available metrics, or empty dict on any failure.
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as TEO
+
+    suffix = ".SH" if code.startswith("6") else ".SZ"
+    ts_code = f"{code}{suffix}"
+
+    def _do_fetch():
+        import tushare as ts
+        pro = ts.pro_api()
+        out = {}
+        df = pro.daily_basic(
+            ts_code=ts_code,
+            trade_date=datetime.now().strftime("%Y%m%d"),
+            fields="ts_code,pe_ttm,pb,total_mv,ps_ttm",
+        )
+        if df is None or df.empty:
+            # Today may be a non-trading day; fall back to the latest bar.
+            df = pro.daily_basic(
+                ts_code=ts_code,
+                fields="ts_code,pe_ttm,pb,total_mv,ps_ttm",
+            )
+        if df is not None and not df.empty:
+            row = df.iloc[0]
+            pe = _sf(row.get("pe_ttm"))
+            if pe is not None:
+                out["pe_ttm"] = pe
+            pb = _sf(row.get("pb"))
+            if pb is not None:
+                out["pb"] = pb
+            mc = _sf(row.get("total_mv"))
+            if mc is not None and mc > 0:
+                out["market_cap_billion"] = round(mc / 1e8, 2)
+        return out
+
+    with ThreadPoolExecutor(1) as pool:
+        fut = pool.submit(_do_fetch)
+        try:
+            return fut.result(timeout=10)
+        except Exception as exc:
+            print(f"Tushare fundamental fallback failed: {exc}", file=sys.stderr)
+            return {}
+
+
 def fetch_a_share_fundamentals(code):
     """Fetch fundamental data for A-share stocks using AKShare with retries."""
     import akshare as ak
@@ -186,7 +234,7 @@ def fetch_a_share_fundamentals(code):
     elif filled >= 1:
         result["data_quality"] = "partial"
     else:
-        # Fallback: eastmoney quote API for basic PE/PB when AKShare fails entirely
+        # Fallback 1: eastmoney quote API for basic PE/PB when AKShare fails entirely
         fallback = _fetch_em_quote_fallback(code)
         if fallback:
             result.setdefault("pe_ttm", fallback.get("pe_ttm"))
@@ -195,9 +243,19 @@ def fetch_a_share_fundamentals(code):
             result.setdefault("dividend_yield_pct", fallback.get("dividend_yield_pct"))
             result["_fallback_source"] = "eastmoney_quote"
             errors.append("AKShare failed, used eastmoney quote fallback for PE/PB")
-            # Re-evaluate data quality after fallback
-            filled2 = sum(1 for k in ["pe_ttm", "pb", "roe", "eps", "revenue_growth_pct"] if result.get(k) is not None)
-            result["data_quality"] = "partial" if filled2 >= 1 else "error"
+        # Fallback 2: Tushare daily_basic when AKShare + eastmoney quote both fail.
+        # A single recovered metric (e.g. PE) is enough to keep the dimension
+        # "partial" instead of dropping it to "error".
+        if not (result.get("pe_ttm") or result.get("pb")):
+            tushare_fb = fetch_a_share_fundamentals_tushare(code)
+            if tushare_fb:
+                for _k, _v in tushare_fb.items():
+                    result.setdefault(_k, _v)
+                result.setdefault("_fallback_source", "tushare")
+                errors.append("AKShare + eastmoney quote failed, used Tushare fallback for PE/PB")
+        # Re-evaluate data quality after fallbacks
+        filled2 = sum(1 for k in ["pe_ttm", "pb", "roe", "eps", "revenue_growth_pct"] if result.get(k) is not None)
+        result["data_quality"] = "partial" if filled2 >= 1 else "error"
 
     if errors:
         result["_errors"] = errors

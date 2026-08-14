@@ -708,32 +708,50 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
             attempted=False, cache_used=bool(cached), stale=bool(cached)))
         return result if with_evidence else cached
 
-    # Fetch via subprocess
+    # Fetch via subprocess. Transient EM/Tencent failures under concurrency
+    # are common, so retry once before giving up to a stale cache.
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"),
         ts_code, "--asset", "E", "--freq", "D",
         "-o", str(cache_path),
     ]
-    result = run_script(
-        cmd, label=f"kline_{ts_code}",
-        timeout=_remaining_timeout("kline", live_deadline))
+    if as_of_date:
+        cmd.extend(["--expected-date", as_of_date])
+
+    def _run_kline_subprocess():
+        return run_script(
+            cmd, label=f"kline_{ts_code}",
+            timeout=_remaining_timeout("kline", live_deadline))
+
+    result = _run_kline_subprocess()
     attempt = live_attempt(
         attempted=True, provider_attempts=1, subprocess_started=True)
+    refreshed = None
+    refreshed_verdict = {"valid": False}
     if result["success"]:
         refreshed = _read_json(str(cache_path))
         refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
-        if refreshed_verdict["valid"]:
-            wrapped = source_result(refreshed, attempt)
-            return wrapped if with_evidence else refreshed
-        if refreshed:
-            refreshed = _with_cache_verdict(refreshed, refreshed_verdict)
-            refreshed.setdefault("meta", {})["refresh_error"] = (
-                f"K线刷新后仍未覆盖{as_of_date}")
-            attempt["reason"] = "empty"
-            attempt["cache_used"] = True
-            attempt["stale"] = True
-            wrapped = source_result(refreshed, attempt)
-            return wrapped if with_evidence else refreshed
+    # Retry only when the subprocess itself failed (timeout/crash); a
+    # successful-but-stale refresh re-running would just re-read the same
+    # file the first attempt already wrote.
+    if not result["success"]:
+        result = _run_kline_subprocess()
+        attempt["provider_attempts"] = 2
+        if result["success"]:
+            refreshed = _read_json(str(cache_path))
+            refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
+    if refreshed_verdict["valid"]:
+        wrapped = source_result(refreshed, attempt)
+        return wrapped if with_evidence else refreshed
+    if refreshed:
+        refreshed = _with_cache_verdict(refreshed, refreshed_verdict)
+        refreshed.setdefault("meta", {})["refresh_error"] = (
+            f"K线刷新后仍未覆盖{as_of_date}")
+        attempt["reason"] = "empty"
+        attempt["cache_used"] = True
+        attempt["stale"] = True
+        wrapped = source_result(refreshed, attempt)
+        return wrapped if with_evidence else refreshed
     # Keep a stale cache observable to the quality gate instead of dropping it
     # and losing the source/date diagnostic.
     if cached:
@@ -798,6 +816,8 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
         sys.executable, str(SCRIPT_DIR / "fetchers/capital_flow.py"),
         ts_code, "--asset", "E", "-o", str(cache_path),
     ]
+    if expected_trading_date:
+        cmd.extend(["--expected-date", expected_trading_date])
     result = run_script(
         cmd, label=f"cap_{ts_code}",
         timeout=_remaining_timeout("capital", live_deadline))

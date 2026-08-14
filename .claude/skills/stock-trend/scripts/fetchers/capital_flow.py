@@ -53,13 +53,40 @@ def _valid_flows(flows):
     )
 
 
-def is_valid_capital_result(result):
-    """Return whether a cached/fetched result contains usable capital rows."""
+def latest_capital_date(result):
+    """Return the newest row date across capital rows as 'YYYY-MM-DD', or ''."""
+    rows = result.get("data", []) if isinstance(result, dict) else []
+    if not isinstance(rows, list):
+        return ""
+    dates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("date") or row.get("trade_date") or "").strip()
+        text = text.replace("-", "")
+        if len(text) == 8 and text.isdigit():
+            dates.append(f"{text[:4]}-{text[4:6]}-{text[6:]}")
+    return max(dates) if dates else ""
+
+
+def is_valid_capital_result(result, min_date=""):
+    """Return whether a cached/fetched result contains usable capital rows.
+
+    When ``min_date`` (YYYY-MM-DD) is given, rows must also reach that date;
+    a result that only covers older trading days is considered stale-by-date
+    even when its cache age is still within TTL.
+    """
     if not isinstance(result, dict):
         return False
     if result.get("meta", {}).get("data_source") in (None, "error"):
         return False
-    return _valid_flows(result.get("data"))
+    if not _valid_flows(result.get("data")):
+        return False
+    if min_date:
+        latest = latest_capital_date(result)
+        if not latest or latest < min_date:
+            return False
+    return True
 
 
 def fetch_stock_capital_flow_tushare(ts_code, days=5, timeout=10):
@@ -220,8 +247,13 @@ def fetch_stock_capital_flow(secid, days=5):
     return records
 
 
-def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code):
-    """Fetch usable stock capital rows through the configured fallback chain."""
+def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=""):
+    """Fetch usable stock capital rows through the configured fallback chain.
+
+    ``expected_date`` (YYYY-MM-DD) is the trading day the caller wants covered.
+    A kline_estimate that only reaches an older date is treated as a failure:
+    it would look fresh by age but is stale by data.
+    """
     suffix = "." + ts_code.split(".")[1] if "." in ts_code else ""
     errors = []
 
@@ -256,14 +288,18 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code):
         print(f"Trying K-line estimation for {ts_code}", file=sys.stderr)
         flows = estimate_capital_flow_from_kline(code)
         if _valid_flows(flows):
-            return {
-                "meta": {
-                    "ts_code": ts_code, "asset": "E",
-                    "data_source": "kline_estimate",
-                    "record_count": len(flows),
-                },
-                "data": flows,
-            }
+            if expected_date and latest_capital_date({"data": flows}) < expected_date:
+                errors.append(
+                    f"K线估算最新数据日期早于预期交易日{expected_date}")
+            else:
+                return {
+                    "meta": {
+                        "ts_code": ts_code, "asset": "E",
+                        "data_source": "kline_estimate",
+                        "record_count": len(flows),
+                    },
+                    "data": flows,
+                }
         errors.append("K线估算不可用或未返回有效日期记录")
 
     return {
@@ -397,12 +433,13 @@ def main():
     parser.add_argument("--asset", choices=["E", "FD"], help="Asset type (auto-detected if omitted)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
+    parser.add_argument("--expected-date", help="YYYY-MM-DD trading day the result must cover; stale-by-date cache is ignored")
     args = parser.parse_args()
 
     cache_key = f"capital_flow_{args.ts_code}"
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        if is_valid_capital_result(cached):
+        if is_valid_capital_result(cached, min_date=args.expected_date):
             output_json(cached, output_path=args.output)
             return
 
@@ -438,7 +475,7 @@ def main():
             result["data"] = []
         else:
             primary = fetch_stock_capital_flow_with_fallbacks(
-                args.ts_code, secid, code)
+                args.ts_code, secid, code, expected_date=args.expected_date)
             result["meta"] = primary["meta"]
             result["data"] = primary["data"]
 

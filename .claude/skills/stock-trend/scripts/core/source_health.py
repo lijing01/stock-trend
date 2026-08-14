@@ -14,21 +14,21 @@ SOURCES = (
     "sector_ranking", "sector_membership", "kline", "capital",
     "fundamental",
 )
-SCAN_DEADLINE_SECONDS = 75
+SCAN_DEADLINE_SECONDS = 110
 FINALIZATION_RESERVE_SECONDS = 5
 LIVE_ATTEMPT_TIMEOUT_SECONDS = {
     "sector_ranking": 3,
     "sector_membership": 3,
     # kline fetchers walk EM host rotation → Tencent → BaoStock; a slow EM
-    # host can take several seconds before the fallback completes. 15s keeps
-    # the subprocess under the fetcher's own 15s urlopen timeout while still
-    # releasing the slot in time.
-    "kline": 15,
-    # capital/fundamental fetchers each walk several AKShare endpoints
-    # (~8s standalone); the old 8s timeout tripped under concurrency and
-    # orphaned those dimensions to stale cache.
-    "capital": 15,
-    "fundamental": 15,
+    # host can take several seconds before the fallback completes. 25s lets
+    # the fallback chain finish without abandoning the slot to a stale cache.
+    "kline": 25,
+    # capital/fundamental fetchers each walk several AKShare/Tushare
+    # endpoints (~8-10s standalone); under 4-worker concurrency the old 15s
+    # subprocess timeout tripped and orphaned those dimensions to stale
+    # cache. 25s covers the full fallback chain.
+    "capital": 25,
+    "fundamental": 25,
 }
 MAX_PROVIDER_ATTEMPTS = {
     "sector_ranking": 4,

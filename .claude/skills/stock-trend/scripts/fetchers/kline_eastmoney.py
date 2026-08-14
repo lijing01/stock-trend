@@ -30,6 +30,22 @@ from core.eastmoney_utils import (
 )
 
 
+def latest_kline_date(payload):
+    """Return the newest bar's trade_date as 'YYYY-MM-DD', or ''."""
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return ""
+    dates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("trade_date") or row.get("date") or "").strip()
+        text = text.replace("-", "")
+        if len(text) == 8 and text.isdigit():
+            dates.append(f"{text[:4]}-{text[4:6]}-{text[6:]}")
+    return max(dates) if dates else ""
+
+
 def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
     """Fetch K-line data from East Money API.
 
@@ -313,15 +329,20 @@ def main():
     parser.add_argument("--lmt", type=int, default=250, help="Number of records to fetch (default: 250)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
+    parser.add_argument("--expected-date", help="YYYY-MM-DD trading day the bars must cover; stale-by-date cache is ignored")
 
     args = parser.parse_args()
 
-    # Check cache (shared key with fetch_kline.py)
+    # Check cache (shared key with fetch_kline.py). A cache is a hit only when
+    # it covers the expected trading day: a T-1 bar must not be served as fresh
+    # merely because its cache age is within TTL.
     adj = args.adj or detect_adj(args.ts_code)
     cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        if cached:
+        if cached and (
+                not args.expected_date
+                or latest_kline_date(cached) >= args.expected_date):
             output_json(cached, output_path=args.output)
             return
 
@@ -442,6 +463,12 @@ def main():
 
     if record_count < 60:
         warnings.append(f"数据记录不足60条（仅{record_count}条），部分指标可能无法准确计算")
+
+    latest_date = latest_kline_date({"data": records})
+    if args.expected_date and latest_date and latest_date < args.expected_date:
+        warnings.append(
+            f"数据最新日期{latest_date}早于预期交易日{args.expected_date}，"
+            f"来自降级源({data_source})")
 
     # Add ts_code to each record
     for r in records:
