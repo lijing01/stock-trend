@@ -453,6 +453,9 @@ def validate_dimension_scores(scores, signals_info, self_check):
     # Technical dimension: no validation (script-computed)
     adjusted["technical"] = scores.get("technical", 0)
 
+    # Wyckoff dimension: no validation (script-computed), preserve automated score
+    adjusted["wyckoff"] = scores.get("wyckoff", 0)
+
     # Overall confidence penalty
     overall_penalty = 1.0
     if penalty_factors:
@@ -1442,8 +1445,8 @@ def main():
 
     # Print summary
     print(f"Composite score: {composite} | Direction: {full_direction} | Confidence: {confidence}")
-    print(f"Scores: tech={scores['technical']} cap={scores['capital_flow']} "
-          f"fund={scores['fundamental']} sent={scores['sentiment']} macro={scores['macro']} wyckoff={scores['wyckoff']}")
+    print(f"Scores: tech={scores.get('technical')} cap={scores.get('capital_flow')} "
+          f"fund={scores.get('fundamental')} sent={scores.get('sentiment')} macro={scores.get('macro')} wyckoff={scores.get('wyckoff', 0)}")
     print(f"Weights: " + " ".join(f"{k}={v:.2f}" for k, v in weights.items()))
     print(f"Risks: {unique_risks}")
     print(f"Output: {output_path}")
