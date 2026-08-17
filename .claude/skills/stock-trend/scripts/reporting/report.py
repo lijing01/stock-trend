@@ -856,6 +856,11 @@ def build_context(args):
         minor_phase = short_term.get("minor_phase") or w_phase.get("minor_phase") or {}
         context["wyckoff_minor_phase_name"] = minor_phase.get("name", "")
         context["wyckoff_minor_phase_desc"] = minor_phase.get("description", "")
+        trigger = minor_phase.get("trigger")
+        context["wyckoff_minor_phase_trigger"] = (
+            f"；触发K线 {trigger['date']} 低{trigger['low']} 收{trigger['close']}"
+            if trigger and trigger.get("date") else ""
+        )
         context["wyckoff_long_term_phase"] = long_term.get("phase_name", "长期结构未确认")
         context["wyckoff_long_term_confidence"] = (
             f"{long_term.get('confidence', 0) * 100:.0f}%"

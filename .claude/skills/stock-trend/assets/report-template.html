@@ -166,7 +166,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 
     <p><strong>阶段判定:</strong> {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）<br>
     <strong>当前子阶段:</strong> {{wyckoff_sub_phase_name}}<br>
-    {{#wyckoff_minor_phase_name}}<strong>细分子阶段:</strong> {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}</p>
+    {{#wyckoff_minor_phase_name}}<strong>细分子阶段:</strong> {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}</p>
 
     <h3>长短周期结论</h3>
     <table>

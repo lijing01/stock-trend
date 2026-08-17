@@ -998,11 +998,22 @@ def _long_term_structure_text(wyckoff):
 
 
 def _minor_phase_text(wyckoff):
-    """Render the short-term Wyckoff A–E phase with its Chinese meaning."""
+    """Render the short-term Wyckoff A–E phase with its Chinese meaning.
+
+    When the phase carries a trigger K-line, its date and low/close prices
+    are appended so readers can see which bar satisfied the phase condition.
+    """
     minor = wyckoff.get("minor_phase", {})
     name = minor.get("name", "小级别阶段未确认")
     description = minor.get("description", "")
-    return f"{name}（{description}）" if description else name
+    text = f"{name}（{description}）" if description else name
+    trigger = minor.get("trigger")
+    if trigger and trigger.get("date"):
+        text += (
+            f"；触发K线 {trigger['date']} "
+            f"低{trigger['low']} 收{trigger['close']}"
+        )
+    return text
 
 
 def _long_term_confidence_text(wyckoff):

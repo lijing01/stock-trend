@@ -90,13 +90,20 @@ MINOR_PHASES = {
 }
 
 
-def build_minor_phase(phase: str, sub_phase: str) -> dict:
-    """Return the display-only A–E label for an existing short-term signal."""
+def build_minor_phase(phase: str, sub_phase: str, trigger: dict | None = None) -> dict:
+    """Return the display-only A–E label for an existing short-term signal.
+
+    When ``trigger`` (a bar dict with date/low/close) is supplied, it is
+    attached so reports can show the K-line that triggered the phase.
+    """
     code, name, description = MINOR_PHASES.get(
         (phase, sub_phase),
         ("-", "小级别阶段未确认", "未识别到足以归类 A–E 的小级别结构"),
     )
-    return {"code": code, "name": name, "description": description}
+    minor = {"code": code, "name": name, "description": description}
+    if trigger:
+        minor["trigger"] = trigger
+    return minor
 
 # Phase → score mapping
 PHASE_SCORES = {
@@ -434,15 +441,22 @@ def _route_price_location(close: float, trading_range: dict, atr: float) -> str:
 
 def _choose_range_phase(accumulation: tuple | None, distribution: tuple | None,
                         min_margin: float = 0.15) -> tuple[tuple | None, list[dict]]:
-    """Arbitrate competing in-range evidence instead of relying on call order."""
+    """Arbitrate competing in-range evidence instead of relying on call order.
+
+    Result tuples may carry an optional third element (trigger bar index);
+    it is preserved for the winner so the minor phase can expose its
+    triggering K-line.
+    """
     candidates = [(PHASE_ACCUMULATION, accumulation), (PHASE_DISTRIBUTION, distribution)]
     valid = [(phase, result) for phase, result in candidates if result]
     valid.sort(key=lambda item: item[1][1], reverse=True)
     ranked = [{"phase": phase, "confidence": round(result[1], 2)} for phase, result in valid]
     if not valid or (len(valid) > 1 and valid[0][1][1] - valid[1][1][1] < min_margin):
         return None, ranked
-    phase, (sub_phase, confidence) = valid[0]
-    return (phase, sub_phase, confidence), ranked[1:]
+    phase, result = valid[0]
+    sub_phase, confidence = result[0], result[1]
+    trigger_idx = result[2] if len(result) > 2 else None
+    return (phase, sub_phase, confidence, trigger_idx), ranked[1:]
 
 
 def _classify_range_phase(swings: list, closes: list, volumes: list, highs: list,
@@ -529,14 +543,14 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
     if not recent_swing_lows:
         near_support = abs(latest_close - range_support) <= latest_atr * 0.5
         if near_support and latest_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.7:
-            return (SUB_LPS, 0.6)
+            return (SUB_LPS, 0.6, latest_idx)
         return None
 
     latest_swing_low = recent_swing_lows[-1]
     if (latest_idx - latest_swing_low["index"] <= EVENT_MAX_AGE[SUB_SPRING]
             and latest_swing_low["is_climax"]
             and latest_swing_low.get("climax_type") == "selling"):
-        return (SUB_SC, 0.8)
+        return (SUB_SC, 0.8, latest_swing_low["index"])
 
     if len(recent_swing_lows) >= 1:
         sc_swings = [s for s in recent_swing_lows if s.get("is_climax")]
@@ -544,7 +558,7 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
             sc_idx = sc_swings[-1]["index"]
             bars_since_sc = latest_idx - sc_idx
             if bars_since_sc <= 10 and latest_close > range_support + (range_resistance - range_support) * 0.3:
-                return (SUB_AR, 0.7)
+                return (SUB_AR, 0.7, sc_idx)
 
     if len(recent_swing_lows) >= 2:
         prev_low = recent_swing_lows[-2]
@@ -552,7 +566,7 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
         if (latest_idx - curr_low["index"] <= EVENT_MAX_AGE[SUB_ST]
                 and curr_low["volume_ratio"] < prev_low["volume_ratio"] * 0.7
                 and abs(curr_low["price"] - prev_low["price"]) <= latest_atr * 2):
-            return (SUB_ST, 0.8)
+            return (SUB_ST, 0.8, curr_low["index"])
 
     spring_candidates = [s for s in recent_swing_lows
                          if latest_idx - s["index"] <= EVENT_MAX_AGE[SUB_SPRING]
@@ -562,15 +576,15 @@ def classify_accumulation(swings: list, closes: list, volumes: list, lows: list,
                                  for close in closes[s["index"]:latest_idx + 1])]
     if spring_candidates and any(s["volume_ratio"] > 1.5 or s["volume_ratio"] < 0.8
                                  for s in spring_candidates):
-        return (SUB_SPRING, 0.7)
+        return (SUB_SPRING, 0.7, spring_candidates[-1]["index"])
 
     near_support = abs(latest_close - range_support) <= latest_atr * 0.5
     if near_support and latest_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.6:
-        return (SUB_LPS, 0.7)
+        return (SUB_LPS, 0.7, latest_idx)
 
     volume_ratio = _volume_trend_ratio(volumes, latest_idx)
     if volume_ratio <= 0.8 and _close_location(latest_close, trading_range) >= 0.55:
-        return (SUB_PRE_MARKUP, 0.6)
+        return (SUB_PRE_MARKUP, 0.6, latest_idx)
     return None
 
 
@@ -590,22 +604,25 @@ def classify_markup(swings: list, closes: list, volumes: list, highs: list,
     trend_high = max(closes[max(0, latest_idx - 20) : latest_idx + 1])
     retrace_from_high = (trend_high - latest_close) / latest_atr if latest_atr > 0 else 0
     bars_since_breakout = _find_first_breakout_bar(closes, trading_range, latest_idx)
+    breakout_idx = (latest_idx - bars_since_breakout
+                    if bars_since_breakout is not None else latest_idx)
+    breakout_idx = max(breakout_idx, 0)
 
     if bars_since_breakout is not None and bars_since_breakout <= EVENT_MAX_AGE[SUB_JAC]:
         breakout_volumes = volumes[latest_idx - bars_since_breakout : latest_idx + 1]
         avg_vol = sum(breakout_volumes) / len(breakout_volumes) if breakout_volumes else 0
         baseline_vol = _ma_of_last_n(volumes, latest_idx - bars_since_breakout, 50) if latest_idx - bars_since_breakout >= 50 else 1
         if avg_vol > baseline_vol * 1.3:
-            return (SUB_JAC, 0.8)
-        return (SUB_JAC, 0.5)
+            return (SUB_JAC, 0.8, breakout_idx)
+        return (SUB_JAC, 0.5, breakout_idx)
 
     if retrace_from_high <= 2.0 and retrace_from_high >= 0.5:
         pullback_vol = volumes[latest_idx]
         if pullback_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.8:
-            return (SUB_BU, 0.7)
-        return (SUB_BU, 0.5)
+            return (SUB_BU, 0.7, breakout_idx)
+        return (SUB_BU, 0.5, breakout_idx)
 
-    return (SUB_CONTINUATION, 0.6)
+    return (SUB_CONTINUATION, 0.6, latest_idx)
 
 
 def _find_first_breakout_bar(closes: list, trading_range: dict, latest_idx: int) -> int | None:
@@ -640,7 +657,7 @@ def classify_distribution(swings: list, closes: list, volumes: list,
         return None
     if latest_close < range_support - latest_atr * 0.5:
         if volumes[latest_idx] > _ma_of_last_n(volumes, latest_idx, 50) * 1.3:
-            return (SUB_SOW, 0.7)
+            return (SUB_SOW, 0.7, latest_idx)
         return None
 
     recent_swing_highs = [s for s in swings if s["type"] == "high"
@@ -655,7 +672,7 @@ def classify_distribution(swings: list, closes: list, volumes: list,
     if (latest_idx - latest_swing_high["index"] <= EVENT_MAX_AGE[SUB_BC]
             and latest_swing_high["is_climax"]
             and latest_swing_high.get("climax_type") == "buying"):
-        return (SUB_BC, 0.8)
+        return (SUB_BC, 0.8, latest_swing_high["index"])
 
     utad_candidates = [s for s in recent_swing_highs
                        if latest_idx - s["index"] <= EVENT_MAX_AGE[SUB_UTAD]
@@ -663,15 +680,15 @@ def classify_distribution(swings: list, closes: list, volumes: list,
                        and latest_close < range_resistance + latest_atr * 0.3]
     if utad_candidates:
         has_climax = any(s.get("is_climax") for s in utad_candidates)
-        return (SUB_UTAD, 0.75 if has_climax else 0.55)
+        return (SUB_UTAD, 0.75 if has_climax else 0.55, utad_candidates[-1]["index"])
 
     near_resistance = abs(latest_close - range_resistance) <= latest_atr * 0.5
     if near_resistance and volumes[latest_idx] < _ma_of_last_n(volumes, latest_idx, 50) * 0.6:
-        return (SUB_LPSY, 0.65)
+        return (SUB_LPSY, 0.65, latest_idx)
 
     volume_ratio = _volume_trend_ratio(volumes, latest_idx)
     if volume_ratio >= 1.2 and _close_location(latest_close, trading_range) <= 0.45:
-        return (SUB_PRE_MARKDOWN, 0.6)
+        return (SUB_PRE_MARKDOWN, 0.6, latest_idx)
     return None
 
 
@@ -690,21 +707,21 @@ def classify_markdown(swings: list, closes: list, volumes: list, lows: list,
 
     range_under = range_support - latest_close
     if range_under <= latest_atr * 2.0 and range_under > latest_atr * 0.5:
-        return (SUB_BREAKDOWN, 0.7)
+        return (SUB_BREAKDOWN, 0.7, latest_idx)
 
     if len(closes) >= 10:
         recent_returns = [(closes[i] - closes[i - 1]) / closes[i - 1]
                           for i in range(max(latest_idx - 10, 1), latest_idx + 1)]
         avg_return = sum(recent_returns) / len(recent_returns)
         if avg_return < -0.02 and volumes[latest_idx] > _ma_of_last_n(volumes, latest_idx, 50) * 1.5:
-            return (SUB_PANIC, 0.75)
+            return (SUB_PANIC, 0.75, latest_idx)
 
     if volumes[latest_idx] > _ma_of_last_n(volumes, latest_idx, 50) * 1.5:
         daily_range = highs[latest_idx] - lows[latest_idx]
         if daily_range < latest_atr * 0.7:
-            return (SUB_STOPPING_VOL, 0.6)
+            return (SUB_STOPPING_VOL, 0.6, latest_idx)
 
-    return (SUB_BREAKDOWN, 0.4)
+    return (SUB_BREAKDOWN, 0.4, latest_idx)
 
 
 DEFAULT_VOL_MA_PERIOD = 50
@@ -1078,6 +1095,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     sub_phase = ""
     confidence = 0.0
     secondary_possibilities = []
+    trigger_idx = None
     signal = {"status": "none", "age_bars": 0, "structure_level": "", "range_id": ""}
     trend_context = {"direction": PHASE_UNKNOWN, "source": "none"}
 
@@ -1086,7 +1104,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             swings, closes, volumes, highs, lows, atr_values, trading_range, latest_idx,
         )
         if selected:
-            phase, sub_phase, confidence = selected
+            phase, sub_phase, confidence, *rest = selected
+            trigger_idx = rest[0] if rest else None
             signal.update({
                 "status": "confirmed",
                 "structure_level": trading_range.get("level", "single"),
@@ -1121,6 +1140,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             else:
                 phase, sub_phase = PHASE_MARKUP, SUB_JAC
             confidence = active_event["confidence"]
+            trigger_idx = active_event.get("event_index")
         signal = {
             "status": active_event["status"],
             "age_bars": active_event["age_bars"],
@@ -1166,7 +1186,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             swings, closes, volumes, highs, lows, atr_values, context_range, latest_idx,
         )
         if long_selected:
-            long_phase, long_sub_phase, long_confidence = long_selected
+            long_phase, long_sub_phase, long_confidence, *_ = long_selected
             long_confidence = _compose_confidence(
                 long_confidence, context_range, directional_vsa_count,
             )
@@ -1198,6 +1218,13 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "reason": long_reason,
         "range": context_range if long_term_eligible and context_range else {"is_clear_range": False},
     }
+    trigger = None
+    if trigger_idx is not None and 0 <= trigger_idx < len(ohlcv["date"]):
+        trigger = {
+            "date": ohlcv["date"][trigger_idx],
+            "low": round(ohlcv["low"][trigger_idx], 2),
+            "close": round(ohlcv["close"][trigger_idx], 2),
+        }
     short_term = {
         "phase": phase,
         "phase_name": PHASE_NAMES.get(phase, "未知阶段"),
@@ -1207,7 +1234,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "signal_status": signal.get("status", "none"),
         "signal_age_bars": signal.get("age_bars", 0),
         "range_level": (trading_range or {}).get("level", ""),
-        "minor_phase": build_minor_phase(phase, sub_phase),
+        "minor_phase": build_minor_phase(phase, sub_phase, trigger),
     }
 
     timeframe_map = {}
@@ -1256,7 +1283,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "secondary_possibilities": secondary_possibilities,
             "primary_sub_phase": sub_phase,
             "sub_phase_name": SUB_PHASE_NAMES.get(sub_phase, ""),
-            "minor_phase": build_minor_phase(phase, sub_phase),
+            "minor_phase": build_minor_phase(phase, sub_phase, trigger),
         },
         "range": trading_range or {"is_clear_range": False},
         "ranges": ranges,

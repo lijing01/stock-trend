@@ -109,14 +109,14 @@ holdings:
   ts_code: 601899.SH
 - buy_date: null
   buy_price: 129.92805
-  close_date: null
-  close_price: null
+  close_date: '2026-08-14'
+  close_price: 122.93
   code: '605499'
   current_price: 122.8
   name: 东鹏饮料
   notes: 截图同步：成本价由截图浮动盈亏反推
   quantity: 200.0
-  status: active
+  status: closed
   stop_loss: null
   targets: []
   ts_code: 605499.SH
