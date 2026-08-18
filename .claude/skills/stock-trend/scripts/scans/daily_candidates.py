@@ -1462,14 +1462,26 @@ def main():
         time.monotonic() - monotonic_start)
 
     if args.json:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        builders = [("json", lambda: build_json_output(
+            candidates, sector_codes, elapsed, policy, buckets))]
+        if args.html:
+            builders.append(("html", lambda: _generate_html(
+                candidates, sector_codes, elapsed, ts, policy, buckets)))
         outputs, performance = _freeze_output_envelope(
-            performance,
-            [("json", lambda: build_json_output(
-                candidates, sector_codes, elapsed, policy, buckets))],
-            run_started_at=monotonic_start,
-        )
+            performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
         out["meta"]["performance"] = performance
+        if args.html:
+            try:
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                html = _attach_performance_audit(
+                    outputs["html"], performance, "html")
+                html_path = REPORTS_DIR / f"candidates-{ts}.html"
+                html_path.write_text(html, encoding="utf-8")
+                print(f"HTML: {html_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"⚠️ HTML 生成失败: {e}", file=sys.stderr)
         _emit_performance_summary(performance)
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return

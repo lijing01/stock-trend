@@ -277,7 +277,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 1. 运行(默认生成 HTML):
 ```bash
 python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] [--min-candidates 20]
-# 手动指定板块: --sectors BK0420,BK0897; Agent 消费: --json; 仅 MD: --no-html
+# 手动指定板块: --sectors BK0420,BK0897; Agent 消费: --json（默认同时生成 HTML）; 仅 MD: --no-html
 ```
 2. **默认打开 HTML 报告**:
 ```bash

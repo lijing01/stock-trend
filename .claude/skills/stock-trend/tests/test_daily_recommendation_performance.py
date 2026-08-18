@@ -374,7 +374,7 @@ class TestProductionPerformanceContract(unittest.TestCase):
                 completed["sources"][source]["logical_live_requests"],
             )
 
-    def test_json_mode_emits_performance_without_writing_reports(self):
+    def test_json_mode_emits_performance_and_writes_default_html_report(self):
         from scans import daily_candidates as dc
 
         args = Namespace(
@@ -392,10 +392,12 @@ class TestProductionPerformanceContract(unittest.TestCase):
              redirect_stdout(stdout), redirect_stderr(stderr):
             dc.main()
             report_files = list(Path(tmpdir).iterdir())
+            self.assertEqual([path.suffix for path in report_files], [".html"])
+            html_report = report_files[0].read_text(encoding="utf-8")
 
         payload = json.loads(stdout.getvalue())
         self.assertIn("performance", payload["meta"])
-        self.assertEqual(report_files, [])
+        self.assertIn("每日候选股", html_report)
         self.assertIn("[performance]", stderr.getvalue())
 
 
