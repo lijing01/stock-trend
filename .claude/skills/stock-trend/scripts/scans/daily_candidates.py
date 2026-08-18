@@ -1016,6 +1016,14 @@ def _minor_phase_text(wyckoff):
     return text
 
 
+def _minor_phase_html(wyckoff):
+    text = _minor_phase_text(wyckoff)
+    minor = wyckoff.get("minor_phase", {})
+    if minor.get("code") == "D" and "BU/LPS" in minor.get("name", ""):
+        return f"<span style='background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:4px'>{text}</span>"
+    return text
+
+
 def _long_term_confidence_text(wyckoff):
     """Avoid presenting 0% as evidence when the long-term phase is unavailable."""
     long_term = wyckoff.get("long_term", {})
@@ -1251,7 +1259,7 @@ def _html_candidate_rows(items):
             f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
             f"<td>{_sector_text(item)}</td>"
-            f"<td>{_minor_phase_text(wyckoff)}</td>"
+            f"<td>{_minor_phase_html(wyckoff)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
             f"<td>{_long_term_structure_text(wyckoff)}</td>"
             f"<td>{wyckoff.get('alignment', {}).get('label', '未确认')}</td>"

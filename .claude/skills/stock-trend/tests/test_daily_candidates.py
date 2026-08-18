@@ -1516,6 +1516,16 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("需求占优，回踩缩量后等待向上确认", html)
         self.assertIn("股市有风险，投资需谨慎", html)
 
+    def test_html_highlights_bu_lps_with_yellow_background(self):
+        item = candidate("lps")
+        item["wyckoff"]["minor_phase"] = {
+            "code": "D", "name": "BU/LPS（阶段D）",
+            "description": "回踩缩量并守住原阻力",
+        }
+        html = dc._html_candidate_rows([item])
+        self.assertIn("#fef3c7", html)
+        self.assertIn("BU/LPS（阶段D）", html)
+
     def test_report_explains_unavailable_long_term_structure(self):
         item = candidate("1")
         item["wyckoff"]["long_term"] = {

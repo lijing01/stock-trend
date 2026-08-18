@@ -41,6 +41,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 .advice-list li{counter-increment:advice;padding:8px 0 8px 32px;position:relative;border-bottom:1px solid #f5f5f5;font-size:14px}
 .advice-list li::before{content:counter(advice) ".";color:#1d4ed8;font-weight:600;position:absolute;left:0}
 .wyckoff-section{}
+.wyckoff-lps{background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:4px}
 </style>
 </head>
 <body>
@@ -166,7 +167,7 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 
     <p><strong>阶段判定:</strong> {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）<br>
     <strong>当前子阶段:</strong> {{wyckoff_sub_phase_name}}<br>
-    {{#wyckoff_minor_phase_name}}<strong>细分子阶段:</strong> {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}</p>
+    {{#wyckoff_minor_phase_name}}<strong>细分子阶段:</strong> <span class="{{wyckoff_minor_phase_css}}">{{wyckoff_minor_phase_name}}</span> — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}</p>
 
     <h3>长短周期结论</h3>
     <table>

@@ -856,6 +856,12 @@ def build_context(args):
         minor_phase = short_term.get("minor_phase") or w_phase.get("minor_phase") or {}
         context["wyckoff_minor_phase_name"] = minor_phase.get("name", "")
         context["wyckoff_minor_phase_desc"] = minor_phase.get("description", "")
+        context["wyckoff_minor_phase_css"] = (
+            "wyckoff-lps"
+            if minor_phase.get("code") == "D"
+            and "BU/LPS" in minor_phase.get("name", "")
+            else ""
+        )
         trigger = minor_phase.get("trigger")
         context["wyckoff_minor_phase_trigger"] = (
             f"；触发K线 {trigger['date']} 低{trigger['low']} 收{trigger['close']}"

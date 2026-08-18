@@ -77,6 +77,7 @@ MINOR_PHASES = {
     (PHASE_ACCUMULATION, SUB_LPS): ("D", "阶段D：需求确认", "需求占优，回踩缩量后等待向上确认"),
     (PHASE_ACCUMULATION, SUB_PRE_MARKUP): ("D", "阶段D：需求确认", "需求占优，等待突破箱体上沿确认"),
     (PHASE_MARKUP, SUB_JAC): ("E", "阶段E：离开箱体", "价格已离开整理区，顺势跟随并防范假突破"),
+    (PHASE_MARKUP, SUB_LPS): ("D", "BU/LPS（阶段D）", "SOS 后回调缩量、跌幅收敛，并在原阻力附近获得支撑"),
     (PHASE_MARKUP, SUB_BU): ("E", "阶段E：离开箱体", "突破后回踩确认，守住箱体上沿则趋势延续"),
     (PHASE_MARKUP, SUB_CONTINUATION): ("E", "阶段E：离开箱体", "趋势延续中，持有为主并跟踪量价是否衰竭"),
     (PHASE_DISTRIBUTION, SUB_BC): ("A", "阶段A：供给显现", "上涨动能开始衰竭，观察冲高后的供给压力"),
@@ -114,6 +115,7 @@ PHASE_SCORES = {
     (PHASE_ACCUMULATION, SUB_LPS): 2.0,
     (PHASE_ACCUMULATION, SUB_PRE_MARKUP): 2.0,
     (PHASE_MARKUP, SUB_JAC): 2.0,
+    (PHASE_MARKUP, SUB_LPS): 2.0,
     (PHASE_MARKUP, SUB_BU): 1.5,
     (PHASE_MARKUP, SUB_CONTINUATION): 1.0,
     (PHASE_DISTRIBUTION, SUB_BC): -1.0,
@@ -985,6 +987,22 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
                 "sos", i, detected_idx, dates, status, trading_range.get("level", "single"),
                 trading_range, 0.8 if status == "confirmed" else (0.65 if strength else 0.45),
             ))
+    confirmed_sos = [event for event in events
+                     if event["type"] == "sos" and event["status"] == "confirmed"]
+    for sos_event in confirmed_sos:
+        for j in range(
+                sos_event["detected_index"] + 1,
+                min(sos_event["detected_index"] + 1 + EVENT_MAX_AGE[SUB_LPS], len(closes)),
+        ):
+            if _is_lps_pullback(ohlcv, atr_values, trading_range, sos_event, j):
+                lps_event = _event_record(
+                    "lps", j, j, dates, "confirmed",
+                    trading_range.get("level", "single"), trading_range, 0.78,
+                )
+                lps_event["parent_event"] = "sos"
+                lps_event["parent_event_index"] = sos_event["event_index"]
+                events.append(lps_event)
+                break
     latest_idx = len(closes) - 1
     for event in events:
         event["bars_since_event"] = latest_idx - event["event_index"]
@@ -992,11 +1010,43 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
     return events
 
 
+def _is_lps_pullback(ohlcv: dict, atr_values: list, trading_range: dict,
+                     sos_event: dict, index: int) -> bool:
+    """Recognize a shallow, low-volume pullback after a confirmed SOS."""
+    detected_idx = sos_event.get("detected_index", -1)
+    if index <= detected_idx or index >= len(ohlcv["close"]):
+        return False
+    atr = atr_values[index] or 0.0
+    if atr <= 0:
+        return False
+    resistance = trading_range["resistance"]
+    close = ohlcv["close"][index]
+    low = ohlcv["low"][index]
+    if close < resistance - atr * 0.3 or low < resistance - atr * 0.5:
+        return False
+    prior_closes = ohlcv["close"][sos_event["event_index"]:index]
+    post_sos_high = max(prior_closes) if prior_closes else close
+    if post_sos_high - close > atr * 2.0:
+        return False
+    base_vol = _ma_of_last_n(ohlcv["volume"], index, 50)
+    if not base_vol or ohlcv["volume"][index] > base_vol * 0.8:
+        return False
+    body = abs(close - ohlcv["open"][index])
+    if body > atr or close > ohlcv["close"][index - 1]:
+        return False
+    return True
+
+
 def _current_event(events: list[dict]) -> dict | None:
     """Choose the most recent event that is still relevant to a current signal."""
     valid = []
     for event in events:
-        max_age = EVENT_MAX_AGE.get(SUB_JAC if event["type"] == "sos" else SUB_SPRING, 0)
+        event_sub_phase = {
+            "sos": SUB_JAC,
+            "lps": SUB_LPS,
+            "spring": SUB_SPRING,
+        }.get(event["type"], "")
+        max_age = EVENT_MAX_AGE.get(event_sub_phase, 0)
         if event.get("age_bars", 0) <= max_age:
             valid.append(event)
     return max(valid, key=lambda event: event["event_index"]) if valid else None
@@ -1028,6 +1078,7 @@ def generate_trading_implication(phase: str, sub_phase: str) -> str:
     if phase == PHASE_MARKUP:
         implications = {
             SUB_JAC: "JAC（跃过小溪）放量突破箱体，趋势确认。可顺势做多，以箱顶作为止损参考。",
+            SUB_LPS: "BU/LPS（最后支撑点）回调缩量且守住原阻力，供应重新测试失败。",
             SUB_BU: "回踩箱顶获支撑，缩量整理。突破确认后的健康回调，可考虑加仓。",
             SUB_CONTINUATION: "持续拉升阶段。顺应趋势持有，跟踪止盈，不逆势猜顶。",
         }
@@ -1137,8 +1188,10 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         if active_event["status"] == "confirmed":
             if active_event["type"] == "spring":
                 phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
-            else:
+            elif active_event["type"] == "sos":
                 phase, sub_phase = PHASE_MARKUP, SUB_JAC
+            else:
+                phase, sub_phase = PHASE_MARKUP, SUB_LPS
             confidence = active_event["confidence"]
             trigger_idx = active_event.get("event_index")
         signal = {

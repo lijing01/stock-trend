@@ -19,6 +19,7 @@ from analysis.wyckoff import (
     SUB_BREAKDOWN, SUB_PANIC, SUB_STOPPING_VOL,
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
+    _is_lps_pullback,
     is_buy_point, is_buy_signal,
     analyze, analyze_kline_dict, build_period_alignment, load_kline,
 )
@@ -110,6 +111,67 @@ class TestMinorPhase(unittest.TestCase):
         self.assertEqual(minor["code"], "-")
         self.assertEqual(minor["name"], "小级别阶段未确认")
         self.assertIn("A–E", minor["description"])
+
+    def test_markup_lps_is_displayed_as_bu_lps_phase_d(self):
+        minor = build_minor_phase(PHASE_MARKUP, SUB_LPS)
+        self.assertEqual(minor["code"], "D")
+        self.assertIn("BU/LPS", minor["name"])
+
+
+class TestSosLps(unittest.TestCase):
+    @staticmethod
+    def _ohlcv_with_confirmed_sos_and_lps():
+        n = 60
+        ohlcv = {
+            "open": [100.0] * n, "high": [101.0] * n,
+            "low": [99.0] * n, "close": [100.0] * n,
+            "volume": [100.0] * n,
+            "date": [f"202601{i + 1:02d}" for i in range(n)],
+        }
+        ohlcv["open"][50], ohlcv["high"][50], ohlcv["low"][50] = 110.0, 114.0, 109.0
+        ohlcv["close"][50], ohlcv["volume"][50] = 113.0, 150.0
+        ohlcv["open"][51], ohlcv["high"][51], ohlcv["low"][51] = 112.5, 113.5, 111.5
+        ohlcv["close"][51], ohlcv["volume"][51] = 112.5, 110.0
+        ohlcv["open"][52], ohlcv["high"][52], ohlcv["low"][52] = 112.5, 113.0, 110.2
+        ohlcv["close"][52], ohlcv["volume"][52] = 111.2, 70.0
+        return ohlcv, [2.0] * n, {
+            "id": "minor_sos_lps", "level": "minor", "support": 100.0,
+            "resistance": 110.0, "support_idx": 10, "resistance_idx": 40,
+            "touch_count": 5, "duration_bars": 30, "quality_score": 1.0,
+            "is_clear_range": True,
+        }
+
+    def test_confirmed_sos_is_followed_by_confirmed_lps(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_confirmed_sos_and_lps()
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+        sos = next(event for event in events if event["type"] == "sos")
+        lps = next(event for event in events if event["type"] == "lps")
+        self.assertEqual(sos["status"], "confirmed")
+        self.assertEqual(lps["status"], "confirmed")
+        self.assertGreater(lps["event_index"], sos["detected_index"])
+        self.assertEqual(lps["parent_event"], "sos")
+        rows = [
+            {"open": ohlcv["open"][i], "high": ohlcv["high"][i],
+             "low": ohlcv["low"][i], "close": ohlcv["close"][i],
+             "vol": ohlcv["volume"][i], "date": ohlcv["date"][i]}
+            for i in range(len(ohlcv["close"]))
+        ]
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[trading_range]):
+            result = analyze_kline_dict({"meta": {"ts_code": "TEST"}, "data": rows})
+        self.assertEqual(result["phase"]["primary"], PHASE_MARKUP)
+        self.assertEqual(result["phase"]["primary_sub_phase"], SUB_LPS)
+        self.assertEqual(result["phase"]["minor_phase"]["code"], "D")
+        self.assertEqual(result["signal"]["event"], "lps")
+
+    def test_lps_requires_shallow_low_volume_pullback(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_confirmed_sos_and_lps()
+        sos = {"event_index": 50, "detected_index": 51}
+        self.assertTrue(_is_lps_pullback(ohlcv, atr, trading_range, sos, 52))
+        ohlcv["volume"][52] = 140.0
+        self.assertFalse(_is_lps_pullback(ohlcv, atr, trading_range, sos, 52))
+        ohlcv["volume"][52] = 70.0
+        ohlcv["close"][52] = 108.5
+        self.assertFalse(_is_lps_pullback(ohlcv, atr, trading_range, sos, 52))
 
 class TestTradingImplication(unittest.TestCase):
     def test_accumulation_st(self):

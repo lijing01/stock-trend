@@ -745,6 +745,13 @@ class TestGatePass(unittest.TestCase):
             with self.subTest(sub=sub):
                 self.assertTrue(sc.wyckoff_gate_pass(_wk(phase="markup", sub=sub, conf=0.5)))
 
+    def test_confirmed_markup_lps_is_a_buy_point_but_candidate_is_not(self):
+        wk = _wk(phase="markup", sub="lps", conf=0.7, score=2.0)
+        wk["signal"] = {"status": "confirmed", "age_bars": 1, "event": "lps"}
+        self.assertTrue(sc.wyckoff_gate_pass(wk))
+        wk["signal"]["status"] = "candidate"
+        self.assertFalse(sc.wyckoff_gate_pass(wk))
+
     def test_distribution_markdown_rejected(self):
         self.assertFalse(sc.wyckoff_gate_pass(_wk(phase="distribution", sub="lpsy", conf=0.7, score=-2.0)))
         self.assertFalse(sc.wyckoff_gate_pass(_wk(phase="markdown", sub="breakdown", conf=0.7, score=-2.5)))
