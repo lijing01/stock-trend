@@ -483,6 +483,52 @@ class TestMinorWyckoffStructure(unittest.TestCase):
         self.assertEqual(state["state"], "retest")
         self.assertEqual(state["confirmed_sos_date"], "20260814")
 
+    def test_tr_state_marks_deep_return_after_confirmed_breakout_failed(self):
+        tr = {"support": 14.5, "resistance": 16.42}
+        events = [{
+            "type": "sos", "event_index": 8, "event_date": "20260814",
+            "status": "confirmed", "age_bars": 2,
+        }]
+        state = _tr_state(tr, [17.0, 15.9], 0.79, events)
+        self.assertEqual(state["state"], "failed_breakout")
+
+    def test_confirmed_sos_retest_is_not_current_jac(self):
+        ohlcv, _, trading_range = self._event_fixture()
+        # The latest close has returned to the former resistance area.
+        ohlcv["close"][-1] = 102.0
+        ohlcv["high"][-1] = 103.0
+        ohlcv["low"][-1] = 101.5
+        ohlcv["volume"][-1] = 70.0
+        trading_range["quality_score"] = 1.0
+        rows = [
+            {
+                "open": ohlcv["open"][i], "high": ohlcv["high"][i],
+                "low": ohlcv["low"][i], "close": ohlcv["close"][i],
+                "vol": ohlcv["volume"][i], "date": ohlcv["date"][i],
+            }
+            for i in range(len(ohlcv["close"]))
+        ]
+        confirmed_sos = {
+            "type": "sos", "event_index": 40, "detected_index": 40,
+            "event_date": rows[40]["date"], "detected_date": rows[40]["date"],
+            "status": "confirmed", "age_bars": 1,
+            "structure_level": "minor", "range_id": "minor_10",
+            "confidence": 0.8,
+        }
+        with patch("analysis.wyckoff.detect_trading_ranges",
+                   return_value=[trading_range]), \
+                patch("analysis.wyckoff.detect_wyckoff_events",
+                      return_value=[confirmed_sos]), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=((PHASE_MARKUP, SUB_JAC, 0.8), [])):
+            result = analyze_kline_dict({"meta": {"ts_code": "TEST"}, "data": rows})
+
+        self.assertEqual(result["tr_state"]["state"], "retest")
+        self.assertEqual(result["phase"]["primary"], PHASE_ACCUMULATION)
+        self.assertEqual(result["phase"]["primary_sub_phase"], SUB_PRE_MARKUP)
+        self.assertEqual(result["signal"]["status"], "retest_pending")
+        self.assertFalse(is_buy_signal(result))
+
 
 class TestLongTermWyckoffContext(unittest.TestCase):
     @staticmethod

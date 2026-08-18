@@ -524,6 +524,10 @@ def build_period_alignment(short_term: dict, long_term: dict) -> dict:
         int(short_term.get("signal_age_bars", 0) or 0),
     )
     if not long_term.get("eligible") or long_phase == PHASE_UNKNOWN:
+        if (short_phase in BUY_PHASES and short_term.get("sub_phase") in BUY_SUB_PHASES
+                and not confirmed_buy):
+            return {"status": "short_term_pending", "recommendation_gate": "observation",
+                    "label": "短线突破/回踩待确认，暂不推荐"}
         return {"status": "long_term_unavailable", "recommendation_gate": "short_term_only",
                 "label": "长期结构未确认，按短线信号处理"}
     if long_phase in {PHASE_DISTRIBUTION, PHASE_MARKDOWN} and confirmed_buy:
@@ -1001,6 +1005,10 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
         # breakout fail by a few ticks.
         strength = spread >= atr * 1.1 and vol_ratio >= 1.2 and close_position >= 0.7
         if breakout:
+            # Keep historical SOS confirmation separate from the current
+            # acceptance state.  A later return into the box is handled by
+            # _tr_state/analyze_kline_dict, where it is downgraded to a
+            # retest or failed breakout instead of remaining Phase E.
             hold_idx = next((j for j in range(i + 1, min(i + 4, len(closes)))
                              if closes[j] > resistance), None)
             status = "confirmed" if strength and hold_idx is not None else "candidate"
@@ -1157,6 +1165,10 @@ def _tr_state(trading_range: dict | None, closes: list, atr: float,
         state = "breakout_confirmed" if confirmed_sos else "breakout_candidate"
     elif confirmed_sos and close >= resistance - buffer_size:
         state = "retest"
+    elif confirmed_sos:
+        # A confirmed historical SOS that has fallen materially back into the
+        # box is no longer a live JAC/Phase E signal.
+        state = "failed_breakout"
     elif close < support - buffer_size:
         state = "failed_breakout" if confirmed_sos else "below_range"
     else:
@@ -1330,6 +1342,20 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         event for event in event_history if event.get("status") == "candidate"
     ])
     tr_state = _tr_state(trading_range, closes, atr_values[-1] or 0.0, event_history)
+    # Historical SOS confirmation must not override the current relationship
+    # with the box.  A pullback to the former resistance is Phase D territory
+    # until a low-volume LPS/BU or renewed acceptance is observed.
+    if signal.get("event") == "sos" and signal.get("status") == "confirmed":
+        if tr_state.get("state") == "retest":
+            phase, sub_phase = PHASE_ACCUMULATION, SUB_PRE_MARKUP
+            signal["status"] = "retest_pending"
+            signal["state"] = "retest_pending"
+            confidence = min(confidence, 0.65)
+        elif tr_state.get("state") == "failed_breakout":
+            phase, sub_phase = PHASE_ACCUMULATION, SUB_ST
+            signal["status"] = "failed_breakout"
+            signal["state"] = "failed_breakout"
+            confidence = min(confidence, 0.45)
     lps_candidate = None
     confirmed_sos = _latest_confirmed_sos(event_history)
     if confirmed_sos and trading_range:

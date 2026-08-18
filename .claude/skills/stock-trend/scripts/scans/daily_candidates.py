@@ -69,6 +69,8 @@ REASON_LABELS = {
     "intraday_provisional": "盘中数据尚未收盘确认",
     "recommendation_limit": "超出当日推荐数量上限",
     "wyckoff_countertrend": "维科夫长短周期逆势，降级为观察",
+    "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
+    "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
 }
 
 DATA_REASON_CODES = {
@@ -969,6 +971,11 @@ def _candidate_diagnostic_text(item):
         parts.append("其他原因：" + "、".join(dict.fromkeys(other_reasons)))
     elif not data_reasons:
         parts.append("信号：" + _signal_text(item.get("signals", {})))
+    signal_status = item.get("wyckoff", {}).get("short_term", {}).get("signal_status", "")
+    if signal_status == "retest_pending":
+        parts.append("维科夫状态：突破后回踩待确认")
+    elif signal_status == "failed_breakout":
+        parts.append("维科夫状态：突破失败")
     return "；".join(parts)
 
 
@@ -1174,7 +1181,14 @@ def classify_candidates(candidates, policy):
             reasons.append("quality_adjusted_below_min_score")
         if item.get("wyckoff", {}).get("alignment", {}).get(
                 "recommendation_gate") == "observation":
-            reasons.append("wyckoff_countertrend")
+            alignment_status = item.get("wyckoff", {}).get("alignment", {}).get("status")
+            signal_status = item.get("wyckoff", {}).get("short_term", {}).get("signal_status")
+            if signal_status == "retest_pending":
+                reasons.append("wyckoff_retest_pending")
+            elif signal_status == "failed_breakout":
+                reasons.append("wyckoff_failed_breakout")
+            elif alignment_status != "short_term_pending":
+                reasons.append("wyckoff_countertrend")
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
         if not reasons:
