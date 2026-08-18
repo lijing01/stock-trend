@@ -1278,12 +1278,49 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = build_recommendation_policy(regime, "2026-08-06")
         self.assertEqual(policy["mode"], "observation")
 
-    def test_intraday_output_is_provisional_observation(self):
+    def test_intraday_keeps_strong_tier_but_provisional(self):
         regime = {"score": 90, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(
             regime, "2026-08-06", market_open=True)
-        self.assertEqual(policy["mode"], "observation")
+        self.assertEqual(policy["mode"], "actionable")
+        self.assertEqual(policy["max_recommendations"], 5)
+        self.assertEqual(policy["max_portfolio_pct"], 60)
+        self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
+
+    def test_intraday_neutral_tier_waiting_but_provisional(self):
+        regime = {"score": 70, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(
+            regime, "2026-08-06", market_open=True)
+        self.assertEqual(policy["mode"], "waiting_trigger")
+        self.assertEqual(policy["max_recommendations"], 2)
+        self.assertTrue(policy.get("provisional"))
+        self.assertIn("intraday_provisional", policy["reasons"])
+
+    def test_intraday_weak_tier_still_observation_with_both_reasons(self):
+        regime = {"score": 50, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(
+            regime, "2026-08-06", market_open=True)
+        self.assertEqual(policy["mode"], "observation")
+        self.assertIn("regime_weak", policy["reasons"])
+        self.assertIn("intraday_provisional", policy["reasons"])
+
+    def test_intraday_stale_regime_still_observation(self):
+        regime = {"score": 90, "data_date": "2026-08-05"}
+        policy = build_recommendation_policy(
+            regime, "2026-08-06", market_open=True)
+        self.assertEqual(policy["mode"], "observation")
+        self.assertIn("regime_stale", policy["reasons"])
+        self.assertFalse(policy.get("provisional"))
+
+    def test_intraday_observation_pool_marked_provisional(self):
+        policy = build_recommendation_policy(
+            {"score": 50, "data_date": "2026-08-06"},
+            "2026-08-06", market_open=True)
+        buckets = classify_candidates([candidate("1")], policy)
+        self.assertIn(
+            "intraday_provisional",
+            buckets["observation"][0]["observation_reasons"])
 
     def test_neutral_regime_limits_waiting_list_to_two(self):
         regime = {"score": 70, "data_date": "2026-08-06"}

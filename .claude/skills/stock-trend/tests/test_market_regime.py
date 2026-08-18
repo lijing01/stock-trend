@@ -471,6 +471,151 @@ def test_cached_holdings_refresh():
     mr.PORTFOLIO_YAML = old_portfolio
 
 
+# ──────────────── 盘中混合评分 (intraday blend) ────────────────
+
+
+def test_session_elapsed_fraction():
+    print("\n--- _session_elapsed_fraction ---")
+    from datetime import datetime
+    cases = [
+        (datetime(2026, 8, 18, 9, 29), 0.0),
+        (datetime(2026, 8, 18, 9, 30), 0.0),
+        (datetime(2026, 8, 18, 10, 15), 45 / 240.0),
+        (datetime(2026, 8, 18, 11, 30), 0.5),
+        (datetime(2026, 8, 18, 12, 0), 0.5),      # 午休
+        (datetime(2026, 8, 18, 13, 30), 0.5 + 30 / 240.0),
+        (datetime(2026, 8, 18, 15, 0), 1.0),
+        (datetime(2026, 8, 18, 15, 1), 0.0),      # 收盘后走全天路径
+        (datetime(2026, 8, 22, 10, 0), 0.0),      # 周六
+    ]
+    for now, want in cases:
+        got = mr._session_elapsed_fraction(now)
+        test(f"fraction {now.strftime('%m-%d %H:%M')}",
+             abs(got - want) < 1e-9, f"got {got} want {want}")
+
+
+def test_blend_weight():
+    print("\n--- _blend_weight ---")
+    test("fraction<floor=0", mr._blend_weight(0.10) == 0.0)
+    test("fraction=floor=0", mr._blend_weight(0.17) == 0.0)
+    test("fraction>=0.75=1", mr._blend_weight(0.75) == 1.0)
+    got = mr._blend_weight(0.375)
+    test("fraction=0.375≈0.353", abs(got - 0.3534) < 0.01, f"got {got:.4f}")
+
+
+def test_baseline_history_excludes_partials():
+    print("\n--- _baseline_history ---")
+    history = {
+        "2026-08-14": {"amount_yi": 19327.0, "zt": {"count": 59}},
+        "2026-08-17": {"amount_yi": 23875.0, "zt": {"count": 106}},
+        "2026-08-18": {"amount_yi": 9914.0, "zt": {"count": 55}},      # 今日 partial
+        "2026-08-19": {"amount_yi": 6000.0, "zt": {"count": 30}, "intraday": True},
+    }
+    base = mr._baseline_history(history, "2026-08-18")
+    keys = sorted(base)
+    test("排除今日partial", "2026-08-18" not in keys, str(keys))
+    test("排除intraday标记", "2026-08-19" not in keys, str(keys))
+    test("排除异常低额", "2026-08-19" not in keys)
+    test("保留合法全天", "2026-08-14" in keys and "2026-08-17" in keys, str(keys))
+
+
+def test_last_close_context():
+    print("\n--- _last_close_context ---")
+    history = {
+        "2026-08-14": {"regime_score": 56.7, "label": "中性", "amount_yi": 19327.0},
+        "2026-08-17": {"regime_score": 83.8, "label": "强势", "amount_yi": 23875.0},
+        "2026-08-18": {"regime_score": 46.3, "amount_yi": 9914.0},
+    }
+    lc = mr._last_close_context(history, "2026-08-18")
+    test("取上一交易日", lc and lc["date"] == "2026-08-17" and lc["score"] == 83.8,
+         str(lc))
+    test("无前收返回None", mr._last_close_context({}, "2026-08-18") is None)
+    test("仅今日条目返回None",
+         mr._last_close_context({"2026-08-18": {"regime_score": 46.3}}, "2026-08-18") is None)
+
+
+def test_should_save_history():
+    print("\n--- should_save_history ---")
+    test("盘中不写历史", mr.should_save_history({"intraday": True}) is False)
+    test("全天写历史", mr.should_save_history({"intraday": False}) is True)
+    test("缺省写历史", mr.should_save_history({}) is True)
+
+
+def test_collect_context_intraday_blend_not_weak():
+    print("\n--- collect_context 盘中混合不误判弱势 ---")
+    from datetime import datetime
+    prior_dates = [f"202607{i + 1:02d}" for i in range(1, 21)]
+    prior_rows = [
+        {"trade_date": d, "close": 3800 + i, "amount": 11000e8, "pct_chg": 0.1}
+        for i, d in enumerate(prior_dates)
+    ]
+    rows_by_code = {
+        "000001.SH": prior_rows + [
+            {"trade_date": "20260818", "close": 3980.0, "amount": 5000e8, "pct_chg": 0.5},
+        ],
+        "399106.SZ": prior_rows + [
+            {"trade_date": "20260818", "close": 2600.0, "amount": 4914e8, "pct_chg": 0.4},
+        ],
+        "000300.SH": prior_rows + [
+            {"trade_date": "20260818", "close": 4740.0, "amount": 0, "pct_chg": 1.2},
+        ],
+        "399001.SZ": prior_rows + [
+            {"trade_date": "20260818", "close": 10800.0, "amount": 0, "pct_chg": 1.0},
+        ],
+    }
+
+    def fake_index(code, lmt=80, retries=2, diagnostics=None):
+        rows = rows_by_code[code]
+        if diagnostics is not None:
+            diagnostics.update({"source": "fixture", "record_count": len(rows),
+                                "data_date": rows[-1]["trade_date"], "errors": []})
+        return rows
+
+    history = {
+        "2026-08-17": {
+            "regime_score": 83.8, "label": "强势",
+            "components": {"index_trend": 100.0, "volume": 80.0, "breadth": 83.3,
+                           "zt_emotion": 100.0, "capital": 79.9},
+            "amount_yi": 23875.0, "zt": {"count": 106, "streak_count": 15, "max_streak": 4},
+        },
+        # 已污染 partial 条目(不应成为基线/锚)
+        "2026-08-18": {"regime_score": 46.3, "amount_yi": 9914.0,
+                       "zt": {"count": 55, "streak_count": 20, "max_streak": 5}},
+    }
+
+    def run(now):
+        with patch.object(mr, "fetch_index_kline", side_effect=fake_index), \
+                patch.object(mr, "fetch_sector_rankings", return_value=[]), \
+                patch.object(mr, "fetch_zt_stats",
+                             return_value={"count": 55, "streak_count": 20, "max_streak": 5}), \
+                patch.object(mr, "fetch_market_activity",
+                             return_value={"up": 1827, "down": 3542, "main_force_yi": -232.6}), \
+                patch.object(mr, "fetch_northbound", return_value=None), \
+                patch.object(mr, "load_history", return_value=history), \
+                patch.object(mr, "load_portfolio", return_value=[]):
+            return mr.collect_context(now=now)
+
+    # 10:15 — 有外推: 评分不误判弱势(锚昨收强势)
+    ctx = run(datetime(2026, 8, 18, 10, 15))
+    test("10:15 标记盘中", ctx["intraday"] is True)
+    test("10:15 不误判弱势", ctx["regime"]["score"] > 60.0,
+         f"score {ctx['regime']['score']} label {ctx['regime']['label']}")
+    test("10:15 成交额外推为全天额", (ctx["amount_yi"] or 0) > 20000,
+         f"amount {ctx['amount_yi']}")
+    test("10:15 含盘中说明", "盘中" in ctx.get("intraday_note", ""), ctx.get("intraday_note", ""))
+
+    # 9:40 — fraction<FLOOR: 纯昨收锚(≈83.8)
+    ctx_early = run(datetime(2026, 8, 18, 9, 40))
+    test("9:40 标记盘中", ctx_early["intraday"] is True)
+    test("9:40 纯昨收锚", abs(ctx_early["regime"]["score"] - 83.8) < 1.0,
+         f"score {ctx_early['regime']['score']}")
+
+    # 收盘后(15:30) — 非盘中,走全天路径
+    ctx_close = run(datetime(2026, 8, 18, 15, 30))
+    test("收盘后非盘中", ctx_close["intraday"] is False)
+    test("收盘后无盘中说明", ctx_close.get("intraday_note", "") == "")
+
+
 # ──────────────── live loaders (guarded) ────────────────
 
 
@@ -511,6 +656,12 @@ def main():
     test_index_metrics()
     test_persistence()
     test_cached_holdings_refresh()
+    test_session_elapsed_fraction()
+    test_blend_weight()
+    test_baseline_history_excludes_partials()
+    test_last_close_context()
+    test_should_save_history()
+    test_collect_context_intraday_blend_not_weak()
     test_live_loaders()
 
     print(f"\nResults: {PASSED} passed, {FAILED} failed, {SKIPPED} skipped")

@@ -1085,11 +1085,6 @@ def load_regime_context():
 
 
 def build_recommendation_policy(regime, expected_date, market_open=False):
-    if market_open:
-        return {
-            "mode": "observation", "max_recommendations": 0,
-            "max_portfolio_pct": 0, "reasons": ["intraday_provisional"],
-        }
     if not regime or regime.get("score") is None:
         return {
             "mode": "observation", "max_recommendations": 0,
@@ -1101,24 +1096,31 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
             "max_portfolio_pct": 0, "reasons": ["regime_stale"],
         }
     score = float(regime["score"])
+    capital_score = regime.get("capital_score")
+    divergence = capital_score is not None and float(capital_score) < 35
     if score < 60:
-        return {
+        policy = {
             "mode": "observation", "max_recommendations": 0,
             "max_portfolio_pct": 0, "reasons": ["regime_weak"],
         }
-    capital_score = regime.get("capital_score")
-    divergence = capital_score is not None and float(capital_score) < 35
-    if score < 80:
-        return {
+    elif score < 80:
+        policy = {
             "mode": "waiting_trigger", "max_recommendations": 2,
             "max_portfolio_pct": 30, "reasons": [],
             "requires_sector_capital_proof": divergence,
         }
-    return {
-        "mode": "actionable", "max_recommendations": 5,
-        "max_portfolio_pct": 60, "reasons": [],
-        "requires_sector_capital_proof": divergence,
-    }
+    else:
+        policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "max_portfolio_pct": 60, "reasons": [],
+            "requires_sector_capital_proof": divergence,
+        }
+    # 盘中不再硬锁观察池: 按评分分档,但全部标记「盘中临时,收盘确认」。
+    # stale/missing 检查在上面先行 → 非当日 regime 仍 regime_stale 且不置 provisional。
+    if market_open:
+        policy["provisional"] = True
+        policy["reasons"] = (policy.get("reasons") or []) + ["intraday_provisional"]
+    return policy
 
 
 def classify_candidates(candidates, policy):
@@ -1169,6 +1171,8 @@ def classify_candidates(candidates, policy):
             reasons.extend(policy["reasons"])
         if not reasons:
             reasons.append("recommendation_limit")
+        if policy.get("provisional") and "intraday_provisional" not in reasons:
+            reasons.insert(0, "intraday_provisional")
         copy["observation_reasons"] = list(dict.fromkeys(reasons))
         observation.append(copy)
     return {
@@ -1209,10 +1213,17 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         ])
     if policy.get("reasons"):
         lines.extend(["", f"> ⚠️ 推荐降级: {', '.join(policy['reasons'])}"])
+    if policy.get("provisional"):
+        lines.extend([
+            "",
+            "> ⚠️ **盘中临时(未收盘确认)**: 当前为盘中快照,收盘后请复跑 "
+            "`/daily-review` 与 `/candidates` 确认最终结论。",
+        ])
+    suffix = "(盘中临时,收盘确认)" if policy.get("provisional") else ""
     _append_candidate_table(
-        lines, "今日可执行", buckets["actionable"], "今日无可执行推荐。")
+        lines, f"今日可执行{suffix}", buckets["actionable"], "今日无可执行推荐。")
     _append_candidate_table(
-        lines, "等待触发", buckets["waiting_trigger"], "暂无等待触发标的。")
+        lines, f"等待触发{suffix}", buckets["waiting_trigger"], "暂无等待触发标的。")
     _append_candidate_table(
         lines, "次日确认观察（非推荐）", buckets.get("next_day_confirmation", []),
         "暂无可供次日确认的观察标的。")
@@ -1289,6 +1300,13 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
 
     performance_html = _performance_html(performance)
 
+    provisional_banner = (
+        '<p style="color:#b45309;font-weight:600;margin:8px 0">⚠️ 盘中临时(未收盘确认): '
+        '当前为盘中快照,收盘后请复跑 /daily-review 与 /candidates 确认最终结论。</p>'
+        if policy.get("provisional") else ""
+    )
+    tier_suffix = "(盘中临时,收盘确认)" if policy.get("provisional") else ""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1312,9 +1330,10 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 <p class="dt">{policy_note}</p>
 <p class="dt">{funnel_note}</p>
-<h2 style="font-size:18px;margin:18px 0 8px">今日可执行</h2>
+{provisional_banner}
+<h2 style="font-size:18px;margin:18px 0 8px">今日可执行{tier_suffix}</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
-<h2 style="font-size:18px;margin:18px 0 8px">等待触发</h2>
+<h2 style="font-size:18px;margin:18px 0 8px">等待触发{tier_suffix}</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>

@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import statistics
 import sys
 import time
 from datetime import datetime, date
@@ -61,6 +62,39 @@ def _safe_float(v) -> float:
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, v))
+
+
+# ──────────────── 盘中会话时钟 ────────────────
+
+
+def _session_elapsed_fraction(now=None) -> float:
+    """A股当日已过交易时间占比(0-1)。
+
+    240 交易分钟 = 9:30-11:30(120) + 13:00-15:00(120)。
+    午休(11:30-13:00)按 0.5;盘前/收盘后/周末返回 0(走全天路径)。
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return 0.0
+    t = now.hour * 60 + now.minute
+    if 570 <= t < 690:          # 9:30-11:30
+        return (t - 570) / 240.0
+    if 690 <= t < 780:          # 11:30-13:00 午休
+        return 0.5
+    if 780 <= t <= 900:         # 13:00-15:00
+        return 0.5 + (t - 780) / 240.0
+    return 0.0                  # 盘前 / 收盘后
+
+
+# 外推可信下限: 开盘 ~41 分钟前不外推(纯昨收),避免放大早盘噪音
+FLOOR_FRACTION = 0.17
+
+
+def _blend_weight(fraction: float, floor: float = FLOOR_FRACTION) -> float:
+    """昨收→盘中 混合权重: 0=纯昨收, 1=纯盘中(0.75 已过时间后)."""
+    if fraction <= floor:
+        return 0.0
+    return _clamp((fraction - floor) / (0.75 - floor), 0.0, 1.0)
 
 
 # ──────────────── 数据收集 ────────────────
@@ -356,6 +390,15 @@ def score_capital(northbound_yi: float | None, market_activity: dict | None) -> 
     return {"score": 50.0, "detail": "资金数据不可用"}
 
 
+def _regime_gate(score: float) -> tuple[str, str]:
+    """评分 → (label, advice)."""
+    if score >= 80:
+        return "强势", "可正常建仓/加仓,重点做强势板块龙头"
+    if score >= 60:
+        return "中性", "轻仓观察,只做高分标的,不追高"
+    return "弱势", "降仓/空仓,不找牛股,等大盘站上MA20"
+
+
 def compute_regime(components: dict) -> dict:
     """综合市场环境分(0-100) + gate 标签."""
     weights = {
@@ -377,12 +420,7 @@ def compute_regime(components: dict) -> dict:
     if used_weight <= 0:
         return {"score": 50.0, "label": "中性", "advice": "数据不可用"}
     score = round(_clamp(total / used_weight), 1)
-    if score >= 80:
-        label, advice = "强势", "可正常建仓/加仓,重点做强势板块龙头"
-    elif score >= 60:
-        label, advice = "中性", "轻仓观察,只做高分标的,不追高"
-    else:
-        label, advice = "弱势", "降仓/空仓,不找牛股,等大盘站上MA20"
+    label, advice = _regime_gate(score)
     return {"score": score, "label": label, "advice": advice}
 
 
@@ -399,13 +437,54 @@ def load_history(days: int = 30) -> dict:
     return {}
 
 
+def _baseline_history(history: dict, data_date: str,
+                      sanity_floor_ratio: float = 0.55) -> dict:
+    """只留可做**全天**基线的历史条目。
+
+    过滤规则(修复盘中 partial 污染):
+      - date < data_date(排除今日 partial 条目)
+      - 非 partial/intraday 标记(未来防护)
+      - amount 低于 median*0.55 的异常低值剔除(修复已污染条目,如 08-18 半日额 9914)
+        真实低量日(≥15000)不受影响
+    """
+    entries = {
+        k: v for k, v in history.items()
+        if k < data_date and isinstance(v, dict)
+        and not (v.get("partial") or v.get("intraday"))
+    }
+    amounts = sorted(
+        _safe_float(e.get("amount_yi")) for e in entries.values()
+        if _safe_float(e.get("amount_yi")) > 0)
+    if amounts:
+        floor = statistics.median(amounts) * sanity_floor_ratio
+        entries = {
+            k: v for k, v in entries.items()
+            if _safe_float(v.get("amount_yi")) <= 0
+            or _safe_float(v.get("amount_yi")) >= floor
+        }
+    return entries
+
+
+def _last_close_context(history: dict, data_date: str) -> dict | None:
+    """上一完整交易日条目 {date, score, label, components};无则 None."""
+    prior = _baseline_history(history, data_date)
+    if not prior:
+        return None
+    key = max(prior)
+    e = prior[key]
+    return {
+        "date": key,
+        "score": _safe_float(e.get("regime_score")),
+        "label": e.get("label", ""),
+        "components": e.get("components"),
+    }
+
+
 def previous_amounts(history: dict, before_date: str,
                      fetched: dict | None = None) -> list[float]:
     """Return prior turnover values, preferring freshly fetched dates."""
     by_date = {}
-    for history_date, entry in sorted(history.items()):
-        if history_date >= before_date or not isinstance(entry, dict):
-            continue
+    for history_date, entry in sorted(_baseline_history(history, before_date).items()):
         amount = _safe_float(entry.get("amount_yi"))
         if amount > 0:
             by_date[history_date] = amount
@@ -439,8 +518,14 @@ def complete_market_amounts(index_rows: dict) -> dict[str, float]:
     }
 
 
+def should_save_history(ctx: dict) -> bool:
+    """盘中快照不写历史基线(避免 partial 数据污染);全天/收盘后条目才写."""
+    return not bool(ctx.get("intraday", False))
+
+
 def save_history(entry: dict) -> None:
     history = load_history()
+    entry.setdefault("intraday", False)
     history[entry["date"]] = entry
     # prune to newest N
     items = sorted(history.items(), key=lambda kv: kv[0])[-HISTORY_MAX_DAYS:]
@@ -615,6 +700,8 @@ def generate_report(ctx: dict) -> str:
     lines.append(f"▸ 操作建议: {regime.get('advice', '')}")
     if ctx.get("stale_note"):
         lines.append(f"▸ ⚠️ {ctx['stale_note']}")
+    if ctx.get("intraday_note"):
+        lines.append(f"▸ ⚠️ {ctx['intraday_note']}")
     lines.append("")
 
     # ① 市场环境
@@ -730,8 +817,11 @@ def build_plan(regime: dict, holdings: list[dict]) -> list[str]:
 # ──────────────── 主流程 ────────────────
 
 
-def collect_context() -> dict:
-    """拉数据 → 评分 → 组装今日上下文."""
+def collect_context(now=None) -> dict:
+    """拉数据 → 评分 → 组装今日上下文.
+
+    now: 可注入时钟供盘中混合测试;默认 datetime.now().
+    """
     # 指数
     index_codes = list(dict.fromkeys(TREND_INDEX_CODES + AMOUNT_INDEX_CODES))
     index_rows = {}
@@ -766,7 +856,10 @@ def collect_context() -> dict:
 
     history = load_history()
     amount_history_yi = previous_amounts(history, data_date, amount_hist)
-    history_zt_counts = [int(h.get("zt", {}).get("count", 0)) for h in history.values()]
+    history_zt_counts = [
+        int(h.get("zt", {}).get("count", 0))
+        for h in _baseline_history(history, data_date).values()
+    ]
 
     # 北向(不可用降级到全市场主力净流入)
     northbound = fetch_northbound()
@@ -779,6 +872,58 @@ def collect_context() -> dict:
         "capital": score_capital(northbound, activity),
     }
     regime = compute_regime(components)
+
+    # ── 盘中混合: 昨收锚 + 盘中外推(避免半日数据对全天基线误判弱势) ──
+    now = now or datetime.now()
+    fraction = _session_elapsed_fraction(now)
+    is_intraday = fraction > 0 and data_date == now.date().isoformat()
+    intraday_note = ""
+    amount_yi_display = round(today_amount_yi, 0) if today_amount_yi else None
+    zt_display = zt
+    if is_intraday:
+        last_close = _last_close_context(history, data_date)
+        w = _blend_weight(fraction)
+        if fraction >= FLOOR_FRACTION and today_amount_yi and activity:
+            # 外推: est = partial / 已过交易时间占比
+            est_amount = today_amount_yi / max(fraction, FLOOR_FRACTION)
+            est_zt = {**zt, "count": int(round(zt.get("count", 0) / max(fraction, FLOOR_FRACTION)))} if zt else {}
+            est_activity = {
+                **activity,
+                "up": int(round(activity.get("up", 0) / max(fraction, FLOOR_FRACTION))),
+                "down": int(round(activity.get("down", 0) / max(fraction, FLOOR_FRACTION))),
+            }
+            if activity.get("main_force_yi") is not None:
+                est_activity["main_force_yi"] = (
+                    activity["main_force_yi"] / max(fraction, FLOOR_FRACTION))
+            ext_components = {
+                "index_trend": components["index_trend"],
+                "volume": score_volume(est_amount, amount_history_yi),
+                "breadth": score_breadth(est_activity, sectors),
+                "zt_emotion": score_zt_emotion(est_zt, history_zt_counts),
+                "capital": score_capital(northbound, est_activity),
+            }
+            ext_regime = compute_regime(ext_components)
+            amount_yi_display = round(est_amount, 0)
+            zt_display = est_zt
+        else:
+            # 开盘前 ~40 分钟不外推(放大早盘噪音): 直接用昨收条目组件
+            # history 存储的 components 为 {key: score_float},需还原为 {key: {"score": ...}}
+            stored = ((last_close or {}).get("components") or {})
+            ext_components = (
+                {k: {"score": v} for k, v in stored.items() if v is not None}
+                if stored else components)
+            ext_regime = compute_regime(ext_components)
+        anchor_score = (last_close or {}).get("score") if last_close else 50.0
+        blended = round((1 - w) * _safe_float(anchor_score) + w * ext_regime["score"], 1)
+        label, advice = _regime_gate(blended)
+        regime = {"score": blended, "label": label, "advice": advice, "intraday": True}
+        components = ext_components
+        anchor_label = f"昨收 {_safe_float(anchor_score):.1f}" if last_close else "中性 50(无前收基准)"
+        intraday_note = (
+            f"盘中快照 {fraction:.0%} 时段: 评分为 {anchor_label} 与按 "
+            f"{max(fraction, FLOOR_FRACTION):.0%} 外推盘中分的混合(权重 {w:.0%}); "
+            f"收盘后请复跑 /daily-review 确认"
+        )
 
     # 板块最强/最弱(industry, 按 change_pct)
     ranked = sorted(sectors, key=lambda s: _safe_float(s.get("change_pct")), reverse=True)
@@ -797,8 +942,10 @@ def collect_context() -> dict:
         "stale_note": "" if data_date == date.today().isoformat() else f"数据日期 {data_date},非今日(可能非交易日或盘中)",
         "regime": regime,
         "components": components,
-        "amount_yi": round(today_amount_yi, 0) if today_amount_yi else None,
-        "zt": zt,
+        "amount_yi": amount_yi_display,
+        "zt": zt_display,
+        "intraday": is_intraday,
+        "intraday_note": intraday_note,
         "indices": {
             code: {
                 "close": m.get("close"),
@@ -827,6 +974,8 @@ def build_agent_output(ctx: dict) -> dict:
         "regime": ctx["regime"],
         "components": ctx["components"],
         "amount_yi": ctx["amount_yi"],
+        "intraday": ctx.get("intraday", False),
+        "intraday_note": ctx.get("intraday_note", ""),
         "index_data_quality": ctx.get("index_data_quality", {}),
         "zt": ctx["zt"],
         "top_sectors": ctx["top_sectors"],
@@ -867,16 +1016,19 @@ def main():
         print("[4/5] 拉取资金(北向/主力)...")
         print("[5/5] 计算评分 + 持仓分析...")
         ctx = collect_context()
-        # 持久化
-        history_entry = {
-            "date": ctx["data_date"],
-            "regime_score": ctx["regime"]["score"],
-            "label": ctx["regime"]["label"],
-            "components": {k: v.get("score") for k, v in ctx["components"].items()},
-            "amount_yi": ctx["amount_yi"],
-            "zt": ctx["zt"],
-        }
-        save_history(history_entry)
+        # 持久化: 盘中快照不写 history(避免 partial 污染基线),但 context 仍写
+        # (candidates 盘中需要当日 regime 分档)
+        if should_save_history(ctx):
+            history_entry = {
+                "date": ctx["data_date"],
+                "regime_score": ctx["regime"]["score"],
+                "label": ctx["regime"]["label"],
+                "components": {k: v.get("score") for k, v in ctx["components"].items()},
+                "amount_yi": ctx["amount_yi"],
+                "zt": ctx["zt"],
+                "intraday": False,
+            }
+            save_history(history_entry)
         save_context(ctx)
 
     now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -954,6 +1106,7 @@ ul{{padding-left:20px;line-height:1.8}}
 <div class="score">{regime.get('score',0)} / 100 <span style="font-size:18px">{regime.get('label','')}</span></div>
 <p class="dt">{regime.get('advice','')}</p>
 {'<p class="dt">⚠️ ' + ctx.get('stale_note','') + '</p>' if ctx.get('stale_note') else ''}
+{'<p class="dt" style="color:#d97706">⚠️ ' + ctx.get('intraday_note','') + '</p>' if ctx.get('intraday_note') else ''}
 
 <h2>① 市场环境</h2>
 <table><thead><tr><th>组件</th><th>得分</th><th>说明</th></tr></thead><tbody>
