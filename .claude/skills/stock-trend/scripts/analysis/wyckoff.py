@@ -138,7 +138,7 @@ CLIMAX_VOL_RATIO_THRESHOLD = 2.0
 CLIMAX_SHADOW_RATIO_THRESHOLD = 0.5
 
 # Trading range constants
-RANGE_CLUSTER_TOLERANCE_ATR = 1.0
+RANGE_CLUSTER_TOLERANCE_ATR = 0.75
 RANGE_MIN_HEIGHT_ATRS = 3
 RANGE_MIN_TOUCHES = 3
 RANGE_MIN_BARS = 20
@@ -209,7 +209,12 @@ def compute_ma(values: list, period: int) -> list[float | None]:
 
 
 def compute_atr(highs: list, lows: list, closes: list, period: int = 14) -> list[float | None]:
-    """Average True Range."""
+    """Wilder Average True Range.
+
+    The previous simple moving average made one shock bar influence the
+    range tolerance for the full rolling window.  Wilder smoothing keeps the
+    volatility response adaptive without letting a single bar dominate it.
+    """
     trs = []
     for i in range(len(closes)):
         if i == 0:
@@ -217,7 +222,15 @@ def compute_atr(highs: list, lows: list, closes: list, period: int = 14) -> list
         else:
             tr = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
         trs.append(tr)
-    return compute_ma(trs, period)
+    if len(trs) < period:
+        return [None] * len(trs)
+    result = [None] * len(trs)
+    current = sum(trs[:period]) / period
+    result[period - 1] = round(current, 4)
+    for i in range(period, len(trs)):
+        current = ((current * (period - 1)) + trs[i]) / period
+        result[i] = round(current, 4)
+    return result
 
 
 def detect_swing_points(closes: list, highs: list, lows: list, volumes: list,
@@ -376,7 +389,13 @@ def _select_current_range(ranges: list[dict], close: float, atr: float) -> dict 
     """Prefer the smallest relevant range; retain wider ranges as context."""
     relevant = []
     for trading_range in ranges:
-        buffer_size = max(atr * 2.0, trading_range["resistance"] * 0.02)
+        height = trading_range["resistance"] - trading_range["support"]
+        # Keep a transition buffer, but do not let a volatile stock remain in
+        # an old range several ATRs beyond its boundary.
+        buffer_size = min(
+            max(atr, trading_range["resistance"] * 0.01),
+            max(height * 0.25, 0.0),
+        )
         if trading_range["support"] - buffer_size <= close <= trading_range["resistance"] + buffer_size:
             relevant.append(trading_range)
     if not relevant:
@@ -977,7 +996,10 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
         spread = highs[i] - lows[i]
         close_position = (closes[i] - lows[i]) / spread if spread > 0 else 0.0
         breakout = closes[i] > resistance + max(atr * 0.3, resistance * 0.005)
-        strength = spread >= atr * 1.2 and vol_ratio >= 1.2 and close_position >= 0.7
+        # Wilder ATR is less sensitive to the latest shock than the former
+        # SMA, so keep a strong-spread requirement without making a valid
+        # breakout fail by a few ticks.
+        strength = spread >= atr * 1.1 and vol_ratio >= 1.2 and close_position >= 0.7
         if breakout:
             hold_idx = next((j for j in range(i + 1, min(i + 4, len(closes)))
                              if closes[j] > resistance), None)
@@ -1049,7 +1071,104 @@ def _current_event(events: list[dict]) -> dict | None:
         max_age = EVENT_MAX_AGE.get(event_sub_phase, 0)
         if event.get("age_bars", 0) <= max_age:
             valid.append(event)
-    return max(valid, key=lambda event: event["event_index"]) if valid else None
+    # A fresh candidate on the next bar of an already-confirmed breakout is
+    # not stronger evidence than the confirmed parent event.  Prefer the
+    # latest confirmed event and only fall back to candidates when no
+    # confirmed event is still alive.
+    confirmed = [event for event in valid if event.get("status") == "confirmed"]
+    pool = confirmed or [event for event in valid if event.get("status") == "candidate"]
+    event_priority = {"lps": 3, "sos": 2, "spring": 1}
+    return max(
+        pool,
+        key=lambda event: (event_priority.get(event.get("type"), 0), event["event_index"]),
+    ) if pool else None
+
+
+def _latest_confirmed_sos(events: list[dict]) -> dict | None:
+    """Return the latest live confirmed SOS for post-breakout validation."""
+    sos_events = [
+        event for event in events
+        if event.get("type") == "sos"
+        and event.get("status") == "confirmed"
+        and event.get("age_bars", 0) <= EVENT_MAX_AGE[SUB_JAC]
+    ]
+    return max(sos_events, key=lambda event: event["event_index"]) if sos_events else None
+
+
+def _lps_candidate(ohlcv: dict, atr_values: list, trading_range: dict,
+                   sos_event: dict, index: int) -> dict | None:
+    """Return a non-confirming LPS candidate after a confirmed SOS.
+
+    Confirmation remains stricter and is produced by ``_is_lps_pullback``;
+    this candidate is informational and must not pass the buy-point gate.
+    """
+    detected_idx = sos_event.get("detected_index", -1)
+    if index <= detected_idx or index >= len(ohlcv["close"]):
+        return None
+    age = index - detected_idx
+    if age > EVENT_MAX_AGE[SUB_LPS]:
+        return None
+    atr = atr_values[detected_idx] or atr_values[index] or 0.0
+    if atr <= 0:
+        return None
+    resistance = trading_range["resistance"]
+    close = ohlcv["close"][index]
+    low = ohlcv["low"][index]
+    previous_close = ohlcv["close"][index - 1]
+    if low < resistance - atr * 0.75 or close < resistance - atr * 0.5:
+        return None
+    if close >= previous_close:
+        return None
+    sos_idx = sos_event.get("event_index", detected_idx)
+    sos_volume = ohlcv["volume"][sos_idx]
+    base_vol = _ma_of_last_n(ohlcv["volume"], index, 20)
+    if not base_vol or ohlcv["volume"][index] > max(base_vol * 0.95, sos_volume * 0.85):
+        return None
+    return {
+        "type": "lps",
+        "status": "candidate",
+        "event_index": index,
+        "detected_index": index,
+        "event_date": ohlcv["date"][index],
+        "detected_date": ohlcv["date"][index],
+        "age_bars": 0,
+        "bars_since_event": 0,
+        "structure_level": trading_range.get("level", "single"),
+        "range_id": trading_range.get("id", ""),
+        "confidence": 0.62,
+        "parent_event": "sos",
+        "parent_event_index": sos_event.get("event_index"),
+        "breakout_atr": round(atr, 4),
+    }
+
+
+def _tr_state(trading_range: dict | None, closes: list, atr: float,
+              events: list[dict]) -> dict:
+    """Classify the current relationship to a trading range."""
+    if not trading_range or not closes:
+        return {"state": "no_range", "buffer": None, "evidence": ""}
+    support = trading_range["support"]
+    resistance = trading_range["resistance"]
+    height = max(resistance - support, 0.0)
+    buffer_size = min(max(atr, resistance * 0.01), max(height * 0.25, 0.0))
+    close = closes[-1]
+    confirmed_sos = _latest_confirmed_sos(events)
+    if close > resistance + buffer_size:
+        state = "breakout_confirmed" if confirmed_sos else "breakout_candidate"
+    elif confirmed_sos and close >= resistance - buffer_size:
+        state = "retest"
+    elif close < support - buffer_size:
+        state = "failed_breakout" if confirmed_sos else "below_range"
+    else:
+        state = "in_range"
+    return {
+        "state": state,
+        "buffer": round(buffer_size, 4),
+        "close": round(close, 4),
+        "support": support,
+        "resistance": resistance,
+        "confirmed_sos_date": confirmed_sos.get("event_date", "") if confirmed_sos else "",
+    }
 
 
 def _compose_confidence(structure_confidence: float, trading_range: dict | None,
@@ -1204,6 +1323,20 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "event": active_event["type"],
         }
 
+    confirmed_event = _current_event([
+        event for event in event_history if event.get("status") == "confirmed"
+    ])
+    candidate_event = _current_event([
+        event for event in event_history if event.get("status") == "candidate"
+    ])
+    tr_state = _tr_state(trading_range, closes, atr_values[-1] or 0.0, event_history)
+    lps_candidate = None
+    confirmed_sos = _latest_confirmed_sos(event_history)
+    if confirmed_sos and trading_range:
+        lps_candidate = _lps_candidate(
+            ohlcv, atr_values, trading_range, confirmed_sos, latest_idx,
+        )
+
     bullish_phases = {PHASE_ACCUMULATION, PHASE_MARKUP}
     expected_vsa = {"absorption", "no_supply", "stopping_volume"} if phase in bullish_phases else {"no_demand", "upthrust"}
     directional_vsa_count = sum(1 for item in vsa_signals[-10:] if item.get("type") in expected_vsa)
@@ -1225,6 +1358,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         key_signals.append(
             f"当前事件: {active_event['type'].upper()}（{active_event['status']}，{active_event['age_bars']} 根K）"
         )
+    if lps_candidate:
+        key_signals.append("LPS候选：等待回踩后的收复确认")
     for vs in vsa_signals[-3:]:
         key_signals.append(vs["description"])
 
@@ -1339,6 +1474,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "minor_phase": build_minor_phase(phase, sub_phase, trigger),
         },
         "range": trading_range or {"is_clear_range": False},
+        "tr_state": tr_state,
         "ranges": ranges,
         "timeframes": timeframe_map,
         "short_term": short_term,
@@ -1348,6 +1484,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "structures": structures,
         "event_history": event_history,
         "signal": signal,
+        "confirmed_event": confirmed_event,
+        "candidate_event": candidate_event,
+        "lps_candidate": lps_candidate,
         "swing_points": swings[-20:],
         "vsa_signals": vsa_signals_sorted[:10],
         "cause_effect": cause_effect,

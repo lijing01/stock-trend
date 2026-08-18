@@ -19,7 +19,7 @@ from analysis.wyckoff import (
     SUB_BREAKDOWN, SUB_PANIC, SUB_STOPPING_VOL,
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
-    _is_lps_pullback,
+    _is_lps_pullback, _current_event, _tr_state,
     is_buy_point, is_buy_signal,
     analyze, analyze_kline_dict, build_period_alignment, load_kline,
 )
@@ -463,6 +463,25 @@ class TestMinorWyckoffStructure(unittest.TestCase):
 
         self.assertEqual(result["signal"]["status"], "candidate")
         self.assertNotEqual(result["phase"]["primary_sub_phase"], SUB_JAC)
+
+    def test_confirmed_event_has_priority_over_newer_candidate(self):
+        events = [
+            {"type": "sos", "event_index": 10, "status": "confirmed", "age_bars": 2},
+            {"type": "sos", "event_index": 11, "status": "candidate", "age_bars": 1},
+        ]
+        active = _current_event(events)
+        self.assertEqual(active["event_index"], 10)
+        self.assertEqual(active["status"], "confirmed")
+
+    def test_tr_state_marks_confirmed_breakout_retest(self):
+        tr = {"support": 14.5, "resistance": 16.42}
+        events = [{
+            "type": "sos", "event_index": 8, "event_date": "20260814",
+            "status": "confirmed", "age_bars": 2,
+        }]
+        state = _tr_state(tr, [17.0, 16.4], 0.79, events)
+        self.assertEqual(state["state"], "retest")
+        self.assertEqual(state["confirmed_sos_date"], "20260814")
 
 
 class TestLongTermWyckoffContext(unittest.TestCase):

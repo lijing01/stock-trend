@@ -1155,7 +1155,7 @@ def calc_support_resistance(df, ma_result, bollinger_result, atr_pct=None, adx_v
 
 
 def calc_atr(df, period=14):
-    """Compute Average True Range for stop-loss and volatility assessment."""
+    """Compute Wilder Average True Range for risk and volatility assessment."""
     if len(df) < period + 1:
         return {"atr": None, "atr_pct": None, "signal": {"type": "insufficient_data", "description": "ATR数据不足", "score": 0}}
 
@@ -1164,7 +1164,17 @@ def calc_atr(df, period=14):
     prev_close = df["close"].shift(1)
 
     tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean()
+    # Wilder's smoothing reacts to new volatility without making a single
+    # shock bar dominate the full rolling window.
+    values = tr.to_numpy(dtype=float)
+    atr_values = np.full(len(values), np.nan)
+    if len(values) >= period:
+        current = float(np.mean(values[:period]))
+        atr_values[period - 1] = current
+        for i in range(period, len(values)):
+            current = ((current * (period - 1)) + values[i]) / period
+            atr_values[i] = current
+    atr = pd.Series(atr_values, index=tr.index)
     curr_atr = atr.iloc[-1]
 
     if pd.isna(curr_atr):

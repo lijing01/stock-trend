@@ -101,4 +101,16 @@ python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --cod
 4. ATR 分用途与参数收紧；
 5. 太极集团回放、全量回测和回归测试。
 
-本方案是实施计划，尚未修改算法代码。
+## 实施状态
+
+已完成第一版实现：
+
+- confirmed 事件优先于同一突破腿中的 candidate 事件；
+- TR 增加突破后回踩状态，并收紧 ATR 过渡缓冲；
+- 输出 confirmed/candidate 事件与 LPS candidate；
+- TR 聚类与技术 ATR 改用 Wilder 平滑/收紧容差；
+- 新增事件仲裁与 TR 状态回归测试。
+
+验证结果：`test_wyckoff.py` 54项通过；项目主测试套件通过；golden 对比21项通过、0项失败；太极集团当前回放识别为“confirmed SOS → retest”，并保留“LPS candidate”。
+
+维科夫回测已用太极集团与贵州茅台双标的运行，但样本仅4个信号，结果不足以证明策略收益改善，不能据此扩大结论。
