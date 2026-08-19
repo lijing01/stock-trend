@@ -91,6 +91,37 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         self.assertEqual(performance["final_valid_count"], 1)
 
+    def test_complete_performance_preserves_degraded_scan_evidence(self):
+        performance = {
+            "degradation_reasons": ["resonance_error:RuntimeError"],
+            "failed_batches": [{"sectors": ["BK1"], "reason": "OSError"}],
+        }
+        completed = _complete_performance(
+            performance, None, [],
+            {"actionable": [], "waiting_trigger": [], "observation": []},
+            min_score=50, total_seconds=1.0)
+        self.assertEqual(completed["scan_status"], "degraded")
+        self.assertEqual(completed["degradation_reasons"],
+                         ["resonance_error:RuntimeError"])
+        self.assertEqual(completed["failed_batches"][0]["sectors"], ["BK1"])
+
+    def test_complete_performance_marks_all_failed_batches_as_error(self):
+        performance = {
+            "batch_count": 2,
+            "failed_batches": [
+                {"sectors": ["BK1"], "reason": "OSError"},
+                {"sectors": ["BK2"], "reason": "TimeoutError"},
+            ],
+            "degradation_reasons": [
+                "batch_error:OSError", "batch_error:TimeoutError",
+            ],
+        }
+        completed = _complete_performance(
+            performance, None, [],
+            {"actionable": [], "waiting_trigger": [], "observation": []},
+            min_score=50, total_seconds=1.0)
+        self.assertEqual(completed["scan_status"], "error")
+
     def test_performance_audit_renders_in_markdown_html_and_stderr(self):
         policy = {
             "mode": "actionable", "max_recommendations": 5,

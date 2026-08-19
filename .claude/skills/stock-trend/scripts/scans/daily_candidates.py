@@ -14,6 +14,7 @@ import sys
 import json
 import argparse
 import copy
+from html import escape
 import time
 from datetime import datetime, timedelta, time as datetime_time
 from pathlib import Path
@@ -117,6 +118,22 @@ _SOURCE_AUDIT_FIELDS = (
 )
 
 
+def _record_degradation(metrics, reason):
+    """Record one stable degradation reason without duplicate noise."""
+    reasons = metrics.setdefault("degradation_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
+def _record_failed_batch(metrics, batch, exc):
+    """Retain the failed batch and its exception type in the public audit."""
+    metrics.setdefault("failed_batches", []).append({
+        "sectors": list(batch),
+        "reason": type(exc).__name__,
+    })
+    _record_degradation(metrics, f"batch_error:{type(exc).__name__}")
+
+
 def _complete_performance(performance, source_health, candidates, buckets,
                           min_score, total_seconds):
     """Finalize the additive public performance contract from run evidence."""
@@ -130,6 +147,14 @@ def _complete_performance(performance, source_health, candidates, buckets,
         _is_final_valid_candidate(item, min_score) for item in candidates)
     completed["actionable_count"] = len(buckets.get("actionable", []))
     completed["total_seconds"] = max(0.0, float(total_seconds))
+    completed.setdefault("degradation_reasons", [])
+    completed.setdefault("failed_batches", [])
+    attempted_batches = int(completed.get("batch_count", 0))
+    failed_batches = len(completed["failed_batches"])
+    completed["scan_status"] = (
+        "error" if attempted_batches > 0 and failed_batches == attempted_batches
+        else ("degraded" if completed["degradation_reasons"] else "complete")
+    )
 
     snapshot = (source_health.snapshot()
                 if isinstance(source_health, RunSourceHealth)
@@ -207,6 +232,9 @@ def _performance_markdown(performance):
         f"有效 {performance.get('final_valid_count', 0)} → "
         f"可执行 {performance.get('actionable_count', 0)}",
         "",
+        f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
+        f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
+        "",
         "| 数据源 | 逻辑请求 | Provider尝试 | 缓存命中 | 失败 | 熔断 | 状态 | 失败原因 |",
         "|---|---:|---:|---:|---:|---:|---|---|",
     ])
@@ -247,10 +275,14 @@ def _performance_html(performance):
     funnel_text = " | ".join(
         f"{field}={performance.get(field, 0)}"
         for field in _PERFORMANCE_FUNNEL_FIELDS)
+    scan_status = escape(str(performance.get("scan_status", "complete")))
+    degradation_reasons = escape(
+        "、".join(performance.get("degradation_reasons", [])) or "无")
     return (
         "<section><h2 style='font-size:18px;margin:18px 0 8px'>"
         "性能与数据源审计</h2>"
         f"<p class='dt'>{phase_text}</p><p class='dt'>{funnel_text}</p>"
+        f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
         "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
         "<th>Provider尝试</th><th>缓存</th><th>失败</th><th>熔断</th>"
         "<th>状态</th><th>失败原因</th></tr></thead><tbody>"
