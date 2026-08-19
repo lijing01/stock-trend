@@ -33,7 +33,7 @@
 - Modify: `.claude/skills/stock-trend/scripts/scans/daily_candidates.py:601-715`
 - Modify: `.claude/skills/stock-trend/tests/test_daily_candidates.py:640-700`
 
-- [ ] **Step 1: Write a failing universe-expansion test**
+- [x] **Step 1: Write a failing universe-expansion test**
 
   Add this test near `test_pick_hot_sectors_uses_absolute_threshold`. It verifies that the 21st qualifying sector reaches the batch scanner rather than being truncated at the legacy default of 20:
 
@@ -60,7 +60,7 @@
       self.assertEqual(picked[-1]["code"], "BK20")
   ```
 
-- [ ] **Step 2: Run the target test and confirm RED**
+- [x] **Step 2: Run the target test and confirm RED**
 
   Run:
 
@@ -70,7 +70,7 @@
 
   Expected: the new test fails with 20 returned sectors, proving the top-20 ceiling exists.
 
-- [ ] **Step 3: Make the ranked-universe limit optional**
+- [x] **Step 3: Make the ranked-universe limit optional**
 
   Change `pick_hot_sectors()` to default `top_n` to `None`, and continue passing that value to `rank_hot_sectors()`:
 
@@ -82,7 +82,7 @@
 
   `rank_hot_sectors(..., top_n=None)` already returns all list members through Python slicing. Do not alter its scoring or filtering. The existing `scan_sectors()` early-stop condition at `eligible_count >= min_candidates` remains the execution budget guard.
 
-- [ ] **Step 4: Run the target test and confirm GREEN**
+- [x] **Step 4: Run the target test and confirm GREEN**
 
   Run:
 
@@ -92,7 +92,7 @@
 
   Expected: all tests pass; a 21-sector qualifying universe is retained, while ordinary scans still stop after the configured valid-candidate target.
 
-- [ ] **Step 5: Commit the universe-expansion change**
+- [x] **Step 5: Commit the universe-expansion change**
 
   ```bash
   git add .claude/skills/stock-trend/scripts/scans/daily_candidates.py .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -106,7 +106,7 @@
 - Modify: `.claude/skills/stock-trend/scripts/scans/daily_candidates.py:104-285`
 - Modify: `.claude/skills/stock-trend/tests/test_daily_candidates.py:110-250`
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
   Add a helper-level test that supplies degradation evidence before `_complete_performance()` finalizes the result:
 
@@ -149,7 +149,7 @@
       self.assertEqual(completed["scan_status"], "error")
   ```
 
-- [ ] **Step 2: Run the target test and confirm RED**
+- [x] **Step 2: Run the target test and confirm RED**
 
   Run:
 
@@ -159,7 +159,7 @@
 
   Expected: failures because `scan_status` and the normalized degradation fields do not yet exist.
 
-- [ ] **Step 3: Implement the normalized health helpers and final status**
+- [x] **Step 3: Implement the normalized health helpers and final status**
 
   Add these helpers above `_complete_performance()`:
 
@@ -201,7 +201,7 @@
 
   Add an equivalent escaped `扫描状态` paragraph to `_performance_html()`. Do not change existing timing, funnel, or source-health fields.
 
-- [ ] **Step 4: Run the target tests and confirm GREEN**
+- [x] **Step 4: Run the target tests and confirm GREEN**
 
   Run:
 
@@ -211,7 +211,7 @@
 
   Expected: complete scans retain `complete`; scans with one recoverable failure are `degraded`; scans whose every attempted batch failed are `error`.
 
-- [ ] **Step 5: Commit the scan-health contract**
+- [x] **Step 5: Commit the scan-health contract**
 
   ```bash
   git add .claude/skills/stock-trend/scripts/scans/daily_candidates.py .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -225,7 +225,7 @@
 - Modify: `.claude/skills/stock-trend/scripts/scans/daily_candidates.py:601-742`
 - Modify: `.claude/skills/stock-trend/tests/test_daily_candidates.py:640-805`
 
-- [ ] **Step 1: Write failing resilience tests**
+- [x] **Step 1: Write failing resilience tests**
 
   Add the following tests. They all use a complete live ranking payload and three days of valid history, so only the injected failure can cause degradation:
 
@@ -300,7 +300,7 @@
 
   The resonance test must also assert `picked[0]["resonance_quality"] == "error"` and preserve the sector as scanable based on its independent ranking evidence.
 
-- [ ] **Step 2: Run the target tests and confirm RED**
+- [x] **Step 2: Run the target tests and confirm RED**
 
   Run:
 
@@ -310,7 +310,7 @@
 
   Expected: the cache/snapshot tests error out before returning a sector; the resonance test has no structured error state.
 
-- [ ] **Step 3: Implement side-effect isolation and resonance provenance**
+- [x] **Step 3: Implement side-effect isolation and resonance provenance**
 
   In `pick_hot_sectors()`, initialize `metrics = metrics if metrics is not None else {}`. On a complete live ranking, write the cache and snapshot independently:
 
@@ -356,7 +356,7 @@
 
   Keep the existing policy that resonance absence does not by itself promote or reject a sector; it changes evidence quality only.
 
-- [ ] **Step 4: Run the target tests and confirm GREEN**
+- [x] **Step 4: Run the target tests and confirm GREEN**
 
   Run:
 
@@ -366,7 +366,7 @@
 
   Expected: ranking data remains usable after either write failure, and every resonance failure/mismatch is visible in both metrics and per-sector provenance.
 
-- [ ] **Step 5: Commit the resilience change**
+- [x] **Step 5: Commit the resilience change**
 
   ```bash
   git add .claude/skills/stock-trend/scripts/scans/daily_candidates.py .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -381,7 +381,7 @@
 - Modify: `.claude/skills/stock-trend/tests/test_daily_candidates.py:804-1085`
 - Modify: `.claude/skills/stock-trend/tests/test_daily_candidates.py:1570-1640`
 
-- [ ] **Step 1: Write failing batch and main-contract tests**
+- [x] **Step 1: Write failing batch and main-contract tests**
 
   Add a batch test that lets the first gather call fail and the second succeed:
 
@@ -449,7 +449,7 @@
       )
   ```
 
-- [ ] **Step 2: Run the target tests and confirm RED**
+- [x] **Step 2: Run the target tests and confirm RED**
 
   Run:
 
@@ -459,7 +459,7 @@
 
   Expected: the batch test finds no `failed_batches` record; the main JSON has no scan status or degradation evidence.
 
-- [ ] **Step 3: Record each recoverable batch failure**
+- [x] **Step 3: Record each recoverable batch failure**
 
   In the `except Exception as exc` around `gather_candidates()` in `scan_sectors()`, retain the stderr diagnostic and add:
 
@@ -479,7 +479,7 @@
 
   `_complete_performance()` then makes this data visible through the existing `build_json_output()` performance envelope.
 
-- [ ] **Step 4: Run the target tests and confirm GREEN**
+- [x] **Step 4: Run the target tests and confirm GREEN**
 
   Run:
 
@@ -489,7 +489,7 @@
 
   Expected: a later successful batch is retained, the missing batch is disclosed, and the JSON public contract reports `degraded`.
 
-- [ ] **Step 5: Commit the batch-observability change**
+- [x] **Step 5: Commit the batch-observability change**
 
   ```bash
   git add .claude/skills/stock-trend/scripts/scans/daily_candidates.py .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -503,7 +503,7 @@
 - Verify only: `.claude/skills/stock-trend/scripts/scans/daily_candidates.py`
 - Verify only: `.claude/skills/stock-trend/tests/test_daily_candidates.py`
 
-- [ ] **Step 1: Run the focused suite**
+- [x] **Step 1: Run the focused suite**
 
   ```bash
   python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
@@ -511,7 +511,7 @@
 
   Expected: all existing and new tests pass. The focused suite proves that scan status, failure evidence, cache-write recovery, resonance provenance, and sector-universe expansion work together.
 
-- [ ] **Step 2: Run the repository-mandated Python gates**
+- [x] **Step 2: Run the repository-mandated Python gates**
 
   ```bash
   python3 .claude/skills/stock-trend/tests/test_stock_trend.py
@@ -520,7 +520,7 @@
 
   Expected: both commands exit 0. Do not regenerate golden snapshots. Any output difference must be reviewed as an intended additive reporting-contract change.
 
-- [ ] **Step 3: Verify the change boundary**
+- [x] **Step 3: Verify the change boundary**
 
   ```bash
   git diff --check
