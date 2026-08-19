@@ -681,6 +681,61 @@ def run_new_script_tests(tmpdir):
             test("TF-RPT-01i: HTML含场景B", "场景 B：回调到位" in html_content, html_content[:200], "report")
             test("TF-RPT-01k: HTML含事件链", "突破后事件链" in html_content and "LPS" in html_content, html_content[:500], "report")
 
+    invalid_wyckoff_path = os.path.join(tmpdir, "render_wyckoff_failed_breakout.json")
+    _write_json(invalid_wyckoff_path, {
+        "meta": {},
+        "phase": {"primary": "accumulation", "primary_name": "吸筹阶段",
+                  "primary_sub_phase": "secondary_test", "sub_phase_name": "二次测试（ST）",
+                  "confidence": 0.45},
+        "range": {"is_clear_range": False}, "vsa_signals": [], "cause_effect": {},
+        "wyckoff_score": 0.5, "wyckoff_signals": {"trading_implication": "等待重新确认。"},
+        "event_history": [
+            {"type": "sos", "event_index": 50, "event_date": "20260520",
+             "detected_date": "20260521", "status": "confirmed"},
+        ],
+        "short_term": {"phase_name": "吸筹阶段", "sub_phase_name": "二次测试（ST）",
+                       "confidence": 0.45, "signal_status": "failed_breakout"},
+        "long_term": {"eligible": True, "phase": "distribution",
+                      "phase_name": "派发阶段", "confidence": 0.7},
+        "alignment": {"label": "短线突破失效，等待结构重建", "recommendation_gate": "observation"},
+    })
+    invalid_md_path = os.path.join(tmpdir, "test_report_failed_breakout.md")
+    invalid_html_path = os.path.join(tmpdir, "test_report_failed_breakout.html")
+    rc, stdout, stderr = run_script(
+        "reporting/report.py",
+        "--technical", tech_path,
+        "--kline", kline_path,
+        "--scores-file", scores_path,
+        "--wyckoff-data", invalid_wyckoff_path,
+        "--stock-name", "贵州茅台",
+        "--date", "2026-05-29",
+        "--output-md", invalid_md_path,
+        "--output-html", invalid_html_path,
+        timeout=15,
+    )
+    if rc == 0:
+        with open(invalid_md_path, "r", encoding="utf-8") as f:
+            invalid_md_content = f.read()
+        with open(invalid_html_path, "r", encoding="utf-8") as f:
+            invalid_html_content = f.read()
+        for label, content in (("MD", invalid_md_content), ("HTML", invalid_html_content)):
+            test(
+                f"TF-RPT-WY-FAIL-01: {label}含相关触发日志",
+                "相关触发日志" in content and "SOS（JAC 突破）" in content,
+                content[content.find("维科夫"):content.find("维科夫") + 800],
+                "report",
+            )
+            test(
+                f"TF-RPT-WY-FAIL-02: {label}含失效后的下阶段判定",
+                "失效后的下阶段判定" in content
+                and "吸筹阶段（置信度: 45%）" in content
+                and "二次测试（ST）" in content,
+                content[content.find("维科夫"):content.find("维科夫") + 1000],
+                "report",
+            )
+    else:
+        test("TF-RPT-WY-FAIL-00: 报告生成", False, f"exit_code={rc}, stderr={stderr[:200]}", "report")
+
     weak_tech_path, weak_kline_path, weak_scores_path = _write_report_fixture(
         tmpdir,
         "render_weak",

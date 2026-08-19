@@ -337,7 +337,7 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
 
 
 def _wyckoff_event_chain(wyckoff_data):
-    """Return the latest SOS→BU→LPS chain for report rendering."""
+    """Return the latest SOS→BU→LPS trigger log for report rendering."""
     events = wyckoff_data.get("event_history") or []
     if not isinstance(events, list):
         return []
@@ -355,7 +355,7 @@ def _wyckoff_event_chain(wyckoff_data):
         event.get("event_index", -1),
         {"sos": 0, "bu": 1, "lps": 2}.get(event.get("type"), 9),
     ))
-    labels = {"sos": "SOS", "bu": "BU", "lps": "LPS"}
+    labels = {"sos": "SOS（JAC 突破）", "bu": "BU", "lps": "LPS"}
     statuses = {"confirmed": "已确认", "candidate": "候选/待确认", "expired": "已失效"}
     chain = []
     for event in related:
@@ -370,6 +370,29 @@ def _wyckoff_event_chain(wyckoff_data):
             "event_date": event_date or "—",
         })
     return chain
+
+
+def _wyckoff_next_stage_judgment(wyckoff_data):
+    """Describe the engine's reclassification after a JAC retest or failure."""
+    phase = wyckoff_data.get("phase") or {}
+    short_term = wyckoff_data.get("short_term") or {}
+    signal = wyckoff_data.get("signal") or {}
+    status = short_term.get("signal_status", signal.get("status", ""))
+    if status not in {"retest_pending", "failed_breakout"}:
+        return {}
+
+    failed = status == "failed_breakout"
+    return {
+        "label": "失效后的下阶段判定" if failed else "回踩后的下阶段判定",
+        "phase_name": phase.get("primary_name", "未确认"),
+        "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+        "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+        "condition": (
+            "需重新站回箱体阻力并形成新的有效突破，才可再次判定为 JAC。"
+            if failed else
+            "回踩守住原阻力并重新转强后，再确认 LPS 或新的 JAC。"
+        ),
+    }
 
 
 def _load_all_data(args):
@@ -874,6 +897,13 @@ def build_context(args):
         context["wyckoff"] = True
         context["wyckoff_event_chain"] = _wyckoff_event_chain(wyckoff_data)
         context["has_wyckoff_event_chain"] = bool(context["wyckoff_event_chain"])
+        next_stage = _wyckoff_next_stage_judgment(wyckoff_data)
+        context["wyckoff_next_stage"] = bool(next_stage)
+        context["wyckoff_next_stage_label"] = next_stage.get("label", "")
+        context["wyckoff_next_stage_phase"] = next_stage.get("phase_name", "")
+        context["wyckoff_next_stage_confidence"] = next_stage.get("confidence", "")
+        context["wyckoff_next_stage_sub_phase"] = next_stage.get("sub_phase_name", "")
+        context["wyckoff_next_stage_condition"] = next_stage.get("condition", "")
         context["wyckoff_score"] = w_score
         context["wyckoff_score_label"] = f"{w_score:+.1f}"
         context["wyckoff_phase"] = w_phase.get("primary", "")
@@ -947,6 +977,7 @@ def build_context(args):
         context["维科夫面CSS"] = score_css(w_score)
     else:
         context["wyckoff"] = False
+        context["wyckoff_next_stage"] = False
         context["wyckoff_score"] = 0
         context["维科夫面摘要"] = "—"
         context["维科夫面得分"] = "—"

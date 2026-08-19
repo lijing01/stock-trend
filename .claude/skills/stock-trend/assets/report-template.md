@@ -133,13 +133,21 @@
 {{#wyckoff_minor_phase_name}}**细分子阶段**: {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}
 
 {{#has_wyckoff_event_chain}}
-### 突破后事件链
+### 相关触发日志（突破后事件链）
 
 | 事件 | 发生日 | 状态 |
 |---|---|---|
 {{#wyckoff_event_chain}}| {{event_label}} | {{event_date}} | {{event_status}} |
 {{/wyckoff_event_chain}}
 {{/has_wyckoff_event_chain}}
+
+{{#wyckoff_next_stage}}
+### {{wyckoff_next_stage_label}}
+
+**阶段判定**: {{wyckoff_next_stage_phase}}（置信度: {{wyckoff_next_stage_confidence}}）
+**当前子阶段**: {{wyckoff_next_stage_sub_phase}}
+**重新确认条件**: {{wyckoff_next_stage_condition}}
+{{/wyckoff_next_stage}}
 
 ### 长短周期结论
 
