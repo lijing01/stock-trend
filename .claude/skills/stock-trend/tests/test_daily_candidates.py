@@ -7,7 +7,7 @@ import tempfile
 import types
 import unittest
 import copy
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -1779,6 +1779,41 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(output["sectors"], sectors)
         self.assertEqual(output["candidates"][0]["quality_adjusted_score"], 80.0)
         self.assertEqual(output["candidates"][0]["wyckoff"]["minor_phase"]["code"], "D")
+
+    def test_main_json_exposes_all_failed_scan_batches(self):
+        def fake_scan(*_args, metrics=None, **_kwargs):
+            metrics.update({
+                "batch_count": 1,
+                "failed_batches": [{
+                    "sectors": ["BK1"], "reason": "OSError",
+                }],
+                "degradation_reasons": ["batch_error:OSError"],
+            })
+            return []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(dc, "load_regime_context", return_value={}), \
+             patch("fetchers.sector_data.get_last_trading_day",
+                   return_value=("2026-08-06", "snapshot")), \
+             patch.object(dc, "resolve_recommendation_date",
+                          return_value="2026-08-06"), \
+             patch.object(dc, "pick_hot_sectors", return_value=[{
+                 "code": "BK1", "name": "测试板块", "sector_score": 60,
+             }]), \
+             patch.object(dc, "scan_sectors", side_effect=fake_scan), \
+             patch.object(dc, "REPORTS_DIR", Path(temp_dir)), \
+             patch.object(sys, "argv", ["daily_candidates.py", "--json",
+                                          "--no-html"]):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                dc.main()
+
+        output = json.loads(stdout.getvalue())
+        performance = output["meta"]["performance"]
+        self.assertEqual(performance["scan_status"], "error")
+        self.assertEqual(performance["failed_batches"][0]["sectors"], ["BK1"])
+        self.assertIn("batch_error:OSError",
+                      performance["degradation_reasons"])
 
 
 def run_daily_candidates_tests():

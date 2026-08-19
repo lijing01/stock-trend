@@ -867,6 +867,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     batch, top_n_per_sector=per_sector)
         except Exception as e:
             print(f"  ⚠️ 板块 {batch} 汇聚失败: {e}", file=sys.stderr)
+            _record_failed_batch(metrics, batch, e)
             continue
         finally:
             metrics["sector_membership_seconds"] = metrics.get(
@@ -1505,7 +1506,7 @@ def main():
         ranking_start = time.monotonic()
         sector_codes = pick_hot_sectors(
             regime=regime, as_of_date=expected_date,
-            source_health=source_health)
+            source_health=source_health, metrics=performance)
         performance["sector_ranking_seconds"] = round(
             time.monotonic() - ranking_start, 3)
         performance["sector_ranking_requests"] = 1
