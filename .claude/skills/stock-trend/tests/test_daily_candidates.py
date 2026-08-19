@@ -736,7 +736,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                 min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
         self.assertTrue(picked)
         self.assertIn(
-            "sector_ranking_cache_write_error:OSError",
+            "ranking_cache_write_error:OSError",
             metrics["degradation_reasons"],
         )
 

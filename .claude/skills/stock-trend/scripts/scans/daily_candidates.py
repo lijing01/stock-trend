@@ -705,7 +705,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 save_rankings_cache(rankings, data_date=as_of_date)
             except (OSError, TypeError, ValueError) as exc:
                 _record_degradation(
-                    metrics, f"sector_ranking_cache_write_error:{type(exc).__name__}")
+                    metrics, f"ranking_cache_write_error:{type(exc).__name__}")
             try:
                 append_daily_snapshot(rankings, override_date=as_of_date)
             except (OSError, TypeError, ValueError) as exc:
@@ -764,7 +764,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             if resonance.date == expected_date:
                 qualified = merge_sector_resonance(
                     qualified, resonance.sectors)
-                resonance_quality = "verified"
+                resonance_quality = "good"
             else:
                 resonance_quality = "stale"
                 resonance_reason = "date_mismatch"
