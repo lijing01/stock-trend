@@ -69,6 +69,22 @@ def candidate(code, eligible=True, adjusted_score=80.0,
     }
 
 
+def _complete_rankings_and_history():
+    row = {
+        "code": "BK1", "name": "测试板块", "change_pct": 2.0,
+        "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+    }
+    rankings = {
+        "meta": {"complete": True, "data_date": "2026-08-06"},
+        "sectors": [row],
+    }
+    history = {
+        date: [{"code": "BK1", "hot_score": 70, "net_flow": 1e8}]
+        for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+    }
+    return rankings, history
+
+
 class TestRecommendationPolicy(unittest.TestCase):
     def test_final_valid_count_uses_same_predicate_as_scan_early_stop(self):
         valid = candidate("valid", adjusted_score=70)
@@ -705,6 +721,61 @@ class TestRecommendationPolicy(unittest.TestCase):
             picked = dc.pick_hot_sectors(min_stocks=1)
         self.assertEqual(len(picked), 21)
         self.assertEqual(picked[-1]["code"], "BK20")
+
+    def test_pick_hot_sectors_survives_rankings_cache_write_failure(self):
+        rankings, history = _complete_rankings_and_history()
+        metrics = {}
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache",
+                   side_effect=OSError("disk full")), \
+             patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
+        self.assertTrue(picked)
+        self.assertIn(
+            "sector_ranking_cache_write_error:OSError",
+            metrics["degradation_reasons"],
+        )
+
+    def test_pick_hot_sectors_survives_snapshot_write_failure(self):
+        rankings, history = _complete_rankings_and_history()
+        metrics = {}
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache"), \
+             patch("fetchers.sector_data.append_daily_snapshot",
+                   side_effect=OSError("disk full")), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
+        self.assertTrue(picked)
+        self.assertIn(
+            "sector_snapshot_write_error:OSError",
+            metrics["degradation_reasons"],
+        )
+
+    def test_pick_hot_sectors_marks_resonance_failure_without_blocking(self):
+        rankings, history = _complete_rankings_and_history()
+        metrics = {}
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache"), \
+             patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history), \
+             patch("bridge.sector_feeder.load_qualified_sectors",
+                   side_effect=RuntimeError("feed unavailable")):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
+        self.assertEqual(picked[0]["resonance_quality"], "error")
+        self.assertEqual(picked[0]["resonance_reason"], "RuntimeError")
+        self.assertTrue(picked[0]["sector_actionable"])
+        self.assertIn("resonance_error:RuntimeError",
+                      metrics["degradation_reasons"])
 
     def test_pick_hot_sectors_uses_cache_when_live_sources_fail(self):
         row = {

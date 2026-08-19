@@ -631,8 +631,9 @@ def _rebind_primary_sector(item, peer_cohorts=None, as_of_date=""):
 
 
 def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
-                     as_of_date="", source_health=None):
+                     as_of_date="", source_health=None, metrics=None):
     """Pick all sectors above the absolute heat floor, in rank order."""
+    metrics = metrics if metrics is not None else {}
     from fetchers.sector_data import (
         append_daily_snapshot,
         get_sector_rankings,
@@ -700,8 +701,16 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     }
     if active and live_meta.get("complete", False):
         if as_of_date:
-            save_rankings_cache(rankings, data_date=as_of_date)
-            append_daily_snapshot(rankings, override_date=as_of_date)
+            try:
+                save_rankings_cache(rankings, data_date=as_of_date)
+            except (OSError, TypeError, ValueError) as exc:
+                _record_degradation(
+                    metrics, f"sector_ranking_cache_write_error:{type(exc).__name__}")
+            try:
+                append_daily_snapshot(rankings, override_date=as_of_date)
+            except (OSError, TypeError, ValueError) as exc:
+                _record_degradation(
+                    metrics, f"sector_snapshot_write_error:{type(exc).__name__}")
     else:
         cached = load_rankings_cache_full()
         cached_rankings = (cached or {}).get("rankings", {})
@@ -746,6 +755,8 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         if sector.get("absolute_hot_score", 0) >= min_hot
     ]
     expected_date = as_of_date or (regime or {}).get("data_date", "")
+    resonance_quality = "not_available"
+    resonance_reason = ""
     if expected_date:
         try:
             from bridge.sector_feeder import load_qualified_sectors
@@ -753,8 +764,19 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             if resonance.date == expected_date:
                 qualified = merge_sector_resonance(
                     qualified, resonance.sectors)
-        except Exception:
-            pass
+                resonance_quality = "verified"
+            else:
+                resonance_quality = "stale"
+                resonance_reason = "date_mismatch"
+                _record_degradation(metrics, "resonance_stale:date_mismatch")
+        except Exception as exc:
+            resonance_quality = "error"
+            resonance_reason = type(exc).__name__
+            _record_degradation(
+                metrics, f"resonance_error:{type(exc).__name__}")
+    for sector in qualified:
+        sector["resonance_quality"] = resonance_quality
+        sector["resonance_reason"] = resonance_reason
     hs300_change = (regime or {}).get("hs300_change")
     enriched = enrich_sector_context(
         qualified,
