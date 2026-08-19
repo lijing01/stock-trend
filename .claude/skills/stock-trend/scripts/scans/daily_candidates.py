@@ -446,7 +446,17 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
                 capital_positive_days / denominator * 70
                 + min(capital_streak / 3, 1) * 30
             )
-        capital_evidence = "verified" if net_flows else "unknown"
+        # Weak-market promotion requires positive flow evidence, not merely
+        # the presence of a (possibly negative or sparse) flow record.
+        positive_capital_proof = (
+            len(net_flows) >= 3
+            and capital_positive_days >= 2
+            and sum(net_flows) > 0
+        )
+        capital_evidence = (
+            "positive_verified" if positive_capital_proof
+            else ("partial" if net_flows else "unknown")
+        )
         sector_score = round(
             float(sector.get("absolute_hot_score", 0)) * 0.30
             + persistence * 0.30
@@ -1145,7 +1155,7 @@ def classify_candidates(candidates, policy):
         and item.get("sector_actionable", True)
         and item.get("score_eligible", True)
         and (not policy.get("requires_sector_capital_proof", False)
-             or item.get("sector_capital_evidence") == "verified")
+             or item.get("sector_capital_evidence") == "positive_verified")
         and item.get("wyckoff", {}).get("alignment", {}).get(
             "recommendation_gate", "short_term_only") != "observation"
     ]
@@ -1165,9 +1175,11 @@ def classify_candidates(candidates, policy):
                 "次日板块跑赢沪深300、守住当日低点，且放量或资金/共振确认"))
             for item in confirmations
         ]
+    confirmation_codes = {item["code"] for item in confirmations}
     observation = []
     for item in candidates:
-        if item.get("code") in promoted:
+        if (item.get("code") in promoted
+                or item.get("code") in confirmation_codes):
             continue
         copy = dict(item)
         reasons = list(item.get("data_quality", {}).get("reasons", []))
@@ -1175,7 +1187,7 @@ def classify_candidates(candidates, policy):
             reasons.append(item.get("sector_persistence_status")
                            or item.get("sector_type") or "sector_unverified")
         if policy.get("requires_sector_capital_proof", False) \
-                and item.get("sector_capital_evidence") != "verified":
+                and item.get("sector_capital_evidence") != "positive_verified":
             reasons.append("breadth_capital_divergence")
         if not item.get("score_eligible", True):
             reasons.append("quality_adjusted_below_min_score")

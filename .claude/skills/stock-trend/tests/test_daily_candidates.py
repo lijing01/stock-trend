@@ -520,6 +520,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(sector["persistence_days"], 3)
         self.assertGreater(sector["relative_strength"], 0)
         self.assertGreater(sector["capital_persistence"], 50)
+        self.assertEqual(sector["capital_evidence"], "positive_verified")
 
     def test_sector_without_history_is_single_day_observation(self):
         ranked = [{
@@ -612,6 +613,20 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertLess(sector["capital_persistence"], 50)
         self.assertEqual(sector["capital_positive_days"], 1)
         self.assertEqual(sector["capital_streak"], 0)
+
+    def test_negative_sector_flows_are_not_positive_verified(self):
+        ranked = [{"code": "BK1", "name": "资金流出",
+                   "absolute_hot_score": 70, "hot_score": 80}]
+        history = {
+            "2026-08-04": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -2e8}],
+            "2026-08-05": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -1e8}],
+            "2026-08-06": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -3e8}],
+        }
+        sector = enrich_sector_context(ranked, history)[0]
+        self.assertEqual(sector["capital_evidence"], "partial")
 
     def test_sector_resonance_merges_zt_and_lhb_scores_by_name(self):
         ranked = [{"code": "BK1", "name": "半导体"}]
@@ -1329,20 +1344,41 @@ class TestRecommendationPolicy(unittest.TestCase):
             [candidate("1"), candidate("2"), candidate("3")], policy)
         self.assertEqual(policy["mode"], "waiting_trigger")
         self.assertEqual(len(buckets["waiting_trigger"]), 2)
-        self.assertEqual(len(buckets["observation"]), 1)
+        self.assertEqual(
+            [row["code"] for row in buckets["next_day_confirmation"]],
+            ["3"],
+        )
+        self.assertEqual(buckets["observation"], [])
 
     def test_divergence_requires_verified_sector_capital(self):
         policy = build_recommendation_policy(
             {"score": 65, "data_date": "2026-08-06", "capital_score": 20},
             "2026-08-06")
-        unverified = candidate("unknown")
-        verified = candidate("verified")
-        verified["sector_capital_evidence"] = "verified"
-        buckets = classify_candidates([unverified, verified], policy)
+        historical = candidate("historical")
+        historical["sector_capital_evidence"] = "verified"
+        positive = candidate("positive")
+        positive["sector_capital_evidence"] = "positive_verified"
+        buckets = classify_candidates([historical, positive], policy)
         self.assertEqual([item["code"] for item in buckets["waiting_trigger"]],
-                         ["verified"])
-        self.assertIn("breadth_capital_divergence",
-                      buckets["observation"][0]["observation_reasons"])
+                         ["positive"])
+        self.assertEqual(
+            [item["code"] for item in buckets["next_day_confirmation"]],
+            ["historical"],
+        )
+
+    def test_positive_capital_proof_is_not_marked_as_divergence_in_observation(self):
+        policy = build_recommendation_policy(
+            {"score": 65, "data_date": "2026-08-06", "capital_score": 20},
+            "2026-08-06")
+        item = candidate("positive", eligible=False)
+        item["sector_capital_evidence"] = "positive_verified"
+        buckets = classify_candidates([item], policy)
+        self.assertEqual([row["code"] for row in buckets["observation"]],
+                         ["positive"])
+        self.assertNotIn(
+            "breadth_capital_divergence",
+            buckets["observation"][0]["observation_reasons"],
+        )
 
     def test_zero_capital_score_still_enables_divergence_gate(self):
         policy = build_recommendation_policy(
@@ -1360,6 +1396,22 @@ class TestRecommendationPolicy(unittest.TestCase):
                          ["watch"])
         self.assertIn("次日板块跑赢沪深300",
                       buckets["next_day_confirmation"][0]["confirmation_conditions"])
+        self.assertEqual(buckets["observation"], [])
+
+    def test_confirmation_candidate_is_not_duplicated_in_observation(self):
+        policy = build_recommendation_policy(
+            {"score": 65, "data_date": "2026-08-06", "capital_score": 50},
+            "2026-08-06")
+        watch = candidate("watch", sector_actionable=False)
+        buckets = classify_candidates([watch], policy)
+        confirmation_codes = {
+            row["code"] for row in buckets["next_day_confirmation"]
+        }
+        observation_codes = {
+            row["code"] for row in buckets["observation"]
+        }
+        self.assertTrue(confirmation_codes)
+        self.assertFalse(confirmation_codes & observation_codes)
 
     def test_confirmation_list_does_not_duplicate_waiting_candidate(self):
         policy = build_recommendation_policy(
