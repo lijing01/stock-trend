@@ -652,6 +652,29 @@ class TestRecommendationPolicy(unittest.TestCase):
             picked = dc.pick_hot_sectors(top_n=20, min_hot=45, min_stocks=1)
         self.assertEqual(picked, [])
 
+    def test_pick_hot_sectors_returns_all_absolute_heat_qualified_sectors(self):
+        rows = [
+            {"code": f"BK{i:02d}", "name": f"板块{i:02d}",
+             "change_pct": 2.0, "main_force_net": 1e8,
+             "up_count": 9, "down_count": 1}
+            for i in range(21)
+        ]
+        rankings = {"meta": {"complete": True}, "sectors": rows}
+        history = {
+            date: [{"code": row["code"], "hot_score": 70,
+                    "net_flow": 1e8} for row in rows]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache"), \
+             patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(min_stocks=1)
+        self.assertEqual(len(picked), 21)
+        self.assertEqual(picked[-1]["code"], "BK20")
+
     def test_pick_hot_sectors_uses_cache_when_live_sources_fail(self):
         row = {
             "code": "BK1", "name": "缓存板块", "change_pct": 2.0,

@@ -598,9 +598,9 @@ def _rebind_primary_sector(item, peer_cohorts=None, as_of_date=""):
     return rebound
 
 
-def pick_hot_sectors(top_n=20, min_hot=45, min_stocks=10, regime=None,
+def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                      as_of_date="", source_health=None):
-    """Pick sectors above an absolute heat floor, in relative-rank order."""
+    """Pick all sectors above the absolute heat floor, in rank order."""
     from fetchers.sector_data import (
         append_daily_snapshot,
         get_sector_rankings,
