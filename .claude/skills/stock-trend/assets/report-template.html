@@ -169,6 +169,14 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
     <strong>当前子阶段:</strong> {{wyckoff_sub_phase_name}}<br>
     {{#wyckoff_minor_phase_name}}<strong>细分子阶段:</strong> <span class="{{wyckoff_minor_phase_css}}">{{wyckoff_minor_phase_name}}</span> — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}</p>
 
+    {{#has_wyckoff_event_chain}}
+    <h3>突破后事件链</h3>
+    <table>
+        <tr><th>事件</th><th>发生日</th><th>状态</th></tr>
+        {{#wyckoff_event_chain}}<tr><td>{{event_label}}</td><td>{{event_date}}</td><td>{{event_status}}</td></tr>{{/wyckoff_event_chain}}
+    </table>
+    {{/has_wyckoff_event_chain}}
+
     <h3>长短周期结论</h3>
     <table>
         <tr><th>周期</th><th>维科夫判断</th></tr>

@@ -336,6 +336,42 @@ def build_action_plan(direction, confidence, latest_close, report_params, analys
     }
 
 
+def _wyckoff_event_chain(wyckoff_data):
+    """Return the latest SOS→BU→LPS chain for report rendering."""
+    events = wyckoff_data.get("event_history") or []
+    if not isinstance(events, list):
+        return []
+    sos_events = [event for event in events if event.get("type") == "sos"]
+    if not sos_events:
+        return []
+    # A newer SOS candidate can represent a new breakout leg; do not let an
+    # older confirmed SOS make the report describe stale structure.
+    sos = max(sos_events, key=lambda event: event.get("event_index", -1))
+    related = [event for event in events
+               if event is sos
+               or (event.get("parent_event") == "sos"
+                   and event.get("parent_event_index") == sos.get("event_index"))]
+    related.sort(key=lambda event: (
+        event.get("event_index", -1),
+        {"sos": 0, "bu": 1, "lps": 2}.get(event.get("type"), 9),
+    ))
+    labels = {"sos": "SOS", "bu": "BU", "lps": "LPS"}
+    statuses = {"confirmed": "已确认", "candidate": "候选/待确认", "expired": "已失效"}
+    chain = []
+    for event in related:
+        event_date = event.get("event_date", "")
+        detected_date = event.get("detected_date", "")
+        detail = statuses.get(event.get("status"), event.get("status", "未确认"))
+        if detected_date and detected_date != event_date:
+            detail += f"；确认日 {detected_date}"
+        chain.append({
+            "event_label": labels.get(event.get("type"), event.get("type", "事件")),
+            "event_status": detail,
+            "event_date": event_date or "—",
+        })
+    return chain
+
+
 def _load_all_data(args):
     """Load all data files and parse JSON args. Pure IO, all upfront."""
     technical = _load_json_safe(args.technical) or {}
@@ -836,6 +872,8 @@ def build_context(args):
         w_score = wyckoff_data.get("wyckoff_score", 0)
 
         context["wyckoff"] = True
+        context["wyckoff_event_chain"] = _wyckoff_event_chain(wyckoff_data)
+        context["has_wyckoff_event_chain"] = bool(context["wyckoff_event_chain"])
         context["wyckoff_score"] = w_score
         context["wyckoff_score_label"] = f"{w_score:+.1f}"
         context["wyckoff_phase"] = w_phase.get("primary", "")
@@ -859,7 +897,8 @@ def build_context(args):
         context["wyckoff_minor_phase_css"] = (
             "wyckoff-lps"
             if minor_phase.get("code") == "D"
-            and "BU/LPS" in minor_phase.get("name", "")
+            and w_phase.get("primary_sub_phase") == "lps"
+            and context["wyckoff_short_term_status"] == "confirmed"
             else ""
         )
         trigger = minor_phase.get("trigger")

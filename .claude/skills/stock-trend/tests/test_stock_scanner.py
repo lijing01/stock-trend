@@ -741,9 +741,14 @@ class TestGatePass(unittest.TestCase):
                 self.assertTrue(sc.wyckoff_gate_pass(_wk(sub=sub, conf=0.6)))
 
     def test_markup_buy_points_pass(self):
-        for sub in ("jac", "backup"):
+        for sub in ("jac",):
             with self.subTest(sub=sub):
                 self.assertTrue(sc.wyckoff_gate_pass(_wk(phase="markup", sub=sub, conf=0.5)))
+
+    def test_markup_bu_candidate_is_observation_only(self):
+        wk = _wk(phase="markup", sub="backup", conf=0.7)
+        wk["signal"] = {"status": "candidate", "age_bars": 0, "event": "bu"}
+        self.assertFalse(sc.wyckoff_gate_pass(wk))
 
     def test_confirmed_markup_lps_is_a_buy_point_but_candidate_is_not(self):
         wk = _wk(phase="markup", sub="lps", conf=0.7, score=2.0)

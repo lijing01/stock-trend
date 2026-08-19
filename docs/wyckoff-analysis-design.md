@@ -218,6 +218,25 @@ Climax 标记条件：
 
 Spring 允许高量 Shakeout 与缩量供应枯竭两种变体；其发生日、确认日和当前年龄由事件模型给出。SOS 复用既有 `jac` 子阶段以保持兼容：突破日可以输出 `markup/jac + signal.status=candidate`，后续持稳才成为可交易确认信号。
 
+### 4.6 突破后 BU / LPS 事件链与报告展示
+
+突破后的回踩按行为和结果分开记录：
+
+```text
+confirmed SOS/JAC → BU candidate → confirmed LPS
+                                  └→ expired（未在确认窗口内转强）
+```
+
+`BU` 是观察状态，不进入正式买点；只有后续 K 线重新突破 BU 回踩高点，或连续收回原箱顶，才生成 `LPS`。LPS 的 `event_date` 保留回踩日，`detected_date` 使用后续确认日，保证回测不会把未来信息泄漏到回踩当天。
+
+JSON 保留完整 `event_history`、`bu_candidate` 和兼容字段 `lps_candidate`。Markdown/HTML 报告不铺开所有历史事件，只展示最新有效突破腿的事件链：
+
+```text
+SOS（日期/状态） → BU（日期/候选或失效） → LPS（日期/确认日）
+```
+
+报告中的 BU 必须明确“待确认”，LPS 必须明确“已确认”；不能再使用含义不清的 `BU/LPS` 合并标签。
+
 ### 4.6 置信度计算
 
 | 因素 | 权重 | 条件 |

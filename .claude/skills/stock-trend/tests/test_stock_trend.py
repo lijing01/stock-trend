@@ -625,6 +625,16 @@ def run_new_script_tests(tmpdir):
                   "confidence": 0.7},
         "range": {"is_clear_range": False}, "vsa_signals": [], "cause_effect": {},
         "wyckoff_score": 2.0, "wyckoff_signals": {"trading_implication": "测试"},
+        "event_history": [
+            {"type": "sos", "event_index": 50, "event_date": "20260520",
+             "detected_date": "20260521", "status": "confirmed"},
+            {"type": "bu", "event_index": 52, "event_date": "20260523",
+             "detected_date": "20260523", "status": "candidate",
+             "parent_event": "sos", "parent_event_index": 50},
+            {"type": "lps", "event_index": 52, "event_date": "20260523",
+             "detected_date": "20260524", "status": "confirmed",
+             "parent_event": "sos", "parent_event_index": 50},
+        ],
         "short_term": {"phase_name": "拉升阶段", "sub_phase_name": "JAC",
                        "confidence": 0.7, "signal_status": "confirmed"},
         "long_term": {"eligible": True, "phase": "accumulation",
@@ -661,6 +671,7 @@ def run_new_script_tests(tmpdir):
             test("TF-RPT-01e: MD含场景B", "场景 B：回调到位" in md_content, md_content[:200], "report")
             test("TF-RPT-01f: MD含执行时间窗", "执行时间窗" in md_content, md_content[:200], "report")
             test("TF-RPT-01j: MD含长短周期结论", "中线吸筹，短线突破确认" in md_content, md_content[:500], "report")
+            test("TF-RPT-01k: MD含事件链", "突破后事件链" in md_content and "BU" in md_content and "LPS" in md_content, md_content[:500], "report")
 
         if html_exists:
             with open(html_path, "r", encoding="utf-8") as f:
@@ -668,6 +679,7 @@ def run_new_script_tests(tmpdir):
             test("TF-RPT-01g: HTML含今日动作", "今日动作" in html_content, html_content[:200], "report")
             test("TF-RPT-01h: HTML含场景A", "场景 A：继续上冲" in html_content, html_content[:200], "report")
             test("TF-RPT-01i: HTML含场景B", "场景 B：回调到位" in html_content, html_content[:200], "report")
+            test("TF-RPT-01k: HTML含事件链", "突破后事件链" in html_content and "LPS" in html_content, html_content[:500], "report")
 
     weak_tech_path, weak_kline_path, weak_scores_path = _write_report_fixture(
         tmpdir,

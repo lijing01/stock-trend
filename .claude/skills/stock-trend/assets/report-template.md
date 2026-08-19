@@ -132,6 +132,15 @@
 **当前子阶段**: {{wyckoff_sub_phase_name}}
 {{#wyckoff_minor_phase_name}}**细分子阶段**: {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}
 
+{{#has_wyckoff_event_chain}}
+### 突破后事件链
+
+| 事件 | 发生日 | 状态 |
+|---|---|---|
+{{#wyckoff_event_chain}}| {{event_label}} | {{event_date}} | {{event_status}} |
+{{/wyckoff_event_chain}}
+{{/has_wyckoff_event_chain}}
+
 ### 长短周期结论
 
 | 周期 | 维科夫判断 |

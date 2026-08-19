@@ -1713,15 +1713,29 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("需求占优，回踩缩量后等待向上确认", html)
         self.assertIn("股市有风险，投资需谨慎", html)
 
-    def test_html_highlights_bu_lps_with_yellow_background(self):
+    def test_html_highlights_confirmed_lps_with_yellow_background(self):
         item = candidate("lps")
         item["wyckoff"]["minor_phase"] = {
-            "code": "D", "name": "BU/LPS（阶段D）",
-            "description": "回踩缩量并守住原阻力",
+            "code": "D", "name": "阶段D：LPS已确认",
+            "description": "回踩后已重新转强",
         }
+        item["wyckoff"]["sub_phase"] = "lps"
+        item["wyckoff"]["signal_status"] = "confirmed"
         html = dc._html_candidate_rows([item])
         self.assertIn("#fef3c7", html)
-        self.assertIn("BU/LPS（阶段D）", html)
+        self.assertIn("阶段D：LPS已确认", html)
+
+    def test_html_does_not_highlight_bu_candidate_as_lps(self):
+        item = candidate("bu")
+        item["wyckoff"]["minor_phase"] = {
+            "code": "D", "name": "阶段D：BU回踩待确认",
+            "description": "缩量守位，等待再次转强",
+        }
+        item["wyckoff"]["sub_phase"] = "backup"
+        item["wyckoff"]["signal_status"] = "candidate"
+        html = dc._html_candidate_rows([item])
+        self.assertNotIn("#fef3c7", html)
+        self.assertIn("阶段D：BU回踩待确认", html)
 
     def test_report_explains_unavailable_long_term_structure(self):
         item = candidate("1")

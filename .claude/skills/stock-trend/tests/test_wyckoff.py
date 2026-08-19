@@ -115,12 +115,12 @@ class TestMinorPhase(unittest.TestCase):
     def test_markup_lps_is_displayed_as_bu_lps_phase_d(self):
         minor = build_minor_phase(PHASE_MARKUP, SUB_LPS)
         self.assertEqual(minor["code"], "D")
-        self.assertIn("BU/LPS", minor["name"])
+        self.assertIn("LPS已确认", minor["name"])
 
 
 class TestSosLps(unittest.TestCase):
     @staticmethod
-    def _ohlcv_with_confirmed_sos_and_lps():
+    def _ohlcv_with_sos_bu_and_lps_confirmation():
         n = 60
         ohlcv = {
             "open": [100.0] * n, "high": [101.0] * n,
@@ -132,8 +132,10 @@ class TestSosLps(unittest.TestCase):
         ohlcv["close"][50], ohlcv["volume"][50] = 113.0, 150.0
         ohlcv["open"][51], ohlcv["high"][51], ohlcv["low"][51] = 112.5, 113.5, 111.5
         ohlcv["close"][51], ohlcv["volume"][51] = 112.5, 110.0
-        ohlcv["open"][52], ohlcv["high"][52], ohlcv["low"][52] = 112.5, 113.0, 110.2
+        ohlcv["open"][52], ohlcv["high"][52], ohlcv["low"][52] = 111.5, 112.0, 110.2
         ohlcv["close"][52], ohlcv["volume"][52] = 111.2, 70.0
+        ohlcv["open"][53], ohlcv["high"][53], ohlcv["low"][53] = 111.5, 114.0, 111.0
+        ohlcv["close"][53], ohlcv["volume"][53] = 113.4, 95.0
         return ohlcv, [2.0] * n, {
             "id": "minor_sos_lps", "level": "minor", "support": 100.0,
             "resistance": 110.0, "support_idx": 10, "resistance_idx": 40,
@@ -141,14 +143,26 @@ class TestSosLps(unittest.TestCase):
             "is_clear_range": True,
         }
 
-    def test_confirmed_sos_is_followed_by_confirmed_lps(self):
-        ohlcv, atr, trading_range = self._ohlcv_with_confirmed_sos_and_lps()
+    def test_bu_candidate_is_not_a_confirmed_lps(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        as_of = {key: values[:53] for key, values in ohlcv.items()}
+        events = detect_wyckoff_events(as_of, atr[:53], trading_range)
+        bu = next(event for event in events if event["type"] == "bu")
+        self.assertEqual(bu["status"], "candidate")
+        self.assertFalse(any(
+            event["type"] == "lps" and event["status"] == "confirmed"
+            for event in events
+        ))
+
+    def test_confirmed_sos_is_followed_by_lps_only_after_reclaim(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
         events = detect_wyckoff_events(ohlcv, atr, trading_range)
         sos = next(event for event in events if event["type"] == "sos")
         lps = next(event for event in events if event["type"] == "lps")
         self.assertEqual(sos["status"], "confirmed")
         self.assertEqual(lps["status"], "confirmed")
-        self.assertGreater(lps["event_index"], sos["detected_index"])
+        self.assertEqual(lps["event_index"], 52)
+        self.assertEqual(lps["detected_index"], 53)
         self.assertEqual(lps["parent_event"], "sos")
         rows = [
             {"open": ohlcv["open"][i], "high": ohlcv["high"][i],
@@ -164,7 +178,7 @@ class TestSosLps(unittest.TestCase):
         self.assertEqual(result["signal"]["event"], "lps")
 
     def test_lps_requires_shallow_low_volume_pullback(self):
-        ohlcv, atr, trading_range = self._ohlcv_with_confirmed_sos_and_lps()
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
         sos = {"event_index": 50, "detected_index": 51}
         self.assertTrue(_is_lps_pullback(ohlcv, atr, trading_range, sos, 52))
         ohlcv["volume"][52] = 140.0
@@ -172,6 +186,21 @@ class TestSosLps(unittest.TestCase):
         ohlcv["volume"][52] = 70.0
         ohlcv["close"][52] = 108.5
         self.assertFalse(_is_lps_pullback(ohlcv, atr, trading_range, sos, 52))
+
+    def test_no_confirmed_sos_means_no_bu_or_lps(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        ohlcv["volume"][50] = 100.0
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+        self.assertFalse(any(event["type"] in {"bu", "lps"} for event in events))
+
+    def test_bu_expires_without_reclaim(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        ohlcv["close"][53] = 111.0
+        ohlcv["high"][53] = 111.5
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+        bu = next(event for event in events if event["type"] == "bu")
+        self.assertEqual(bu["status"], "expired")
+        self.assertFalse(any(event["type"] == "lps" for event in events))
 
 class TestTradingImplication(unittest.TestCase):
     def test_accumulation_st(self):

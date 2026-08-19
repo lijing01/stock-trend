@@ -11,6 +11,7 @@ Usage:
 
 import json
 import sys
+from statistics import median
 from pathlib import Path
 from typing import Any
 
@@ -77,8 +78,8 @@ MINOR_PHASES = {
     (PHASE_ACCUMULATION, SUB_LPS): ("D", "阶段D：需求确认", "需求占优，回踩缩量后等待向上确认"),
     (PHASE_ACCUMULATION, SUB_PRE_MARKUP): ("D", "阶段D：需求确认", "需求占优，等待突破箱体上沿确认"),
     (PHASE_MARKUP, SUB_JAC): ("E", "阶段E：离开箱体", "价格已离开整理区，顺势跟随并防范假突破"),
-    (PHASE_MARKUP, SUB_LPS): ("D", "BU/LPS（阶段D）", "SOS 后回调缩量、跌幅收敛，并在原阻力附近获得支撑"),
-    (PHASE_MARKUP, SUB_BU): ("E", "阶段E：离开箱体", "突破后回踩确认，守住箱体上沿则趋势延续"),
+    (PHASE_MARKUP, SUB_LPS): ("D", "阶段D：LPS已确认", "SOS 后回踩缩量、守住原阻力，并在后续 K 线重新转强"),
+    (PHASE_MARKUP, SUB_BU): ("D", "阶段D：BU回踩待确认", "突破后缩量守位，等待重新站稳或突破回踩高点"),
     (PHASE_MARKUP, SUB_CONTINUATION): ("E", "阶段E：离开箱体", "趋势延续中，持有为主并跟踪量价是否衰竭"),
     (PHASE_DISTRIBUTION, SUB_BC): ("A", "阶段A：供给显现", "上涨动能开始衰竭，观察冲高后的供给压力"),
     (PHASE_DISTRIBUTION, SUB_UTAD): ("C", "阶段C：上冲测试", "上冲测试需求后回落，警惕假突破"),
@@ -147,6 +148,17 @@ EVENT_MAX_AGE = {
     SUB_SPRING: 8, SUB_ST: 8, SUB_JAC: 8, SUB_BU: 10, SUB_LPS: 10,
     SUB_BC: 8, SUB_UTAD: 8,
 }
+
+# Post-breakout BU/LPS confirmation contract.  These values are deliberately
+# named constants so later backtests can tune them without scattering rules.
+LPS_CANDIDATE_MAX_AGE = 5
+LPS_CONFIRM_MAX_BARS = 3
+LPS_SUPPORT_CLOSE_ATR = 0.30
+LPS_SUPPORT_LOW_ATR = 0.50
+LPS_MAX_RETRACE_ATR = 2.00
+LPS_MAX_SPREAD_ATR = 1.00
+LPS_VOLUME_VS_SOS = 0.85
+LPS_VOLUME_VS_AVERAGE = 0.90
 
 # Maximum lookback for finding breakout
 FIND_BREAKOUT_MAX_BARS = 60
@@ -641,12 +653,6 @@ def classify_markup(swings: list, closes: list, volumes: list, highs: list,
             return (SUB_JAC, 0.8, breakout_idx)
         return (SUB_JAC, 0.5, breakout_idx)
 
-    if retrace_from_high <= 2.0 and retrace_from_high >= 0.5:
-        pullback_vol = volumes[latest_idx]
-        if pullback_vol < _ma_of_last_n(volumes, latest_idx, 50) * 0.8:
-            return (SUB_BU, 0.7, breakout_idx)
-        return (SUB_BU, 0.5, breakout_idx)
-
     return (SUB_CONTINUATION, 0.6, latest_idx)
 
 
@@ -907,7 +913,7 @@ def wyckoff_score(phase: str, sub_phase: str) -> float:
 # 买点子阶段:吸筹尾段(Spring/LPS/ST/拉升前)+ 拉升初段(JAC/回踩)。
 # 单一事实源 — stock_scanner 漏斗与 scores.py wyckoff 模式共用。
 BUY_PHASES = (PHASE_ACCUMULATION, PHASE_MARKUP)
-BUY_SUB_PHASES = (SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC, SUB_BU)
+BUY_SUB_PHASES = (SUB_SPRING, SUB_LPS, SUB_ST, SUB_PRE_MARKUP, SUB_JAC)
 
 
 def normalize_score_100(score_3: float) -> float:
@@ -1013,26 +1019,50 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
                              if closes[j] > resistance), None)
             status = "confirmed" if strength and hold_idx is not None else "candidate"
             detected_idx = hold_idx if status == "confirmed" else i
-            events.append(_event_record(
+            sos_event = _event_record(
                 "sos", i, detected_idx, dates, status, trading_range.get("level", "single"),
                 trading_range, 0.8 if status == "confirmed" else (0.65 if strength else 0.45),
-            ))
+            )
+            sos_event["breakout_atr"] = round(atr, 4)
+            events.append(sos_event)
     confirmed_sos = [event for event in events
                      if event["type"] == "sos" and event["status"] == "confirmed"]
     for sos_event in confirmed_sos:
         for j in range(
                 sos_event["detected_index"] + 1,
-                min(sos_event["detected_index"] + 1 + EVENT_MAX_AGE[SUB_LPS], len(closes)),
+                min(sos_event["detected_index"] + 1 + LPS_CANDIDATE_MAX_AGE, len(closes)),
         ):
-            if _is_lps_pullback(ohlcv, atr_values, trading_range, sos_event, j):
+            evidence = _bu_candidate_evidence(ohlcv, trading_range, sos_event, j)
+            if not evidence:
+                continue
+            bu_event = _event_record(
+                "bu", j, j, dates, "candidate",
+                trading_range.get("level", "single"), trading_range, 0.62,
+            )
+            bu_event.update(evidence)
+            bu_event["parent_event"] = "sos"
+            bu_event["parent_event_index"] = sos_event["event_index"]
+            events.append(bu_event)
+            confirmation_idx = _confirm_lps(
+                ohlcv, trading_range, j, len(closes) - 1,
+            )
+            if confirmation_idx is not None:
                 lps_event = _event_record(
-                    "lps", j, j, dates, "confirmed",
+                    "lps", j, confirmation_idx, dates, "confirmed",
                     trading_range.get("level", "single"), trading_range, 0.78,
                 )
-                lps_event["parent_event"] = "sos"
-                lps_event["parent_event_index"] = sos_event["event_index"]
+                lps_event.update({
+                    "parent_event": "sos",
+                    "parent_event_index": sos_event["event_index"],
+                    "candidate_event_index": j,
+                    "breakout_atr": evidence["breakout_atr"],
+                    "confirmation": "reclaim_bu_high" if closes[confirmation_idx] > highs[j]
+                    else "two_closes_above_resistance",
+                })
                 events.append(lps_event)
-                break
+            elif len(closes) - 1 >= j + LPS_CONFIRM_MAX_BARS:
+                bu_event["status"] = "expired"
+            break
     latest_idx = len(closes) - 1
     for event in events:
         event["bars_since_event"] = latest_idx - event["event_index"]
@@ -1040,9 +1070,81 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
     return events
 
 
+def _volume_baseline_before(volumes: list, index: int, window: int) -> float | None:
+    """Return the mean volume strictly before ``index``."""
+    values = volumes[max(0, index - window):index]
+    return sum(values) / len(values) if values else None
+
+
+def _bu_candidate_evidence(ohlcv: dict, trading_range: dict,
+                           sos_event: dict, index: int) -> dict | None:
+    """Return auditable evidence for a post-SOS BU candidate."""
+    if index <= sos_event.get("detected_index", -1):
+        return None
+    breakout_atr = _safe_float(sos_event.get("breakout_atr"))
+    if not breakout_atr or breakout_atr <= 0:
+        return None
+    closes = ohlcv["close"]
+    highs = ohlcv["high"]
+    lows = ohlcv["low"]
+    volumes = ohlcv["volume"]
+    resistance = trading_range["resistance"]
+    close = closes[index]
+    low = lows[index]
+    spread = highs[index] - low
+    if close < resistance - breakout_atr * LPS_SUPPORT_CLOSE_ATR:
+        return None
+    if low < resistance - breakout_atr * LPS_SUPPORT_LOW_ATR:
+        return None
+    post_sos_closes = closes[sos_event["event_index"]:index]
+    post_sos_high = max(post_sos_closes) if post_sos_closes else close
+    if post_sos_high - close > breakout_atr * LPS_MAX_RETRACE_ATR:
+        return None
+    if spread > breakout_atr * LPS_MAX_SPREAD_ATR:
+        return None
+    if close >= closes[index - 1]:
+        return None
+    avg5 = _volume_baseline_before(volumes, index, 5)
+    avg10 = _volume_baseline_before(volumes, index, 10)
+    tr_start = trading_range.get("support_idx", 0)
+    tr_volumes = volumes[tr_start:index]
+    tr_median = median(tr_volumes) if tr_volumes else None
+    sos_volume = volumes[sos_event["event_index"]]
+    baselines = (avg5, avg10, tr_median)
+    if any(value is None for value in baselines):
+        return None
+    if volumes[index] > sos_volume * LPS_VOLUME_VS_SOS:
+        return None
+    if any(volumes[index] > value * LPS_VOLUME_VS_AVERAGE for value in baselines):
+        return None
+    return {
+        "breakout_atr": round(breakout_atr, 4),
+        "volume_avg5": round(avg5, 4),
+        "volume_avg10": round(avg10, 4),
+        "volume_tr_median": round(tr_median, 4),
+        "pullback_spread": round(spread, 4),
+    }
+
+
+def _confirm_lps(ohlcv: dict, trading_range: dict, bu_index: int,
+                 end_index: int) -> int | None:
+    """Return a later bar that confirms a BU candidate, if one exists."""
+    closes = ohlcv["close"]
+    highs = ohlcv["high"]
+    resistance = trading_range["resistance"]
+    stop = min(bu_index + 1 + LPS_CONFIRM_MAX_BARS, end_index + 1)
+    for index in range(bu_index + 1, stop):
+        if closes[index] > highs[bu_index]:
+            return index
+        if index >= bu_index + 2 and (
+                closes[index - 1] >= resistance and closes[index] >= resistance):
+            return index
+    return None
+
+
 def _is_lps_pullback(ohlcv: dict, atr_values: list, trading_range: dict,
                      sos_event: dict, index: int) -> bool:
-    """Recognize a shallow, low-volume pullback after a confirmed SOS."""
+    """Backward-compatible shallow-pullback predicate for existing callers."""
     detected_idx = sos_event.get("detected_index", -1)
     if index <= detected_idx or index >= len(ohlcv["close"]):
         return False
@@ -1074,6 +1176,7 @@ def _current_event(events: list[dict]) -> dict | None:
         event_sub_phase = {
             "sos": SUB_JAC,
             "lps": SUB_LPS,
+            "bu": SUB_BU,
             "spring": SUB_SPRING,
         }.get(event["type"], "")
         max_age = EVENT_MAX_AGE.get(event_sub_phase, 0)
@@ -1084,8 +1187,15 @@ def _current_event(events: list[dict]) -> dict | None:
     # latest confirmed event and only fall back to candidates when no
     # confirmed event is still alive.
     confirmed = [event for event in valid if event.get("status") == "confirmed"]
-    pool = confirmed or [event for event in valid if event.get("status") == "candidate"]
-    event_priority = {"lps": 3, "sos": 2, "spring": 1}
+    confirmed_lps = [event for event in confirmed if event.get("type") == "lps"]
+    candidate_bu = [event for event in valid
+                    if event.get("type") == "bu"
+                    and event.get("status") == "candidate"]
+    # Once LPS is confirmed it wins; before that, a live BU candidate is the
+    # most useful current state and must not be hidden by its parent SOS.
+    pool = confirmed_lps or candidate_bu or confirmed
+    pool = pool or [event for event in valid if event.get("status") == "candidate"]
+    event_priority = {"lps": 4, "bu": 3, "sos": 2, "spring": 1}
     return max(
         pool,
         key=lambda event: (event_priority.get(event.get("type"), 0), event["event_index"]),
@@ -1209,8 +1319,8 @@ def generate_trading_implication(phase: str, sub_phase: str) -> str:
     if phase == PHASE_MARKUP:
         implications = {
             SUB_JAC: "JAC（跃过小溪）放量突破箱体，趋势确认。可顺势做多，以箱顶作为止损参考。",
-            SUB_LPS: "BU/LPS（最后支撑点）回调缩量且守住原阻力，供应重新测试失败。",
-            SUB_BU: "回踩箱顶获支撑，缩量整理。突破确认后的健康回调，可考虑加仓。",
+            SUB_LPS: "LPS（最后支撑点）回调缩量守住原阻力，并在后续 K 线重新转强。",
+            SUB_BU: "BU 回踩候选，缩量守位但尚未完成二次转强确认，暂作观察。",
             SUB_CONTINUATION: "持续拉升阶段。顺应趋势持有，跟踪止盈，不逆势猜顶。",
         }
         return implications.get(sub_phase, "拉升阶段，多头持仓为主，注意跟踪趋势力度变化。")
@@ -1316,15 +1426,19 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     event_history.sort(key=lambda event: (event["event_index"], event["type"]))
     active_event = _current_event(event_history)
     if active_event:
-        if active_event["status"] == "confirmed":
-            if active_event["type"] == "spring":
-                phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
-            elif active_event["type"] == "sos":
+        if active_event["type"] == "spring":
+            phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
+        elif active_event["type"] == "sos":
+            if active_event["status"] == "confirmed":
                 phase, sub_phase = PHASE_MARKUP, SUB_JAC
             else:
-                phase, sub_phase = PHASE_MARKUP, SUB_LPS
-            confidence = active_event["confidence"]
-            trigger_idx = active_event.get("event_index")
+                phase, sub_phase = PHASE_ACCUMULATION, SUB_PRE_MARKUP
+        elif active_event["type"] == "bu":
+            phase, sub_phase = PHASE_MARKUP, SUB_BU
+        else:
+            phase, sub_phase = PHASE_MARKUP, SUB_LPS
+        confidence = active_event["confidence"]
+        trigger_idx = active_event.get("event_index")
         signal = {
             "status": active_event["status"],
             "age_bars": active_event["age_bars"],
@@ -1356,12 +1470,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             signal["status"] = "failed_breakout"
             signal["state"] = "failed_breakout"
             confidence = min(confidence, 0.45)
-    lps_candidate = None
-    confirmed_sos = _latest_confirmed_sos(event_history)
-    if confirmed_sos and trading_range:
-        lps_candidate = _lps_candidate(
-            ohlcv, atr_values, trading_range, confirmed_sos, latest_idx,
-        )
+    bu_candidate = candidate_event if candidate_event and candidate_event.get("type") == "bu" else None
+    lps_candidate = ({**bu_candidate, "deprecated_alias": True}
+                     if bu_candidate else None)
 
     bullish_phases = {PHASE_ACCUMULATION, PHASE_MARKUP}
     expected_vsa = {"absorption", "no_supply", "stopping_volume"} if phase in bullish_phases else {"no_demand", "upthrust"}
@@ -1384,8 +1495,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         key_signals.append(
             f"当前事件: {active_event['type'].upper()}（{active_event['status']}，{active_event['age_bars']} 根K）"
         )
-    if lps_candidate:
-        key_signals.append("LPS候选：等待回踩后的收复确认")
+    if bu_candidate:
+        key_signals.append("BU候选：等待回踩后的收复确认")
     for vs in vsa_signals[-3:]:
         key_signals.append(vs["description"])
 
@@ -1512,6 +1623,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "signal": signal,
         "confirmed_event": confirmed_event,
         "candidate_event": candidate_event,
+        "bu_candidate": bu_candidate,
         "lps_candidate": lps_candidate,
         "swing_points": swings[-20:],
         "vsa_signals": vsa_signals_sorted[:10],

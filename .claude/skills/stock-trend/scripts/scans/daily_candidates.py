@@ -1036,8 +1036,14 @@ def _candidate_diagnostic_text(item):
         parts.append("其他原因：" + "、".join(dict.fromkeys(other_reasons)))
     elif not data_reasons:
         parts.append("信号：" + _signal_text(item.get("signals", {})))
-    signal_status = item.get("wyckoff", {}).get("short_term", {}).get("signal_status", "")
-    if signal_status == "retest_pending":
+    wyckoff = item.get("wyckoff", {})
+    signal_status = wyckoff.get("signal_status") or wyckoff.get("short_term", {}).get("signal_status", "")
+    sub_phase = str(wyckoff.get("sub_phase", "")).lower()
+    if sub_phase == "backup" and signal_status == "candidate":
+        parts.append("维科夫状态：BU回踩待确认")
+    elif sub_phase == "lps" and signal_status == "confirmed":
+        parts.append("维科夫状态：LPS已确认")
+    elif signal_status == "retest_pending":
         parts.append("维科夫状态：突破后回踩待确认")
     elif signal_status == "failed_breakout":
         parts.append("维科夫状态：突破失败")
@@ -1091,7 +1097,9 @@ def _minor_phase_text(wyckoff):
 def _minor_phase_html(wyckoff):
     text = _minor_phase_text(wyckoff)
     minor = wyckoff.get("minor_phase", {})
-    if minor.get("code") == "D" and "BU/LPS" in minor.get("name", ""):
+    if (minor.get("code") == "D"
+            and str(wyckoff.get("sub_phase", "")).lower() == "lps"
+            and wyckoff.get("signal_status") == "confirmed"):
         return f"<span style='background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:4px'>{text}</span>"
     return text
 
