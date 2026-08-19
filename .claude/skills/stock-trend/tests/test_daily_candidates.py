@@ -777,6 +777,26 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("resonance_error:RuntimeError",
                       metrics["degradation_reasons"])
 
+    def test_pick_hot_sectors_marks_stale_resonance_provenance(self):
+        rankings, history = _complete_rankings_and_history()
+        metrics = {}
+        stale_resonance = types.SimpleNamespace(
+            date="2026-08-05", sectors=[])
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache"), \
+             patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history), \
+             patch("bridge.sector_feeder.load_qualified_sectors",
+                   return_value=stale_resonance):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
+        self.assertEqual(picked[0]["resonance_quality"], "stale")
+        self.assertEqual(picked[0]["resonance_reason"], "date_mismatch")
+        self.assertIn("resonance_stale:date_mismatch",
+                      metrics["degradation_reasons"])
+
     def test_pick_hot_sectors_uses_cache_when_live_sources_fail(self):
         row = {
             "code": "BK1", "name": "缓存板块", "change_pct": 2.0,
