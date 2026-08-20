@@ -1144,6 +1144,11 @@ def _trade_plan_text(item):
     )
 
 
+def _markdown_cell(value):
+    """Escape content embedded in one Markdown table cell."""
+    return str(value).replace("|", r"\|").replace("\n", " ")
+
+
 def _append_candidate_table(lines, title, items, empty_text):
     lines.extend(["", f"## {title}", ""])
     if not items:
@@ -1156,8 +1161,8 @@ def _append_candidate_table(lines, title, items, empty_text):
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
-        detail = _candidate_diagnostic_text(item)
-        plan_text = _trade_plan_text(item)
+        detail = _markdown_cell(_candidate_diagnostic_text(item))
+        plan_text = _markdown_cell(_trade_plan_text(item))
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "

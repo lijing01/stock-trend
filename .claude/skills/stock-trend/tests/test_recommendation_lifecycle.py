@@ -51,11 +51,11 @@ class TestRecommendationLifecycle(unittest.TestCase):
             recommendation["recommendation_date"] = "2026-08-20"
             at4 = evaluate_recommendation(
                 {"recommendation_date": "2026-08-20", **recommendation},
-                "2026-08-24", dates, rows, windows=(5,))
+                "2026-08-24", dates, rows, stock_meta={"adj": "qfq"}, windows=(5,))
             self.assertEqual(at4["windows"]["5"]["status"], "pending")
             at5 = evaluate_recommendation(
                 {"recommendation_date": "2026-08-20", **recommendation},
-                "2026-08-25", dates, rows, windows=(5,))
+                "2026-08-25", dates, rows, stock_meta={"adj": "qfq"}, windows=(5,))
             self.assertEqual(at5["windows"]["5"]["status"], "complete")
             self.assertEqual(before, first.path.read_bytes())
 

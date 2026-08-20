@@ -1647,7 +1647,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 item["trade_plan"] = build_candidate_trade_plan(
                     c["code"], kline_data.get(ts), item.get("wyckoff", {}),
                     trade_plan_policy, as_of_date,
-                    item.get("warnings", ""))
+                    _candidate_counterargument(item))
                 verdict = validate_trade_plan(
                     item["trade_plan"], trade_plan_policy, as_of_date)
                 item["trade_plan_status"] = (
@@ -1740,6 +1740,14 @@ def _detect_warnings(candidate, kline_data, capital_data, fundamental_data,
         warnings.append("短期炒作风险：基本面弱但动量强")
 
     return warnings
+
+
+def _candidate_counterargument(item):
+    """Return one stable human-readable risk statement for every candidate."""
+    warnings = item.get("warnings") or []
+    if warnings:
+        return "；".join(str(warning) for warning in warnings)
+    return "若量价确认失败或收盘跌破结构支撑，则交易逻辑失效"
 
 
 # ──────────────────────── Phase 3: Rank + Output ────────────────────────

@@ -1045,6 +1045,16 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
 
 class TestFilters(unittest.TestCase):
+    def test_counterargument_is_stable_and_non_empty(self):
+        self.assertEqual(
+            sc._candidate_counterargument({"warnings": []}),
+            "若量价确认失败或收盘跌破结构支撑，则交易逻辑失效",
+        )
+        self.assertEqual(
+            sc._candidate_counterargument({"warnings": ["风险A", "风险B"]}),
+            "风险A；风险B",
+        )
+
     def test_is_a_share(self):
         for ok in ("600519", "000001", "300750", "688001", "601166"):
             with self.subTest(code=ok):

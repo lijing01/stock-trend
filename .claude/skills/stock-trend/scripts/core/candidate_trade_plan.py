@@ -1,7 +1,7 @@
 """Pure, risk-bounded trade plans for daily stock recommendations."""
 import copy
 import math
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -14,6 +14,7 @@ MIN_PRIMARY_RR = 1.5
 RISK_BUDGET_PCT = 0.5
 VALID_TRADING_SESSIONS = 3
 HORIZON = {"min_trading_days": 20, "max_trading_days": 120}
+EVENT_STATUSES = {"not_implemented", "clear", "watch", "risk", "pending"}
 
 def _finite_positive(value):
     try:
@@ -43,10 +44,40 @@ def calculate_position_pct(entry_price, stop_price, max_portfolio_pct,
     equal_cap = float(max_portfolio_pct) / max(1, int(max_recommendations))
     return round(max(0.0, min(risk_based, equal_cap, 20.0)), 1)
 
-def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date, counterargument):
+def _next_validity_date(basis_date, market_sessions=None):
+    try:
+        base = date.fromisoformat(str(basis_date)[:10])
+    except (TypeError, ValueError):
+        return basis_date
+    normalized = []
+    for raw in market_sessions or []:
+        text = str(raw)
+        if len(text) == 8 and text.isdigit():
+            text = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+        try:
+            candidate = date.fromisoformat(text[:10])
+        except ValueError:
+            continue
+        if candidate > base:
+            normalized.append(candidate)
+    if len(normalized) >= VALID_TRADING_SESSIONS:
+        return sorted(set(normalized))[VALID_TRADING_SESSIONS - 1].isoformat()
+    current = base
+    sessions = 0
+    while sessions < VALID_TRADING_SESSIONS:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            sessions += 1
+    return current.isoformat()
+
+def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date,
+                               counterargument, market_sessions=None):
     df = _normalized_frame(kline)
+    if len(df) < 2:
+        return {"schema_version": SCHEMA_VERSION, "code": code, "basis_date": basis_date,
+                "action": "avoid", "event_check": {"status": "not_implemented"}}
     close = _finite_positive(df["close"].iloc[-1])
-    if close is None or len(df) < 2:
+    if close is None:
         return {"schema_version": SCHEMA_VERSION, "code": code, "basis_date": basis_date,
                 "action": "avoid", "event_check": {"status": "not_implemented"}}
     ma = calc_ma_signals(df, [5, 10, 20, 60]); rsi = calc_rsi(df)
@@ -65,12 +96,26 @@ def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date, counter
     stop = _finite_positive(risk.get("stop_loss")) or close - 1.5 * atr_value
     if low <= stop: low = stop + .25 * atr_value
     one_r = max(high - stop, .01)
-    technical_targets = risk.get("targets") or []
-    targets = [x.get("price") if isinstance(x, dict) else x for x in technical_targets]
-    targets = [x for x in targets if _finite_positive(x)]
-    while len(targets) < 3: targets.append(high + one_r * (len(targets) + 1))
-    targets = sorted(targets[:3])
-    action = "buy" if timing.get("verdict") == "ready" else ("wait" if timing.get("verdict") == "wait" else "avoid")
+    technical_targets = [
+        risk.get("target_conservative"),
+        risk.get("target_moderate"),
+        risk.get("target_aggressive"),
+    ]
+    technical_targets = [_finite_positive(value) for value in technical_targets]
+    has_technical_targets = (
+        all(value is not None for value in technical_targets)
+        and high < technical_targets[0] < technical_targets[1] < technical_targets[2]
+    )
+    if has_technical_targets:
+        targets = technical_targets
+        target_source = "technical"
+    else:
+        targets = [high + one_r, high + one_r * 2, high + one_r * 3]
+        target_source = "synthetic_fallback"
+    verdict = timing.get("verdict")
+    action = "buy" if verdict == "ready" else ("wait" if verdict in ("wait", "watch") else "avoid")
+    if action == "buy" and not has_technical_targets:
+        action = "wait"
     cap = float(policy.get("max_portfolio_pct", 0) or 0)
     pos = calculate_position_pct(high, stop, cap, policy.get("max_recommendations", 1))
     supplied_rr = risk.get("risk_reward_ratio")
@@ -83,13 +128,16 @@ def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date, counter
         "targets": {"conservative": round(targets[0], 4), "primary": round(targets[1], 4), "aggressive": round(targets[2], 4)},
         "risk_reward": {"supplied": supplied_rr, "recomputed": round((targets[1]-high)/(high-stop), 2)},
         "position": {"max_portfolio_pct": pos}, "horizon": dict(HORIZON),
-        "validity": {"trading_sessions": VALID_TRADING_SESSIONS, "valid_until": basis_date},
+        "validity": {"trading_sessions": VALID_TRADING_SESSIONS,
+                     "valid_until": _next_validity_date(basis_date, market_sessions)},
+        "target_source": target_source,
         "counterargument": counterargument, "event_check": {"status": "not_implemented"},
         "indicators": {"atr": atr}, "wyckoff": copy.deepcopy(wyckoff or {})}
 
 def validate_trade_plan(plan, policy, expected_date=None):
     reasons = []
     if not isinstance(plan, dict): return {"complete": False, "recomputed_rr": None, "reasons": ["trade_plan_missing"]}
+    if plan.get("schema_version") != SCHEMA_VERSION: reasons.append("trade_plan_schema_invalid")
     e, t = plan.get("entry") or {}, plan.get("targets") or {}
     low, high = _finite_positive(e.get("low")), _finite_positive(e.get("high")); stop = _finite_positive((plan.get("stop_loss") or {}).get("price"))
     vals = [_finite_positive(t.get(k)) for k in ("conservative", "primary", "aggressive")]
@@ -102,9 +150,27 @@ def validate_trade_plan(plan, policy, expected_date=None):
     elif not high < vals[0] < vals[1] < vals[2]: reasons.append("trade_plan_targets_unordered")
     rr = round((vals[1]-high)/(high-stop), 2) if vals[1] and high and stop and high > stop else None
     if rr is None or rr < MIN_PRIMARY_RR: reasons.append("trade_plan_rr_below_min")
+    stored_rr = _finite_positive((plan.get("risk_reward") or {}).get("recomputed"))
+    if stored_rr is None or (rr is not None and abs(stored_rr - rr) > 0.01):
+        reasons.append("trade_plan_rr_mismatch")
     pos = _finite_positive((plan.get("position") or {}).get("max_portfolio_pct"))
     if not pos or pos > float(policy.get("max_portfolio_pct", 0) or 0): reasons.append("trade_plan_position_over_policy")
-    if not plan.get("counterargument"): reasons.append("trade_plan_missing_counterargument")
-    if (plan.get("event_check") or {}).get("status") is None: reasons.append("trade_plan_event_status_missing")
+    counterargument = plan.get("counterargument")
+    if not isinstance(counterargument, str) or not counterargument.strip(): reasons.append("trade_plan_missing_counterargument")
+    event_status = (plan.get("event_check") or {}).get("status")
+    if event_status not in EVENT_STATUSES: reasons.append("trade_plan_event_status_invalid")
+    horizon = plan.get("horizon") or {}
+    if horizon.get("min_trading_days") != HORIZON["min_trading_days"] or horizon.get("max_trading_days") != HORIZON["max_trading_days"]:
+        reasons.append("trade_plan_horizon_invalid")
+    validity = plan.get("validity") or {}
+    if validity.get("trading_sessions") != VALID_TRADING_SESSIONS:
+        reasons.append("trade_plan_validity_sessions_invalid")
+    valid_until = validity.get("valid_until")
+    basis_date = plan.get("basis_date") or expected_date
+    try:
+        if not valid_until or not basis_date or date.fromisoformat(str(valid_until)[:10]) <= date.fromisoformat(str(basis_date)[:10]):
+            reasons.append("trade_plan_validity_date_invalid")
+    except (TypeError, ValueError):
+        reasons.append("trade_plan_validity_date_invalid")
     if plan.get("action") != "buy": reasons.append("trade_plan_not_ready")
     return {"complete": not reasons, "recomputed_rr": rr, "reasons": reasons}

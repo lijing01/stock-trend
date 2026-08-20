@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans.daily_candidates import (
     _candidate_diagnostic_text,
+    _append_candidate_table,
     _complete_performance,
     _emit_performance_summary,
     _generate_html,
@@ -106,6 +107,12 @@ def _complete_rankings_and_history():
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_markdown_trade_plan_pipes_are_escaped(self):
+        lines = []
+        _append_candidate_table(lines, "测试", [candidate("600000")], "无")
+        row = lines[-1]
+        self.assertIn(r"入场10.0~10.5 \| 止损9.5", row)
+
     def test_final_valid_count_uses_same_predicate_as_scan_early_stop(self):
         valid = candidate("valid", adjusted_score=70)
         low_score = candidate("low", adjusted_score=49)

@@ -28,12 +28,18 @@ def _validate(src):
     for key in ('market_regime','sectors','candidates','buckets','scan_status'):
         if key not in src: raise SnapshotValidationError('missing '+key)
     if not isinstance(src['buckets'], dict): raise SnapshotValidationError('invalid buckets')
+    required_buckets = ('actionable', 'waiting_trigger', 'next_day_confirmation', 'observation')
+    if any(name not in src['buckets'] or not isinstance(src['buckets'][name], list)
+           for name in required_buckets):
+        raise SnapshotValidationError('invalid bucket contract')
     def dates(x, path=''):
         if isinstance(x, dict):
             for k,v in x.items():
                 if isinstance(v,str) and ('date' in k.lower() or k in ('as_of','basis_date')):
                     try:
-                        if _d(v)>_d(rd): raise SnapshotValidationError('future evidence: '+path+k)
+                        is_plan_date = 'trade_plan' in path or k in ('valid_until', 'event_date') and 'plan' in path
+                        if not is_plan_date and _d(v)>_d(rd):
+                            raise SnapshotValidationError('future evidence: '+path+k)
                     except SnapshotValidationError: raise
                     except Exception: pass
                 dates(v,path+k+'.')
@@ -47,6 +53,7 @@ def build_snapshot(source):
     content={k:s[k] for k in ('recommendation_date','snapshot_type','model_version','policy','market_regime','sectors','candidates','buckets','scan_status')}
     return {'schema_version':SCHEMA_VERSION,'generated_at':s.get('generated_at',''),'content_sha256':content_sha256(content),'content':content}
 def save_official_snapshot(snapshot, root=DEFAULT_ROOT):
+    _validate_snapshot_envelope(snapshot)
     root=Path(root); root.mkdir(parents=True,exist_ok=True); c=snapshot['content']; target=root/(c['recommendation_date']+'.json')
     payload=canonical_json(snapshot)+b'\n'; fd,tmp=tempfile.mkstemp(dir=root,prefix='.tmp-'); os.close(fd)
     try:
@@ -73,10 +80,21 @@ def save_snapshot_if_official(source, root=DEFAULT_ROOT):
     return save_official_snapshot(build_snapshot(source),root)
 def load_official_snapshot(path):
     p=Path(path); obj=json.loads(p.read_text());
-    if obj.get('schema_version')!=SCHEMA_VERSION: raise SnapshotValidationError('unknown schema')
+    _validate_snapshot_envelope(obj)
     if p.stem != obj.get('content',{}).get('recommendation_date'): raise SnapshotValidationError('filename mismatch')
-    if content_sha256(obj['content']) != obj.get('content_sha256'): raise SnapshotValidationError('digest mismatch')
     return obj
+
+def _validate_snapshot_envelope(snapshot):
+    if not isinstance(snapshot, dict) or snapshot.get('schema_version') != SCHEMA_VERSION:
+        raise SnapshotValidationError('unknown schema')
+    content = snapshot.get('content')
+    if not isinstance(content, dict):
+        raise SnapshotValidationError('missing content')
+    if content_sha256(content) != snapshot.get('content_sha256'):
+        raise SnapshotValidationError('digest mismatch')
+    source = copy.deepcopy(content)
+    source['generated_at'] = snapshot.get('generated_at')
+    _validate(source)
 def iter_official_snapshots(root=DEFAULT_ROOT, through_date=None):
     out=[]; rejected=[]
     for p in sorted(Path(root).glob('*.json')):
