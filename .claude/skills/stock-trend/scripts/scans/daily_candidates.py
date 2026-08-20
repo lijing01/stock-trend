@@ -14,6 +14,7 @@ import sys
 import json
 import argparse
 import copy
+import math
 from html import escape
 import time
 from datetime import datetime, timedelta, time as datetime_time
@@ -73,6 +74,7 @@ REASON_LABELS = {
     "wyckoff_countertrend": "维科夫长短周期逆势，降级为观察",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
+    "trade_plan_target_source_not_executable": "目标来源非结构化阻力位，仅供观察",
 }
 
 DATA_REASON_CODES = {
@@ -1154,16 +1156,31 @@ def _trade_plan_text(item):
     position = plan.get("position") or {}
     if not plan:
         return "交易计划：未生成"
-    source = plan.get("target_source") or "unavailable"
-    source_text = TARGET_SOURCE_LABELS.get(source, "目标不可用")
-    rr_value = rr.get("recomputed")
+    source = plan.get("target_source")
+    if source not in TARGET_SOURCE_LABELS:
+        source = "unavailable"
+    source_text = TARGET_SOURCE_LABELS[source]
+    target_values = [targets.get(key) for key in
+                     ("conservative", "primary", "aggressive")]
+    valid_target_ladder = (
+        source in {"resistance", "atr_projection"}
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in target_values
+        )
+        and target_values[0] < target_values[1] < target_values[2]
+    )
+    rr_value = rr.get("recomputed") if valid_target_ladder else None
     rr_text = (
         f"{rr_value:.2f}" if isinstance(rr_value, (int, float))
-        and not isinstance(rr_value, bool) else "—"
+        and not isinstance(rr_value, bool)
+        and math.isfinite(rr_value) else "—"
     )
-    target_text = "/".join(
-        "—" if targets.get(key) is None else str(targets.get(key))
-        for key in ("conservative", "primary", "aggressive")
+    target_text = (
+        "/".join(str(value) for value in target_values)
+        if valid_target_ladder else "—/—/—"
     )
     reason = plan.get("target_reason")
     reason_text = f"（{reason}）" if source == "unavailable" and reason else ""
@@ -1281,11 +1298,28 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
 
 
 def _trade_plan_promotable(item):
-    """Only a complete v1 buy plan can enter the formal actionable bucket."""
+    """Only a complete resistance-backed v1 buy plan is recommendable."""
+    plan = item.get("trade_plan")
+    targets = (plan or {}).get("targets") or {}
+    target_values = [targets.get(key) for key in
+                     ("conservative", "primary", "aggressive")]
+    risk_reward = (plan or {}).get("risk_reward") or {}
+    rr_value = risk_reward.get("recomputed")
     return (
         item.get("trade_plan_status") == "complete"
-        and isinstance(item.get("trade_plan"), dict)
-        and item["trade_plan"].get("action") == "buy"
+        and isinstance(plan, dict)
+        and plan.get("action") == "buy"
+        and plan.get("target_source") == "resistance"
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in target_values
+        )
+        and target_values[0] < target_values[1] < target_values[2]
+        and isinstance(rr_value, (int, float))
+        and not isinstance(rr_value, bool)
+        and math.isfinite(rr_value)
     )
 
 
@@ -1300,7 +1334,8 @@ def classify_candidates(candidates, policy):
         and item.get("wyckoff", {}).get("alignment", {}).get(
             "recommendation_gate", "short_term_only") != "observation"
         and (_trade_plan_promotable(item)
-             if policy.get("mode") == "actionable" else True)
+             if policy.get("mode") in {"actionable", "waiting_trigger"}
+             else True)
     ]
     limit = policy.get("max_recommendations", 0)
     actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
@@ -1312,6 +1347,7 @@ def classify_candidates(candidates, policy):
                          if item.get("data_quality", {}).get("eligible", False)
                          and item.get("score_eligible", True)
                          and item.get("wyckoff")
+                         and _trade_plan_promotable(item)
                          and item.get("code") not in promoted][:2]
         confirmations = [
             dict(item, confirmation_conditions=(
@@ -1344,10 +1380,13 @@ def classify_candidates(candidates, policy):
                 reasons.append("wyckoff_failed_breakout")
             elif alignment_status != "short_term_pending":
                 reasons.append("wyckoff_countertrend")
-        if policy.get("mode") == "actionable" and not _trade_plan_promotable(item):
+        if (policy.get("mode") in {"actionable", "waiting_trigger"}
+                and not _trade_plan_promotable(item)):
             reasons.extend(item.get("trade_plan_reasons") or [])
             if not item.get("trade_plan"):
                 reasons.append("trade_plan_missing")
+            elif item.get("trade_plan", {}).get("target_source") != "resistance":
+                reasons.append("trade_plan_target_source_not_executable")
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
         if not reasons:

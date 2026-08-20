@@ -135,6 +135,19 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("目标来源 目标不可用", unavailable_text)
         self.assertNotIn("R:R 2.0", unavailable_text)
 
+        legacy_item = candidate("legacy")
+        legacy_item["trade_plan"].update({
+            "target_source": "synthetic_fallback",
+            "risk_reward": {"supplied": 2.0, "recomputed": 2.0},
+            "targets": {"conservative": 11.0, "primary": 12.0,
+                        "aggressive": 14.0},
+        })
+        legacy_text = _trade_plan_text(legacy_item)
+        self.assertIn("目标来源 目标不可用", legacy_text)
+        self.assertIn("目标—/—/—", legacy_text)
+        self.assertIn("R:R —", legacy_text)
+        self.assertNotIn("R:R 2.00", legacy_text)
+
     def test_report_contains_target_source_audit_in_markdown_and_html(self):
         resistance = candidate("resistance")
         atr = candidate("atr")
@@ -1576,6 +1589,25 @@ class TestRecommendationPolicy(unittest.TestCase):
             ["3"],
         )
         self.assertEqual(buckets["observation"], [])
+
+    def test_waiting_trigger_excludes_non_structural_target_sources(self):
+        policy = build_recommendation_policy(
+            {"score": 70, "data_date": "2026-08-06"}, "2026-08-06")
+        resistance = candidate("resistance")
+        atr = candidate("atr")
+        atr["trade_plan"]["target_source"] = "atr_projection"
+        unavailable = candidate("unavailable")
+        unavailable["trade_plan"]["target_source"] = "unavailable"
+        buckets = classify_candidates(
+            [resistance, atr, unavailable], policy)
+        self.assertEqual(
+            [row["code"] for row in buckets["waiting_trigger"]],
+            ["resistance"],
+        )
+        self.assertEqual(
+            {row["code"] for row in buckets["observation"]},
+            {"atr", "unavailable"},
+        )
 
     def test_divergence_requires_verified_sector_capital(self):
         policy = build_recommendation_policy(

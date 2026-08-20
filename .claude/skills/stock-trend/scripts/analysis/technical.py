@@ -1281,14 +1281,20 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
     """
     curr_close = df["close"].iloc[-1]
     entry_referenced = entry_price is not None
-    try:
-        entry_reference = float(entry_price) if entry_referenced else float(curr_close)
-    except (TypeError, ValueError):
+    invalid_entry_reference = False
+    if entry_referenced:
+        try:
+            entry_reference = float(entry_price)
+        except (TypeError, ValueError, OverflowError):
+            entry_reference = None
+            invalid_entry_reference = True
+        if (entry_reference is None
+                or not np.isfinite(entry_reference)
+                or entry_reference <= 0):
+            entry_reference = None
+            invalid_entry_reference = True
+    else:
         entry_reference = float(curr_close)
-        entry_referenced = False
-    if not np.isfinite(entry_reference) or entry_reference <= 0:
-        entry_reference = float(curr_close)
-        entry_referenced = False
     atr = atr_result.get("atr")
     atr_pct = atr_result.get("atr_pct", 0)
 
@@ -1307,7 +1313,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
     support_items = [item for item in levels.get("support", []) if item["price"] and item.get("source") != "boll_upper"]
     support_prices = [item["price"] for item in support_items]
     resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
-    if entry_referenced:
+    if entry_referenced and entry_reference is not None:
         resistance_prices = [price for price in resistance_prices if price > entry_reference]
 
     # --- Adaptive stop-loss with volatility regime awareness ---
@@ -1378,12 +1384,14 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
     warning = None
 
     reference = entry_reference if entry_referenced else curr_close
-    risk = (reference - stop_loss) if stop_loss else None
+    risk = (reference - stop_loss) if reference is not None and stop_loss else None
     target_source = "legacy"
 
     if entry_referenced:
         target_source = "unavailable"
-        if resistance_prices and risk and risk > 0:
+        if invalid_entry_reference:
+            warning = "计划入场价无效，不能评估盈亏比"
+        elif resistance_prices and risk and risk > 0:
             target_rr_threshold = 2.0 if is_etf else 1.5
             moderate_idx = None
             for i, rp in enumerate(resistance_prices):

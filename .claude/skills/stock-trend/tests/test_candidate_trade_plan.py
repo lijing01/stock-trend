@@ -110,6 +110,25 @@ def test_risk_reward_atr_projection_is_not_fixed_two_r():
     )
 
 
+def test_invalid_entry_reference_disables_target_calculation():
+    df = pd.DataFrame(make_kline(start=100.0, rows=2)["data"])
+    result = calc_risk_reward(
+        df,
+        {"atr": 2.0, "atr_pct": 2.0},
+        {"resistance": [{"price": 120.0}, {"price": 130.0},
+                        {"price": 140.0}]},
+        direction="bullish",
+        is_etf=False,
+        entry_price="invalid",
+    )
+    assert result["entry_reference"] is None
+    assert result["target_source"] == "unavailable"
+    assert result["target_conservative"] is None
+    assert result["target_moderate"] is None
+    assert result["target_aggressive"] is None
+    assert result["risk_reward_ratio"] is None
+
+
 def test_builder_does_not_create_synthetic_targets_when_ladder_unavailable():
     risk = {
         "stop_loss": 95,
@@ -168,6 +187,7 @@ def run_candidate_trade_plan_tests():
              test_builder_uses_technical_targets,
              test_risk_reward_uses_planned_entry_reference_and_source,
              test_risk_reward_atr_projection_is_not_fixed_two_r,
+             test_invalid_entry_reference_disables_target_calculation,
              test_builder_does_not_create_synthetic_targets_when_ladder_unavailable,
              test_builder_keeps_atr_projection_observation_only,
              test_builder_validity_is_not_only_basis_date,
@@ -185,6 +205,7 @@ if __name__ == "__main__":
     test_builder_uses_technical_targets()
     test_risk_reward_uses_planned_entry_reference_and_source()
     test_risk_reward_atr_projection_is_not_fixed_two_r()
+    test_invalid_entry_reference_disables_target_calculation()
     test_builder_does_not_create_synthetic_targets_when_ladder_unavailable()
     test_builder_keeps_atr_projection_observation_only()
     test_builder_validity_is_not_only_basis_date()
