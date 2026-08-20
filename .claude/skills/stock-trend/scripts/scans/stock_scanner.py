@@ -36,6 +36,10 @@ from core.source_health import (
     live_attempt,
     source_result,
 )
+from core.candidate_trade_plan import (
+    build_candidate_trade_plan,
+    validate_trade_plan,
+)
 from analysis.wyckoff import (
     analyze_kline_dict,
     BUY_PHASES, BUY_SUB_PHASES, build_period_alignment, is_buy_signal, normalize_score_100,
@@ -1272,7 +1276,8 @@ def score_wyckoff(analysis):
 
 
 def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
-               as_of_date="", source_health=None, metrics=None):
+               as_of_date="", source_health=None, metrics=None,
+               trade_plan_policy=None):
     """Phase 2: Fetch data and compute multi-dimension scores for all candidates.
 
     enable_wyckoff: run Wyckoff gate (P0-2 funnel) — drops candidates not at a
@@ -1634,6 +1639,24 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 "long_term": long_term,
                 "alignment": wk.get("alignment") or build_period_alignment(short_term, long_term),
             }
+
+        # K-lines are already prefetched above; attach an additive plan without
+        # introducing another network request.  Policy is optional for legacy callers.
+        if trade_plan_policy is not None:
+            try:
+                item["trade_plan"] = build_candidate_trade_plan(
+                    c["code"], kline_data.get(ts), item.get("wyckoff", {}),
+                    trade_plan_policy, as_of_date,
+                    item.get("warnings", ""))
+                verdict = validate_trade_plan(
+                    item["trade_plan"], trade_plan_policy, as_of_date)
+                item["trade_plan_status"] = (
+                    "complete" if verdict["complete"] else "incomplete")
+                item["trade_plan_reasons"] = verdict["reasons"]
+            except (KeyError, TypeError, ValueError):
+                item["trade_plan"] = None
+                item["trade_plan_status"] = "error"
+                item["trade_plan_reasons"] = ["trade_plan_build_error"]
 
         scored.append(item)
 

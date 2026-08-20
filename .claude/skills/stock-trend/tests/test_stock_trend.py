@@ -1426,6 +1426,10 @@ def run_daily_recommendation_tests():
     try:
         from test_capital_flow import run_capital_flow_tests
         from test_daily_candidates import run_daily_candidates_tests
+        from test_candidate_trade_plan import run_candidate_trade_plan_tests
+        from test_recommendation_snapshot import run_recommendation_snapshot_tests
+        from test_recommendation_attribution import run_recommendation_attribution_tests
+        from test_recommendation_lifecycle import run_recommendation_lifecycle_tests
         from test_recommendation_quality import run_recommendation_quality_tests
         from test_stock_scanner import run_stock_scanner_tests
         from test_wyckoff_backtest import run_wyckoff_backtest_tests
@@ -1437,6 +1441,10 @@ def run_daily_recommendation_tests():
             run_stock_scanner_tests,
             run_daily_candidates_tests,
             run_wyckoff_backtest_tests,
+            run_candidate_trade_plan_tests,
+            run_recommendation_snapshot_tests,
+            run_recommendation_attribution_tests,
+            run_recommendation_lifecycle_tests,
         ):
             p, f = runner()
             PASSED += p

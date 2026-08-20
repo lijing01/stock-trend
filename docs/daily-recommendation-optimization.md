@@ -278,7 +278,7 @@ final_score = raw_composite_score × coverage_factor × freshness_factor
 - 与现有持仓高度重合时降低推荐等级；
 - 多板块股票记录完整板块列表，并标注最强主线归属。
 
-### P1-4 输出完整交易计划
+### P1-4 输出完整交易计划（已实现 v1）
 
 每只正式推荐至少包含：
 
@@ -297,9 +297,11 @@ final_score = raw_composite_score × coverage_factor × freshness_factor
 | 反向论据 | 最强看空证据 |
 | 重要日期 | 财报、解禁、分红、政策事件 |
 
+实现约束：正式 `actionable` 必须通过 `candidate-trade-plan/v1` 校验，主目标 R:R 由入场上沿、止损和主目标重算且不低于 1.5；仓位按单笔 0.5% 组合风险预算并受市场上限约束。盘中只输出 observation，事件字段 v1 暂标记 `not_implemented`，仍需人工复核公告。
+
 ## P2：反馈闭环和可解释性
 
-### P2-1 推荐快照
+### P2-1 推荐快照（已实现 v1）
 
 每日保存不可变快照，包括：
 
@@ -310,7 +312,9 @@ final_score = raw_composite_score × coverage_factor × freshness_factor
 - 最终行动等级；
 - 推荐价、止损、目标和模型版本。
 
-### P2-2 自动业绩跟踪
+正式快照路径为 `.cache/stock-trend/recommendation_history/YYYY-MM-DD.json`，采用 canonical JSON 摘要和同文件系统 hard-link write-once：同内容重复保存为 no-op，同日不同内容抛出冲突且不覆盖。临时/盘中结果不进入官方快照。
+
+### P2-2 自动业绩跟踪（已实现基础 v1）
 
 自动计算推荐后 5/10/20/60 个交易日：
 
@@ -320,6 +324,8 @@ final_score = raw_composite_score × coverage_factor × freshness_factor
 - 最大有利波动和最大不利波动；
 - 止损/目标是否触发；
 - 实际可成交性。
+
+归因引擎位于 `scripts/analysis/recommendation_attribution.py`，使用 T+1、市场交易日、前复权输入、evaluation cutoff、停牌/一字涨停/止损优先规则；结果写入独立可变 sidecar。默认成本为 gross/zero，成本参数显式传入。样本少于 20 个正式日期或 100 个成熟信号时，汇总保持 `evidence_insufficient`。
 
 ### P2-3 分组校准
 

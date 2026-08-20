@@ -66,6 +66,26 @@ def candidate(code, eligible=True, adjusted_score=80.0,
             "coverage": 0.8 if eligible else 0.55,
             "reasons": [] if eligible else ["coverage_below_70pct"],
         },
+        "trade_plan": {
+            "schema_version": "candidate-trade-plan/v1",
+            "basis_date": "2026-08-06",
+            "action": "buy",
+            "entry": {"low": 10.0, "high": 10.5},
+            "confirmation": "收盘站上10.5且量能确认",
+            "invalidation": "收盘跌破9.5",
+            "stop_loss": {"price": 9.5},
+            "targets": {"conservative": 11.0, "primary": 12.0,
+                        "aggressive": 14.0},
+            "risk_reward": {"supplied": 1.5, "recomputed": 1.5},
+            "position": {"max_portfolio_pct": 10.0},
+            "horizon": {"min_trading_days": 20,
+                        "max_trading_days": 120},
+            "validity": {"trading_sessions": 3},
+            "counterargument": "跌破结构支撑则逻辑失效",
+            "event_check": {"status": "not_implemented"},
+        },
+        "trade_plan_status": "complete",
+        "trade_plan_reasons": [],
     }
 
 
@@ -1438,22 +1458,24 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = build_recommendation_policy(regime, "2026-08-06")
         self.assertEqual(policy["mode"], "observation")
 
-    def test_intraday_keeps_strong_tier_but_provisional(self):
+    def test_intraday_is_observation_only_and_provisional(self):
         regime = {"score": 90, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(
             regime, "2026-08-06", market_open=True)
-        self.assertEqual(policy["mode"], "actionable")
-        self.assertEqual(policy["max_recommendations"], 5)
-        self.assertEqual(policy["max_portfolio_pct"], 60)
+        self.assertEqual(policy["mode"], "observation")
+        self.assertEqual(policy["max_recommendations"], 0)
+        self.assertEqual(policy["max_portfolio_pct"], 0)
+        self.assertEqual(policy["provisional_target_mode"], "actionable")
         self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
 
-    def test_intraday_neutral_tier_waiting_but_provisional(self):
+    def test_intraday_neutral_tier_is_observation_only(self):
         regime = {"score": 70, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(
             regime, "2026-08-06", market_open=True)
-        self.assertEqual(policy["mode"], "waiting_trigger")
-        self.assertEqual(policy["max_recommendations"], 2)
+        self.assertEqual(policy["mode"], "observation")
+        self.assertEqual(policy["max_recommendations"], 0)
+        self.assertEqual(policy["provisional_target_mode"], "waiting_trigger")
         self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
 

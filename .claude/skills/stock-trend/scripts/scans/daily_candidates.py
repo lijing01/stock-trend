@@ -45,6 +45,7 @@ from core.source_health import (
     classify_failure,
     live_attempt,
 )
+from core.recommendation_snapshot import save_snapshot_if_official
 SIGNAL_LABELS = {
     "volume_breakout": "放量突破",
     "northbound_adding": "北向增持",
@@ -798,7 +799,8 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
 
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
-                 sector_context=None, source_health=None, metrics=None):
+                 sector_context=None, source_health=None, metrics=None,
+                 trade_plan_policy=None):
     """Expand until enough score-qualified, data-eligible candidates exist."""
     metrics = metrics if metrics is not None else {}
     if sector_context is None:
@@ -900,10 +902,11 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                 scored = run_phase2(
                     new_candidates, enable_wyckoff=True,
                     as_of_date=as_of_date,
-                    source_health=source_health, metrics=metrics)
+                    source_health=source_health, metrics=metrics,
+                    trade_plan_policy=trade_plan_policy)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
-                        "source_health", "metrics")):
+                        "source_health", "metrics", "trade_plan_policy")):
                     raise
                 scored = run_phase2(
                     new_candidates, enable_wyckoff=True,
@@ -1120,6 +1123,27 @@ def _kline_depth_text(wyckoff):
     return f"{available}/{minimum}" if available is not None else "未知"
 
 
+def _trade_plan_text(item):
+    """Render the additive compact trade-plan fields consistently."""
+    plan = item.get("trade_plan") or {}
+    entry = plan.get("entry") or {}
+    stop = plan.get("stop_loss") or {}
+    targets = plan.get("targets") or {}
+    rr = plan.get("risk_reward") or {}
+    position = plan.get("position") or {}
+    if not plan:
+        return "交易计划：未生成"
+    return (
+        f"交易计划：入场{entry.get('low', '-')}~{entry.get('high', '-')} | "
+        f"止损{stop.get('price', '-')} | "
+        f"目标{targets.get('conservative', '-')}/"
+        f"{targets.get('primary', '-')}/{targets.get('aggressive', '-')} | "
+        f"R:R {rr.get('recomputed', '-')} | "
+        f"仓位≤{position.get('max_portfolio_pct', '-')}% | "
+        f"有效{(plan.get('validity') or {}).get('trading_sessions', '-')}个交易日"
+    )
+
+
 def _append_candidate_table(lines, title, items, empty_text):
     lines.extend(["", f"## {title}", ""])
     if not items:
@@ -1133,6 +1157,7 @@ def _append_candidate_table(lines, title, items, empty_text):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
         detail = _candidate_diagnostic_text(item)
+        plan_text = _trade_plan_text(item)
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
@@ -1145,7 +1170,7 @@ def _append_candidate_table(lines, title, items, empty_text):
             f"{item['composite_score']:.1f} | "
             f"{candidate_rank_score(item):.1f} | "
             f"{quality.get('coverage', 0):.0%} | "
-            f"{detail} |"
+            f"{detail}；{plan_text} |"
         )
 
 
@@ -1203,12 +1228,27 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
             "max_portfolio_pct": 60, "reasons": [],
             "requires_sector_capital_proof": divergence,
         }
-    # 盘中不再硬锁观察池: 按评分分档,但全部标记「盘中临时,收盘确认」。
-    # stale/missing 检查在上面先行 → 非当日 regime 仍 regime_stale 且不置 provisional。
+    # 盘中结果只用于观察，不能产生正式推荐或仓位建议。
     if market_open:
-        policy["provisional"] = True
+        previous_mode = policy.get("mode", "observation")
+        policy.update({
+            "mode": "observation",
+            "max_recommendations": 0,
+            "max_portfolio_pct": 0,
+            "provisional": True,
+            "provisional_target_mode": previous_mode,
+        })
         policy["reasons"] = (policy.get("reasons") or []) + ["intraday_provisional"]
     return policy
+
+
+def _trade_plan_promotable(item):
+    """Only a complete v1 buy plan can enter the formal actionable bucket."""
+    return (
+        item.get("trade_plan_status") == "complete"
+        and isinstance(item.get("trade_plan"), dict)
+        and item["trade_plan"].get("action") == "buy"
+    )
 
 
 def classify_candidates(candidates, policy):
@@ -1221,6 +1261,8 @@ def classify_candidates(candidates, policy):
              or item.get("sector_capital_evidence") == "positive_verified")
         and item.get("wyckoff", {}).get("alignment", {}).get(
             "recommendation_gate", "short_term_only") != "observation"
+        and (_trade_plan_promotable(item)
+             if policy.get("mode") == "actionable" else True)
     ]
     limit = policy.get("max_recommendations", 0)
     actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
@@ -1264,6 +1306,10 @@ def classify_candidates(candidates, policy):
                 reasons.append("wyckoff_failed_breakout")
             elif alignment_status != "short_term_pending":
                 reasons.append("wyckoff_countertrend")
+        if policy.get("mode") == "actionable" and not _trade_plan_promotable(item):
+            reasons.extend(item.get("trade_plan_reasons") or [])
+            if not item.get("trade_plan"):
+                reasons.append("trade_plan_missing")
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
         if not reasons:
@@ -1280,8 +1326,40 @@ def classify_candidates(candidates, policy):
     }
 
 
+def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
+                                  recommendation_date, performance=None):
+    """Persist one official snapshot while keeping report generation resilient."""
+    source = {
+        "recommendation_date": recommendation_date,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "snapshot_type": "provisional" if policy.get("provisional") else "formal",
+        "model_version": "daily-candidates/v1",
+        "policy": copy.deepcopy(policy),
+        "market_regime": load_regime_context() or {},
+        "sectors": copy.deepcopy(sector_codes),
+        "candidates": copy.deepcopy(candidates),
+        "buckets": copy.deepcopy(buckets),
+        "scan_status": (performance or {}).get("scan_status", "complete"),
+    }
+    try:
+        result = save_snapshot_if_official(source)
+        return {
+            "status": result.status,
+            "path": str(result.path) if result.path else None,
+            "content_sha256": getattr(result, "content_sha256", None),
+            "reason": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "save_failed",
+            "path": None,
+            "content_sha256": None,
+            "reason": type(exc).__name__,
+        }
+
+
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
-                    performance=None):
+                    performance=None, tracking=None):
     funnel = (
         f"板块 {len(sector_codes)} → 候选 {len(candidates)} → "
         f"维科夫买点 {sum(1 for item in candidates if item.get('wyckoff'))} → "
@@ -1316,6 +1394,10 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
             "> ⚠️ **盘中临时(未收盘确认)**: 当前为盘中快照,收盘后请复跑 "
             "`/daily-review` 与 `/candidates` 确认最终结论。",
         ])
+    if tracking:
+        lines.extend(["", f"**推荐快照追踪**: {tracking.get('status')}"
+                      + (f" | {tracking.get('path')}"
+                         if tracking.get("path") else "")])
     suffix = "(盘中临时,收盘确认)" if policy.get("provisional") else ""
     _append_candidate_table(
         lines, f"今日可执行{suffix}", buckets["actionable"], "今日无可执行推荐。")
@@ -1344,6 +1426,7 @@ def _html_candidate_rows(items):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
         detail = _candidate_diagnostic_text(item)
+        plan_text = escape(_trade_plan_text(item))
         rows.append(
             f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
@@ -1358,13 +1441,13 @@ def _html_candidate_rows(items):
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
             f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
-            f"<td>{detail}</td></tr>"
+            f"<td>{escape(detail)}；{plan_text}</td></tr>"
         )
     return "".join(rows)
 
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
-                   performance=None):
+                   performance=None, tracking=None):
     """Lightweight HTML mirror of the MD report."""
     regime = load_regime_context()
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
@@ -1396,6 +1479,11 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         )
 
     performance_html = _performance_html(performance)
+    tracking_html = (
+        f"<p class='dt'>推荐快照追踪：{escape(str(tracking.get('status')))}"
+        f"{(' | ' + escape(str(tracking.get('path')))) if tracking.get('path') else ''}</p>"
+        if tracking else ""
+    )
 
     provisional_banner = (
         '<p style="color:#b45309;font-weight:600;margin:8px 0">⚠️ 盘中临时(未收盘确认): '
@@ -1427,6 +1515,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 <p class="dt">{policy_note}</p>
 <p class="dt">{funnel_note}</p>
+{tracking_html}
 {provisional_banner}
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行{tier_suffix}</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
@@ -1443,7 +1532,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
-                      performance=None):
+                      performance=None, tracking=None):
     return {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -1451,6 +1540,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
             "candidate_count": len(candidates),
             "elapsed_seconds": round(elapsed, 1),
             "performance": performance or {},
+            "tracking": tracking or {},
         },
         "policy": policy,
         "sectors": sector_codes,
@@ -1539,6 +1629,7 @@ def main():
         sector_context={c["code"]: c for c in sector_codes},
         source_health=source_health,
         metrics=performance,
+        trade_plan_policy=policy,
     )
 
     # 过滤 + 排序 + 归一化到 top
@@ -1549,14 +1640,18 @@ def main():
     performance = _complete_performance(
         performance, source_health, candidates, buckets, args.min_score,
         time.monotonic() - monotonic_start)
+    tracking = _save_recommendation_snapshot(
+        candidates, sector_codes, policy, buckets, expected_date, performance)
 
     if args.json:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         builders = [("json", lambda: build_json_output(
-            candidates, sector_codes, elapsed, policy, buckets))]
+            candidates, sector_codes, elapsed, policy, buckets,
+            tracking=tracking))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
-                candidates, sector_codes, elapsed, ts, policy, buckets)))
+                candidates, sector_codes, elapsed, ts, policy, buckets,
+                tracking=tracking)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -1578,11 +1673,13 @@ def main():
     # Assemble every requested format exactly once before freezing one shared
     # performance envelope.  Serialization and file writes are outside it.
     builders = [("markdown", lambda: generate_report(
-        candidates, sector_codes, elapsed, policy, buckets))]
+        candidates, sector_codes, elapsed, policy, buckets,
+        tracking=tracking))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
-            candidates, sector_codes, elapsed, ts, policy, buckets)))
+            candidates, sector_codes, elapsed, ts, policy, buckets,
+            tracking=tracking)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(
