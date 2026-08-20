@@ -899,6 +899,30 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertNotIn("wyckoff", scored[0]["dimensions"])
         self.assertNotIn("wyckoff", scored[0])
 
+    def test_trade_plan_source_survives_scanner_and_only_resistance_is_complete(self):
+        resistance_plan = {"action": "buy", "target_source": "resistance"}
+        atr_plan = {"action": "wait", "target_source": "atr_projection"}
+        candidates = [_make_candidate("600001"), _make_candidate("600002")]
+        sc._fetch_kline = lambda ts, as_of_date="": _make_kline(60, ts)
+        sc.analyze_kline_dict = lambda kline: _wk(sub="lps", conf=0.6)
+        with patch.object(sc, "build_candidate_trade_plan",
+                          side_effect=[resistance_plan, atr_plan]), \
+             patch.object(sc, "validate_trade_plan", side_effect=[
+                 {"complete": True, "reasons": []},
+                 {"complete": False, "reasons": [
+                     "trade_plan_target_source_not_executable"]},
+             ]):
+            scored = sc.run_phase2(
+                candidates, enable_wyckoff=False,
+                trade_plan_policy={"mode": "actionable"})
+
+        self.assertEqual(
+            [item["trade_plan_target_source"] for item in scored],
+            ["resistance", "atr_projection"],
+        )
+        self.assertEqual(scored[0]["trade_plan_status"], "complete")
+        self.assertEqual(scored[1]["trade_plan_status"], "incomplete")
+
     def test_composite_uses_raw_dimension_values_before_rounding(self):
         sc._fetch_kline = lambda ts, as_of_date="": _make_kline(60, ts)
         raw = {

@@ -1653,10 +1653,14 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 item["trade_plan_status"] = (
                     "complete" if verdict["complete"] else "incomplete")
                 item["trade_plan_reasons"] = verdict["reasons"]
+                item["trade_plan_target_source"] = (
+                    (item.get("trade_plan") or {}).get("target_source")
+                    or "unavailable")
             except (KeyError, TypeError, ValueError):
                 item["trade_plan"] = None
                 item["trade_plan_status"] = "error"
                 item["trade_plan_reasons"] = ["trade_plan_build_error"]
+                item["trade_plan_target_source"] = "unavailable"
 
         scored.append(item)
 

@@ -22,6 +22,7 @@ from scans.daily_candidates import (
     _generate_html,
     _is_final_valid_candidate,
     _freeze_output_envelope,
+    _trade_plan_text,
     build_json_output,
     build_recommendation_policy,
     candidate_rank_score,
@@ -78,6 +79,7 @@ def candidate(code, eligible=True, adjusted_score=80.0,
             "targets": {"conservative": 11.0, "primary": 12.0,
                         "aggressive": 14.0},
             "risk_reward": {"supplied": 1.5, "recomputed": 1.5},
+            "target_source": "resistance",
             "position": {"max_portfolio_pct": 10.0},
             "horizon": {"min_trading_days": 20,
                         "max_trading_days": 120},
@@ -107,6 +109,57 @@ def _complete_rankings_and_history():
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_trade_plan_text_discloses_source_and_unavailable_rr(self):
+        resistance_text = _trade_plan_text(candidate("resistance"))
+        self.assertIn("目标来源 阻力位", resistance_text)
+        self.assertIn("R:R 1.50", resistance_text)
+
+        atr_item = candidate("atr")
+        atr_item["trade_plan"].update({
+            "target_source": "atr_projection",
+            "risk_reward": {"supplied": 1.2, "recomputed": 1.23},
+        })
+        atr_text = _trade_plan_text(atr_item)
+        self.assertIn("目标来源 ATR投射（仅观察）", atr_text)
+
+        unavailable_item = candidate("unavailable")
+        unavailable_item["trade_plan"].update({
+            "target_source": "unavailable",
+            "target_reason": "没有高于计划入场价的有效目标梯度",
+            "targets": {"conservative": None, "primary": None,
+                        "aggressive": None},
+            "risk_reward": {"supplied": None, "recomputed": None},
+        })
+        unavailable_text = _trade_plan_text(unavailable_item)
+        self.assertIn("R:R —", unavailable_text)
+        self.assertIn("目标来源 目标不可用", unavailable_text)
+        self.assertNotIn("R:R 2.0", unavailable_text)
+
+    def test_report_contains_target_source_audit_in_markdown_and_html(self):
+        resistance = candidate("resistance")
+        atr = candidate("atr")
+        atr["trade_plan"]["target_source"] = "atr_projection"
+        unavailable = candidate("unavailable")
+        unavailable["trade_plan"].update({
+            "target_source": "unavailable",
+            "targets": {"conservative": None, "primary": None,
+                        "aggressive": None},
+            "risk_reward": {"supplied": None, "recomputed": None},
+        })
+        items = [resistance, atr, unavailable]
+        buckets = {
+            "actionable": [resistance], "waiting_trigger": [],
+            "next_day_confirmation": [], "observation": [atr, unavailable],
+        }
+        policy = {"mode": "actionable", "max_recommendations": 5,
+                  "max_portfolio_pct": 60, "reasons": []}
+        report = generate_report(items, [], 0.1, policy, buckets)
+        html = _generate_html(items, [], 0.1, "20260820-160000",
+                              policy, buckets)
+        audit = "目标来源审计：阻力位 1｜ATR投射（仅观察） 1｜目标不可用 1"
+        self.assertIn(audit, report)
+        self.assertIn(audit, html)
+
     def test_markdown_trade_plan_pipes_are_escaped(self):
         lines = []
         _append_candidate_table(lines, "测试", [candidate("600000")], "无")

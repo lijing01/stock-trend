@@ -1123,6 +1123,27 @@ def _kline_depth_text(wyckoff):
     return f"{available}/{minimum}" if available is not None else "未知"
 
 
+TARGET_SOURCE_LABELS = {
+    "resistance": "阻力位",
+    "atr_projection": "ATR投射（仅观察）",
+    "unavailable": "目标不可用",
+}
+
+
+def _target_source_audit(items):
+    counts = {source: 0 for source in TARGET_SOURCE_LABELS}
+    for item in items:
+        source = (item.get("trade_plan") or {}).get("target_source")
+        if source not in counts:
+            source = "unavailable"
+        counts[source] += 1
+    return (
+        f"目标来源审计：阻力位 {counts['resistance']}｜"
+        f"ATR投射（仅观察） {counts['atr_projection']}｜"
+        f"目标不可用 {counts['unavailable']}"
+    )
+
+
 def _trade_plan_text(item):
     """Render the additive compact trade-plan fields consistently."""
     plan = item.get("trade_plan") or {}
@@ -1133,12 +1154,24 @@ def _trade_plan_text(item):
     position = plan.get("position") or {}
     if not plan:
         return "交易计划：未生成"
+    source = plan.get("target_source") or "unavailable"
+    source_text = TARGET_SOURCE_LABELS.get(source, "目标不可用")
+    rr_value = rr.get("recomputed")
+    rr_text = (
+        f"{rr_value:.2f}" if isinstance(rr_value, (int, float))
+        and not isinstance(rr_value, bool) else "—"
+    )
+    target_text = "/".join(
+        "—" if targets.get(key) is None else str(targets.get(key))
+        for key in ("conservative", "primary", "aggressive")
+    )
+    reason = plan.get("target_reason")
+    reason_text = f"（{reason}）" if source == "unavailable" and reason else ""
     return (
         f"交易计划：入场{entry.get('low', '-')}~{entry.get('high', '-')} | "
         f"止损{stop.get('price', '-')} | "
-        f"目标{targets.get('conservative', '-')}/"
-        f"{targets.get('primary', '-')}/{targets.get('aggressive', '-')} | "
-        f"R:R {rr.get('recomputed', '-')} | "
+        f"目标{target_text} | 目标来源 {source_text}{reason_text} | "
+        f"R:R {rr_text} | "
         f"仓位≤{position.get('max_portfolio_pct', '-')}% | "
         f"有效{(plan.get('validity') or {}).get('trading_sessions', '-')}个交易日"
     )
@@ -1383,6 +1416,8 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         f"组合仓位上限 {policy['max_portfolio_pct']}%",
         "",
         f"**筛选漏斗**: {funnel}",
+        "",
+        f"**{_target_source_audit(candidates)}**",
     ]
     regime = load_regime_context()
     if regime and regime.get("score") is not None:
@@ -1471,6 +1506,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
         f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
     )
+    target_audit = _target_source_audit(candidates)
 
     regime_html = ""
     if regime and regime["score"] is not None:
@@ -1520,6 +1556,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 <p class="dt">{policy_note}</p>
 <p class="dt">{funnel_note}</p>
+<p class="dt">{escape(target_audit)}</p>
 {tracking_html}
 {provisional_banner}
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行{tier_suffix}</h2>

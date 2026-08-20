@@ -288,6 +288,9 @@ open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。
 6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。
 7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。正式可执行项必须携带 `candidate-trade-plan/v1`：入场区间、确认/失效、止损、三级目标、重算 R:R≥1.5、风险预算仓位、20–120 交易日周期、3 日有效期、反向论据和事件状态；不完整计划降级并列出稳定原因码。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy`、三层推荐、`meta.tracking`。
+   - R:R 以计划入场区间上沿、止损位和主目标计算，不是固定收益倍数。
+   - 报告必须标注目标来源：`阻力位` 可用于可执行计划，`ATR投射（仅观察）` 只作情景参考，`目标不可用` 显示 `R:R —`。
+   - 不得使用 `entry + nR` 生成目标来满足最低 R:R 门槛；目标不足时降为观察，不伪造可交易结论。
 8. 复核：候选仍需人工确认基本面和事件公告后再入场；弱市、盘中或证据不足时允许“今日无推荐”。正式收盘结果按交易日写入 `.cache/stock-trend/recommendation_history/YYYY-MM-DD.json`，同内容重复运行幂等、不同内容冲突且不覆盖；保存失败只降低追踪状态，不抑制报告输出。P0 不代表完整生产链收益已经验证。
 
 ---

@@ -1271,7 +1271,8 @@ def calc_max_drawdown(df):
 # --- Stop-loss and Risk:Reward ---
 
 
-def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
+def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
+                     entry_price=None):
     """Calculate stop-loss price and risk:reward ratio with three-tier targets.
 
     Stop-loss uses adaptive ATR multiplier based on trend direction and volatility.
@@ -1279,6 +1280,15 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     ETF vs stock: ETFs get tighter ATR multipliers (smoother action) + higher R:R threshold.
     """
     curr_close = df["close"].iloc[-1]
+    entry_referenced = entry_price is not None
+    try:
+        entry_reference = float(entry_price) if entry_referenced else float(curr_close)
+    except (TypeError, ValueError):
+        entry_reference = float(curr_close)
+        entry_referenced = False
+    if not np.isfinite(entry_reference) or entry_reference <= 0:
+        entry_reference = float(curr_close)
+        entry_referenced = False
     atr = atr_result.get("atr")
     atr_pct = atr_result.get("atr_pct", 0)
 
@@ -1297,6 +1307,8 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     support_items = [item for item in levels.get("support", []) if item["price"] and item.get("source") != "boll_upper"]
     support_prices = [item["price"] for item in support_items]
     resistance_prices = sorted([item["price"] for item in levels.get("resistance", []) if item["price"]])
+    if entry_referenced:
+        resistance_prices = [price for price in resistance_prices if price > entry_reference]
 
     # --- Adaptive stop-loss with volatility regime awareness ---
     # ATR multiplier: wider in bearish (avoid whipsaw), tighter in bullish low-vol
@@ -1365,9 +1377,44 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     target_aggressive = None
     warning = None
 
-    risk = (curr_close - stop_loss) if stop_loss else None
+    reference = entry_reference if entry_referenced else curr_close
+    risk = (reference - stop_loss) if stop_loss else None
+    target_source = "legacy"
 
-    if resistance_prices:
+    if entry_referenced:
+        target_source = "unavailable"
+        if resistance_prices and risk and risk > 0:
+            target_rr_threshold = 2.0 if is_etf else 1.5
+            moderate_idx = None
+            for i, rp in enumerate(resistance_prices):
+                if i == 0:
+                    continue
+                if (rp - reference) / risk >= target_rr_threshold:
+                    moderate_idx = i
+                    break
+            if moderate_idx is not None and moderate_idx + 1 < len(resistance_prices):
+                target_conservative = _round_price(resistance_prices[0])
+                target_moderate = _round_price(resistance_prices[moderate_idx])
+                target_aggressive = _round_price(resistance_prices[moderate_idx + 1])
+                if target_conservative < target_moderate < target_aggressive:
+                    target_source = "resistance"
+                else:
+                    target_conservative = None
+                    target_moderate = None
+                    target_aggressive = None
+        elif not resistance_prices and atr:
+            target_conservative = _round_price(reference + 1 * atr)
+            mod_mult = 3 if is_etf else 2
+            agg_mult = 4 if is_etf else 3
+            target_moderate = _round_price(reference + mod_mult * atr)
+            target_aggressive = _round_price(reference + agg_mult * atr)
+            target_source = "atr_projection"
+            warning = "支撑/压力位数据不足，目标价为ATR投射，仅供观察"
+        else:
+            warning = "目标位不可用，不能评估盈亏比"
+        if target_source == "unavailable" and warning is None:
+            warning = "没有高于计划入场价且可形成三档梯度的目标位"
+    elif resistance_prices:
         # Conservative: nearest resistance
         target_conservative = _round_price(resistance_prices[0])
 
@@ -1420,7 +1467,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
     rr_favorable_threshold = 2.0 if is_etf else 1.5
 
     # --- R:R ratios for all three targets ---
-    reward = (target - curr_close) if target else None
+    reward = (target - reference) if target else None
 
     rr_ratio = None
     rr_conservative = None
@@ -1430,15 +1477,15 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
 
     if risk and risk > 0:
         if target:
-            reward = target - curr_close
+            reward = target - reference
             rr_ratio = round(reward / risk, 2)
             favorable_rr = rr_ratio >= rr_favorable_threshold
         if target_conservative:
-            rr_conservative = round((target_conservative - curr_close) / risk, 2)
+            rr_conservative = round((target_conservative - reference) / risk, 2)
         if target_moderate:
-            rr_moderate = round((target_moderate - curr_close) / risk, 2)
+            rr_moderate = round((target_moderate - reference) / risk, 2)
         if target_aggressive:
-            rr_aggressive = round((target_aggressive - curr_close) / risk, 2)
+            rr_aggressive = round((target_aggressive - reference) / risk, 2)
 
     # Combine warnings
     if not warning:
@@ -1484,6 +1531,8 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False):
 
     return {
         "stop_loss": stop_loss,
+        "entry_reference": _round_price(reference),
+        "target_source": target_source,
         "target_conservative": target_conservative,
         "target_moderate": target_moderate,
         "target_aggressive": target_aggressive,

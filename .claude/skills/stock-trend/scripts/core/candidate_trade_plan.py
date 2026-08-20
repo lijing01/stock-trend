@@ -23,6 +23,10 @@ def _finite_positive(value):
         return None
     return n if math.isfinite(n) and n > 0 else None
 
+def _round_optional_price(value):
+    price = _finite_positive(value)
+    return round(price, 4) if price is not None else None
+
 def _normalized_frame(kline):
     rows = kline.get("data", []) if isinstance(kline, dict) else (kline or [])
     df = pd.DataFrame(copy.deepcopy(rows))
@@ -88,49 +92,59 @@ def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date,
     atr_value = _finite_positive(atr.get("atr")) or close * 0.02
     levels = calc_support_resistance(df, ma, bb, atr_pct=atr.get("atr_pct"),
         adx_value=adx.get("adx"), atr_absolute=atr.get("atr"))
-    risk = calc_risk_reward(df, atr, levels, direction="bullish", is_etf=False)
-    timing = calc_entry_signals(df, indicators, rr_ratio=risk.get("risk_reward_ratio"), is_etf=False)
     support = [x.get("price") for x in levels.get("support", []) if _finite_positive(x.get("price")) and x["price"] < close]
     low = max(close - .75 * atr_value, max(support[-1:] or [close - .75 * atr_value]))
     high = close + .25 * atr_value
+    risk = calc_risk_reward(
+        df, atr, levels, direction="bullish", is_etf=False, entry_price=high)
+    timing = calc_entry_signals(df, indicators, rr_ratio=risk.get("risk_reward_ratio"), is_etf=False)
     stop = _finite_positive(risk.get("stop_loss")) or close - 1.5 * atr_value
     if low <= stop: low = stop + .25 * atr_value
-    one_r = max(high - stop, .01)
-    technical_targets = [
+    target_source = str(risk.get("target_source") or "unavailable")
+    targets = [
         risk.get("target_conservative"),
         risk.get("target_moderate"),
         risk.get("target_aggressive"),
     ]
-    technical_targets = [_finite_positive(value) for value in technical_targets]
-    has_technical_targets = (
-        all(value is not None for value in technical_targets)
-        and high < technical_targets[0] < technical_targets[1] < technical_targets[2]
+    targets = [_finite_positive(value) for value in targets]
+    has_valid_ladder = (
+        target_source in {"resistance", "atr_projection"}
+        and all(value is not None for value in targets)
+        and high < targets[0] < targets[1] < targets[2]
     )
-    if has_technical_targets:
-        targets = technical_targets
-        target_source = "technical"
-    else:
-        targets = [high + one_r, high + one_r * 2, high + one_r * 3]
-        target_source = "synthetic_fallback"
+    if not has_valid_ladder:
+        target_source = "unavailable"
+        targets = [None, None, None]
     verdict = timing.get("verdict")
     action = "buy" if verdict == "ready" else ("wait" if verdict in ("wait", "watch") else "avoid")
-    if action == "buy" and not has_technical_targets:
+    executable_target = target_source == "resistance" and has_valid_ladder
+    if action == "buy" and not executable_target:
         action = "wait"
     cap = float(policy.get("max_portfolio_pct", 0) or 0)
     pos = calculate_position_pct(high, stop, cap, policy.get("max_recommendations", 1))
     supplied_rr = risk.get("risk_reward_ratio")
+    recomputed_rr = (
+        round((targets[1] - high) / (high - stop), 2)
+        if has_valid_ladder and high > stop else None
+    )
     return {"schema_version": SCHEMA_VERSION, "code": code, "basis_date": basis_date,
         "basis_price": close, "action": action,
         "entry": {"low": round(low, 4), "high": round(high, 4), "reference_price": close},
         "confirmation": "; ".join(timing.get("signals", [])) or "确认站上入场区并放量",
         "invalidation": "收盘跌破止损或结构支撑",
         "stop_loss": {"price": round(stop, 4)},
-        "targets": {"conservative": round(targets[0], 4), "primary": round(targets[1], 4), "aggressive": round(targets[2], 4)},
-        "risk_reward": {"supplied": supplied_rr, "recomputed": round((targets[1]-high)/(high-stop), 2)},
+        "targets": {"conservative": _round_optional_price(targets[0]),
+                    "primary": _round_optional_price(targets[1]),
+                    "aggressive": _round_optional_price(targets[2])},
+        "risk_reward": {"supplied": supplied_rr, "recomputed": recomputed_rr},
         "position": {"max_portfolio_pct": pos}, "horizon": dict(HORIZON),
         "validity": {"trading_sessions": VALID_TRADING_SESSIONS,
                      "valid_until": _next_validity_date(basis_date, market_sessions)},
         "target_source": target_source,
+        "target_reason": (
+            None if has_valid_ladder else
+            (risk.get("warning") or "没有高于计划入场价的有效目标梯度")
+        ),
         "counterargument": counterargument, "event_check": {"status": "not_implemented"},
         "indicators": {"atr": atr}, "wyckoff": copy.deepcopy(wyckoff or {})}
 
@@ -146,12 +160,15 @@ def validate_trade_plan(plan, policy, expected_date=None):
     if not plan.get("confirmation"): reasons.append("trade_plan_missing_confirmation")
     if not plan.get("invalidation"): reasons.append("trade_plan_missing_invalidation")
     if not stop or not low or stop >= low: reasons.append("trade_plan_invalid_stop")
-    if not all(vals): reasons.append("trade_plan_missing_targets")
+    target_source = str(plan.get("target_source") or "unavailable")
+    if target_source not in {"resistance", "atr_projection", "unavailable"}:
+        reasons.append("trade_plan_target_source_invalid")
+    if not all(vals): reasons.append("trade_plan_targets_unavailable")
     elif not high < vals[0] < vals[1] < vals[2]: reasons.append("trade_plan_targets_unordered")
     rr = round((vals[1]-high)/(high-stop), 2) if vals[1] and high and stop and high > stop else None
-    if rr is None or rr < MIN_PRIMARY_RR: reasons.append("trade_plan_rr_below_min")
+    if rr is not None and rr < MIN_PRIMARY_RR: reasons.append("trade_plan_rr_below_min")
     stored_rr = _finite_positive((plan.get("risk_reward") or {}).get("recomputed"))
-    if stored_rr is None or (rr is not None and abs(stored_rr - rr) > 0.01):
+    if rr is not None and (stored_rr is None or abs(stored_rr - rr) > 0.01):
         reasons.append("trade_plan_rr_mismatch")
     pos = _finite_positive((plan.get("position") or {}).get("max_portfolio_pct"))
     if not pos or pos > float(policy.get("max_portfolio_pct", 0) or 0): reasons.append("trade_plan_position_over_policy")
@@ -172,5 +189,7 @@ def validate_trade_plan(plan, policy, expected_date=None):
             reasons.append("trade_plan_validity_date_invalid")
     except (TypeError, ValueError):
         reasons.append("trade_plan_validity_date_invalid")
+    if plan.get("action") == "buy" and target_source != "resistance":
+        reasons.append("trade_plan_target_source_not_executable")
     if plan.get("action") != "buy": reasons.append("trade_plan_not_ready")
     return {"complete": not reasons, "recomputed_rr": rr, "reasons": reasons}
