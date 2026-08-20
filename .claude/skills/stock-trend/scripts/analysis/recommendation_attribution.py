@@ -1,6 +1,10 @@
-import argparse, copy, dataclasses, json, math, os, tempfile
+import argparse, copy, dataclasses, json, math, os, sys, tempfile
 from datetime import date
 from pathlib import Path
+SCRIPT_ROOT=Path(__file__).resolve().parent.parent
+if str(SCRIPT_ROOT) not in sys.path: sys.path.insert(0,str(SCRIPT_ROOT))
+from core.cache_utils import CACHE_DIR
+from core.recommendation_snapshot import iter_official_snapshots
 WINDOWS=(5,10,20,60); EVALUATOR_VERSION='recommendation-attribution/v1'
 @dataclasses.dataclass(frozen=True)
 class CostModel:
@@ -152,8 +156,46 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
   payload=merge_attribution(prior,payload) if prior else payload
   write_sidecar(payload,path)
  return payload
+def default_series_loader(code,candidate):
+ """Fetch qfq stock, HS300 and sector rows through existing adapters."""
+ from scans.stock_scanner import _fetch_kline
+ from analysis.market_regime import fetch_index_kline
+ from fetchers.sector_kline import fetch_single_kline
+ ts_code=candidate.get('ts_code') or (str(code)+'.SH' if str(code).startswith(('0','3','6')) else str(code))
+ stock=_fetch_kline(ts_code,as_of_date=candidate.get('basis_date','')) or {}
+ stock_rows=stock.get('data',[]) if isinstance(stock,dict) else []
+ hs=fetch_index_kline('000300.SH',lmt=180)
+ sector=[]
+ if candidate.get('sector_code'): sector=fetch_single_kline(candidate['sector_code'],min_records=180)
+ return {'market_sessions':[_row_date(x) for x in hs], 'stock_rows':stock_rows,
+         'hs300_rows':hs, 'sector_rows':sector}
+def track_official_history(history_root=None, attribution_root=None,
+                           evaluation_as_of=None, through_date=None,
+                           series_loader=default_series_loader,
+                           cost_model=None, windows=WINDOWS):
+ """Process all valid official snapshots; one provider failure is isolated."""
+ history_root=Path(history_root or (Path(CACHE_DIR)/'recommendation_history'))
+ attribution_root=Path(attribution_root or (Path(CACHE_DIR)/'recommendation_attribution'))
+ snapshots,rejected=iter_official_snapshots(history_root,through_date)
+ as_of=evaluation_as_of or (through_date or date.today().isoformat())
+ payloads=[]
+ for snapshot in snapshots:
+  try:
+   payloads.append(track_attribution(snapshot,series_loader,as_of,
+                                      root=attribution_root,cost_model=cost_model,
+                                      windows=windows))
+  except Exception as exc:
+   payloads.append({'recommendation_date':snapshot.get('content',{}).get('recommendation_date'),
+                    'items':[],'error':type(exc).__name__})
+ items=[item for payload in payloads for item in payload.get('items',[])]
+ summary=summarize_attribution(items,minimum_dates=len(snapshots))
+ summary['snapshots']=len(snapshots); summary['rejected_snapshots']=rejected
+ return {'summary':summary,'items':items}
 def main(argv=None):
- p=argparse.ArgumentParser(); p.add_argument('--through'); p.add_argument('--history',type=int,default=120); p.add_argument('--windows',default='5,10,20,60'); p.add_argument('--json',action='store_true'); p.add_argument('--buy-commission-bps',type=float,default=0); p.add_argument('--sell-commission-bps',type=float,default=0); p.add_argument('--buy-slippage-bps',type=float,default=0); p.add_argument('--sell-slippage-bps',type=float,default=0); p.add_argument('--sell-tax-bps',type=float,default=0); args=p.parse_args(argv)
- out={'evaluator_version':EVALUATOR_VERSION,'through':args.through,'windows':[int(x) for x in args.windows.split(',')],'status':'evidence_insufficient'}
+ p=argparse.ArgumentParser(); p.add_argument('--through'); p.add_argument('--history',type=int,default=120); p.add_argument('--history-root'); p.add_argument('--attribution-root'); p.add_argument('--evaluation-as-of'); p.add_argument('--windows',default='5,10,20,60'); p.add_argument('--json',action='store_true'); p.add_argument('--buy-commission-bps',type=float,default=0); p.add_argument('--sell-commission-bps',type=float,default=0); p.add_argument('--buy-slippage-bps',type=float,default=0); p.add_argument('--sell-slippage-bps',type=float,default=0); p.add_argument('--sell-tax-bps',type=float,default=0); args=p.parse_args(argv)
+ windows=tuple(int(x) for x in args.windows.split(',') if x)
+ costs=CostModel(args.buy_commission_bps,args.sell_commission_bps,args.buy_slippage_bps,args.sell_slippage_bps,args.sell_tax_bps)
+ out=track_official_history(args.history_root,args.attribution_root,args.evaluation_as_of,args.through,windows=windows,cost_model=costs)
+ out.update({'evaluator_version':EVALUATOR_VERSION,'through':args.through,'windows':list(windows)})
  print(json.dumps(out,ensure_ascii=False) if args.json else 'evidence_insufficient'); return 0
 if __name__=='__main__': main()
