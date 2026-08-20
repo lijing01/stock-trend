@@ -71,9 +71,17 @@ def evaluate_recommendation(recommendation,evaluation_as_of,market_sessions,stoc
 def merge_attribution(existing,incoming):
  if not existing:return copy.deepcopy(incoming)
  out=copy.deepcopy(existing)
+ if 'items' in incoming or 'items' in out:
+  old={str(x.get('code')):x for x in out.setdefault('items',[])}
+  for item in incoming.get('items',[]):
+   code=str(item.get('code')); previous=old.get(code)
+   old[code]=merge_attribution(previous,item) if previous else copy.deepcopy(item)
+  out['items']=[old[k] for k in sorted(old)]
+  return out
  for ni,nw in incoming.get('windows',{}).items():
   ow=out.setdefault('windows',{}).get(ni)
-  if not ow or ow.get('status') in ('pending','data_error'): out['windows'][ni]=copy.deepcopy(nw)
+  if not ow or ow.get('status') in ('pending','data_error'):
+   out['windows'][ni]=copy.deepcopy(nw)
  return out
 def write_sidecar(payload,path):
  path=Path(path); path.parent.mkdir(parents=True,exist_ok=True); fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.tmp-'); os.close(fd)
@@ -84,6 +92,66 @@ def write_sidecar(payload,path):
   try: os.unlink(tmp)
   except OSError: pass
  return path
+def read_sidecar(path):
+ try:
+  with open(path,encoding='utf-8') as f:return json.load(f)
+ except (OSError,ValueError):return None
+def sidecar_path(root,recommendation_date):
+ return Path(root)/(str(recommendation_date)[:10]+'.json')
+def summarize_attribution(items, minimum_dates=20, minimum_mature=100):
+ completed=[]; pending=unexecutable=errors=0
+ for item in items:
+  for window in (item.get('windows') or {}).values():
+   status=window.get('status')
+   if status=='complete': completed.append(window)
+   elif status=='pending': pending+=1
+   elif status=='unexecutable': unexecutable+=1
+   elif status=='data_error': errors+=1
+ mature=len(completed)
+ out={'official_dates':minimum_dates,'mature_observations':mature,
+      'pending':pending,'unexecutable':unexecutable,'errors':errors,
+      'status':'evidence_insufficient' if minimum_dates<20 or mature<100 else 'ready'}
+ if completed:
+  vals=[x.get('net_return') for x in completed if x.get('net_return') is not None]
+  out['mean_net_return']=sum(vals)/len(vals) if vals else None
+ return out
+def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
+                      cost_model=None, windows=WINDOWS):
+ """Evaluate one immutable snapshot and merge its mutable date sidecar.
+
+ ``series_loader`` receives ``(code, candidate)`` and returns a mapping with
+ market_sessions, stock_rows, hs300_rows and sector_rows.  Keeping the loader
+ injectable makes the evaluator deterministic and lets callers isolate one
+ provider failure without losing other candidates.
+ """
+ content=snapshot.get('content',snapshot); buckets=content.get('buckets') or {}
+ candidates=[]
+ for item in buckets.get('actionable',[]):
+  candidates.append(item)
+ results=[]
+ for candidate in candidates:
+  try:
+   series=series_loader(candidate.get('code'),candidate) or {}
+   result=evaluate_recommendation(
+    {'recommendation_date':content['recommendation_date'],'candidate':candidate},
+    evaluation_as_of, series.get('market_sessions',[]),
+    series.get('stock_rows',[]), series.get('hs300_rows'),
+    series.get('sector_rows'), cost_model=cost_model, windows=windows)
+  except Exception as exc:
+   result={'evaluator_version':EVALUATOR_VERSION,'recommendation_date':content['recommendation_date'],
+           'code':candidate.get('code',''),'evaluation_as_of':evaluation_as_of,
+           'execution':{'status':'data_error','reason':type(exc).__name__},
+           'windows':{str(w):{'status':'data_error','reason':type(exc).__name__} for w in windows}}
+  results.append(result)
+ payload={'evaluator_version':EVALUATOR_VERSION,
+          'recommendation_date':content['recommendation_date'],
+          'evaluation_as_of':evaluation_as_of,'items':results}
+ if root is not None:
+  path=sidecar_path(root,content['recommendation_date'])
+  prior=read_sidecar(path)
+  payload=merge_attribution(prior,payload) if prior else payload
+  write_sidecar(payload,path)
+ return payload
 def main(argv=None):
  p=argparse.ArgumentParser(); p.add_argument('--through'); p.add_argument('--history',type=int,default=120); p.add_argument('--windows',default='5,10,20,60'); p.add_argument('--json',action='store_true'); p.add_argument('--buy-commission-bps',type=float,default=0); p.add_argument('--sell-commission-bps',type=float,default=0); p.add_argument('--buy-slippage-bps',type=float,default=0); p.add_argument('--sell-slippage-bps',type=float,default=0); p.add_argument('--sell-tax-bps',type=float,default=0); args=p.parse_args(argv)
  out={'evaluator_version':EVALUATOR_VERSION,'through':args.through,'windows':[int(x) for x in args.windows.split(',')],'status':'evidence_insufficient'}
