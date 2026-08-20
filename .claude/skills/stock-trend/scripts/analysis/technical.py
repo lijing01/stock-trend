@@ -1271,16 +1271,23 @@ def calc_max_drawdown(df):
 # --- Stop-loss and Risk:Reward ---
 
 
+_ENTRY_PRICE_UNSET = object()
+
+
 def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
-                     entry_price=None):
+                     entry_price=_ENTRY_PRICE_UNSET):
     """Calculate stop-loss price and risk:reward ratio with three-tier targets.
 
     Stop-loss uses adaptive ATR multiplier based on trend direction and volatility.
     Position sizing factors in R:R quality and trend direction.
     ETF vs stock: ETFs get tighter ATR multipliers (smoother action) + higher R:R threshold.
+
+    Omitting entry_price retains the legacy close-referenced calculation. An
+    explicitly supplied entry_price, including None, is treated as planned
+    entry evidence and must be valid before targets/R:R can be calculated.
     """
     curr_close = df["close"].iloc[-1]
-    entry_referenced = entry_price is not None
+    entry_referenced = entry_price is not _ENTRY_PRICE_UNSET
     invalid_entry_reference = False
     if entry_referenced:
         try:

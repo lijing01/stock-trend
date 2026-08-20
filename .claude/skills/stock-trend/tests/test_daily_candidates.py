@@ -114,6 +114,12 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("目标来源 阻力位", resistance_text)
         self.assertIn("R:R 1.50", resistance_text)
 
+        mismatch_item = candidate("mismatch")
+        mismatch_item["trade_plan"]["risk_reward"]["recomputed"] = 99.0
+        mismatch_text = _trade_plan_text(mismatch_item)
+        self.assertIn("R:R 1.50", mismatch_text)
+        self.assertNotIn("R:R 99.00", mismatch_text)
+
         atr_item = candidate("atr")
         atr_item["trade_plan"].update({
             "target_source": "atr_projection",
@@ -147,6 +153,16 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("目标—/—/—", legacy_text)
         self.assertIn("R:R —", legacy_text)
         self.assertNotIn("R:R 2.00", legacy_text)
+
+        invalid_ladder_item = candidate("invalid-ladder")
+        invalid_ladder_item["trade_plan"].update({
+            "targets": {"conservative": 10.1, "primary": 10.2,
+                        "aggressive": 10.3},
+            "risk_reward": {"supplied": 2.0, "recomputed": 2.0},
+        })
+        invalid_ladder_text = _trade_plan_text(invalid_ladder_item)
+        self.assertIn("目标—/—/—", invalid_ladder_text)
+        self.assertIn("R:R —", invalid_ladder_text)
 
     def test_report_contains_target_source_audit_in_markdown_and_html(self):
         resistance = candidate("resistance")

@@ -1146,37 +1146,46 @@ def _target_source_audit(items):
     )
 
 
+def _is_finite_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
 def _trade_plan_text(item):
     """Render the additive compact trade-plan fields consistently."""
-    plan = item.get("trade_plan") or {}
-    entry = plan.get("entry") or {}
-    stop = plan.get("stop_loss") or {}
-    targets = plan.get("targets") or {}
-    rr = plan.get("risk_reward") or {}
-    position = plan.get("position") or {}
+    raw_plan = item.get("trade_plan")
+    plan = raw_plan if isinstance(raw_plan, dict) else {}
+    entry = plan.get("entry") if isinstance(plan.get("entry"), dict) else {}
+    stop = plan.get("stop_loss") if isinstance(plan.get("stop_loss"), dict) else {}
+    targets = plan.get("targets") if isinstance(plan.get("targets"), dict) else {}
+    position = plan.get("position") if isinstance(plan.get("position"), dict) else {}
     if not plan:
         return "交易计划：未生成"
     source = plan.get("target_source")
     if source not in TARGET_SOURCE_LABELS:
         source = "unavailable"
     source_text = TARGET_SOURCE_LABELS[source]
+    entry_high = entry.get("high")
+    stop_price = stop.get("price")
     target_values = [targets.get(key) for key in
                      ("conservative", "primary", "aggressive")]
     valid_target_ladder = (
         source in {"resistance", "atr_projection"}
-        and all(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            for value in target_values
-        )
-        and target_values[0] < target_values[1] < target_values[2]
+        and _is_finite_number(entry_high)
+        and _is_finite_number(stop_price)
+        and all(_is_finite_number(value) for value in target_values)
+        and stop_price < entry_high < target_values[0]
+        < target_values[1] < target_values[2]
     )
-    rr_value = rr.get("recomputed") if valid_target_ladder else None
+    rr_value = (
+        round((target_values[1] - entry_high) / (entry_high - stop_price), 2)
+        if valid_target_ladder else None
+    )
     rr_text = (
-        f"{rr_value:.2f}" if isinstance(rr_value, (int, float))
-        and not isinstance(rr_value, bool)
-        and math.isfinite(rr_value) else "—"
+        f"{rr_value:.2f}" if _is_finite_number(rr_value) else "—"
     )
     target_text = (
         "/".join(str(value) for value in target_values)
@@ -1300,10 +1309,12 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
 def _trade_plan_promotable(item):
     """Only a complete resistance-backed v1 buy plan is recommendable."""
     plan = item.get("trade_plan")
-    targets = (plan or {}).get("targets") or {}
+    if not isinstance(plan, dict):
+        return False
+    targets = plan.get("targets") if isinstance(plan.get("targets"), dict) else {}
     target_values = [targets.get(key) for key in
                      ("conservative", "primary", "aggressive")]
-    risk_reward = (plan or {}).get("risk_reward") or {}
+    risk_reward = plan.get("risk_reward") if isinstance(plan.get("risk_reward"), dict) else {}
     rr_value = risk_reward.get("recomputed")
     return (
         item.get("trade_plan_status") == "complete"
@@ -1311,15 +1322,10 @@ def _trade_plan_promotable(item):
         and plan.get("action") == "buy"
         and plan.get("target_source") == "resistance"
         and all(
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            for value in target_values
+            _is_finite_number(value) for value in target_values
         )
         and target_values[0] < target_values[1] < target_values[2]
-        and isinstance(rr_value, (int, float))
-        and not isinstance(rr_value, bool)
-        and math.isfinite(rr_value)
+        and _is_finite_number(rr_value)
     )
 
 
@@ -1385,7 +1391,8 @@ def classify_candidates(candidates, policy):
             reasons.extend(item.get("trade_plan_reasons") or [])
             if not item.get("trade_plan"):
                 reasons.append("trade_plan_missing")
-            elif item.get("trade_plan", {}).get("target_source") != "resistance":
+            elif (not isinstance(item.get("trade_plan"), dict)
+                  or item["trade_plan"].get("target_source") != "resistance"):
                 reasons.append("trade_plan_target_source_not_executable")
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
