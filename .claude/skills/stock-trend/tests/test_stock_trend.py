@@ -1307,7 +1307,7 @@ def run_pipeline_tests(tmpdir):
     try:
         rc, stdout, stderr = run_script(
             "pipeline/runner.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
-            "-o", tmpdir, timeout=180,
+            "--expected-date", "2026-04-06", "-o", tmpdir, timeout=180,
         )
     finally:
         if old_cache_dir is None:
