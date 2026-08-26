@@ -106,6 +106,66 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
         self.assertEqual(result["meta"]["data_source"], "error")
         save.assert_not_called()
 
+    def _run_stock_sources(self, eastmoney, tushare, estimate):
+        outputs = []
+        with patch.object(sys, "argv", [
+                "capital_flow.py", "600519.SH",
+                "--expected-date", "2026-08-26",
+            ]), \
+                patch.object(capital_flow, "load_cache", return_value=None), \
+                patch.object(capital_flow, "resolve_secid", return_value="1.600519"), \
+                patch.object(capital_flow, "fetch_stock_capital_flow",
+                             return_value=eastmoney), \
+                patch.object(capital_flow, "fetch_stock_capital_flow_tushare",
+                             return_value=tushare), \
+                patch.object(capital_flow, "estimate_capital_flow_from_kline",
+                             return_value=estimate), \
+                patch.object(capital_flow, "fetch_northbound_flow", return_value=None), \
+                patch.object(capital_flow, "fetch_individual_northbound", return_value=None), \
+                patch.object(capital_flow, "fetch_margin_detail", return_value=None), \
+                patch.object(capital_flow, "fetch_longhubang", return_value=None), \
+                patch.object(capital_flow, "output_json",
+                             side_effect=lambda value, **_: outputs.append(value)), \
+                patch.object(capital_flow, "save_cache") as save:
+            capital_flow.main()
+        return outputs[0], save
+
+    def test_fresh_stale_eastmoney_result_falls_back_and_is_not_cached(self):
+        stale = [{"date": "20260825", "main_net_inflow": 1.0}]
+        result, save = self._run_stock_sources(stale, None, None)
+        self.assertEqual(result["meta"]["data_source"], "error")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertIn("eastmoney", result["meta"]["stale_sources"])
+        save.assert_not_called()
+
+    def test_fresh_stale_tushare_result_falls_back_and_is_not_cached(self):
+        stale = [{"date": "20260825", "main_net_inflow": 1.0}]
+        result, save = self._run_stock_sources(None, stale, None)
+        self.assertEqual(result["meta"]["data_source"], "error")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertIn("tushare_fallback", result["meta"]["stale_sources"])
+        save.assert_not_called()
+
+    def test_fresh_stale_etf_result_is_explicit_error_and_not_cached(self):
+        outputs = []
+        stale = [{"date": "20260825", "main_net_inflow": 1.0}]
+        with patch.object(sys, "argv", [
+                "capital_flow.py", "513180.SH", "--asset", "FD",
+                "--expected-date", "2026-08-26",
+            ]), \
+                patch.object(capital_flow, "load_cache", return_value=None), \
+                patch.object(capital_flow, "fetch_etf_capital_flow", return_value=stale), \
+                patch.object(capital_flow, "output_json",
+                             side_effect=lambda value, **_: outputs.append(value)), \
+                patch.object(capital_flow, "save_cache") as save:
+            capital_flow.main()
+
+        result = outputs[0]
+        self.assertEqual(result["meta"]["data_source"], "error")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertEqual(result["meta"]["stale_data_source"], "eastmoney_etf")
+        save.assert_not_called()
+
 
 class TestKlineExpectedDateValidation(unittest.TestCase):
     @staticmethod
@@ -214,7 +274,8 @@ class TestPipelineExpectedDatePropagation(unittest.TestCase):
     def _write_json(path, payload):
         Path(path).write_text(json.dumps(payload), encoding="utf-8")
 
-    def _run_pipeline(self, freq, expected_date="2026-08-26", calendar_result=None):
+    def _run_pipeline(self, freq, expected_date="2026-08-26", calendar_result=None,
+                      fallback_kline=None):
         commands = {}
         with tempfile.TemporaryDirectory() as tmpdir:
             def fake_run_script(cmd, label="", timeout=30):
@@ -227,7 +288,7 @@ class TestPipelineExpectedDatePropagation(unittest.TestCase):
                     })
                 elif label == "fetch_kline_eastmoney":
                     output = cmd[cmd.index("-o") + 1]
-                    self._write_json(output, {
+                    self._write_json(output, fallback_kline or {
                         "meta": {"data_source": "eastmoney", "record_count": 1},
                         "data": [{
                             "trade_date": "20260826", "open": 10.0, "high": 10.5,
@@ -293,6 +354,32 @@ class TestPipelineExpectedDatePropagation(unittest.TestCase):
         self.assertIsNone(output["meta"]["expected_date"])
         self.assertEqual(output["meta"]["expected_date_source"], "unavailable")
         self.assertIn("Expected daily trading date unavailable", output["errors"])
+
+    def test_stale_fallback_kline_diagnostics_survive_pipeline_summary(self):
+        stale_error = {
+            "meta": {
+                "data_source": "error",
+                "error_type": "stale_data",
+                "stale_data_source": "eastmoney",
+                "record_count": 0,
+                "cache_validation": {
+                    "expected_date": "2026-08-26",
+                    "latest_date": "2026-08-25",
+                    "valid": False,
+                },
+                "error": "数据最新日期2026-08-25早于预期交易日2026-08-26",
+            },
+            "data": [],
+        }
+        _, output = self._run_pipeline("D", fallback_kline=stale_error)
+        self.assertEqual(output["results"]["kline"], {
+            "data_source": "error",
+            "record_count": 0,
+            "error_type": "stale_data",
+            "stale_data_source": "eastmoney",
+            "cache_validation": stale_error["meta"]["cache_validation"],
+            "error": stale_error["meta"]["error"],
+        })
 
 def run_capital_flow_tests():
     suite = unittest.TestSuite()

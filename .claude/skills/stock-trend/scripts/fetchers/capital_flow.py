@@ -256,18 +256,25 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
     """
     suffix = "." + ts_code.split(".")[1] if "." in ts_code else ""
     errors = []
+    stale_sources = []
 
     try:
         flows = fetch_stock_capital_flow(secid)
         if not _valid_flows(flows):
             raise RuntimeError("东方财富资金流向API未返回有效日期记录")
-        return {
+        candidate = {
             "meta": {
                 "ts_code": ts_code, "asset": "E", "secid": secid,
                 "data_source": "eastmoney", "record_count": len(flows),
             },
             "data": flows,
         }
+        if is_valid_capital_result(candidate, min_date=expected_date):
+            return candidate
+        stale_sources.append("eastmoney")
+        raise RuntimeError(
+            f"东方财富最新数据日期{latest_capital_date(candidate) or '未知'}"
+            f"早于预期交易日{expected_date}")
     except Exception as exc:
         errors.append(str(exc))
 
@@ -275,7 +282,7 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
         print(f"Trying Tushare fallback for {ts_code}", file=sys.stderr)
         flows = fetch_stock_capital_flow_tushare(ts_code)
         if _valid_flows(flows):
-            return {
+            candidate = {
                 "meta": {
                     "ts_code": ts_code, "asset": "E",
                     "data_source": "tushare_fallback",
@@ -283,32 +290,43 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
                 },
                 "data": flows,
             }
-        errors.append("Tushare不可用或未返回有效日期记录")
+            if is_valid_capital_result(candidate, min_date=expected_date):
+                return candidate
+            stale_sources.append("tushare_fallback")
+            errors.append(
+                f"Tushare最新数据日期{latest_capital_date(candidate) or '未知'}"
+                f"早于预期交易日{expected_date}")
+        else:
+            errors.append("Tushare不可用或未返回有效日期记录")
 
         print(f"Trying K-line estimation for {ts_code}", file=sys.stderr)
         flows = estimate_capital_flow_from_kline(code)
         if _valid_flows(flows):
-            if expected_date and latest_capital_date({"data": flows}) < expected_date:
+            candidate = {
+                "meta": {
+                    "ts_code": ts_code, "asset": "E",
+                    "data_source": "kline_estimate",
+                    "record_count": len(flows),
+                },
+                "data": flows,
+            }
+            if not is_valid_capital_result(candidate, min_date=expected_date):
+                stale_sources.append("kline_estimate")
                 errors.append(
                     f"K线估算最新数据日期早于预期交易日{expected_date}")
             else:
-                return {
-                    "meta": {
-                        "ts_code": ts_code, "asset": "E",
-                        "data_source": "kline_estimate",
-                        "record_count": len(flows),
-                    },
-                    "data": flows,
-                }
-        errors.append("K线估算不可用或未返回有效日期记录")
+                return candidate
+        else:
+            errors.append("K线估算不可用或未返回有效日期记录")
 
-    return {
-        "meta": {
-            "ts_code": ts_code, "asset": "E", "data_source": "error",
-            "error": f"资金流向获取失败: {'; '.join(filter(None, errors)) or '未知错误'}",
-        },
-        "data": [],
+    meta = {
+        "ts_code": ts_code, "asset": "E", "data_source": "error",
+        "error": f"资金流向获取失败: {'; '.join(filter(None, errors)) or '未知错误'}",
     }
+    if stale_sources:
+        meta["error_type"] = "stale_data"
+        meta["stale_sources"] = stale_sources
+    return {"meta": meta, "data": []}
 
 
 def fetch_etf_capital_flow(fund_code, days=5):
@@ -454,11 +472,32 @@ def main():
         fund_code = code
         try:
             flows = fetch_etf_capital_flow(fund_code)
-            result["meta"] = {
-                "ts_code": args.ts_code, "asset": "FD", "fund_code": fund_code,
-                "data_source": "eastmoney_etf", "record_count": len(flows),
+            candidate = {
+                "meta": {
+                    "ts_code": args.ts_code, "asset": "FD", "fund_code": fund_code,
+                    "data_source": "eastmoney_etf", "record_count": len(flows),
+                },
+                "data": flows,
             }
-            result["data"] = flows
+            if is_valid_capital_result(candidate, min_date=args.expected_date):
+                result.update(candidate)
+            else:
+                latest_date = latest_capital_date(candidate)
+                is_stale = bool(
+                    args.expected_date and latest_date
+                    and latest_date < args.expected_date)
+                result["meta"] = {
+                    "ts_code": args.ts_code, "asset": "FD",
+                    "data_source": "error",
+                    "error_type": "stale_data" if is_stale else "data_unavailable",
+                    "stale_data_source": "eastmoney_etf" if is_stale else None,
+                    "error": (
+                        f"ETF资金流向最新数据日期{latest_date or '未知'}"
+                        f"早于预期交易日{args.expected_date}"
+                        if is_stale else "ETF资金流向未返回有效日期记录"
+                    ),
+                }
+                result["data"] = []
         except Exception as e:
             result["meta"] = {
                 "ts_code": args.ts_code, "asset": "FD",
@@ -532,7 +571,7 @@ def main():
     result.setdefault("meta", {})["fetch_time"] = (
         datetime.now().strftime("%Y%m%d-%H%M%S"))
 
-    if is_valid_capital_result(result):
+    if is_valid_capital_result(result, min_date=args.expected_date):
         save_cache(cache_key, result)
 
     output_json(result, output_path=args.output)

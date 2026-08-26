@@ -272,14 +272,18 @@ def main():
         kline_data = read_json(kline_path)
 
     if kline_data:
-        data_source = kline_data.get("meta", {}).get("data_source", "unknown")
-        record_count = kline_data.get("meta", {}).get("record_count", 0)
+        kline_meta = kline_data.get("meta", {})
+        data_source = kline_meta.get("data_source", "unknown")
+        record_count = kline_meta.get("record_count", 0)
         kline_available = is_successful_kline(kline_data)
         print(f"  K-line data: {data_source}, {record_count} records")
         results["kline"] = {
             "data_source": data_source,
             "record_count": record_count,
         }
+        for key in ("error_type", "stale_data_source", "cache_validation", "error"):
+            if key in kline_meta:
+                results["kline"][key] = kline_meta[key]
         if not kline_available:
             errors.append("K-line data unavailable or empty")
     else:
