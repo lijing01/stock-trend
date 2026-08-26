@@ -881,10 +881,16 @@ def main():
 
     output_path = data_dir / "scores.json" if data_dir else Path(args.output)
     summary = technical_data.get("summary", {})
+    data_quality = summary.get("data_quality")
+
+    if data_quality == "error":
+        if output_path.is_file() or output_path.is_symlink():
+            output_path.unlink()
+        print("Error: technical data quality is error; scoring aborted", file=sys.stderr)
+        sys.exit(1)
 
     # Extract technical score from summary
     tech_score = summary.get("total_score", 0)
-    data_quality = summary.get("data_quality")
     wyckoff_data_quality = None
 
     # Non-technical scores: use provided values or derive from automated data
@@ -904,12 +910,6 @@ def main():
         print("⚠ Input validation warnings:", file=sys.stderr)
         for err in validation_errors:
             print(f"  - {err}", file=sys.stderr)
-
-    if data_quality == "error":
-        if output_path.is_file() or output_path.is_symlink():
-            output_path.unlink()
-        print("Error: technical data quality is error; scoring aborted", file=sys.stderr)
-        sys.exit(1)
 
     # Populate dimension data args from data directory when --code is used
     if data_dir:
