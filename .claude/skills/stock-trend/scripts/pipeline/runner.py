@@ -196,6 +196,8 @@ def main():
 
     pipeline_start = time.time()
     errors = []
+    if args.freq == "D" and not expected_date:
+        errors.append("Expected daily trading date unavailable")
     timeouts = []
     results = {}
     kline_available = False

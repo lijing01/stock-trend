@@ -148,6 +148,31 @@ class TestKlineExpectedDateValidation(unittest.TestCase):
         self.assertEqual(result["data"], [])
         save.assert_not_called()
 
+    def test_tushare_cli_bypasses_ttl_valid_stale_cache_then_rejects_stale_refetch(self):
+        outputs = []
+        stale_payload = {
+            "meta": {"data_source": "tushare_sdk", "record_count": 1},
+            "data": [{"trade_date": "20260825", "close": 10.0}],
+        }
+        stale_frame = self._tushare_frame("20260825")
+        with patch.object(sys, "argv", [
+                "kline.py", "600519.SH", "--expected-date", "2026-08-26",
+            ]), \
+                patch.object(kline, "load_cache", return_value=stale_payload) as load, \
+                patch.object(kline, "resolve_token", return_value="token"), \
+                patch.object(kline, "fetch_kline",
+                             return_value=(stale_frame, "tushare_sdk")) as fetch, \
+                patch.object(kline, "output_json",
+                             side_effect=lambda value, **_: outputs.append(value)), \
+                patch.object(kline, "save_cache") as save:
+            kline.main()
+
+        load.assert_called_once()
+        fetch.assert_called_once()
+        self.assertEqual(outputs[0]["meta"]["error_type"], "stale_data")
+        self.assertFalse(outputs[0]["meta"]["cache_validation"]["valid"])
+        save.assert_not_called()
+
     def test_eastmoney_rejects_and_does_not_cache_stale_fresh_payload(self):
         outputs = []
         stale_records = [{
@@ -189,7 +214,7 @@ class TestPipelineExpectedDatePropagation(unittest.TestCase):
     def _write_json(path, payload):
         Path(path).write_text(json.dumps(payload), encoding="utf-8")
 
-    def _run_pipeline(self, freq):
+    def _run_pipeline(self, freq, expected_date="2026-08-26", calendar_result=None):
         commands = {}
         with tempfile.TemporaryDirectory() as tmpdir:
             def fake_run_script(cmd, label="", timeout=30):
@@ -221,13 +246,23 @@ class TestPipelineExpectedDatePropagation(unittest.TestCase):
 
             argv = [
                 "pipeline/runner.py", "600519.SH", "--asset", "E",
-                "--freq", freq, "--expected-date", "2026-08-26",
-                "--output-dir", tmpdir, "--no-fundamental", "--no-macro",
+                "--freq", freq, "--output-dir", tmpdir,
+                "--no-fundamental", "--no-macro",
             ]
+            if expected_date:
+                argv.extend(["--expected-date", expected_date])
+            calendar_patch = patch(
+                "fetchers.sector_data.get_last_trading_day",
+                return_value=calendar_result,
+            ) if calendar_result is not None else None
             with patch.object(sys, "argv", argv), \
                     patch.object(runner, "clean_cache", return_value=0), \
                     patch.object(runner, "run_script", side_effect=fake_run_script):
-                runner.main()
+                if calendar_patch:
+                    with calendar_patch:
+                        runner.main()
+                else:
+                    runner.main()
             pipeline_output = json.loads(
                 (Path(tmpdir) / "pipeline_output.json").read_text(encoding="utf-8"))
         return commands, pipeline_output
@@ -248,6 +283,16 @@ class TestPipelineExpectedDatePropagation(unittest.TestCase):
             self.assertNotIn("--expected-date", commands[label])
         self.assertIsNone(output["meta"]["expected_date"])
         self.assertEqual(output["meta"]["expected_date_source"], "not_applicable")
+
+    def test_daily_calendar_resolution_failure_is_explicit_in_pipeline_errors(self):
+        commands, output = self._run_pipeline(
+            "D", expected_date=None, calendar_result=(None, ""))
+        for label in (
+                "fetch_kline_tushare", "fetch_kline_eastmoney", "fetch_capital_flow"):
+            self.assertNotIn("--expected-date", commands[label])
+        self.assertIsNone(output["meta"]["expected_date"])
+        self.assertEqual(output["meta"]["expected_date_source"], "unavailable")
+        self.assertIn("Expected daily trading date unavailable", output["errors"])
 
 def run_capital_flow_tests():
     suite = unittest.TestSuite()
