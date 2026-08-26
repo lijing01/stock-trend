@@ -879,6 +879,7 @@ def main():
     else:
         parser.error("--technical or --code required")
 
+    output_path = data_dir / "scores.json" if data_dir else Path(args.output)
     summary = technical_data.get("summary", {})
 
     # Extract technical score from summary
@@ -905,6 +906,8 @@ def main():
             print(f"  - {err}", file=sys.stderr)
 
     if data_quality == "error":
+        if output_path.is_file() or output_path.is_symlink():
+            output_path.unlink()
         print("Error: technical data quality is error; scoring aborted", file=sys.stderr)
         sys.exit(1)
 
@@ -1451,10 +1454,6 @@ def main():
     }
 
     # Write output
-    if data_dir:
-        output_path = data_dir / "scores.json"
-    else:
-        output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)

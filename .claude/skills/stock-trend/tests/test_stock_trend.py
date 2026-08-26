@@ -1454,11 +1454,28 @@ def run_validate_tests():
         technical_path = os.path.join(score_tmpdir, "technical.json")
         scores_path = os.path.join(score_tmpdir, "scores.json")
         _write_json(technical_path, error_quality_tech)
+        _write_json(scores_path, {"direction": "bullish", "composite_score": 2.8})
         rc, stdout, stderr = run_script(
             "analysis/scores.py", "--technical", technical_path, "-o", scores_path
         )
         test("VI-score-error-quality: scores exits nonzero",
-             rc != 0, f"exit_code={rc}, stdout={stdout}, stderr={stderr}", "validate")
+             rc != 0 and not os.path.exists(scores_path),
+             f"exit_code={rc}, scores_exists={os.path.exists(scores_path)}, "
+             f"stdout={stdout}, stderr={stderr}", "validate")
+
+    with tempfile.TemporaryDirectory() as score_tmpdir:
+        technical_path = os.path.join(score_tmpdir, "technical.json")
+        scores_path = os.path.join(score_tmpdir, "scores.json")
+        _write_json(technical_path, error_quality_tech)
+        _write_json(scores_path, {"direction": "bullish", "composite_score": 2.8})
+        rc, stdout, stderr = run_script(
+            "analysis/scores.py", "--code", "999999.SH",
+            "--data-dir", score_tmpdir,
+        )
+        test("VI-score-error-quality: code mode removes stale scores",
+             rc != 0 and not os.path.exists(scores_path),
+             f"exit_code={rc}, scores_exists={os.path.exists(scores_path)}, "
+             f"stdout={stdout}, stderr={stderr}", "validate")
 
     # VI-score-range: score out of range [-100, 100]
     out_of_range_scores = {
