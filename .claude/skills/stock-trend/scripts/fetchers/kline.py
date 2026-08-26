@@ -66,6 +66,52 @@ def calc_start_date(end_date, freq):
     return start.strftime("%Y%m%d")
 
 
+def latest_kline_date(payload):
+    """Return the newest bar date as YYYY-MM-DD, or an empty string."""
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    dates = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("trade_date") or row.get("date") or "").replace("-", "")
+        if len(text) == 8 and text.isdigit():
+            dates.append(f"{text[:4]}-{text[4:6]}-{text[6:]}")
+    return max(dates) if dates else ""
+
+
+def cache_validation(payload, expected_date):
+    """Describe whether a K-line payload covers the requested trading day."""
+    latest_date = latest_kline_date(payload)
+    return {
+        "expected_date": expected_date,
+        "latest_date": latest_date,
+        "valid": bool(latest_date and latest_date >= expected_date),
+    }
+
+
+def reject_stale_payload(result, expected_date):
+    """Return an explicit error payload when fresh data misses expected_date."""
+    validation = cache_validation(result, expected_date)
+    result.setdefault("meta", {})["cache_validation"] = validation
+    if validation["valid"]:
+        return result
+
+    meta = dict(result.get("meta", {}))
+    stale_source = meta.get("data_source", "unknown")
+    meta.update({
+        "data_source": "error",
+        "error_type": "stale_data",
+        "stale_data_source": stale_source,
+        "record_count": 0,
+        "error": (
+            f"数据最新日期{validation['latest_date'] or '未知'}早于"
+            f"预期交易日{expected_date}"
+        ),
+        "cache_validation": validation,
+    })
+    return {"meta": meta, "data": []}
+
+
 # --- SDK fetch ---
 
 
@@ -251,6 +297,7 @@ def main():
     parser.add_argument("--compact", action="store_true", help="Compact output with fewer columns")
     parser.add_argument("--token", help="Tushare token (overrides env var and config file)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
+    parser.add_argument("--expected-date", help="YYYY-MM-DD trading day the bars must cover; stale-by-date cache is ignored")
 
     args = parser.parse_args()
 
@@ -259,7 +306,12 @@ def main():
     cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        if cached:
+        validation = cache_validation(cached, args.expected_date) if cached and args.expected_date else None
+        if cached and (validation is None or validation["valid"]):
+            if validation is not None:
+                cached = dict(cached)
+                cached["meta"] = dict(cached.get("meta", {}))
+                cached["meta"]["cache_validation"] = validation
             output_json(cached, output_path=args.output)
             return
 
@@ -344,6 +396,9 @@ def main():
     # Fix data_source for HTTP fallback
     if isinstance(source_or_error, str) and source_or_error == "tushare_http":
         result["meta"]["data_source"] = "tushare_http"
+
+    if args.expected_date:
+        result = reject_stale_payload(result, args.expected_date)
 
     # Cache successful result (only if data_source is not error)
     if result.get("meta", {}).get("data_source") != "error":

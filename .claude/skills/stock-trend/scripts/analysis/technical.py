@@ -1802,6 +1802,40 @@ def build_summary(indicator_results, patterns, data_points=None):
 # --- Main ---
 
 
+def build_unavailable_summary(reason):
+    """Return the canonical summary shape when technical data is unavailable."""
+    return {
+        "total_score": 0,
+        "direction": "neutral",
+        "confidence": "low",
+        "consistency": 0,
+        "data_quality": "error",
+        "key_signals": [reason],
+        "dimension_scores": {},
+        "support_levels": [],
+        "resistance_levels": [],
+        "stop_loss": None,
+        "target_conservative": None,
+        "target_moderate": None,
+        "target_aggressive": None,
+        "target": None,
+        "risk_reward_ratio": None,
+        "rr_conservative": None,
+        "rr_moderate": None,
+        "rr_aggressive": None,
+        "favorable_rr": False,
+        "position_sizing": "不建议建仓",
+        "position_tier": 0,
+        "risk_reward_warning": reason,
+        "max_drawdown_pct": None,
+        "entry_signals": {
+            "verdict": "wait",
+            "signals": [],
+            "signal_count": 0,
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Technical analysis for stock-trend skill")
     parser.add_argument("input_file", nargs="?", help="K-line JSON file from fetch_kline.py (reads stdin if omitted)")
@@ -1834,14 +1868,7 @@ def main():
             },
             "latest": {},
             "patterns": [],
-            "summary": {
-                "total_score": 0,
-                "direction": "neutral",
-                "confidence": "low",
-                "key_signals": ["无K线数据，技术面无法分析"],
-                "support_levels": [],
-                "resistance_levels": [],
-            },
+            "summary": build_unavailable_summary("无K线数据，技术面无法分析"),
         }
         _output(result, args.output, args.compact)
         return
@@ -1849,7 +1876,12 @@ def main():
     # Parse data into DataFrame
     records = input_data.get("data", [])
     if not records:
-        result = {"meta": {"error": "No data records in input"}, "summary": {"total_score": 0, "direction": "neutral", "confidence": "low", "key_signals": ["无数据"]}}
+        result = {
+            "meta": {"error": "No data records in input"},
+            "latest": {},
+            "patterns": [],
+            "summary": build_unavailable_summary("无数据记录，技术面无法分析"),
+        }
         _output(result, args.output, args.compact)
         return
 

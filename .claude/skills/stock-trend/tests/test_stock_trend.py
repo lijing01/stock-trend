@@ -395,8 +395,50 @@ def run_analyze_tests(tmpdir):
              f"total_score={summary.get('total_score')}", "analyze")
         test("TA-04a: 空数据direction=neutral", summary.get("direction") == "neutral",
              f"direction={summary.get('direction')}", "analyze")
+        test("TA-04b: 错误输入data_quality=error", summary.get("data_quality") == "error",
+             f"data_quality={summary.get('data_quality')}", "analyze")
+        action_levels = [
+            summary.get("stop_loss"),
+            summary.get("target"),
+            summary.get("target_conservative"),
+            summary.get("target_moderate"),
+            summary.get("target_aggressive"),
+        ]
+        test("TA-04c: 错误输入不生成操作价位",
+             not summary.get("support_levels")
+             and not summary.get("resistance_levels")
+             and all(level is None for level in action_levels),
+             f"summary={summary}", "analyze")
+        test("TA-04d: 错误输入entry verdict=wait",
+             summary.get("entry_signals", {}).get("verdict") == "wait",
+             f"entry_signals={summary.get('entry_signals')}", "analyze")
+        test("TA-04e: 错误输入明确不建议建仓",
+             summary.get("position_sizing") == "不建议建仓"
+             and summary.get("position_tier") == 0
+             and summary.get("risk_reward_warning") == "无K线数据，技术面无法分析",
+             f"summary={summary}", "analyze")
     else:
         test("TA-04: 空数据分析", False, f"exit_code={rc}", "analyze")
+
+    empty_path = os.path.join(tmpdir, "empty_data.json")
+    with open(empty_path, "w") as f:
+        json.dump({"meta": {"ts_code": "999999.SH", "data_source": "test"}, "data": []}, f)
+    empty_tech_path = os.path.join(tmpdir, "ta04_empty.json")
+    rc, stdout, stderr = run_script("analysis/technical.py", empty_path, "-o", empty_tech_path)
+    if rc == 0:
+        empty_summary = load_json_output(empty_tech_path).get("summary", {})
+        test("TA-04f: 空记录复用不可用摘要契约",
+             empty_summary.get("data_quality") == "error"
+             and empty_summary.get("entry_signals", {}).get("verdict") == "wait"
+             and empty_summary.get("stop_loss") is None
+             and empty_summary.get("position_sizing") == "不建议建仓"
+             and empty_summary.get("position_tier") == 0
+             and empty_summary.get("risk_reward_warning") == "无数据记录，技术面无法分析"
+             and empty_summary.get("key_signals") == ["无数据记录，技术面无法分析"],
+             f"summary={empty_summary}", "analyze")
+    else:
+        test("TA-04f: 空记录复用不可用摘要契约", False,
+             f"exit_code={rc}, stderr={stderr}", "analyze")
 
     # TA-03: 50条数据 (limited data quality)
     kline_path = os.path.join(tmpdir, "tf01.json")
@@ -1265,7 +1307,7 @@ def run_pipeline_tests(tmpdir):
     try:
         rc, stdout, stderr = run_script(
             "pipeline/runner.py", "159740.SZ", "--asset", "FD", "--adj", "qfq",
-            "-o", tmpdir, timeout=180,
+            "--expected-date", "2026-04-06", "-o", tmpdir, timeout=180,
         )
     finally:
         if old_cache_dir is None:
@@ -1321,15 +1363,11 @@ def run_validate_tests():
     # Import validate_input from compute_scores
     sys.path.insert(0, str(SCRIPTS_DIR))
     from analysis.scores import validate_input
+    from analysis.technical import build_summary
 
-    # VI-valid-tech: valid technical data passes (errors == 0)
+    # VI-valid-tech: technical.py's emitted summary contract is accepted
     valid_tech = {
-        "summary": {
-            "total_score": 1.5,
-            "direction": "看多",
-            "confidence": 0.7,
-        },
-        "data_quality": "good",
+        "summary": build_summary({}, [], data_points=90),
     }
     valid_scores = {
         "technical": 1.5,
@@ -1339,7 +1377,7 @@ def run_validate_tests():
         "macro": 0,
     }
     errors = validate_input(valid_tech, valid_scores)
-    test("VI-valid-tech: valid technical data passes",
+    test("VI-valid-tech: emitted summary contract passes",
          len(errors) == 0, f"errors={errors}", "validate")
 
     # VI-missing-fields: missing required fields (errors > 0)
@@ -1355,13 +1393,122 @@ def run_validate_tests():
         "summary": {
             "total_score": 1.5,
             "direction": "看多",
-            "confidence": 0.7,
+            "confidence": "medium",
+            "data_quality": "invalid_quality",
         },
-        "data_quality": "invalid_quality",
     }
     errors = validate_input(bad_quality_tech, valid_scores)
     test("VI-bad-quality: invalid data_quality enum",
          len(errors) > 0, f"errors={errors}", "validate")
+
+    for invalid_confidence in (0.7, "unknown"):
+        invalid_confidence_tech = {
+            "summary": {
+                "total_score": 1.5,
+                "direction": "看多",
+                "confidence": invalid_confidence,
+                "data_quality": "good",
+            },
+        }
+        errors = validate_input(invalid_confidence_tech, valid_scores)
+        test(f"VI-bad-confidence: rejects {invalid_confidence!r}",
+             any("confidence" in error for error in errors),
+             f"errors={errors}", "validate")
+
+    # VI-non-error-quality: degraded but usable qualities continue scoring
+    for data_quality in ("good", "limited", "insufficient", "partial"):
+        quality_tech = {
+            "summary": {
+                "total_score": 0,
+                "direction": "neutral",
+                "confidence": "low",
+                "data_quality": data_quality,
+            },
+        }
+        with tempfile.TemporaryDirectory() as score_tmpdir:
+            technical_path = os.path.join(score_tmpdir, "technical.json")
+            scores_path = os.path.join(score_tmpdir, "scores.json")
+            _write_json(technical_path, quality_tech)
+            rc, stdout, stderr = run_script(
+                "analysis/scores.py", "--technical", technical_path, "-o", scores_path
+            )
+            test(f"VI-non-error-quality: {data_quality} continues scoring",
+                 rc == 0 and os.path.exists(scores_path),
+                 f"exit_code={rc}, stdout={stdout}, stderr={stderr}", "validate")
+
+    # VI-error-quality: error is a valid technical quality contract value
+    error_quality_tech = {
+        "summary": {
+            "total_score": 0,
+            "direction": "neutral",
+            "confidence": "low",
+            "data_quality": "error",
+        },
+    }
+    errors = validate_input(error_quality_tech, valid_scores)
+    test("VI-error-quality: error data_quality is valid",
+         len(errors) == 0, f"errors={errors}", "validate")
+
+    # VI-score-error-quality: composite scoring must not publish an error-quality input
+    with tempfile.TemporaryDirectory() as score_tmpdir:
+        technical_path = os.path.join(score_tmpdir, "technical.json")
+        scores_path = os.path.join(score_tmpdir, "scores.json")
+        _write_json(technical_path, error_quality_tech)
+        _write_json(scores_path, {"direction": "bullish", "composite_score": 2.8})
+        rc, stdout, stderr = run_script(
+            "analysis/scores.py", "--technical", technical_path, "-o", scores_path
+        )
+        test("VI-score-error-quality: scores exits nonzero",
+             rc != 0 and not os.path.exists(scores_path),
+             f"exit_code={rc}, scores_exists={os.path.exists(scores_path)}, "
+             f"stdout={stdout}, stderr={stderr}", "validate")
+
+    with tempfile.TemporaryDirectory() as score_tmpdir:
+        technical_path = os.path.join(score_tmpdir, "technical.json")
+        scores_path = os.path.join(score_tmpdir, "scores.json")
+        _write_json(technical_path, error_quality_tech)
+        _write_json(scores_path, {"direction": "bullish", "composite_score": 2.8})
+        rc, stdout, stderr = run_script(
+            "analysis/scores.py", "--code", "999999.SH",
+            "--data-dir", score_tmpdir,
+        )
+        test("VI-score-error-quality: code mode removes stale scores",
+             rc != 0 and not os.path.exists(scores_path),
+             f"exit_code={rc}, scores_exists={os.path.exists(scores_path)}, "
+             f"stdout={stdout}, stderr={stderr}", "validate")
+
+    malformed_error_tech = {
+        "summary": {
+            **error_quality_tech["summary"],
+            "total_score": "corrupt",
+        },
+    }
+    with tempfile.TemporaryDirectory() as score_tmpdir:
+        technical_path = os.path.join(score_tmpdir, "technical.json")
+        scores_path = os.path.join(score_tmpdir, "scores.json")
+        _write_json(technical_path, malformed_error_tech)
+        _write_json(scores_path, {"direction": "bullish", "composite_score": 2.8})
+        rc, stdout, stderr = run_script(
+            "analysis/scores.py", "--technical", technical_path, "-o", scores_path
+        )
+        test("VI-score-error-quality: malformed score removes direct stale output",
+             rc != 0 and not os.path.exists(scores_path),
+             f"exit_code={rc}, scores_exists={os.path.exists(scores_path)}, "
+             f"stdout={stdout}, stderr={stderr}", "validate")
+
+    with tempfile.TemporaryDirectory() as score_tmpdir:
+        technical_path = os.path.join(score_tmpdir, "technical.json")
+        scores_path = os.path.join(score_tmpdir, "scores.json")
+        _write_json(technical_path, malformed_error_tech)
+        _write_json(scores_path, {"direction": "bullish", "composite_score": 2.8})
+        rc, stdout, stderr = run_script(
+            "analysis/scores.py", "--code", "999999.SH",
+            "--data-dir", score_tmpdir,
+        )
+        test("VI-score-error-quality: malformed score removes code stale output",
+             rc != 0 and not os.path.exists(scores_path),
+             f"exit_code={rc}, scores_exists={os.path.exists(scores_path)}, "
+             f"stdout={stdout}, stderr={stderr}", "validate")
 
     # VI-score-range: score out of range [-100, 100]
     out_of_range_scores = {

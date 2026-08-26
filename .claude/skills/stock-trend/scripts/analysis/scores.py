@@ -596,7 +596,7 @@ def validate_input(technical_data, dimension_scores, data_dir=None):
         required_summary_keys = {
             "total_score": (int, float),
             "direction": str,
-            "confidence": (int, float),
+            "data_quality": str,
         }
         for key, expected_types in required_summary_keys.items():
             val = summary.get(key)
@@ -611,12 +611,24 @@ def validate_input(technical_data, dimension_scores, data_dir=None):
                     f"got {type(val).__name__}={val!r}"
                 )
 
-    # Check c: technical_data["data_quality"] must be a valid enum value
-    valid_qualities = ("good", "limited", "insufficient", "partial")
-    dq = technical_data.get("data_quality")
+        valid_confidences = ("low", "medium", "high")
+        confidence = summary.get("confidence")
+        if confidence is None:
+            errors.append(
+                "technical_data['summary'] missing required key 'confidence'"
+            )
+        elif confidence not in valid_confidences:
+            errors.append(
+                "technical_data['summary']['confidence'] must be one of "
+                f"{valid_confidences}, got {confidence!r}"
+            )
+
+    # Check c: summary.data_quality must be a valid enum value
+    valid_qualities = ("good", "limited", "insufficient", "partial", "error")
+    dq = summary.get("data_quality") if isinstance(summary, dict) else None
     if dq is not None and dq not in valid_qualities:
         errors.append(
-            f"technical_data['data_quality'] must be one of {valid_qualities}, "
+            f"technical_data['summary']['data_quality'] must be one of {valid_qualities}, "
             f"got {dq!r}"
         )
 
@@ -867,11 +879,18 @@ def main():
     else:
         parser.error("--technical or --code required")
 
+    output_path = data_dir / "scores.json" if data_dir else Path(args.output)
     summary = technical_data.get("summary", {})
+    data_quality = summary.get("data_quality")
+
+    if data_quality == "error":
+        if output_path.is_file() or output_path.is_symlink():
+            output_path.unlink()
+        print("Error: technical data quality is error; scoring aborted", file=sys.stderr)
+        sys.exit(1)
 
     # Extract technical score from summary
     tech_score = summary.get("total_score", 0)
-    data_quality = summary.get("data_quality")
     wyckoff_data_quality = None
 
     # Non-technical scores: use provided values or derive from automated data
@@ -1435,10 +1454,6 @@ def main():
     }
 
     # Write output
-    if data_dir:
-        output_path = data_dir / "scores.json"
-    else:
-        output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)

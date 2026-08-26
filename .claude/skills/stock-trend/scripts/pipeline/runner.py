@@ -57,6 +57,8 @@ def is_successful_kline(kline_data):
         return False
     if kline_data.get("meta", {}).get("data_source") == "error":
         return False
+    if kline_data.get("meta", {}).get("cache_validation", {}).get("valid") is False:
+        return False
     rows = kline_data.get("data")
     if not isinstance(rows, list) or not rows:
         return False
@@ -64,6 +66,18 @@ def is_successful_kline(kline_data):
     if latest_row is None:
         return False
     return all(safe_float(latest_row.get(key)) is not None for key in ("open", "high", "low", "close"))
+
+
+def resolve_expected_date(freq, cli_expected_date=None, now=None):
+    """Resolve the daily trading date once; weekly bars are not date-gated."""
+    if freq != "D":
+        return None, "not_applicable"
+    if cli_expected_date:
+        return cli_expected_date, "cli"
+
+    from fetchers.sector_data import get_last_trading_day
+    expected_date, source = get_last_trading_day(now=now or datetime.now())
+    return expected_date, source or "unavailable"
 
 
 def remove_stale_file(path, label, errors):
@@ -129,6 +143,7 @@ def main():
     parser.add_argument("--no-futures", action="store_true", help="Skip futures data fetch (ETF only)")
     parser.add_argument("--no-index-valuation", action="store_true", help="Skip index PE valuation fetch (ETF only)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore all cache")
+    parser.add_argument("--expected-date", help="Expected daily trading date YYYY-MM-DD (test override; ignored for weekly bars)")
     parser.add_argument("-o", "--output-dir", default=None, help="Output directory (default: .cache/stock-trend/{code}/). Ignored when --code is used.")
     args = parser.parse_args()
 
@@ -176,9 +191,13 @@ def main():
 
     is_etf = asset == "FD"
     is_hk = ts_code.endswith(".HK")
+    expected_date, expected_date_source = resolve_expected_date(
+        args.freq, cli_expected_date=args.expected_date)
 
     pipeline_start = time.time()
     errors = []
+    if args.freq == "D" and not expected_date:
+        errors.append("Expected daily trading date unavailable")
     timeouts = []
     results = {}
     kline_available = False
@@ -209,6 +228,8 @@ def main():
     ]
     if args.no_cache:
         kline_cmd.append("--no-cache")
+    if expected_date:
+        kline_cmd.extend(["--expected-date", expected_date])
     # Calculate start date from kline_days for Tushare
     from datetime import datetime, timedelta
     start_date = (datetime.now() - timedelta(days=args.kline_days)).strftime("%Y%m%d")
@@ -240,6 +261,8 @@ def main():
             ]
         if args.no_cache:
             fallback_cmd.append("--no-cache")
+        if expected_date:
+            fallback_cmd.extend(["--expected-date", expected_date])
         fallback_cmd.extend(["--lmt", str(args.kline_days)])
         fallback_result = run_script(fallback_cmd, label="fetch_kline_eastmoney")
         if fallback_result.get("timeout"):
@@ -249,14 +272,18 @@ def main():
         kline_data = read_json(kline_path)
 
     if kline_data:
-        data_source = kline_data.get("meta", {}).get("data_source", "unknown")
-        record_count = kline_data.get("meta", {}).get("record_count", 0)
+        kline_meta = kline_data.get("meta", {})
+        data_source = kline_meta.get("data_source", "unknown")
+        record_count = kline_meta.get("record_count", 0)
         kline_available = is_successful_kline(kline_data)
         print(f"  K-line data: {data_source}, {record_count} records")
         results["kline"] = {
             "data_source": data_source,
             "record_count": record_count,
         }
+        for key in ("error_type", "stale_data_source", "cache_validation", "error"):
+            if key in kline_meta:
+                results["kline"][key] = kline_meta[key]
         if not kline_available:
             errors.append("K-line data unavailable or empty")
     else:
@@ -393,6 +420,8 @@ def main():
             ]
         if args.no_cache:
             capital_cmd.append("--no-cache")
+        if expected_date:
+            capital_cmd.extend(["--expected-date", expected_date])
         parallel_tasks.append((
             capital_cmd,
             "fetch_capital_flow",
@@ -547,6 +576,8 @@ def main():
             "pipeline_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "elapsed_seconds": round(elapsed, 1),
             "primary_data_source": primary_data_source,
+            "expected_date": expected_date,
+            "expected_date_source": expected_date_source,
         },
         "results": results,
         "errors": errors,
