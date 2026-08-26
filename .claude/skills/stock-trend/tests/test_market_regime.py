@@ -426,13 +426,34 @@ def test_persistence():
     with tempfile.TemporaryDirectory() as tmp:
         mr.HISTORY_FILE = Path(tmp) / "market_regime_history.json"
         mr.HISTORY_MAX_DAYS = 3
-        for d in range(1, 6):
-            mr.save_history({"date": f"2026-07-{d:02d}", "regime_score": d})
+        for day in (1, 2, 3, 6, 7):
+            mr.save_history({"date": f"2026-07-{day:02d}", "regime_score": day})
         hist = mr.load_history()
-        test("prune 到最近3天", sorted(hist.keys()) == ["2026-07-03", "2026-07-04", "2026-07-05"],
+        test("prune 到最近3个交易日", sorted(hist.keys()) == ["2026-07-03", "2026-07-06", "2026-07-07"],
              f"got {sorted(hist.keys())}")
     mr.HISTORY_FILE = old
     mr.HISTORY_MAX_DAYS = old_max
+
+
+def test_persistence_rejects_malformed_and_weekend_dates():
+    print("\n--- persistence date hygiene ---")
+    old = mr.HISTORY_FILE
+    with tempfile.TemporaryDirectory() as tmp:
+        mr.HISTORY_FILE = Path(tmp) / "history.json"
+        test("拒绝紧凑日期", mr.save_history(
+            {"date": "20260731", "regime_score": 1}) is False)
+        test("拒绝周末日期", mr.save_history(
+            {"date": "2026-08-01", "regime_score": 1}) is False)
+        test("接受严格交易日", mr.save_history(
+            {"date": "2026-08-03", "regime_score": 1}) is True)
+        mr.HISTORY_FILE.write_text(json.dumps({
+            "20260731": {"date": "20260731"},
+            "2026-08-01": {"date": "2026-08-01"},
+            "2026-08-03": {"date": "2026-08-03"},
+        }), encoding="utf-8")
+        hist = mr.load_history()
+        test("读取过滤异常日期", sorted(hist) == ["2026-08-03"], str(hist))
+    mr.HISTORY_FILE = old
 
 
 def test_cached_holdings_refresh():
@@ -517,6 +538,17 @@ def test_baseline_history_excludes_partials():
     test("排除intraday标记", "2026-08-19" not in keys, str(keys))
     test("排除异常低额", "2026-08-19" not in keys)
     test("保留合法全天", "2026-08-14" in keys and "2026-08-17" in keys, str(keys))
+
+
+def test_baseline_history_excludes_malformed_and_weekend_keys():
+    print("\n--- _baseline_history date hygiene ---")
+    history = {
+        "20260731": {"amount_yi": 1000},
+        "2026-08-01": {"amount_yi": 1000},
+        "2026-08-03": {"amount_yi": 1000},
+    }
+    base = mr._baseline_history(history, "2026-08-04")
+    test("基线不纳入异常日期", sorted(base) == ["2026-08-03"], str(base))
 
 
 def test_last_close_context():
@@ -655,10 +687,12 @@ def main():
     test_report()
     test_index_metrics()
     test_persistence()
+    test_persistence_rejects_malformed_and_weekend_dates()
     test_cached_holdings_refresh()
     test_session_elapsed_fraction()
     test_blend_weight()
     test_baseline_history_excludes_partials()
+    test_baseline_history_excludes_malformed_and_weekend_keys()
     test_last_close_context()
     test_should_save_history()
     test_collect_context_intraday_blend_not_weak()

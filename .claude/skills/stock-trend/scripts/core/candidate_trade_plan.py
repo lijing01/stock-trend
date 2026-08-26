@@ -15,6 +15,11 @@ RISK_BUDGET_PCT = 0.5
 VALID_TRADING_SESSIONS = 3
 HORIZON = {"min_trading_days": 20, "max_trading_days": 120}
 EVENT_STATUSES = {"not_implemented", "clear", "watch", "risk", "pending"}
+# A stop immediately below the entry range is not meaningful for a swing
+# plan.  These are validation guards, not a claim about optimal strategy
+# parameters; they should be re-evaluated by the later walk-forward tests.
+MIN_STOP_BUFFER_ATR = 0.30
+MIN_STOP_BUFFER_PCT = 0.50
 
 def _finite_positive(value):
     try:
@@ -23,9 +28,27 @@ def _finite_positive(value):
         return None
     return n if math.isfinite(n) and n > 0 else None
 
+
+def _finite_nonnegative(value):
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return n if math.isfinite(n) and n >= 0 else None
+
 def _round_optional_price(value):
     price = _finite_positive(value)
     return round(price, 4) if price is not None else None
+
+
+def _stop_buffer_requirement(entry_low, atr_value):
+    entry = _finite_positive(entry_low)
+    atr = _finite_positive(atr_value)
+    if entry is None:
+        return None
+    atr_buffer = (MIN_STOP_BUFFER_ATR * atr) if atr is not None else 0.0
+    pct_buffer = entry * MIN_STOP_BUFFER_PCT / 100.0
+    return max(atr_buffer, pct_buffer)
 
 def _normalized_frame(kline):
     rows = kline.get("data", []) if isinstance(kline, dict) else (kline or [])
@@ -93,13 +116,52 @@ def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date,
     levels = calc_support_resistance(df, ma, bb, atr_pct=atr.get("atr_pct"),
         adx_value=adx.get("adx"), atr_absolute=atr.get("atr"))
     support = [x.get("price") for x in levels.get("support", []) if _finite_positive(x.get("price")) and x["price"] < close]
-    low = max(close - .75 * atr_value, max(support[-1:] or [close - .75 * atr_value]))
+    low = max(close - .75 * atr_value,
+              max(support[-1:] or [close - .75 * atr_value]))
     high = close + .25 * atr_value
     risk = calc_risk_reward(
         df, atr, levels, direction="bullish", is_etf=False, entry_price=high)
-    timing = calc_entry_signals(df, indicators, rr_ratio=risk.get("risk_reward_ratio"), is_etf=False)
-    stop = _finite_positive(risk.get("stop_loss")) or close - 1.5 * atr_value
-    if low <= stop: low = stop + .25 * atr_value
+    required_stop_buffer = _stop_buffer_requirement(low, atr_value)
+    stop_candidates = [
+        _finite_positive(value) for value in support
+        if _finite_positive(value) is not None
+    ]
+    risk_stop = _finite_positive(risk.get("stop_loss"))
+    if risk_stop is not None:
+        stop_candidates.append(risk_stop)
+    valid_stop_candidates = [
+        value for value in stop_candidates
+        if value < low
+        and required_stop_buffer is not None
+        and low - value >= required_stop_buffer
+    ]
+    if valid_stop_candidates:
+        stop = max(valid_stop_candidates)
+        stop_source = "structural_support"
+    else:
+        # Preserve the provider's stop for diagnostics, but mark the plan
+        # non-executable.  Never move a stop merely to satisfy validation.
+        stop = risk_stop or close - 1.5 * atr_value
+        stop_source = "unverified"
+    supplied_rr = risk.get("risk_reward_ratio")
+    if (stop_source == "structural_support"
+            and (risk_stop is None or abs(stop - risk_stop) > 1e-9)):
+        try:
+            recalculated = calc_risk_reward(
+                df, atr, levels, direction="bullish", is_etf=False,
+                entry_price=high, stop_price=stop)
+        except TypeError:
+            # Keep compatibility with test/third-party adapters that expose
+            # the pre-v1 signature; the builder still recomputes R:R below.
+            recalculated = None
+        if isinstance(recalculated, dict):
+            risk = recalculated
+    stop_gap = low - stop if stop is not None else None
+    stop_buffer_valid = (
+        required_stop_buffer is not None
+        and stop_gap is not None
+        and stop_gap >= required_stop_buffer
+    )
     target_source = str(risk.get("target_source") or "unavailable")
     targets = [
         risk.get("target_conservative"),
@@ -109,41 +171,70 @@ def build_candidate_trade_plan(code, kline, wyckoff, policy, basis_date,
     targets = [_finite_positive(value) for value in targets]
     has_valid_ladder = (
         target_source in {"resistance", "atr_projection"}
+        and stop_buffer_valid
+        and stop < high
         and all(value is not None for value in targets)
         and high < targets[0] < targets[1] < targets[2]
     )
     if not has_valid_ladder:
         target_source = "unavailable"
         targets = [None, None, None]
+    rr_for_timing = (
+        round((targets[1] - high) / (high - stop), 2)
+        if stop_buffer_valid and targets[1] is not None and stop < high
+        else None
+    )
+    timing = calc_entry_signals(
+        df, indicators, rr_ratio=rr_for_timing, is_etf=False)
     verdict = timing.get("verdict")
     action = "buy" if verdict == "ready" else ("wait" if verdict in ("wait", "watch") else "avoid")
     executable_target = target_source == "resistance" and has_valid_ladder
     if action == "buy" and not executable_target:
         action = "wait"
     cap = float(policy.get("max_portfolio_pct", 0) or 0)
-    pos = calculate_position_pct(high, stop, cap, policy.get("max_recommendations", 1))
-    supplied_rr = risk.get("risk_reward_ratio")
+    pos = calculate_position_pct(
+        high, stop, cap, policy.get("max_recommendations", 1)) \
+        if stop_buffer_valid else 0.0
     recomputed_rr = (
         round((targets[1] - high) / (high - stop), 2)
         if has_valid_ladder and high > stop else None
     )
+    rr_at_entry_low = (
+        round((targets[1] - low) / (low - stop), 2)
+        if has_valid_ladder and low > stop else None
+    )
+    rr_at_entry_high = recomputed_rr
     return {"schema_version": SCHEMA_VERSION, "code": code, "basis_date": basis_date,
         "basis_price": close, "action": action,
         "entry": {"low": round(low, 4), "high": round(high, 4), "reference_price": close},
         "confirmation": "; ".join(timing.get("signals", [])) or "确认站上入场区并放量",
         "invalidation": "收盘跌破止损或结构支撑",
         "stop_loss": {"price": round(stop, 4)},
+        "stop_source": stop_source,
+        "stop_buffer": {
+            "required": round(required_stop_buffer, 4)
+            if required_stop_buffer is not None else None,
+            "actual": round(stop_gap, 4) if stop_gap is not None else None,
+            "valid": stop_buffer_valid,
+        },
         "targets": {"conservative": _round_optional_price(targets[0]),
                     "primary": _round_optional_price(targets[1]),
                     "aggressive": _round_optional_price(targets[2])},
-        "risk_reward": {"supplied": supplied_rr, "recomputed": recomputed_rr},
+        "risk_reward": {
+            "supplied": supplied_rr,
+            "recomputed": recomputed_rr,
+            "rr_at_entry_low": rr_at_entry_low,
+            "rr_at_entry_high": rr_at_entry_high,
+        },
         "position": {"max_portfolio_pct": pos}, "horizon": dict(HORIZON),
         "validity": {"trading_sessions": VALID_TRADING_SESSIONS,
                      "valid_until": _next_validity_date(basis_date, market_sessions)},
         "target_source": target_source,
         "target_reason": (
             None if has_valid_ladder else
-            (risk.get("warning") or "没有高于计划入场价的有效目标梯度")
+            ("止损距离入场下沿不足最小波动缓冲"
+             if not stop_buffer_valid else
+             (risk.get("warning") or "没有高于计划入场价的有效目标梯度"))
         ),
         "counterargument": counterargument, "event_check": {"status": "not_implemented"},
         "indicators": {"atr": atr}, "wyckoff": copy.deepcopy(wyckoff or {})}
@@ -160,6 +251,26 @@ def validate_trade_plan(plan, policy, expected_date=None):
     if not plan.get("confirmation"): reasons.append("trade_plan_missing_confirmation")
     if not plan.get("invalidation"): reasons.append("trade_plan_missing_invalidation")
     if not stop or not low or stop >= low: reasons.append("trade_plan_invalid_stop")
+    stop_buffer = plan.get("stop_buffer")
+    if isinstance(stop_buffer, dict):
+        actual = _finite_nonnegative(stop_buffer.get("actual"))
+        required = _finite_positive(stop_buffer.get("required"))
+        atr_value = _finite_positive(
+            ((plan.get("indicators") or {}).get("atr") or {}).get("atr"))
+        recomputed_required = _stop_buffer_requirement(low, atr_value)
+        if recomputed_required is not None:
+            required = recomputed_required
+        recomputed_actual = low - stop if low and stop else None
+        valid = (
+            stop_buffer.get("valid") is True
+            and actual is not None
+            and recomputed_actual is not None
+            and abs(actual - recomputed_actual) <= 0.01
+            and required is not None
+            and actual + 1e-9 >= required
+        )
+        if not valid:
+            reasons.append("trade_plan_stop_buffer_insufficient")
     target_source = str(plan.get("target_source") or "unavailable")
     if target_source not in {"resistance", "atr_projection", "unavailable"}:
         reasons.append("trade_plan_target_source_invalid")

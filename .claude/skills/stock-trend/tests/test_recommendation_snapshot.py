@@ -33,6 +33,26 @@ class T(unittest.TestCase):
    path=Path(d)/'2026-08-20.json'; path.write_text(json.dumps(snapshot),encoding='utf-8')
    with self.assertRaises(SnapshotValidationError): load_official_snapshot(path)
 
+ def test_nonfinite_values_are_normalized_and_audited(self):
+  s=src(); s['market_regime']['score']=float('nan')
+  snapshot=build_snapshot(s)
+  self.assertIsNone(snapshot['content']['market_regime']['score'])
+  self.assertTrue(snapshot['normalization_warnings'])
+  with tempfile.TemporaryDirectory() as d:
+   result=save_official_snapshot(snapshot,d)
+   self.assertEqual(result.status,'created')
+   loaded=load_official_snapshot(Path(d)/'2026-08-20.json')
+   self.assertIsNone(loaded['content']['market_regime']['score'])
+
+ def test_runtime_telemetry_does_not_change_decision_digest(self):
+  first=src(); first['candidates'][0]['fetched_at']='2026-08-20T15:00:00'
+  first['candidates'][0]['cache_hits']=1
+  second=copy.deepcopy(first)
+  second['candidates'][0]['fetched_at']='2026-08-20T15:01:00'
+  second['candidates'][0]['cache_hits']=99
+  self.assertEqual(build_snapshot(first)['content_sha256'],
+                   build_snapshot(second)['content_sha256'])
+
 def run_recommendation_snapshot_tests():
  suite = unittest.defaultTestLoader.loadTestsFromTestCase(T)
  result = unittest.TextTestRunner(stream=sys.stderr, verbosity=0).run(suite)

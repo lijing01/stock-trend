@@ -1272,10 +1272,12 @@ def calc_max_drawdown(df):
 
 
 _ENTRY_PRICE_UNSET = object()
+_STOP_PRICE_UNSET = object()
 
 
 def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
-                     entry_price=_ENTRY_PRICE_UNSET):
+                     entry_price=_ENTRY_PRICE_UNSET,
+                     stop_price=_STOP_PRICE_UNSET):
     """Calculate stop-loss price and risk:reward ratio with three-tier targets.
 
     Stop-loss uses adaptive ATR multiplier based on trend direction and volatility.
@@ -1285,6 +1287,8 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
     Omitting entry_price retains the legacy close-referenced calculation. An
     explicitly supplied entry_price, including None, is treated as planned
     entry evidence and must be valid before targets/R:R can be calculated.
+    ``stop_price`` is an optional verified structural-stop override; when
+    supplied, all target and R:R calculations use that stop consistently.
     """
     curr_close = df["close"].iloc[-1]
     entry_referenced = entry_price is not _ENTRY_PRICE_UNSET
@@ -1360,6 +1364,20 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
     else:
         stop_loss = None
 
+    # A caller that has selected a verified structural support may override
+    # the provider-derived stop.  Reusing the same target-selection routine
+    # ensures every target and R:R value is based on that actual stop.
+    stop_was_overridden = False
+    if stop_price is not _STOP_PRICE_UNSET:
+        try:
+            override_stop = float(stop_price)
+        except (TypeError, ValueError, OverflowError):
+            override_stop = None
+        if override_stop is not None and np.isfinite(override_stop) \
+                and override_stop > 0 and override_stop < curr_close:
+            stop_loss = _round_price(override_stop)
+            stop_was_overridden = True
+
     # Guard: stop_loss must stay below current price
     # (support level rounding can push it above for low-price ETFs)
     if stop_loss and stop_loss >= curr_close:
@@ -1370,7 +1388,7 @@ def calc_risk_reward(df, atr_result, levels, direction="neutral", is_etf=False,
 
     # Safety net: if stop-loss too close (< 0.5x ATR%), prefer ATR-based distance
     # NOTE: atr_pct is percentage (4.07 = 4.07%), stop_pct is decimal (0.0646 = 6.46%)
-    if stop_loss and atr and atr_pct > 0:
+    if stop_loss and atr and atr_pct > 0 and not stop_was_overridden:
         stop_pct = (curr_close - stop_loss) / curr_close
         if stop_pct < (atr_pct / 100.0) * 0.5:
             atr_stop = _round_price(curr_close - atr_mult * atr)

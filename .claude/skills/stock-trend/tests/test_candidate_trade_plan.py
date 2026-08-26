@@ -67,6 +67,43 @@ def test_builder_uses_technical_targets():
             "若量价确认失败则逻辑失效")
     assert plan["targets"] == {"conservative": 110, "primary": 115, "aggressive": 120}
     assert plan["target_source"] == "resistance"
+    assert plan["risk_reward"]["rr_at_entry_low"] is not None
+    assert plan["risk_reward"]["rr_at_entry_high"] == plan["risk_reward"]["recomputed"]
+
+
+def test_builder_rejects_stop_without_minimum_buffer():
+    close = make_kline()["data"][-1]["close"]
+    risk = {
+        "stop_loss": close - 1.58,
+        "target_conservative": close + 2.0,
+        "target_moderate": close + 3.0,
+        "target_aggressive": close + 4.0,
+        "risk_reward_ratio": 2.0,
+        "target_source": "resistance",
+    }
+    with patch("core.candidate_trade_plan.calc_atr",
+               return_value={"atr": 2.0, "atr_pct": 2.0}), \
+         patch("core.candidate_trade_plan.calc_support_resistance",
+               return_value={"support": [], "resistance": []}), \
+         patch("core.candidate_trade_plan.calc_risk_reward", return_value=risk), \
+         patch("core.candidate_trade_plan.calc_entry_signals",
+               return_value={"verdict": "ready", "signals": []}):
+        plan = build_candidate_trade_plan(
+            "600000", make_kline(), {}, policy(), "2026-08-20", "risk")
+    assert plan["stop_buffer"]["valid"] is False
+    assert plan["action"] == "wait"
+    assert plan["position"]["max_portfolio_pct"] == 0.0
+    assert plan["target_source"] == "unavailable"
+
+
+def test_validator_recomputes_stop_buffer_from_plan_levels():
+    p = build_candidate_trade_plan(
+        "600000", make_kline(), {}, policy(), "2026-08-20", "risk")
+    if isinstance(p.get("stop_buffer"), dict):
+        p["stop_buffer"]["valid"] = True
+        p["stop_buffer"]["actual"] = 999
+        verdict = validate_trade_plan(p, policy(), "2026-08-20")
+        assert "trade_plan_stop_buffer_insufficient" in verdict["reasons"]
 
 
 def test_risk_reward_uses_planned_entry_reference_and_source():
@@ -89,6 +126,19 @@ def test_risk_reward_uses_planned_entry_reference_and_source():
         (result["target_moderate"] - 105.0)
         / (105.0 - result["stop_loss"]), 2
     )
+    overridden = calc_risk_reward(
+        df,
+        {"atr": 2.0, "atr_pct": 2.0},
+        {"resistance": [
+            {"price": 103.0}, {"price": 120.0},
+            {"price": 130.0}, {"price": 140.0},
+        ]},
+        direction="bullish",
+        is_etf=False,
+        entry_price=105.0,
+        stop_price=100.0,
+    )
+    assert overridden["stop_loss"] == 100.0
 
 
 def test_risk_reward_atr_projection_is_not_fixed_two_r():

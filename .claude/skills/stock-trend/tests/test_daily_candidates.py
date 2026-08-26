@@ -372,6 +372,56 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         self.assertEqual(payload["data_date"], "2026-08-06")
 
+    def test_rankings_cache_rejects_unverified_date(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {"complete": True},
+            "sectors": [{"up_count": 1, "down_count": 0}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+             patch.object(sector_data, "CACHE_FILE",
+                          Path(tmpdir) / "rankings.json"):
+            with self.assertRaises(ValueError):
+                sector_data.save_rankings_cache(
+                    rankings, data_date="2026-08-08")
+
+    def test_sector_snapshot_requires_verified_matching_date(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {"complete": True, "data_date": "2026-08-06"},
+            "sectors": [{"code": "BK1", "name": "测试", "up_count": 4,
+                         "down_count": 1, "change_pct": 1.0}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+             patch.object(sector_data, "SNAPSHOT_FILE",
+                          Path(tmpdir) / "snapshots.json"):
+            sector_data.append_daily_snapshot(rankings, override_date="2026-08-06")
+            self.assertTrue(sector_data.SNAPSHOT_FILE.exists())
+            with self.assertRaises(ValueError):
+                sector_data.append_daily_snapshot(
+                    rankings, override_date="2026-08-07")
+            with self.assertRaises(ValueError):
+                sector_data.append_daily_snapshot(
+                    rankings, override_date="2026-08-08")
+
+    def test_snapshot_history_filters_non_iso_and_weekend_keys(self):
+        from fetchers import sector_data
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "SNAPSHOT_FILE",
+                          Path(tmpdir) / "snapshots.json"):
+            sector_data.SNAPSHOT_FILE.write_text(json.dumps({
+                "20260731": [],
+                "2026-08-01": [],
+                "2026-08-06": [],
+            }), encoding="utf-8")
+            history = sector_data.load_snapshot_history(days=10)
+        self.assertEqual(list(history), ["2026-08-06"])
+
     def test_partial_rankings_do_not_overwrite_complete_cache(self):
         from fetchers import sector_data
 
@@ -1648,11 +1698,11 @@ class TestRecommendationPolicy(unittest.TestCase):
         item = candidate("positive", eligible=False)
         item["sector_capital_evidence"] = "positive_verified"
         buckets = classify_candidates([item], policy)
-        self.assertEqual([row["code"] for row in buckets["observation"]],
+        self.assertEqual([row["code"] for row in buckets["data_rejected"]],
                          ["positive"])
         self.assertNotIn(
             "breadth_capital_divergence",
-            buckets["observation"][0]["observation_reasons"],
+            buckets["data_rejected"][0]["observation_reasons"],
         )
 
     def test_zero_capital_score_still_enables_divergence_gate(self):
@@ -1704,7 +1754,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         buckets = classify_candidates(
             [candidate("1"), candidate("2", eligible=False)], policy)
         self.assertEqual([item["code"] for item in buckets["actionable"]], ["1"])
-        self.assertEqual([item["code"] for item in buckets["observation"]], ["2"])
+        self.assertEqual([item["code"] for item in buckets["data_rejected"]], ["2"])
+        self.assertEqual(buckets["observation"], [])
 
     def test_strong_regime_never_promotes_single_day_pulse(self):
         regime = {"score": 85, "data_date": "2026-08-06"}

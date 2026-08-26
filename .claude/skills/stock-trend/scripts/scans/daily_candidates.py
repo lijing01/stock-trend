@@ -47,6 +47,7 @@ from core.source_health import (
     live_attempt,
 )
 from core.recommendation_snapshot import save_snapshot_if_official
+from core.recommendation_snapshot import SnapshotConflict, SnapshotValidationError
 SIGNAL_LABELS = {
     "volume_breakout": "放量突破",
     "northbound_adding": "北向增持",
@@ -75,6 +76,7 @@ REASON_LABELS = {
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
     "trade_plan_target_source_not_executable": "目标来源非结构化阻力位，仅供观察",
+    "data_quality_ineligible": "关键数据质量不合格",
 }
 
 DATA_REASON_CODES = {
@@ -88,6 +90,7 @@ DATA_REASON_CODES = {
     "regime_missing",
     "regime_stale",
     "intraday_provisional",
+    "data_quality_ineligible",
 }
 
 
@@ -111,8 +114,11 @@ _PERFORMANCE_PHASE_FIELDS = (
     "report_seconds", "total_seconds",
 )
 _PERFORMANCE_FUNNEL_FIELDS = (
-    "batch_count", "raw_candidate_count", "unique_candidate_count",
-    "wyckoff_pass_count", "final_candidate_count", "final_valid_count",
+    "sector_universe_count", "sector_qualified_count",
+    "sector_expanded_count", "batch_count", "raw_candidate_count",
+    "unique_candidate_count", "wyckoff_pass_count", "final_candidate_count",
+    "output_candidate_count", "final_valid_count", "data_eligible_count",
+    "data_rejected_count",
     "actionable_count",
 )
 _SOURCE_AUDIT_FIELDS = (
@@ -146,8 +152,22 @@ def _complete_performance(performance, source_health, candidates, buckets,
     for field in _PERFORMANCE_FUNNEL_FIELDS:
         completed.setdefault(field, 0)
     completed["final_candidate_count"] = len(candidates)
+    # Alias the historical ``final`` name with the business-facing output
+    # stage used in the repair plan and downstream dashboards.
+    completed["output_candidate_count"] = len(candidates)
     completed["final_valid_count"] = sum(
         _is_final_valid_candidate(item, min_score) for item in candidates)
+    completed["data_eligible_count"] = sum(
+        bool(item.get("data_quality", {}).get("eligible", False))
+        for item in candidates)
+    completed["data_rejected_count"] = len(
+        buckets.get("data_rejected", []))
+    expanded_codes = completed.get("sector_expanded_codes") or []
+    if expanded_codes:
+        completed["sector_expanded_count"] = len(set(expanded_codes))
+    else:
+        completed.setdefault("sector_expanded_count", 0)
+    completed.pop("sector_expanded_codes", None)
     completed["actionable_count"] = len(buckets.get("actionable", []))
     completed["total_seconds"] = max(0.0, float(total_seconds))
     completed.setdefault("degradation_reasons", [])
@@ -226,13 +246,20 @@ def _performance_markdown(performance):
         for label, field in phase_labels)
     lines.extend([
         "",
-        "**漏斗**: "
+        "**板块漏斗**: "
+        f"评估 {performance.get('sector_universe_count', 0)} → "
+        f"热度合格 {performance.get('sector_qualified_count', 0)} → "
+        f"实际展开 {performance.get('sector_expanded_count', 0)}",
+        "",
+        "**股票漏斗**: "
         f"批次 {performance.get('batch_count', 0)} → "
         f"原始 {performance.get('raw_candidate_count', 0)} → "
         f"去重 {performance.get('unique_candidate_count', 0)} → "
         f"维科夫 {performance.get('wyckoff_pass_count', 0)} → "
-        f"最终 {performance.get('final_candidate_count', 0)} → "
+        f"输出 {performance.get('output_candidate_count', performance.get('final_candidate_count', 0))} → "
+        f"数据合格 {performance.get('data_eligible_count', 0)} → "
         f"有效 {performance.get('final_valid_count', 0)} → "
+        f"数据失效 {performance.get('data_rejected_count', 0)} → "
         f"可执行 {performance.get('actionable_count', 0)}",
         "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
@@ -275,9 +302,21 @@ def _performance_html(performance):
     phase_text = " | ".join(
         f"{field.removesuffix('_seconds')}={float(performance.get(field, 0)):.3f}s"
         for field in _PERFORMANCE_PHASE_FIELDS)
-    funnel_text = " | ".join(
-        f"{field}={performance.get(field, 0)}"
-        for field in _PERFORMANCE_FUNNEL_FIELDS)
+    funnel_text = (
+        "sectors="
+        f"{performance.get('sector_universe_count', 0)}→"
+        f"{performance.get('sector_qualified_count', 0)}→"
+        f"{performance.get('sector_expanded_count', 0)} | "
+        "stocks="
+        f"batch={performance.get('batch_count', 0)}→"
+        f"raw={performance.get('raw_candidate_count', 0)}→"
+        f"unique={performance.get('unique_candidate_count', 0)}→"
+        f"wyckoff={performance.get('wyckoff_pass_count', 0)}→"
+        f"output={performance.get('output_candidate_count', performance.get('final_candidate_count', 0))}→"
+        f"eligible={performance.get('data_eligible_count', 0)}→"
+        f"rejected={performance.get('data_rejected_count', 0)}→"
+        f"actionable={performance.get('actionable_count', 0)}"
+    )
     scan_status = escape(str(performance.get("scan_status", "complete")))
     degradation_reasons = escape(
         "、".join(performance.get("degradation_reasons", [])) or "无")
@@ -308,11 +347,16 @@ def _emit_performance_summary(performance):
         for field in _PERFORMANCE_PHASE_FIELDS)
     print(
         f"[performance] {phase_text} "
+        f"sectors={performance.get('sector_universe_count', 0)}->"
+        f"{performance.get('sector_qualified_count', 0)}->"
+        f"{performance.get('sector_expanded_count', 0)} "
         f"batches={performance.get('batch_count', 0)} "
         f"raw={performance.get('raw_candidate_count', 0)} "
         f"unique={performance.get('unique_candidate_count', 0)} "
         f"wyckoff={performance.get('wyckoff_pass_count', 0)} "
-        f"final={performance.get('final_candidate_count', 0)} "
+        f"output={performance.get('output_candidate_count', performance.get('final_candidate_count', 0))} "
+        f"data_eligible={performance.get('data_eligible_count', 0)} "
+        f"data_rejected={performance.get('data_rejected_count', 0)} "
         f"final_valid={performance.get('final_valid_count', 0)} "
         f"actionable={performance.get('actionable_count', 0)} "
         f"sources=[{source_text}]",
@@ -697,7 +741,10 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             source_health.release_unstarted(ranking_token, "live_deadline")
     ranking_meta = {
         "source": live_meta.get("source", "realtime"),
-        "data_date": as_of_date or datetime.now().strftime("%Y-%m-%d"),
+        # Prefer a date supplied by the upstream ranking payload.  ``as_of``
+        # is an explicit caller contract; never invent a date from the local
+        # wall clock at this boundary.
+        "data_date": live_meta.get("data_date", "") or as_of_date,
         "quality": "good",
         "errors": live_meta.get("errors", [])
         or live_meta.get("upstream_errors", []),
@@ -745,6 +792,12 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 "source": "error", "data_date": "", "quality": "error",
                 "errors": live_meta.get("errors", []),
             }
+    universe_count = live_meta.get("total_sectors")
+    try:
+        universe_count = int(universe_count)
+    except (TypeError, ValueError):
+        universe_count = len(rankings.get("sectors", []))
+    metrics["sector_universe_count"] = max(0, universe_count)
     ranked = rank_hot_sectors(rankings, top_n=top_n, min_stocks=min_stocks)
     for sector in ranked:
         sector.update({
@@ -757,6 +810,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         sector for sector in ranked
         if sector.get("absolute_hot_score", 0) >= min_hot
     ]
+    metrics["sector_qualified_count"] = len(qualified)
     expected_date = as_of_date or (regime or {}).get("data_date", "")
     resonance_quality = "not_available"
     resonance_reason = ""
@@ -796,6 +850,9 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         elif sector.get("ranking_quality") in ("partial", "error"):
             sector["sector_type"] = "partial_realtime"
             sector["sector_actionable"] = False
+    # This is the qualified sector list handed to the stock-expansion stage;
+    # actual expansion count is recorded in scan_sectors below.
+    metrics["sector_qualified_count"] = len(enriched)
     return enriched
 
 
@@ -851,8 +908,10 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
     metrics.setdefault("batch_count", 0)
     metrics.setdefault("raw_candidate_count", 0)
     metrics.setdefault("unique_candidate_count", 0)
+    metrics.setdefault("sector_expanded_codes", [])
     for i in range(0, len(ordered_sector_codes), batch_size):
         batch = ordered_sector_codes[i:i + batch_size]
+        metrics["sector_expanded_codes"].extend(batch)
         metrics["batch_count"] += 1
         membership_started = time.monotonic()
         try:
@@ -1132,9 +1191,12 @@ TARGET_SOURCE_LABELS = {
 }
 
 
-def _target_source_audit(items):
+def _target_source_audit(items, eligible_only=False):
     counts = {source: 0 for source in TARGET_SOURCE_LABELS}
     for item in items:
+        if eligible_only and not item.get("data_quality", {}).get(
+                "eligible", False):
+            continue
         source = (item.get("trade_plan") or {}).get("target_source")
         if source not in counts:
             source = "unavailable"
@@ -1187,15 +1249,28 @@ def _trade_plan_text(item):
     rr_text = (
         f"{rr_value:.2f}" if _is_finite_number(rr_value) else "—"
     )
+    stored_rr = plan.get("risk_reward")
+    if valid_target_ladder and isinstance(stored_rr, dict):
+        rr_low = stored_rr.get("rr_at_entry_low")
+        if _is_finite_number(rr_low):
+            rr_text += f"（下沿 {rr_low:.2f}）"
     target_text = (
         "/".join(str(value) for value in target_values)
         if valid_target_ladder else "—/—/—"
     )
     reason = plan.get("target_reason")
     reason_text = f"（{reason}）" if source == "unavailable" and reason else ""
+    stop_buffer = plan.get("stop_buffer")
+    buffer_text = ""
+    if isinstance(stop_buffer, dict):
+        required = stop_buffer.get("required")
+        actual = stop_buffer.get("actual")
+        if _is_finite_number(required) and _is_finite_number(actual):
+            state = "✓" if stop_buffer.get("valid") is True else "✗"
+            buffer_text = f" | 止损缓冲 {actual}/{required}{state}"
     return (
         f"交易计划：入场{entry.get('low', '-')}~{entry.get('high', '-')} | "
-        f"止损{stop.get('price', '-')} | "
+        f"止损{stop.get('price', '-')}{buffer_text} | "
         f"目标{target_text} | 目标来源 {source_text}{reason_text} | "
         f"R:R {rr_text} | "
         f"仓位≤{position.get('max_portfolio_pct', '-')}% | "
@@ -1330,10 +1405,23 @@ def _trade_plan_promotable(item):
 
 
 def classify_candidates(candidates, policy):
+    data_rejected = []
+    eligible_candidates = []
+    for item in candidates:
+        quality = item.get("data_quality", {})
+        if quality.get("eligible", False):
+            eligible_candidates.append(item)
+            continue
+        rejected = dict(item)
+        reasons = list(quality.get("reasons", []))
+        if not reasons:
+            reasons.append("data_quality_ineligible")
+        rejected["observation_reasons"] = list(dict.fromkeys(reasons))
+        data_rejected.append(rejected)
+
     eligible = [
-        item for item in candidates
-        if item.get("data_quality", {}).get("eligible", False)
-        and item.get("sector_actionable", True)
+        item for item in eligible_candidates
+        if item.get("sector_actionable", True)
         and item.get("score_eligible", True)
         and (not policy.get("requires_sector_capital_proof", False)
              or item.get("sector_capital_evidence") == "positive_verified")
@@ -1349,7 +1437,7 @@ def classify_candidates(candidates, policy):
     promoted = {item["code"] for item in actionable + waiting}
     confirmations = []
     if policy.get("mode") == "waiting_trigger":
-        confirmations = [item for item in candidates
+        confirmations = [item for item in eligible_candidates
                          if item.get("data_quality", {}).get("eligible", False)
                          and item.get("score_eligible", True)
                          and item.get("wyckoff")
@@ -1362,7 +1450,7 @@ def classify_candidates(candidates, policy):
         ]
     confirmation_codes = {item["code"] for item in confirmations}
     observation = []
-    for item in candidates:
+    for item in eligible_candidates:
         if (item.get("code") in promoted
                 or item.get("code") in confirmation_codes):
             continue
@@ -1407,6 +1495,7 @@ def classify_candidates(candidates, policy):
         "waiting_trigger": waiting,
         "next_day_confirmation": confirmations,
         "observation": observation,
+        "data_rejected": data_rejected,
     }
 
 
@@ -1431,21 +1520,56 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
             "status": result.status,
             "path": str(result.path) if result.path else None,
             "content_sha256": getattr(result, "content_sha256", None),
-            "reason": None,
+            "reason": getattr(result, "reason", None),
+            "normalization_warnings": getattr(
+                result, "normalization_warnings", []),
+        }
+    except SnapshotConflict as exc:
+        return {
+            "status": "conflict",
+            "path": None,
+            "content_sha256": None,
+            "error_type": type(exc).__name__,
+            "reason": str(exc),
+        }
+    except SnapshotValidationError as exc:
+        return {
+            "status": "validation_failed",
+            "path": None,
+            "content_sha256": None,
+            "error_type": type(exc).__name__,
+            "reason": str(exc),
+        }
+    except OSError as exc:
+        return {
+            "status": "write_failed",
+            "path": None,
+            "content_sha256": None,
+            "error_type": type(exc).__name__,
+            "reason": str(exc),
         }
     except Exception as exc:
         return {
             "status": "save_failed",
             "path": None,
             "content_sha256": None,
-            "reason": type(exc).__name__,
+            "error_type": type(exc).__name__,
+            "reason": str(exc),
         }
 
 
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                     performance=None, tracking=None):
+    performance = performance or {}
+    sector_universe = performance.get("sector_universe_count",
+                                      len(sector_codes))
+    sector_qualified = performance.get("sector_qualified_count",
+                                       len(sector_codes))
+    sector_expanded = performance.get("sector_expanded_count",
+                                      len(sector_codes))
     funnel = (
-        f"板块 {len(sector_codes)} → 候选 {len(candidates)} → "
+        f"板块评估 {sector_universe} → 热度合格 {sector_qualified} → "
+        f"实际展开 {sector_expanded} → 候选 {len(candidates)} → "
         f"维科夫买点 {sum(1 for item in candidates if item.get('wyckoff'))} → "
         f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
         f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
@@ -1454,7 +1578,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "# 每日候选股",
         "",
         f"> 生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-        f"扫描板块 {len(sector_codes)} 个 | 候选 {len(candidates)} 只 | "
+        f"实际展开板块 {sector_expanded} 个 | 候选 {len(candidates)} 只 | "
         f"耗时 {elapsed:.0f}s",
         "",
         f"**推荐模式**: {policy['mode']} | "
@@ -1463,7 +1587,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "",
         f"**筛选漏斗**: {funnel}",
         "",
-        f"**{_target_source_audit(candidates)}**",
+        f"**{_target_source_audit(candidates, eligible_only=True)}**",
     ]
     regime = load_regime_context()
     if regime and regime.get("score") is not None:
@@ -1481,9 +1605,19 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
             "`/daily-review` 与 `/candidates` 确认最终结论。",
         ])
     if tracking:
-        lines.extend(["", f"**推荐快照追踪**: {tracking.get('status')}"
-                      + (f" | {tracking.get('path')}"
-                         if tracking.get("path") else "")])
+        tracking_text = f"**推荐快照追踪**: {tracking.get('status')}"
+        if tracking.get("path"):
+            tracking_text += f" | {tracking.get('path')}"
+        if tracking.get("error_type") or tracking.get("reason"):
+            tracking_text += (
+                f" | {tracking.get('error_type', '')}: "
+                f"{tracking.get('reason', '')}"
+            )
+        if tracking.get("normalization_warnings"):
+            tracking_text += (
+                f" | 规范化字段 {len(tracking['normalization_warnings'])}"
+            )
+        lines.extend(["", tracking_text])
     suffix = "(盘中临时,收盘确认)" if policy.get("provisional") else ""
     _append_candidate_table(
         lines, f"今日可执行{suffix}", buckets["actionable"], "今日无可执行推荐。")
@@ -1494,6 +1628,9 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "暂无可供次日确认的观察标的。")
     _append_candidate_table(
         lines, "观察池", buckets["observation"], "观察池为空。")
+    _append_candidate_table(
+        lines, "数据失效/待修复", buckets.get("data_rejected", []),
+        "无数据失效候选。")
     lines.extend(_performance_markdown(performance))
     lines.extend([
         "", "---", "",
@@ -1535,24 +1672,33 @@ def _html_candidate_rows(items):
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                    performance=None, tracking=None):
     """Lightweight HTML mirror of the MD report."""
+    performance = performance or {}
     regime = load_regime_context()
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
     actionable_rows = _html_candidate_rows(buckets["actionable"])
     waiting_rows = _html_candidate_rows(buckets["waiting_trigger"])
     confirmation_rows = _html_candidate_rows(buckets.get("next_day_confirmation", []))
     observation_rows = _html_candidate_rows(buckets["observation"])
+    rejected_rows = _html_candidate_rows(buckets.get("data_rejected", []))
+    sector_universe = performance.get("sector_universe_count",
+                                      len(sector_codes))
+    sector_qualified = performance.get("sector_qualified_count",
+                                       len(sector_codes))
+    sector_expanded = performance.get("sector_expanded_count",
+                                      len(sector_codes))
     policy_note = (
         f"推荐模式 {policy['mode']} | 推荐上限 "
         f"{policy['max_recommendations']}只 | 组合仓位上限 "
         f"{policy['max_portfolio_pct']}%"
     )
     funnel_note = (
-        f"筛选漏斗：板块 {len(sector_codes)} → 候选 {len(candidates)} → "
+        f"筛选漏斗：板块评估 {sector_universe} → 热度合格 {sector_qualified} "
+        f"→ 实际展开 {sector_expanded} → 候选 {len(candidates)} → "
         f"维科夫买点 {sum(1 for item in candidates if item.get('wyckoff'))} → "
         f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
         f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
     )
-    target_audit = _target_source_audit(candidates)
+    target_audit = _target_source_audit(candidates, eligible_only=True)
 
     regime_html = ""
     if regime and regime["score"] is not None:
@@ -1568,7 +1714,10 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
     performance_html = _performance_html(performance)
     tracking_html = (
         f"<p class='dt'>推荐快照追踪：{escape(str(tracking.get('status')))}"
-        f"{(' | ' + escape(str(tracking.get('path')))) if tracking.get('path') else ''}</p>"
+        f"{(' | ' + escape(str(tracking.get('path')))) if tracking.get('path') else ''}"
+        f"{(' | ' + escape(str(tracking.get('error_type'))) + ': '
+            + escape(str(tracking.get('reason')))) if tracking.get('error_type') or tracking.get('reason') else ''}"
+        f"{(' | 规范化字段 ' + str(len(tracking.get('normalization_warnings', [])))) if tracking.get('normalization_warnings') else ''}</p>"
         if tracking else ""
     )
 
@@ -1597,7 +1746,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:28px}}
 </style></head><body><div class="w">
 <h1>📋 每日候选股 {datetime.now().strftime('%Y-%m-%d')}</h1>
-<p class="dt">生成 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 扫描板块 {len(sector_codes)} 个 | 候选 {len(candidates)} 只 | 耗时 {elapsed:.0f}s</p>
+<p class="dt">生成 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 实际展开板块 {sector_expanded} 个 | 候选 {len(candidates)} 只 | 耗时 {elapsed:.0f}s</p>
 {regime_html}
 
 <p class="dt">{policy_note}</p>
@@ -1613,6 +1762,8 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>
 {performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
@@ -1637,6 +1788,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         "waiting_trigger": buckets["waiting_trigger"],
         "next_day_confirmation": buckets.get("next_day_confirmation", []),
         "observation": buckets["observation"],
+        "data_rejected": buckets.get("data_rejected", []),
     }
 
 

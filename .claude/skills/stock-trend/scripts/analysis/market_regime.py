@@ -29,6 +29,7 @@ import os
 import statistics
 import sys
 import time
+import shutil
 from datetime import datetime, date
 from pathlib import Path
 
@@ -427,11 +428,40 @@ def compute_regime(components: dict) -> dict:
 # ──────────────── 持久化 ────────────────
 
 
+def _verified_history_date(value) -> str | None:
+    """Return a strict ISO weekday; never remap malformed/weekend keys."""
+    if not isinstance(value, str):
+        return None
+    text = value
+    if len(text) == 8 and text.isdigit():
+        # Compact dates are accepted from provider rows, but not as persisted
+        # history keys.  Callers can normalize them before this boundary.
+        return None
+    if len(text) != 10:
+        return None
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.isoformat() != text or parsed.weekday() >= 5:
+        return None
+    return text
+
+
 def load_history(days: int = 30) -> dict:
     try:
         if HISTORY_FILE.exists():
             data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-            return {k: v for k, v in data.items() if isinstance(v, dict)}
+            today_key = date.today().isoformat()
+            return {
+                key: value for key, value in data.items()
+                if _verified_history_date(key) and isinstance(value, dict)
+                and key <= today_key
+                and (
+                    not value.get("date")
+                    or value.get("date") == key
+                )
+            }
     except Exception:
         pass
     return {}
@@ -447,9 +477,14 @@ def _baseline_history(history: dict, data_date: str,
       - amount 低于 median*0.55 的异常低值剔除(修复已污染条目,如 08-18 半日额 9914)
         真实低量日(≥15000)不受影响
     """
+    data_key = _verified_history_date(data_date)
+    if data_key is None:
+        return {}
     entries = {
         k: v for k, v in history.items()
-        if k < data_date and isinstance(v, dict)
+        if _verified_history_date(k) and k < data_key
+        and isinstance(v, dict)
+        and (not v.get("date") or v.get("date") == k)
         and not (v.get("partial") or v.get("intraday"))
     }
     amounts = sorted(
@@ -483,16 +518,21 @@ def _last_close_context(history: dict, data_date: str) -> dict | None:
 def previous_amounts(history: dict, before_date: str,
                      fetched: dict | None = None) -> list[float]:
     """Return prior turnover values, preferring freshly fetched dates."""
+    before_key = _verified_history_date(before_date)
+    if before_key is None:
+        return []
     by_date = {}
-    for history_date, entry in sorted(_baseline_history(history, before_date).items()):
+    for history_date, entry in sorted(_baseline_history(history, before_key).items()):
         amount = _safe_float(entry.get("amount_yi"))
         if amount > 0:
             by_date[history_date] = amount
     for raw_date, raw_amount in (fetched or {}).items():
-        iso_date = (f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
-                    if len(raw_date) == 8 else raw_date)
+        text = str(raw_date)
+        compact = (f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+                   if len(text) == 8 and text.isdigit() else text)
+        iso_date = _verified_history_date(compact)
         amount = _safe_float(raw_amount)
-        if iso_date < before_date and amount > 0:
+        if iso_date and iso_date < before_key and amount > 0:
             by_date[iso_date] = amount
     return [by_date[key] for key in sorted(by_date)]
 
@@ -523,18 +563,71 @@ def should_save_history(ctx: dict) -> bool:
     return not bool(ctx.get("intraday", False))
 
 
-def save_history(entry: dict) -> None:
+def save_history(entry: dict) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    entry_date = _verified_history_date(entry.get("date"))
+    if entry_date is None:
+        return False
     history = load_history()
-    entry.setdefault("intraday", False)
-    history[entry["date"]] = entry
+    stored = dict(entry)
+    stored["date"] = entry_date
+    stored.setdefault("intraday", False)
+    history[entry_date] = stored
     # prune to newest N
     items = sorted(history.items(), key=lambda kv: kv[0])[-HISTORY_MAX_DAYS:]
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         HISTORY_FILE.write_text(
             json.dumps(dict(items), ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
     except Exception:
-        pass
+        return False
+
+
+def quarantine_invalid_history_dates(path=None) -> dict:
+    """Back up and quarantine malformed/weekend market history entries."""
+    history_path = Path(path or HISTORY_FILE)
+    if not history_path.exists():
+        return {"status": "missing", "moved": 0}
+    try:
+        data = json.loads(history_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"status": "invalid_file", "moved": 0}
+    if not isinstance(data, dict):
+        return {"status": "invalid_file", "moved": 0}
+    valid, invalid = {}, {}
+    today_key = date.today().isoformat()
+    for key, value in data.items():
+        if (_verified_history_date(key) and key <= today_key
+                and isinstance(value, dict)
+                and (not value.get("date") or value.get("date") == key)):
+            valid[key] = value
+        else:
+            invalid[key] = value
+    if not invalid:
+        return {"status": "clean", "moved": 0}
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S%f")
+    backup = history_path.with_name(history_path.name + f".{stamp}.bak")
+    quarantine = history_path.with_name(
+        history_path.name + f".quarantine-{stamp}.json")
+    shutil.copy2(history_path, backup)
+    quarantine.write_text(json.dumps(invalid, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    tmp = history_path.with_name(history_path.name + f".tmp-{stamp}")
+    try:
+        tmp.write_text(json.dumps(valid, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, history_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return {
+        "status": "migrated", "moved": len(invalid),
+        "backup": str(backup), "quarantine": str(quarantine),
+    }
 
 
 def save_context(ctx: dict) -> None:
@@ -837,18 +930,20 @@ def collect_context(now=None) -> dict:
     }
     # 成交额历史优先使用指数K线；腾讯仅提供当日额时补持久化历史。
     amount_hist = complete_market_amounts(index_rows)
-    index_dates = [
-        row["trade_date"]
-        for rows in index_rows.values() for row in rows
-        if row.get("trade_date")
-    ]
-    raw_date = max(index_dates) if index_dates else date.today().strftime("%Y%m%d")
-    today_amount_yi = amount_hist.get(raw_date)
-    # 归一为 ISO YYYY-MM-DD
-    try:
-        data_date = datetime.strptime(raw_date, "%Y%m%d").strftime("%Y-%m-%d")
-    except ValueError:
-        data_date = date.today().isoformat()
+    index_dates = []
+    for rows in index_rows.values():
+        for row in rows:
+            raw = str(row.get("trade_date") or "")
+            compact = (raw if len(raw) == 8 and raw.isdigit()
+                       else raw.replace("-", "")[:8])
+            if len(compact) == 8 and compact.isdigit():
+                iso = _verified_history_date(
+                    f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}")
+                if iso:
+                    index_dates.append(iso)
+    data_date = max(index_dates) if index_dates else ""
+    raw_date = data_date.replace("-", "") if data_date else ""
+    today_amount_yi = amount_hist.get(raw_date) if raw_date else None
 
     sectors = fetch_sector_rankings()
     zt = fetch_zt_stats()
@@ -939,7 +1034,10 @@ def collect_context(now=None) -> dict:
     ctx = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_date": data_date,
-        "stale_note": "" if data_date == date.today().isoformat() else f"数据日期 {data_date},非今日(可能非交易日或盘中)",
+        "stale_note": (
+            "" if not data_date or data_date == date.today().isoformat()
+            else f"数据日期 {data_date},非今日(可能非交易日或盘中)"
+        ),
         "regime": regime,
         "components": components,
         "amount_yi": amount_yi_display,

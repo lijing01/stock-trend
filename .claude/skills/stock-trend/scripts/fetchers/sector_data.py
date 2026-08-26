@@ -15,8 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -773,6 +775,11 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
     """
     if rankings.get("meta", {}).get("complete") is False:
         return
+    date_key = _resolve_verified_data_date(rankings, data_date)
+    # A cache without an upstream/explicit trading date is not safe to use as
+    # a historical baseline.  Keep the live result in memory only.
+    if not date_key:
+        return
     sectors = rankings.get("sectors", [])
     active = sum(
         1 for s in sectors
@@ -786,7 +793,7 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "cached_at": datetime.now().isoformat(),
-        "data_date": data_date or rankings.get("meta", {}).get("data_date", ""),
+        "data_date": date_key,
         "rankings": rankings,
     }
     if hot_sectors:
@@ -809,6 +816,9 @@ def load_rankings_cache() -> Optional[dict]:
         cached_at = datetime.fromisoformat(payload["cached_at"])
         age = datetime.now() - cached_at
         if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            return None
+        data_date = _verified_trading_date(payload.get("data_date", ""))
+        if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
             return None
         # Must have at least some sectors (not an empty cache)
         rankings = payload.get("rankings", {})
@@ -834,6 +844,9 @@ def load_rankings_cache_full() -> Optional[dict]:
         cached_at = datetime.fromisoformat(payload["cached_at"])
         age = datetime.now() - cached_at
         if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            return None
+        data_date = _verified_trading_date(payload.get("data_date", ""))
+        if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
             return None
         rankings = payload.get("rankings", {})
         if rankings.get("meta", {}).get("complete") is False:
@@ -901,7 +914,12 @@ def append_daily_snapshot(rankings: dict, override_date: str = "") -> None:
     if active == 0:
         return  # non-trading day, skip
 
-    date_key = override_date or datetime.now().strftime("%Y-%m-%d")
+    date_key = _resolve_verified_data_date(rankings, override_date)
+    # Never stamp a provider response with the wall-clock date when it did not
+    # identify the represented session.  This is a no-op rather than a
+    # guessed historical record.
+    if not date_key:
+        return
 
     # Compute top 30 summaries
     top = _hot_ranked_sectors(rankings, top_n=30)
@@ -920,7 +938,9 @@ def append_daily_snapshot(rankings: dict, override_date: str = "") -> None:
             "rank": len(summary) + 1,
         })
 
-    # Load existing history, update, save
+    # Load existing history, update, save.  Invalid legacy keys are retained
+    # on disk for the explicit migration/quarantine command, but are not
+    # allowed to participate in the active history.
     history = {}
     if SNAPSHOT_FILE.exists():
         try:
@@ -930,7 +950,7 @@ def append_daily_snapshot(rankings: dict, override_date: str = "") -> None:
     history[date_key] = summary
 
     # Auto-prune: keep last SNAPSHOT_MAX_DAYS
-    dates = sorted(history.keys())
+    dates = sorted(d for d in history if _verified_trading_date(d))
     if len(dates) > SNAPSHOT_MAX_DAYS:
         keep = set(dates[-SNAPSHOT_MAX_DAYS:])
         history = {k: v for k, v in history.items() if k in keep}
@@ -952,9 +972,63 @@ def load_snapshot_history(days: int = 10) -> dict[str, list[dict]]:
         history = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, Exception):
         return {}
-    dates = sorted(history.keys())
+    reference_date = datetime.now().strftime("%Y-%m-%d")
+    valid_history = {
+        key: value for key, value in history.items()
+        if _verified_trading_date(key) and key <= reference_date
+        and isinstance(value, list)
+    }
+    dates = sorted(valid_history)
     recent = dates[-days:] if len(dates) > days else dates
-    return {d: history[d] for d in recent}
+    return {d: valid_history[d] for d in recent}
+
+
+def quarantine_invalid_snapshot_dates(path=None) -> dict:
+    """Back up and quarantine malformed/weekend snapshot keys.
+
+    No key is remapped: the original source date is not recoverable from a
+    weekend/compact key alone.  The operation is explicit so normal reads
+    remain side-effect free.
+    """
+    snapshot_path = Path(path or SNAPSHOT_FILE)
+    if not snapshot_path.exists():
+        return {"status": "missing", "moved": 0}
+    try:
+        history = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {"status": "invalid_file", "moved": 0}
+    if not isinstance(history, dict):
+        return {"status": "invalid_file", "moved": 0}
+    valid, invalid = {}, {}
+    reference_date = datetime.now().strftime("%Y-%m-%d")
+    for key, value in history.items():
+        if (_verified_trading_date(key) and key <= reference_date
+                and isinstance(value, list)):
+            valid[key] = value
+        else:
+            invalid[key] = value
+    if not invalid:
+        return {"status": "clean", "moved": 0}
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S%f")
+    backup = snapshot_path.with_name(snapshot_path.name + f".{stamp}.bak")
+    quarantine = snapshot_path.with_name(
+        snapshot_path.name + f".quarantine-{stamp}.json")
+    shutil.copy2(snapshot_path, backup)
+    quarantine.write_text(json.dumps(invalid, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    tmp = snapshot_path.with_name(snapshot_path.name + f".tmp-{stamp}")
+    try:
+        tmp.write_text(json.dumps(valid, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, snapshot_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return {
+        "status": "migrated", "moved": len(invalid),
+        "backup": str(backup), "quarantine": str(quarantine),
+    }
 
 
 def _strict_calendar_date(value) -> Optional[str]:
@@ -966,6 +1040,38 @@ def _strict_calendar_date(value) -> Optional[str]:
     except ValueError:
         return None
     return value if parsed.isoformat() == value else None
+
+
+def _verified_trading_date(value) -> Optional[str]:
+    """Normalize an explicit date only when it is strict ISO and weekday.
+
+    This intentionally does not remap compact dates or weekends.  A weekend
+    record may have been produced by a stale fallback and its source session
+    cannot be inferred safely from the key alone.
+    """
+    normalized = _strict_calendar_date(value)
+    if normalized is None:
+        return None
+    return normalized if datetime_date.fromisoformat(normalized).weekday() < 5 else None
+
+
+def _resolve_verified_data_date(rankings: dict, explicit_date: str = "") -> Optional[str]:
+    """Resolve and cross-check the date represented by a ranking payload."""
+    meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
+    upstream_raw = meta.get("data_date", "") if isinstance(meta, dict) else ""
+    explicit_raw = explicit_date or ""
+    upstream = _verified_trading_date(upstream_raw) if upstream_raw else None
+    explicit = _verified_trading_date(explicit_raw) if explicit_raw else None
+    if upstream_raw and upstream is None:
+        raise ValueError("invalid ranking data_date")
+    if explicit_raw and explicit is None:
+        raise ValueError("invalid snapshot data_date")
+    if upstream and explicit and upstream != explicit:
+        raise ValueError("ranking/snapshot data_date mismatch")
+    resolved = explicit or upstream
+    if resolved and resolved > datetime.now().strftime("%Y-%m-%d"):
+        raise ValueError("future ranking data_date")
+    return resolved
 
 
 def _load_authoritative_trading_dates(now=None) -> set[str]:
@@ -1054,7 +1160,12 @@ def get_last_trading_day(now=None) -> tuple[Optional[str], str]:
         try:
             history = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8"))
             if history and isinstance(history, dict):
-                dates = sorted(history.keys())
+                dates = sorted(
+                    key for key, value in history.items()
+                    if _verified_trading_date(key)
+                    and key <= current.strftime("%Y-%m-%d")
+                    and isinstance(value, list)
+                )
                 if dates:
                     return dates[-1], "snapshot"
         except Exception:
@@ -1065,8 +1176,9 @@ def get_last_trading_day(now=None) -> tuple[Optional[str], str]:
         try:
             payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
             cached_at_str = payload.get("cached_at", "")
-            data_date = payload.get("data_date", "")
-            if cached_at_str and data_date:
+            data_date = _verified_trading_date(payload.get("data_date", ""))
+            if (cached_at_str and data_date
+                    and data_date <= current.strftime("%Y-%m-%d")):
                 cached_at = datetime.fromisoformat(cached_at_str)
                 age = datetime.now() - cached_at
                 if age.total_seconds() <= MAX_CACHE_AGE_HOURS * 3600:
