@@ -596,7 +596,7 @@ def validate_input(technical_data, dimension_scores, data_dir=None):
         required_summary_keys = {
             "total_score": (int, float),
             "direction": str,
-            "confidence": (int, float),
+            "data_quality": str,
         }
         for key, expected_types in required_summary_keys.items():
             val = summary.get(key)
@@ -611,12 +611,24 @@ def validate_input(technical_data, dimension_scores, data_dir=None):
                     f"got {type(val).__name__}={val!r}"
                 )
 
-    # Check c: technical_data["data_quality"] must be a valid enum value
-    valid_qualities = ("good", "limited", "insufficient", "partial")
-    dq = technical_data.get("data_quality")
+        valid_confidences = ("low", "medium", "high")
+        confidence = summary.get("confidence")
+        if confidence is None:
+            errors.append(
+                "technical_data['summary'] missing required key 'confidence'"
+            )
+        elif confidence not in valid_confidences:
+            errors.append(
+                "technical_data['summary']['confidence'] must be one of "
+                f"{valid_confidences}, got {confidence!r}"
+            )
+
+    # Check c: summary.data_quality must be a valid enum value
+    valid_qualities = ("good", "limited", "insufficient", "partial", "error")
+    dq = summary.get("data_quality") if isinstance(summary, dict) else None
     if dq is not None and dq not in valid_qualities:
         errors.append(
-            f"technical_data['data_quality'] must be one of {valid_qualities}, "
+            f"technical_data['summary']['data_quality'] must be one of {valid_qualities}, "
             f"got {dq!r}"
         )
 
@@ -891,6 +903,10 @@ def main():
         print("⚠ Input validation warnings:", file=sys.stderr)
         for err in validation_errors:
             print(f"  - {err}", file=sys.stderr)
+
+    if data_quality == "error":
+        print("Error: technical data quality is error; scoring aborted", file=sys.stderr)
+        sys.exit(1)
 
     # Populate dimension data args from data directory when --code is used
     if data_dir:
