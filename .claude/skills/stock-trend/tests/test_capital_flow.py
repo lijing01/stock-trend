@@ -138,6 +138,17 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
         self.assertIn("eastmoney", result["meta"]["stale_sources"])
         save.assert_not_called()
 
+    def test_invalid_larger_date_cannot_make_stale_eastmoney_result_fresh(self):
+        mixed_dates = [
+            {"date": "20260825", "main_net_inflow": 1.0},
+            {"date": "99999999", "main_net_inflow": 2.0},
+        ]
+        result, save = self._run_stock_sources(mixed_dates, None, None)
+        self.assertEqual(result["meta"]["data_source"], "error")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertIn("eastmoney", result["meta"]["stale_sources"])
+        save.assert_not_called()
+
     def test_fresh_stale_tushare_result_falls_back_and_is_not_cached(self):
         stale = [{"date": "20260825", "main_net_inflow": 1.0}]
         result, save = self._run_stock_sources(None, stale, None)

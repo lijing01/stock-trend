@@ -62,10 +62,12 @@ def latest_capital_date(result):
     for row in rows:
         if not isinstance(row, dict):
             continue
-        text = str(row.get("date") or row.get("trade_date") or "").strip()
+        raw_date = row.get("date") or row.get("trade_date")
+        if not _valid_flow_date(raw_date):
+            continue
+        text = str(raw_date).strip()
         text = text.replace("-", "")
-        if len(text) == 8 and text.isdigit():
-            dates.append(f"{text[:4]}-{text[4:6]}-{text[6:]}")
+        dates.append(f"{text[:4]}-{text[4:6]}-{text[6:]}")
     return max(dates) if dates else ""
 
 
