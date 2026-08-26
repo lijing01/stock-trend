@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Regression tests for capital-flow fallback and cache validation."""
+"""Regression tests for market-data freshness and capital-flow fallback."""
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from fetchers import capital_flow
+from fetchers import capital_flow, kline, kline_eastmoney
+from pipeline import runner
 
 
 VALID_FLOW = {"date": "20260807", "main_net_inflow": 1.0}
@@ -104,12 +107,158 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
         save.assert_not_called()
 
 
+class TestKlineExpectedDateValidation(unittest.TestCase):
+    @staticmethod
+    def _tushare_frame(trade_date):
+        import pandas as pd
+
+        return pd.DataFrame([{
+            "trade_date": trade_date,
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.8,
+            "close": 10.2,
+            "pre_close": 10.0,
+            "vol": 1000.0,
+            "amount": 10000.0,
+            "pct_chg": 2.0,
+        }])
+
+    def test_tushare_rejects_and_does_not_cache_stale_fresh_payload(self):
+        outputs = []
+        stale_frame = self._tushare_frame("20260825")
+        with patch.object(sys, "argv", [
+                "kline.py", "600519.SH", "--expected-date", "2026-08-26",
+            ]), \
+                patch.object(kline, "load_cache", return_value=None), \
+                patch.object(kline, "resolve_token", return_value="token"), \
+                patch.object(kline, "fetch_kline", return_value=(stale_frame, "tushare_sdk")), \
+                patch.object(kline, "output_json", side_effect=lambda value, **_: outputs.append(value)), \
+                patch.object(kline, "save_cache") as save:
+            kline.main()
+
+        result = outputs[0]
+        self.assertEqual(result["meta"]["data_source"], "error")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertEqual(result["meta"]["cache_validation"], {
+            "expected_date": "2026-08-26",
+            "latest_date": "2026-08-25",
+            "valid": False,
+        })
+        self.assertEqual(result["data"], [])
+        save.assert_not_called()
+
+    def test_eastmoney_rejects_and_does_not_cache_stale_fresh_payload(self):
+        outputs = []
+        stale_records = [{
+            "trade_date": "20260825",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.8,
+            "close": 10.2,
+            "vol": 1000.0,
+            "amount": 10000.0,
+        }]
+        with patch.object(sys, "argv", [
+                "kline_eastmoney.py", "600519.SH",
+                "--expected-date", "2026-08-26",
+            ]), \
+                patch.object(kline_eastmoney, "load_cache", return_value=None), \
+                patch.object(kline_eastmoney, "build_secid", return_value="1.600519"), \
+                patch("core.eastmoney_utils.rotate_em_host",
+                      return_value=((stale_records, "贵州茅台"), "push2his.eastmoney.com")), \
+                patch.object(kline_eastmoney, "output_json",
+                             side_effect=lambda value, **_: outputs.append(value)), \
+                patch.object(kline_eastmoney, "save_cache") as save:
+            kline_eastmoney.main()
+
+        result = outputs[0]
+        self.assertEqual(result["meta"]["data_source"], "error")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertEqual(result["meta"]["cache_validation"], {
+            "expected_date": "2026-08-26",
+            "latest_date": "2026-08-25",
+            "valid": False,
+        })
+        self.assertEqual(result["data"], [])
+        save.assert_not_called()
+
+
+class TestPipelineExpectedDatePropagation(unittest.TestCase):
+    @staticmethod
+    def _write_json(path, payload):
+        Path(path).write_text(json.dumps(payload), encoding="utf-8")
+
+    def _run_pipeline(self, freq):
+        commands = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def fake_run_script(cmd, label="", timeout=30):
+                commands[label] = list(cmd)
+                if label == "fetch_kline_tushare":
+                    output = cmd[cmd.index("-o") + 1]
+                    self._write_json(output, {
+                        "meta": {"data_source": "error", "error_type": "permission"},
+                        "data": [],
+                    })
+                elif label == "fetch_kline_eastmoney":
+                    output = cmd[cmd.index("-o") + 1]
+                    self._write_json(output, {
+                        "meta": {"data_source": "eastmoney", "record_count": 1},
+                        "data": [{
+                            "trade_date": "20260826", "open": 10.0, "high": 10.5,
+                            "low": 9.8, "close": 10.2, "vol": 1000.0,
+                        }],
+                    })
+                elif label == "fetch_capital_flow":
+                    output = cmd[cmd.index("-o") + 1]
+                    self._write_json(output, {
+                        "meta": {"data_source": "eastmoney", "record_count": 1},
+                        "data": [{"date": "20260826", "main_net_inflow": 1.0}],
+                    })
+                return {
+                    "success": True, "returncode": 0, "stdout": "", "stderr": "",
+                }
+
+            argv = [
+                "pipeline/runner.py", "600519.SH", "--asset", "E",
+                "--freq", freq, "--expected-date", "2026-08-26",
+                "--output-dir", tmpdir, "--no-fundamental", "--no-macro",
+            ]
+            with patch.object(sys, "argv", argv), \
+                    patch.object(runner, "clean_cache", return_value=0), \
+                    patch.object(runner, "run_script", side_effect=fake_run_script):
+                runner.main()
+            pipeline_output = json.loads(
+                (Path(tmpdir) / "pipeline_output.json").read_text(encoding="utf-8"))
+        return commands, pipeline_output
+
+    def test_daily_propagates_one_expected_date_to_all_daily_fetches(self):
+        commands, output = self._run_pipeline("D")
+        for label in (
+                "fetch_kline_tushare", "fetch_kline_eastmoney", "fetch_capital_flow"):
+            cmd = commands[label]
+            self.assertEqual(cmd[cmd.index("--expected-date") + 1], "2026-08-26")
+        self.assertEqual(output["meta"]["expected_date"], "2026-08-26")
+        self.assertEqual(output["meta"]["expected_date_source"], "cli")
+
+    def test_weekly_does_not_gate_fetches_by_expected_date(self):
+        commands, output = self._run_pipeline("W")
+        for label in (
+                "fetch_kline_tushare", "fetch_kline_eastmoney", "fetch_capital_flow"):
+            self.assertNotIn("--expected-date", commands[label])
+        self.assertIsNone(output["meta"]["expected_date"])
+        self.assertEqual(output["meta"]["expected_date_source"], "not_applicable")
+
 def run_capital_flow_tests():
     suite = unittest.TestSuite()
     suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(
         TestCapitalFlowFallback))
     suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(
         TestCapitalFlowCacheValidation))
+    suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(
+        TestKlineExpectedDateValidation))
+    suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(
+        TestPipelineExpectedDatePropagation))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     failed = len(result.failures) + len(result.errors)
     return result.testsRun - failed, failed

@@ -46,6 +46,39 @@ def latest_kline_date(payload):
     return max(dates) if dates else ""
 
 
+def cache_validation(payload, expected_date):
+    """Describe whether a K-line payload covers the requested trading day."""
+    latest_date = latest_kline_date(payload)
+    return {
+        "expected_date": expected_date,
+        "latest_date": latest_date,
+        "valid": bool(latest_date and latest_date >= expected_date),
+    }
+
+
+def reject_stale_payload(result, expected_date):
+    """Return an explicit error payload when fresh data misses expected_date."""
+    validation = cache_validation(result, expected_date)
+    result.setdefault("meta", {})["cache_validation"] = validation
+    if validation["valid"]:
+        return result
+
+    meta = dict(result.get("meta", {}))
+    stale_source = meta.get("data_source", "unknown")
+    meta.update({
+        "data_source": "error",
+        "error_type": "stale_data",
+        "stale_data_source": stale_source,
+        "record_count": 0,
+        "error": (
+            f"数据最新日期{validation['latest_date'] or '未知'}早于"
+            f"预期交易日{expected_date}"
+        ),
+        "cache_validation": validation,
+    })
+    return {"meta": meta, "data": []}
+
+
 def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
     """Fetch K-line data from East Money API.
 
@@ -340,9 +373,12 @@ def main():
     cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        if cached and (
-                not args.expected_date
-                or latest_kline_date(cached) >= args.expected_date):
+        validation = cache_validation(cached, args.expected_date) if cached and args.expected_date else None
+        if cached and (validation is None or validation["valid"]):
+            if validation is not None:
+                cached = dict(cached)
+                cached["meta"] = dict(cached.get("meta", {}))
+                cached["meta"]["cache_validation"] = validation
             output_json(cached, output_path=args.output)
             return
 
@@ -396,6 +432,8 @@ def main():
             },
             "data": records,
         }
+        if args.expected_date:
+            result = reject_stale_payload(result, args.expected_date)
         output_json(result, output_path=args.output)
         return
 
@@ -464,12 +502,6 @@ def main():
     if record_count < 60:
         warnings.append(f"数据记录不足60条（仅{record_count}条），部分指标可能无法准确计算")
 
-    latest_date = latest_kline_date({"data": records})
-    if args.expected_date and latest_date and latest_date < args.expected_date:
-        warnings.append(
-            f"数据最新日期{latest_date}早于预期交易日{args.expected_date}，"
-            f"来自降级源({data_source})")
-
     # Add ts_code to each record
     for r in records:
         r["ts_code"] = args.ts_code
@@ -489,6 +521,9 @@ def main():
         },
         "data": records,
     }
+
+    if args.expected_date:
+        result = reject_stale_payload(result, args.expected_date)
 
     # Cache successful result
     if result.get("meta", {}).get("data_source") not in ("error", None):
