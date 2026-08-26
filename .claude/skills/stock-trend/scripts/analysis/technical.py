@@ -1824,9 +1824,9 @@ def build_unavailable_summary(reason):
         "rr_moderate": None,
         "rr_aggressive": None,
         "favorable_rr": False,
-        "position_sizing": None,
-        "position_tier": None,
-        "risk_reward_warning": "技术数据不可用",
+        "position_sizing": "不建议建仓",
+        "position_tier": 0,
+        "risk_reward_warning": reason,
         "max_drawdown_pct": None,
         "entry_signals": {
             "verdict": "wait",
@@ -1880,7 +1880,7 @@ def main():
             "meta": {"error": "No data records in input"},
             "latest": {},
             "patterns": [],
-            "summary": build_unavailable_summary("无数据"),
+            "summary": build_unavailable_summary("无数据记录，技术面无法分析"),
         }
         _output(result, args.output, args.compact)
         return

@@ -412,6 +412,11 @@ def run_analyze_tests(tmpdir):
         test("TA-04d: 错误输入entry verdict=wait",
              summary.get("entry_signals", {}).get("verdict") == "wait",
              f"entry_signals={summary.get('entry_signals')}", "analyze")
+        test("TA-04e: 错误输入明确不建议建仓",
+             summary.get("position_sizing") == "不建议建仓"
+             and summary.get("position_tier") == 0
+             and summary.get("risk_reward_warning") == "无K线数据，技术面无法分析",
+             f"summary={summary}", "analyze")
     else:
         test("TA-04: 空数据分析", False, f"exit_code={rc}", "analyze")
 
@@ -422,13 +427,17 @@ def run_analyze_tests(tmpdir):
     rc, stdout, stderr = run_script("analysis/technical.py", empty_path, "-o", empty_tech_path)
     if rc == 0:
         empty_summary = load_json_output(empty_tech_path).get("summary", {})
-        test("TA-04e: 空记录复用不可用摘要契约",
+        test("TA-04f: 空记录复用不可用摘要契约",
              empty_summary.get("data_quality") == "error"
              and empty_summary.get("entry_signals", {}).get("verdict") == "wait"
-             and empty_summary.get("stop_loss") is None,
+             and empty_summary.get("stop_loss") is None
+             and empty_summary.get("position_sizing") == "不建议建仓"
+             and empty_summary.get("position_tier") == 0
+             and empty_summary.get("risk_reward_warning") == "无数据记录，技术面无法分析"
+             and empty_summary.get("key_signals") == ["无数据记录，技术面无法分析"],
              f"summary={empty_summary}", "analyze")
     else:
-        test("TA-04e: 空记录复用不可用摘要契约", False,
+        test("TA-04f: 空记录复用不可用摘要契约", False,
              f"exit_code={rc}, stderr={stderr}", "analyze")
 
     # TA-03: 50条数据 (limited data quality)
@@ -1391,6 +1400,41 @@ def run_validate_tests():
     errors = validate_input(bad_quality_tech, valid_scores)
     test("VI-bad-quality: invalid data_quality enum",
          len(errors) > 0, f"errors={errors}", "validate")
+
+    for invalid_confidence in (0.7, "unknown"):
+        invalid_confidence_tech = {
+            "summary": {
+                "total_score": 1.5,
+                "direction": "看多",
+                "confidence": invalid_confidence,
+                "data_quality": "good",
+            },
+        }
+        errors = validate_input(invalid_confidence_tech, valid_scores)
+        test(f"VI-bad-confidence: rejects {invalid_confidence!r}",
+             any("confidence" in error for error in errors),
+             f"errors={errors}", "validate")
+
+    # VI-non-error-quality: degraded but usable qualities continue scoring
+    for data_quality in ("good", "limited", "insufficient", "partial"):
+        quality_tech = {
+            "summary": {
+                "total_score": 0,
+                "direction": "neutral",
+                "confidence": "low",
+                "data_quality": data_quality,
+            },
+        }
+        with tempfile.TemporaryDirectory() as score_tmpdir:
+            technical_path = os.path.join(score_tmpdir, "technical.json")
+            scores_path = os.path.join(score_tmpdir, "scores.json")
+            _write_json(technical_path, quality_tech)
+            rc, stdout, stderr = run_script(
+                "analysis/scores.py", "--technical", technical_path, "-o", scores_path
+            )
+            test(f"VI-non-error-quality: {data_quality} continues scoring",
+                 rc == 0 and os.path.exists(scores_path),
+                 f"exit_code={rc}, stdout={stdout}, stderr={stderr}", "validate")
 
     # VI-error-quality: error is a valid technical quality contract value
     error_quality_tech = {
