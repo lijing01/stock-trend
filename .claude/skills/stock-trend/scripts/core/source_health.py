@@ -14,8 +14,11 @@ SOURCES = (
     "sector_ranking", "sector_membership", "kline", "capital",
     "fundamental",
 )
-SCAN_DEADLINE_SECONDS = 110
-FINALIZATION_RESERVE_SECONDS = 5
+SCAN_DEADLINE_SECONDS = 180
+FINALIZATION_RESERVE_SECONDS = 10
+KLINE_PHASE_SECONDS = 110
+CAPITAL_PREFETCH_LIMIT = 36
+CAPITAL_PREFETCH_BATCH_SIZE = 12
 LIVE_ATTEMPT_TIMEOUT_SECONDS = {
     "sector_ranking": 3,
     "sector_membership": 3,
@@ -44,7 +47,7 @@ MAX_IN_FLIGHT = {
     "sector_ranking": 2,
     "sector_membership": 2,
     "kline": 4,
-    "capital": 2,
+    "capital": 4,
     "fundamental": 2,
 }
 # A source only hard-stops after this many *consecutive* live failures.
@@ -81,7 +84,8 @@ def classify_failure(error: BaseException | str | None) -> str:
 
 def live_attempt(*, attempted: bool, provider_attempts: int = 0,
                  reason: str = "", cache_used: bool = False,
-                 stale: bool = False, subprocess_started: bool = False) -> dict:
+                 stale: bool = False, subprocess_started: bool = False,
+                 status: str = "") -> dict:
     """Build the common evidence record used by every source adapter."""
     return {
         "attempted": bool(attempted),
@@ -90,6 +94,7 @@ def live_attempt(*, attempted: bool, provider_attempts: int = 0,
         "stale": bool(stale),
         "subprocess_started": bool(subprocess_started),
         "provider_attempts": max(0, int(provider_attempts or 0)),
+        "status": str(status or ""),
     }
 
 
@@ -145,6 +150,19 @@ class RunSourceHealth:
         self.live_deadline = (
             self.started_at + SCAN_DEADLINE_SECONDS
             - FINALIZATION_RESERVE_SECONDS)
+
+    @property
+    def kline_deadline(self) -> float:
+        """Absolute deadline for the K-line/Wyckoff phase.
+
+        The property is derived from the run start and the live deadline so
+        callers cannot accidentally move the phase boundary independently of
+        the shared 170-second live window.
+        """
+        return min(
+            self.live_deadline,
+            self.started_at + KLINE_PHASE_SECONDS,
+        )
 
     def _state(self, source: str) -> dict:
         return self._states.setdefault(source, _new_source_state())

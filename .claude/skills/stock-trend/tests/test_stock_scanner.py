@@ -15,6 +15,7 @@ Usage:
 import sys
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -1039,6 +1040,165 @@ class TestScoreWyckoff(unittest.TestCase):
 
 
 class TestRunPhase2Funnel(unittest.TestCase):
+    def test_valid_cache_probe_is_reported_as_cache_valid_evidence(self):
+        candidate = _make_candidate("610998")
+        kline = _make_dated_kline(60, candidate["ts_code"], "20260827")
+        kline["meta"]["data_source"] = "test"
+        capital = {
+            "meta": {"data_source": "test"},
+            "data": [{"date": "20260827", "main_net_inflow": 1}],
+        }
+        health = sc.RunSourceHealth()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(sc, "_fetch_kline", return_value=sc.source_result(
+                    kline, sc.live_attempt(
+                        attempted=True, provider_attempts=1,
+                        status="live_success"))), \
+                patch.object(sc, "_fetch_capital_flow",
+                             side_effect=AssertionError("cache must skip live")), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            cache_dir = Path(tmpdir) / candidate["code"]
+            cache_dir.mkdir()
+            (cache_dir / "capital_flow.json").write_text(
+                json.dumps(capital), encoding="utf-8")
+            scored = sc.run_phase2(
+                [candidate], source_health=health,
+                as_of_date="2026-08-27", min_candidates=0)
+
+        self.assertEqual(
+            scored[0]["source_evidence"]["capital"]["status"],
+            "cache_valid")
+        self.assertEqual(health.snapshot()["capital"]["cache_hits"], 1)
+
+    def test_priority_queue_batches_are_stable_and_exclude_valid_cache(self):
+        candidates = []
+        for index in range(40):
+            item = _make_candidate(f"{610000 + index:06d}")
+            item["provisional_score"] = 100 - (index // 2)
+            candidates.append(item)
+        cached_codes = {candidates[3]["code"], candidates[17]["code"]}
+        capital_data = {
+            item["ts_code"]: {
+                "meta": {"data_source": "test"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+            for item in candidates if item["code"] in cached_codes
+        }
+
+        queue = sc.rank_capital_enrichment_candidates(
+            list(reversed(candidates)), capital_data=capital_data,
+            top=30, batch_size=12, prefetch_limit=36,
+            expected_trading_date="2026-08-27")
+
+        ordered_missing = [
+            item["code"] for item in sorted(
+                (item for item in candidates if item["code"] not in cached_codes),
+                key=lambda item: (-item["provisional_score"], item["code"]),
+            )
+        ]
+        self.assertEqual(
+            [item["code"] for item in queue["cache_valid"]],
+            sorted(cached_codes, key=lambda code: (
+                -next(item["provisional_score"] for item in candidates
+                      if item["code"] == code), code)),
+        )
+        self.assertEqual(
+            [item["code"] for item in queue["priority_queue"]],
+            ordered_missing[:36],
+        )
+        self.assertEqual(
+            [len(batch) for batch in queue["batches"]], [12, 12, 12])
+        self.assertEqual(len(queue["omitted"]), 2)
+        self.assertTrue(all(
+            code not in {item["code"] for batch in queue["batches"]
+                          for item in batch}
+            for code in cached_codes))
+
+    def test_kline_phase_deadline_leaves_time_for_capital(self):
+        health = sc.RunSourceHealth()
+        now = time.monotonic()
+        health.started_at = now - 104
+        health.live_deadline = health.started_at + 170
+        capital_calls = []
+
+        def fetch_kline(ts_code, with_evidence=False, **_kwargs):
+            payload = _make_dated_kline(60, ts_code, "20260827")
+            attempt = sc.live_attempt(
+                attempted=True, provider_attempts=1, status="live_success")
+            return sc.source_result(payload, attempt) if with_evidence else payload
+
+        def fetch_capital(ts_code, with_evidence=False, **_kwargs):
+            capital_calls.append(ts_code)
+            payload = {
+                "meta": {"data_source": "test"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+            attempt = sc.live_attempt(
+                attempted=True, provider_attempts=1, status="live_success")
+            return sc.source_result(payload, attempt) if with_evidence else payload
+
+        with patch.object(sc, "_fetch_kline", side_effect=fetch_kline), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental", return_value=None):
+            sc.run_phase2(
+                [_make_candidate("610999")], source_health=health,
+                enable_wyckoff=False, min_candidates=0)
+
+        self.assertLess(health.kline_deadline, health.live_deadline)
+        self.assertTrue(capital_calls)
+        self.assertLess(time.monotonic(), health.live_deadline)
+
+    def test_capital_cap_and_degradation_remain_effective(self):
+        health = sc.RunSourceHealth(failure_threshold=1, max_in_flight=4)
+        tokens = [health.try_acquire_live_permit("capital") for _ in range(4)]
+        self.assertTrue(all(tokens))
+        self.assertIsNone(health.try_acquire_live_permit("capital"))
+        for token in tokens:
+            health.mark_started(token)
+        for token in tokens:
+            health.complete_failure(token, sc.live_attempt(
+                attempted=True, provider_attempts=1, reason="timeout"))
+        self.assertEqual(health.snapshot()["capital"]["state"], "degraded")
+        degraded_tokens = [
+            health.try_acquire_live_permit("capital") for _ in range(3)]
+        self.assertTrue(degraded_tokens[0])
+        self.assertTrue(degraded_tokens[1])
+        self.assertIsNone(degraded_tokens[2])
+        for token in degraded_tokens[:2]:
+            health.release_unstarted(token, "test")
+
+    def test_unenriched_candidate_cannot_be_promoted(self):
+        candidates = [_make_candidate(f"611{index:03d}") for index in range(37)]
+        capital_calls = []
+
+        def fetch_capital(ts_code, **_kwargs):
+            capital_calls.append(ts_code)
+            return {
+                "meta": {"data_source": "test"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+
+        with patch.object(sc, "_fetch_kline",
+                          side_effect=lambda ts_code, **_kwargs:
+                          _make_dated_kline(60, ts_code, "20260827")), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental", return_value=None):
+            scored = sc.run_phase2(
+                candidates, enable_wyckoff=False, min_candidates=20)
+
+        unselected = [
+            item for item in scored
+            if item["source_evidence"]["capital"].get("status") ==
+            "not_selected_for_enrichment"
+        ]
+        self.assertTrue(unselected)
+        self.assertTrue(all(
+            not item["data_quality"]["eligible"] for item in unselected))
+        self.assertLess(len(capital_calls), len(candidates))
+
     def test_expected_trading_date_reaches_all_cache_validators(self):
         seen = {"kline": [], "capital": [], "fundamental": []}
 

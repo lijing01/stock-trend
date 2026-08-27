@@ -2092,6 +2092,118 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("抓取原因码timeout", detail)
         self.assertIn("已回退缓存", detail)
 
+    def test_missing_capital_cache_is_not_rendered_as_cache_fallback(self):
+        item = candidate("cache-miss", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["cache_miss"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "cache_miss",
+                    "stale_reason": "cache_miss",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "status": "cache_miss", "cache_used": False,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("未命中有效缓存", detail)
+        self.assertNotIn("已回退缓存", detail)
+
+    def test_deadline_skipped_capital_request_is_not_provider_error(self):
+        item = candidate("deadline", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["not_started_deadline"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "not_started_deadline",
+                    "stale_reason": "not_started_deadline",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "status": "not_started_deadline", "cache_used": False,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("达到截止时间", detail)
+        self.assertNotIn("资金面数据返回错误", detail)
+
+    def test_genuine_capital_fetch_failure_stays_provider_error(self):
+        item = candidate("capital-error", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["capital_error"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "timeout",
+                    "stale_reason": "capital_error",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "status": "timeout", "reason": "timeout",
+                "cache_used": False,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("资金面数据返回错误", detail)
+        self.assertIn("抓取原因码timeout", detail)
+
+    def test_capital_audit_fields_reconcile_cache_live_and_skipped(self):
+        cache_hit = candidate("cache")
+        cache_hit["source_evidence"] = {
+            "capital": {"status": "cache_valid", "attempted": False},
+        }
+        live_success = candidate("live")
+        live_success["source_evidence"] = {
+            "capital": {"status": "live_success", "attempted": True},
+        }
+        skipped = candidate("skipped", eligible=False)
+        skipped["source_evidence"] = {
+            "capital": {
+                "status": "not_selected_for_enrichment", "attempted": False,
+            },
+        }
+        items = [cache_hit, live_success, skipped]
+        buckets = {
+            "actionable": [cache_hit, live_success],
+            "waiting_trigger": [], "observation": [skipped],
+        }
+
+        performance = _complete_performance(
+            {}, None, items, buckets, min_score=50, total_seconds=1.0)
+
+        self.assertEqual(performance["capital_cache_valid_count"], 1)
+        self.assertEqual(performance["capital_valid_count"], 2)
+        self.assertEqual(performance["capital_skipped_by_budget"], 1)
+        self.assertEqual(performance["capital_enrichment_population"], 3)
+        self.assertEqual(
+            performance["capital_cache_valid_count"]
+            + performance["capital_valid_count"]
+            - performance["capital_cache_valid_count"]
+            + performance["capital_skipped_by_budget"],
+            performance["capital_enrichment_population"],
+        )
+
     def test_json_output_keeps_candidates_and_adds_action_buckets(self):
         items = [candidate("1")]
         policy = {

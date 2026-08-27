@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import copy
+import inspect
 import json
 import math
 import sys
@@ -28,7 +29,10 @@ from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
 from core.recommendation_quality import assess_candidate_data, latest_data_date
 from core.source_health import (
+    CAPITAL_PREFETCH_BATCH_SIZE,
+    CAPITAL_PREFETCH_LIMIT,
     LIVE_ATTEMPT_TIMEOUT_SECONDS,
+    MAX_IN_FLIGHT,
     MAX_PROVIDER_ATTEMPTS,
     RunSourceHealth,
     bounded_source_map,
@@ -51,6 +55,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 # failures; only hard-stop after many consecutive failures.
 SOURCE_FAILURE_THRESHOLD = 2
 SOURCE_HARD_FAILURE_THRESHOLD = 8
+SOURCE_EVIDENCE_STATUSES = frozenset({
+    "live_success", "cache_valid", "cache_miss", "cache_stale",
+    "not_selected_for_enrichment", "not_started_deadline",
+})
+NON_PROVIDER_ENRICHMENT_STATUSES = frozenset({
+    "cache_miss", "cache_stale", "not_selected_for_enrichment",
+    "not_started_deadline",
+})
 
 # ──────────────────────── Helpers ────────────────────────
 
@@ -286,6 +298,26 @@ def _evidenced_fetch(fetcher, *args, usable=None, **kwargs):
         attempted=True, provider_attempts=1, reason=reason))
 
 
+def _call_fetch_compat(fetcher, ts_code, kwargs):
+    """Call a fetcher while keeping older test/adaptor signatures usable."""
+    signature_target = getattr(fetcher, "side_effect", None)
+    if not callable(signature_target):
+        signature_target = fetcher
+    try:
+        parameters = inspect.signature(signature_target).parameters
+    except (TypeError, ValueError):
+        return fetcher(ts_code, **kwargs)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD
+           for parameter in parameters.values()):
+        return fetcher(ts_code, **kwargs)
+    supported = {
+        name: value for name, value in kwargs.items()
+        if name in parameters
+        and parameters[name].kind != inspect.Parameter.POSITIONAL_ONLY
+    }
+    return fetcher(ts_code, **supported)
+
+
 def _unpack_source_result(result):
     """Return payload and evidence from either new or legacy fetchers."""
     if isinstance(result, dict) and set(
@@ -293,6 +325,63 @@ def _unpack_source_result(result):
         return result["payload"], result["live_attempt"]
     return result, live_attempt(
         attempted=False, cache_used=bool(result), stale=False)
+
+
+def _cache_status(payload, verdict=None, cached=None):
+    """Return an explicit cache state without treating diagnostics as data."""
+    if isinstance(verdict, dict) and verdict.get("valid"):
+        return "cache_valid"
+    if cached is None:
+        validation = payload.get("meta", {}).get("cache_validation", {}) \
+            if isinstance(payload, dict) and isinstance(
+                payload.get("meta", {}), dict) else {}
+        cached = validation.get("cache_present") if isinstance(
+            validation, dict) and "cache_present" in validation else payload
+    return "cache_stale" if isinstance(cached, dict) and bool(cached) \
+        else "cache_miss"
+
+
+def _evidence_status(source, payload, attempt, *, cache_probe=False,
+                     usable=None):
+    """Normalize adapter/scheduler evidence to the public status vocabulary."""
+    del source  # Kept in the signature so source-specific adapters can evolve.
+    attempt = attempt if isinstance(attempt, dict) else {}
+    status = str(attempt.get("status") or "")
+    if status in SOURCE_EVIDENCE_STATUSES:
+        return status
+    if cache_probe or not attempt.get("attempted"):
+        if usable is not None and usable(payload):
+            return "cache_valid"
+        validation = payload.get("meta", {}).get("cache_validation", {}) \
+            if isinstance(payload, dict) and isinstance(
+                payload.get("meta", {}), dict) else {}
+        if isinstance(validation, dict) and validation.get("stale"):
+            return "cache_stale"
+        cache_present = isinstance(validation, dict) and validation.get(
+            "cache_present") is True
+        if cache_present or (isinstance(payload, dict) and bool(payload)):
+            return "cache_stale"
+        return "cache_miss"
+    if attempt.get("reason"):
+        return str(attempt["reason"])
+    if usable is None or usable(payload):
+        return "live_success"
+    return "empty"
+
+
+def _normalize_source_evidence(source, payload, attempt, *, cache_probe=False,
+                               usable=None):
+    """Copy evidence and make cache/provider status explicit for reports."""
+    evidence = copy.deepcopy(attempt) if isinstance(attempt, dict) else {}
+    status = _evidence_status(
+        source, payload, evidence, cache_probe=cache_probe, usable=usable)
+    evidence["status"] = status
+    if status in NON_PROVIDER_ENRICHMENT_STATUSES:
+        evidence["cache_used"] = False
+    elif status == "cache_valid":
+        evidence["cache_used"] = True
+        evidence["stale"] = False
+    return evidence
 
 
 def _cache_fetch(fetcher, *args, **kwargs):
@@ -758,12 +847,17 @@ def _cache_ttl_seconds(source, now=None):
 
 def _with_cache_verdict(payload, verdict):
     """Attach an invalid-cache diagnosis without mutating the loaded value."""
+    cache_present = isinstance(payload, dict) and bool(payload)
     if not isinstance(payload, dict):
         payload = {"invalid_payload": payload}
     diagnosed = copy.deepcopy(payload)
     if not isinstance(diagnosed.get("meta"), dict):
         diagnosed["meta"] = {}
-    diagnosed["meta"]["cache_validation"] = verdict
+    diagnosed["meta"]["cache_validation"] = {
+        **(verdict if isinstance(verdict, dict) else {}),
+        "cache_present": cache_present,
+    }
+    diagnosed["meta"]["cache_present"] = cache_present
     return diagnosed
 
 
@@ -779,12 +873,17 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     cache_verdict = _validate_kline_cache(cached, as_of_date)
     if cache_verdict["valid"]:
         result = source_result(cached, live_attempt(
-            attempted=False, cache_used=True, stale=False))
+            attempted=False, cache_used=True, stale=False,
+            status="cache_valid"))
         return result if with_evidence else cached
     if cache_only:
+        cache_present = isinstance(cached, dict) and bool(cached)
         cached = _with_cache_verdict(cached, cache_verdict)
+        status = _cache_status(cached, cache_verdict,
+                               cached if cache_present else None)
         result = source_result(cached, live_attempt(
-            attempted=False, cache_used=bool(cached), stale=bool(cached)))
+            attempted=False, cache_used=False,
+            stale=status == "cache_stale", status=status))
         return result if with_evidence else cached
 
     # Fetch via subprocess. Transient EM/Tencent failures under concurrency
@@ -820,6 +919,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
             refreshed = _read_json(str(cache_path))
             refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
     if refreshed_verdict["valid"]:
+        attempt["status"] = "live_success"
         wrapped = source_result(refreshed, attempt)
         return wrapped if with_evidence else refreshed
     if refreshed:
@@ -827,8 +927,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
         refreshed.setdefault("meta", {})["refresh_error"] = (
             f"K线刷新后仍未覆盖{as_of_date}")
         attempt["reason"] = "empty"
-        attempt["cache_used"] = True
-        attempt["stale"] = True
+        attempt["status"] = "empty"
         wrapped = source_result(refreshed, attempt)
         return wrapped if with_evidence else refreshed
     # Keep a stale cache observable to the quality gate instead of dropping it
@@ -842,10 +941,12 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
                 result.get("stderr") or result.get("error")),
             "cache_used": True, "stale": True,
         })
+        attempt["status"] = attempt["reason"]
         wrapped = source_result(cached, attempt)
         return wrapped if with_evidence else cached
     attempt["reason"] = classify_failure(
         result.get("stderr") or result.get("error"))
+    attempt["status"] = attempt["reason"]
     wrapped = source_result(None, attempt)
     return wrapped if with_evidence else None
 
@@ -864,6 +965,56 @@ def _usable_capital_payload(payload):
 
 def _usable_fundamental_payload(payload):
     return _validate_fundamental_cache(payload)["valid"]
+
+
+def _probe_capital_cache(ts_code, expected_trading_date=""):
+    """Read and validate a capital cache without invoking a provider."""
+    code = ts_code.split(".")[0]
+    cache_path = Path(CACHE_DIR) / code / "capital_flow.json"
+    cached = _read_json(str(cache_path))
+    ttl_seconds = _cache_ttl_seconds("capital")
+    cache_age_seconds = (
+        0 if _cache_file_is_fresh(cache_path, ttl_seconds) else ttl_seconds
+    )
+    verdict = _validate_capital_cache(
+        cached, expected_trading_date,
+        cache_age_seconds=cache_age_seconds,
+        ttl_seconds=ttl_seconds)
+    if verdict["valid"]:
+        return source_result(cached, live_attempt(
+            attempted=False, cache_used=True, stale=False,
+            status="cache_valid"))
+    present = isinstance(cached, dict) and bool(cached)
+    diagnosed = _with_cache_verdict(cached, verdict)
+    status = _cache_status(diagnosed, verdict, diagnosed if present else None)
+    return source_result(diagnosed, live_attempt(
+        attempted=False, cache_used=False, stale=status == "cache_stale",
+        status=status))
+
+
+def _probe_fundamental_cache(ts_code, expected_trading_date=""):
+    """Read and validate a fundamental cache without invoking a provider."""
+    code = ts_code.split(".")[0]
+    cache_path = Path(CACHE_DIR) / code / "fundamental.json"
+    cached = _read_json(str(cache_path))
+    ttl_seconds = _cache_ttl_seconds("fundamental")
+    cache_age_seconds = (
+        0 if _cache_file_is_fresh(cache_path, ttl_seconds) else ttl_seconds
+    )
+    verdict = _validate_fundamental_cache(
+        cached, expected_trading_date,
+        cache_age_seconds=cache_age_seconds,
+        ttl_seconds=ttl_seconds)
+    if verdict["valid"]:
+        return source_result(cached, live_attempt(
+            attempted=False, cache_used=True, stale=False,
+            status="cache_valid"))
+    present = isinstance(cached, dict) and bool(cached)
+    diagnosed = _with_cache_verdict(cached, verdict)
+    status = _cache_status(diagnosed, verdict, diagnosed if present else None)
+    return source_result(diagnosed, live_attempt(
+        attempted=False, cache_used=False, stale=status == "cache_stale",
+        status=status))
 
 
 def _fundamental_failure_reason(payload, verdict=None):
@@ -949,12 +1100,17 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
         ttl_seconds=ttl_seconds)
     if cache_verdict["valid"]:
         wrapped = source_result(cached, live_attempt(
-            attempted=False, cache_used=True, stale=False))
+            attempted=False, cache_used=True, stale=False,
+            status="cache_valid"))
         return wrapped if with_evidence else cached
     if cache_only:
+        cache_present = isinstance(cached, dict) and bool(cached)
         cached = _with_cache_verdict(cached, cache_verdict)
+        status = _cache_status(cached, cache_verdict,
+                               cached if cache_present else None)
         wrapped = source_result(cached, live_attempt(
-            attempted=False, cache_used=bool(cached), stale=bool(cached)))
+            attempted=False, cache_used=False,
+            stale=status == "cache_stale", status=status))
         return wrapped if with_evidence else cached
 
     cmd = [
@@ -974,7 +1130,10 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
             payload, expected_trading_date)
         if not refreshed_verdict["valid"]:
             attempt["reason"] = "empty"
+            attempt["status"] = "empty"
             payload = _with_cache_verdict(payload, refreshed_verdict)
+        else:
+            attempt["status"] = "live_success"
         wrapped = source_result(payload, attempt)
         return wrapped if with_evidence else payload
     attempt["reason"] = classify_failure(
@@ -982,6 +1141,7 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
     if cached:
         cached = _with_cache_verdict(cached, cache_verdict)
         attempt.update({"cache_used": True, "stale": True})
+    attempt["status"] = attempt["reason"]
     wrapped = source_result(cached, attempt)
     return wrapped if with_evidence else cached
 
@@ -1003,12 +1163,17 @@ def _fetch_fundamental(ts_code, cache_only=False, with_evidence=False,
         ttl_seconds=ttl_seconds)
     if cache_verdict["valid"]:
         wrapped = source_result(cached, live_attempt(
-            attempted=False, cache_used=True, stale=False))
+            attempted=False, cache_used=True, stale=False,
+            status="cache_valid"))
         return wrapped if with_evidence else cached
     if cache_only:
+        cache_present = isinstance(cached, dict) and bool(cached)
         cached = _with_cache_verdict(cached, cache_verdict)
+        status = _cache_status(cached, cache_verdict,
+                               cached if cache_present else None)
         wrapped = source_result(cached, live_attempt(
-            attempted=False, cache_used=bool(cached), stale=bool(cached)))
+            attempted=False, cache_used=False,
+            stale=status == "cache_stale", status=status))
         return wrapped if with_evidence else cached
 
     cmd = [
@@ -1027,7 +1192,10 @@ def _fetch_fundamental(ts_code, cache_only=False, with_evidence=False,
         if not refreshed_verdict["valid"]:
             attempt["reason"] = _fundamental_failure_reason(
                 payload, refreshed_verdict)
+            attempt["status"] = attempt["reason"]
             payload = _with_cache_verdict(payload, refreshed_verdict)
+        else:
+            attempt["status"] = "live_success"
         wrapped = source_result(payload, attempt)
         return wrapped if with_evidence else payload
     attempt["reason"] = classify_failure(
@@ -1035,6 +1203,7 @@ def _fetch_fundamental(ts_code, cache_only=False, with_evidence=False,
     if cached:
         cached = _with_cache_verdict(cached, cache_verdict)
         attempt.update({"cache_used": True, "stale": True})
+    attempt["status"] = attempt["reason"]
     wrapped = source_result(cached, attempt)
     return wrapped if with_evidence else cached
 
@@ -1456,7 +1625,76 @@ def score_wyckoff(analysis):
     return s
 
 
-def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
+def rank_capital_enrichment_candidates(candidates, capital_data=None, top=30,
+                                       batch_size=CAPITAL_PREFETCH_BATCH_SIZE,
+                                       prefetch_limit=CAPITAL_PREFETCH_LIMIT,
+                                       expected_trading_date=""):
+    """Build a deterministic capital-enrichment queue from provisional scores.
+
+    ``capital_data`` contains only cache probes at this point.  Valid cache
+    hits are retained in the result but never enter the live-provider queue.
+    The helper is deliberately pure: it only returns new lists and never
+    changes a candidate's final score fields.
+    """
+    capital_data = capital_data if isinstance(capital_data, dict) else {}
+    try:
+        top = max(0, int(top))
+    except (TypeError, ValueError):
+        top = 30
+    try:
+        batch_size = max(1, int(batch_size))
+    except (TypeError, ValueError):
+        batch_size = CAPITAL_PREFETCH_BATCH_SIZE
+    try:
+        prefetch_limit = max(1, int(prefetch_limit))
+    except (TypeError, ValueError):
+        prefetch_limit = CAPITAL_PREFETCH_LIMIT
+    limit = max(prefetch_limit, int(math.ceil(top * 1.2)))
+
+    def provisional_key(candidate):
+        score = _optional_number(candidate.get("provisional_score"))
+        if score is None:
+            score = _optional_number(candidate.get("quality_adjusted_score"))
+        if score is None:
+            score = _optional_number(candidate.get("composite_score"))
+        if score is None:
+            score = 0.0
+        return -score, str(candidate.get("code", ""))
+
+    ordered = sorted(list(candidates or []), key=provisional_key)
+    cache_valid = []
+    cache_missing = []
+    for candidate in ordered:
+        payload = capital_data.get(candidate.get("ts_code"))
+        valid = candidate.get("capital_cache_valid") is True \
+            or _validate_capital_cache(
+                payload, expected_trading_date)["valid"]
+        if valid:
+            cache_valid.append(candidate)
+        else:
+            cache_missing.append(candidate)
+
+    priority_queue = cache_missing[:limit]
+    subsequent_batches = [
+        priority_queue[index:index + batch_size]
+        for index in range(0, len(priority_queue), batch_size)
+    ]
+    priority_scope = ordered[:limit]
+    return {
+        "ordered": ordered,
+        "cache_valid": cache_valid,
+        "cache_missing": cache_missing,
+        "priority_scope": priority_scope,
+        "priority_queue": priority_queue,
+        "initial_priority_queue": priority_queue,
+        "batches": subsequent_batches,
+        "subsequent_batches": subsequent_batches,
+        "omitted": cache_missing[limit:],
+        "limit": limit,
+    }
+
+
+def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                as_of_date="", source_health=None, metrics=None,
                trade_plan_policy=None):
     """Phase 2: Fetch data and compute multi-dimension scores for all candidates.
@@ -1584,22 +1822,23 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     stage_start = time.monotonic()
 
     def _fetch_capital_for_run(ts_code, **kwargs):
-        try:
-            return _fetch_capital_flow(
-                ts_code, expected_trading_date=as_of_date, **kwargs)
-        except TypeError as exc:
-            if "expected_trading_date" not in str(exc):
-                raise
-            return _fetch_capital_flow(ts_code, **kwargs)
+        result = _call_fetch_compat(
+            _fetch_capital_flow, ts_code,
+            {"expected_trading_date": as_of_date, **kwargs})
+        if isinstance(result, dict) and "payload" not in result \
+                and isinstance(result.get("data"), list):
+            meta = result.get("meta")
+            if not isinstance(meta, dict) or not (
+                    meta.get("data_source") or meta.get("source")):
+                result = copy.deepcopy(result)
+                result.setdefault("meta", {})["data_source"] = (
+                    "legacy_adapter")
+        return result
 
     def _fetch_fundamental_for_run(ts_code, **kwargs):
-        try:
-            return _fetch_fundamental(
-                ts_code, expected_trading_date=as_of_date, **kwargs)
-        except TypeError as exc:
-            if "expected_trading_date" not in str(exc):
-                raise
-            return _fetch_fundamental(ts_code, **kwargs)
+        return _call_fetch_compat(
+            _fetch_fundamental, ts_code,
+            {"expected_trading_date": as_of_date, **kwargs})
 
     def _fetch_one_cap(c):
         ts_code = c["ts_code"]
@@ -1912,6 +2151,720 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         scored.append(item)
 
     return scored
+
+
+# ──────────────────────── Prioritized Phase 2 ────────────────────────
+
+
+def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
+               as_of_date="", source_health=None, metrics=None,
+               trade_plan_policy=None, top=30, min_candidates=20):
+    """Score candidates with bounded K-line work and prioritized enrichment.
+
+    K-line/Wyckoff is completed first.  Capital and fundamental cache probes
+    then cover the whole qualified set without provider calls; only the
+    highest provisional-score cache misses enter live enrichment batches.
+    Capital remains a hard quality gate even though it is neutral in the
+    provisional queue score.
+    """
+    candidates = list(candidates or [])
+    print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
+    if not candidates:
+        return []
+
+    metrics_ref = metrics if isinstance(metrics, dict) else {}
+    try:
+        worker_count = max(1, int(max_workers))
+    except (TypeError, ValueError):
+        worker_count = 4
+    try:
+        requested_min_candidates = max(0, int(min_candidates))
+    except (TypeError, ValueError):
+        requested_min_candidates = 20
+
+    peer_cohorts = build_sector_peer_cohorts(candidates)
+    kline_data = {}
+    source_evidence = {
+        "kline": {}, "capital": {}, "fundamental": {},
+    }
+
+    def _record_source_evidence(source, ts_code, attempt):
+        if isinstance(attempt, dict):
+            source_evidence[source][ts_code] = copy.deepcopy(attempt)
+
+    def _kline_usable(payload):
+        return bool(
+            payload and isinstance(payload, dict)
+            and payload.get("data")
+            and (not as_of_date or latest_data_date(payload) >= as_of_date)
+            and not payload.get("meta", {}).get("refresh_error")
+            and _validate_kline_cache(payload, as_of_date)["valid"]
+        )
+
+    print("  Fetching K-line data...", file=sys.stderr)
+    kline_started = time.monotonic()
+
+    def _fetch_one_kline(candidate):
+        ts_code = candidate["ts_code"]
+        cache_only = _source_unavailable(source_health, "kline")
+        kwargs = {"as_of_date": as_of_date}
+        if cache_only:
+            kwargs["cache_only"] = True
+        try:
+            wrapped = _evidenced_fetch(
+                _fetch_kline, ts_code, **kwargs, usable=_kline_usable)
+            payload, attempt = _unpack_source_result(wrapped)
+        except Exception as exc:
+            payload = None
+            attempt = live_attempt(
+                attempted=True, provider_attempts=1,
+                reason=classify_failure(exc))
+        evidence = _normalize_source_evidence(
+            "kline", payload, attempt,
+            cache_probe=not attempt.get("attempted"), usable=_kline_usable)
+        _record_source_evidence("kline", ts_code, evidence)
+        if evidence.get("attempted"):
+            if _kline_usable(payload) and not evidence.get("reason"):
+                _source_succeeded(source_health, "kline")
+            else:
+                _source_failed(source_health, "kline")
+        elif evidence.get("status") == "cache_valid":
+            metrics_ref["kline_cache_hits"] = (
+                metrics_ref.get("kline_cache_hits", 0) + 1)
+        if not _kline_usable(payload):
+            metrics_ref["kline_failures"] = (
+                metrics_ref.get("kline_failures", 0) + 1)
+        return ts_code, payload, evidence
+
+    if isinstance(source_health, RunSourceHealth):
+        def _live_kline(candidate):
+            return _evidenced_fetch(
+                _fetch_kline, candidate["ts_code"],
+                as_of_date=as_of_date,
+                live_deadline=source_health.kline_deadline,
+                usable=_kline_usable)
+
+        fetched = bounded_source_map(
+            "kline", candidates, source_health, _live_kline,
+            lambda candidate: _cache_fetch(
+                _fetch_kline, candidate["ts_code"], as_of_date=as_of_date),
+            source_health.kline_deadline,
+            max_workers=min(worker_count, MAX_IN_FLIGHT["kline"]),
+            cache_usable=_kline_usable,
+            include_evidence=True)
+        for item, result in fetched:
+            payload, attempt = _unpack_source_result(result)
+            evidence = _normalize_source_evidence(
+                "kline", payload, attempt,
+                usable=_kline_usable)
+            if (not attempt.get("attempted") and
+                    attempt.get("reason") == "deadline" and
+                    not _kline_usable(payload)):
+                evidence["status"] = "not_started_deadline"
+            kline_data[item["ts_code"]] = payload
+            _record_source_evidence("kline", item["ts_code"], evidence)
+    else:
+        with ThreadPoolExecutor(
+                max_workers=min(worker_count, MAX_IN_FLIGHT["kline"])) as pool:
+            futures = [pool.submit(_fetch_one_kline, candidate)
+                       for candidate in candidates]
+            for future in as_completed(futures):
+                ts_code, payload, _ = future.result()
+                kline_data[ts_code] = payload
+
+    metrics_ref["kline_seconds"] = metrics_ref.get("kline_seconds", 0.0) + (
+        time.monotonic() - kline_started)
+
+    # Wyckoff is intentionally in-memory and follows the K-line deadline.
+    analysis_by_ts = {}
+    eligible_candidates = []
+    wyckoff_started = time.monotonic()
+    for candidate in candidates:
+        ts_code = candidate["ts_code"]
+        kline = kline_data.get(ts_code)
+        records = kline.get("data", []) if isinstance(kline, dict) else []
+        if len(records) < 20:
+            continue
+        if enable_wyckoff:
+            if len(records) < WYCKOFF_MIN_BARS:
+                continue
+            analysis = analyze_kline_dict(kline)
+            if not wyckoff_gate_pass(analysis):
+                continue
+            analysis_by_ts[ts_code] = analysis
+        eligible_candidates.append(candidate)
+    metrics_ref["wyckoff_seconds"] = metrics_ref.get("wyckoff_seconds", 0.0) + (
+        time.monotonic() - wyckoff_started)
+    metrics_ref["wyckoff_pass_count"] = (
+        metrics_ref.get("wyckoff_pass_count", 0) + len(eligible_candidates))
+
+    def _fetch_capital_for_run(ts_code, **kwargs):
+        result = _call_fetch_compat(
+            _fetch_capital_flow, ts_code,
+            {"expected_trading_date": as_of_date, **kwargs})
+        if isinstance(result, dict) and "payload" not in result \
+                and isinstance(result.get("data"), list):
+            meta = result.get("meta")
+            if not isinstance(meta, dict) or not (
+                    meta.get("data_source") or meta.get("source")):
+                result = copy.deepcopy(result)
+                result.setdefault("meta", {})["data_source"] = (
+                    "legacy_adapter")
+        return result
+
+    def _fetch_fundamental_for_run(ts_code, **kwargs):
+        return _call_fetch_compat(
+            _fetch_fundamental, ts_code,
+            {"expected_trading_date": as_of_date, **kwargs})
+
+    # Probe both caches before admitting any live provider work.  These are
+    # direct file reads, rather than fetcher calls, so a probe cannot consume
+    # provider budget and test doubles remain one-call-per-live-candidate.
+    capital_data = {}
+    fundamental_data = {}
+    fundamental_fallback_data = {}
+    capital_cache_valid_codes = set()
+    fundamental_cache_valid_codes = set()
+    cache_probe_started = time.monotonic()
+
+    def _probe(candidate, source):
+        try:
+            wrapped = (
+                _probe_capital_cache(candidate["ts_code"], as_of_date)
+                if source == "capital" else
+                _probe_fundamental_cache(candidate["ts_code"], as_of_date)
+            )
+            payload, attempt = _unpack_source_result(wrapped)
+        except Exception as exc:
+            payload = None
+            attempt = live_attempt(
+                attempted=False, reason="cache_miss", status="cache_miss")
+        usable = (_usable_capital_payload if source == "capital"
+                  else _usable_fundamental_payload)
+        evidence = _normalize_source_evidence(
+            source, payload, attempt, cache_probe=True, usable=usable)
+        return candidate["ts_code"], source, payload, evidence, usable(payload)
+
+    probe_jobs = []
+    with ThreadPoolExecutor(max_workers=min(worker_count, 8)) as pool:
+        for candidate in eligible_candidates:
+            probe_jobs.append(pool.submit(_probe, candidate, "capital"))
+            probe_jobs.append(pool.submit(_probe, candidate, "fundamental"))
+        for future in as_completed(probe_jobs):
+            ts_code, source, payload, evidence, usable = future.result()
+            _record_source_evidence(source, ts_code, evidence)
+            if (isinstance(source_health, RunSourceHealth)
+                    and evidence.get("status") == "cache_valid"):
+                source_health.record_cache_result(
+                    source, payload, stale=False, reason="cache_valid")
+            if source == "capital":
+                if usable:
+                    capital_data[ts_code] = payload
+                    capital_cache_valid_codes.add(ts_code)
+                else:
+                    capital_data[ts_code] = None
+            elif usable:
+                fundamental_data[ts_code] = payload
+                fundamental_cache_valid_codes.add(ts_code)
+            else:
+                fundamental_data[ts_code] = None
+
+    metrics_ref["capital_cache_valid_count"] = (
+        metrics_ref.get("capital_cache_valid_count", 0)
+        + len(capital_cache_valid_codes))
+    metrics_ref["capital_enrichment_population"] = (
+        metrics_ref.get("capital_enrichment_population", 0)
+        + len(eligible_candidates))
+
+    # Membership PE is a valid partial fundamental fallback for every
+    # candidate, but a priority candidate still gets a live fundamental
+    # request when its full fundamental cache is missing.
+    for candidate in eligible_candidates:
+        ts_code = candidate["ts_code"]
+        if ts_code in fundamental_cache_valid_codes:
+            continue
+        fallback = _same_day_membership_fundamental_fallback(
+            candidate, as_of_date=as_of_date)
+        if fallback is not None:
+            fundamental_fallback_data[ts_code] = fallback
+            fundamental_data[ts_code] = fallback
+            evidence = source_evidence["fundamental"].setdefault(
+                ts_code, live_attempt(attempted=False))
+            evidence["fallback_source"] = "sector_membership_quote"
+            # This is a live, same-day membership observation, not a cache
+            # hit.  It is valid partial evidence when no priority fetch is
+            # requested for the candidate.
+            evidence["status"] = "live_success"
+            evidence["cache_used"] = False
+
+    def _provisional_score(candidate):
+        ts_code = candidate["ts_code"]
+        kline = kline_data.get(ts_code)
+        fund = fundamental_data.get(ts_code) \
+            or fundamental_fallback_data.get(ts_code)
+        memberships = candidate.get("sector_memberships") or [
+            build_sector_membership(
+                candidate.get("sector_code", ""),
+                candidate.get("sector_name", ""),
+                context={
+                    "hot_score": candidate.get("sector_hot_score", 50),
+                    "sector_actionable": candidate.get(
+                        "sector_actionable", False),
+                }, stock=candidate)
+        ]
+        primary = select_primary_sector_membership(memberships)
+        dimensions = {
+            "momentum": score_momentum(candidate, kline),
+            "volume_price": score_volume_price(candidate, kline),
+            # Capital is deliberately neutral for queue ordering only.
+            "capital": 50.0,
+            "fundamental": score_fundamental_quick(candidate, fund),
+            "sector_strength": score_sector_membership(
+                candidate, primary, peer_cohorts),
+        }
+        if enable_wyckoff:
+            dimensions["wyckoff"] = score_wyckoff(
+                analysis_by_ts.get(ts_code))
+        return composite_from_dimensions(dimensions)
+
+    priority_inputs = [
+        {**candidate, "provisional_score": _provisional_score(candidate)}
+        for candidate in eligible_candidates
+    ]
+    queue_info = rank_capital_enrichment_candidates(
+        priority_inputs, capital_data=capital_data, top=top,
+        batch_size=CAPITAL_PREFETCH_BATCH_SIZE,
+        prefetch_limit=CAPITAL_PREFETCH_LIMIT,
+        expected_trading_date=as_of_date)
+    priority_queue = queue_info["priority_queue"]
+    queue_by_code = {candidate["code"]: candidate
+                     for candidate in priority_queue}
+    metrics_ref["capital_priority_count"] = (
+        metrics_ref.get("capital_priority_count", 0) + len(priority_queue))
+
+    # The priority scope is the live capital queue.  A valid capital cache is
+    # already complete for the hard gate and never enters provider work.
+    for candidate in priority_queue:
+        ts_code = candidate["ts_code"]
+        if ts_code not in fundamental_cache_valid_codes:
+            fundamental_data[ts_code] = None
+
+    def _safe_live(fetcher, candidate, usable):
+        try:
+            return _evidenced_fetch(
+                fetcher, candidate["ts_code"],
+                live_deadline=(source_health.live_deadline
+                               if isinstance(source_health, RunSourceHealth)
+                               else None),
+                usable=usable)
+        except Exception as exc:
+            reason = classify_failure(exc)
+            return source_result(None, live_attempt(
+                attempted=True, provider_attempts=1, reason=reason,
+                status=reason))
+
+    def _run_live_batch(source, batch):
+        if not batch:
+            return []
+        usable = (_usable_capital_payload if source == "capital"
+                  else _usable_fundamental_payload)
+        fetcher = (_fetch_capital_for_run if source == "capital"
+                   else _fetch_fundamental_for_run)
+        if isinstance(source_health, RunSourceHealth):
+            def live(candidate):
+                return _safe_live(fetcher, candidate, usable)
+
+            def cache(candidate):
+                return _cache_fetch(fetcher, candidate["ts_code"])
+
+            return bounded_source_map(
+                source, batch, source_health, live, cache,
+                source_health.live_deadline,
+                max_workers=min(worker_count, MAX_IN_FLIGHT[source]),
+                cache_usable=usable, include_evidence=True)
+        if _source_unavailable(source_health, source):
+            return [(
+                candidate,
+                source_result(None, live_attempt(
+                    attempted=False, reason="source_unavailable",
+                    status="source_unavailable")),
+            ) for candidate in batch]
+        results = []
+        with ThreadPoolExecutor(
+                max_workers=min(worker_count, MAX_IN_FLIGHT[source])) as pool:
+            futures = {pool.submit(_safe_live, fetcher, candidate, usable): candidate
+                       for candidate in batch}
+            for future, candidate in list(futures.items()):
+                try:
+                    results.append((candidate, future.result()))
+                except Exception as exc:
+                    reason = classify_failure(exc)
+                    results.append((candidate, source_result(
+                        None, live_attempt(
+                            attempted=True, provider_attempts=1,
+                            reason=reason, status=reason))))
+        return results
+
+    def _consume_live_results(source, results):
+        usable = (_usable_capital_payload if source == "capital"
+                  else _usable_fundamental_payload)
+        for candidate, result in results:
+            ts_code = candidate["ts_code"]
+            payload, attempt = _unpack_source_result(result)
+            evidence = _normalize_source_evidence(
+                source, payload, attempt, usable=usable)
+            if not attempt.get("attempted"):
+                if attempt.get("reason") == "deadline":
+                    evidence["status"] = "not_started_deadline"
+                    evidence["cache_used"] = False
+                elif attempt.get("reason") == "source_unavailable":
+                    evidence["status"] = "source_unavailable"
+                    evidence["cache_used"] = False
+            _record_source_evidence(source, ts_code, evidence)
+            if source == "capital":
+                capital_data[ts_code] = payload if usable(payload) else None
+                if evidence.get("attempted") and evidence.get(
+                        "status") not in ("cache_valid", "cache_miss",
+                                           "cache_stale"):
+                    metrics_ref["capital_live_started"] = (
+                        metrics_ref.get("capital_live_started", 0) + 1)
+                if evidence.get("status") == "live_success":
+                    metrics_ref["capital_live_success_count"] = (
+                        metrics_ref.get("capital_live_success_count", 0) + 1)
+            else:
+                if usable(payload):
+                    fundamental_data[ts_code] = payload
+                elif ts_code in fundamental_fallback_data:
+                    # Keep the verified same-day membership quote usable when
+                    # the optional full fundamental provider fails, while
+                    # retaining the provider reason for diagnostics.
+                    if evidence.get("reason"):
+                        evidence["provider_reason"] = evidence["reason"]
+                    evidence["fallback_source"] = "sector_membership_quote"
+                    evidence["status"] = "live_success"
+                    evidence["cache_used"] = False
+                    fundamental_data[ts_code] = fundamental_fallback_data[ts_code]
+                else:
+                    fundamental_data[ts_code] = None
+            _record_source_evidence(source, ts_code, evidence)
+            if (not isinstance(source_health, RunSourceHealth)
+                    and evidence.get("attempted")):
+                if usable(payload) and not evidence.get("reason"):
+                    _source_succeeded(source_health, source)
+                else:
+                    _source_failed(source_health, source)
+
+    def _score_current():
+        """Recompute all dimensions, plans, and quality after each batch."""
+        scored = []
+        for candidate in eligible_candidates:
+            ts_code = candidate["ts_code"]
+            kline = kline_data.get(ts_code)
+            records = kline.get("data", []) if isinstance(kline, dict) else []
+            if not kline or len(records) < 20:
+                continue
+            cap = capital_data.get(ts_code)
+            fund = fundamental_data.get(ts_code)
+            wk = analysis_by_ts.get(ts_code) if enable_wyckoff else None
+            dim_momentum = score_momentum(candidate, kline)
+            dim_volume = score_volume_price(candidate, kline)
+            dim_capital = score_capital(candidate, cap)
+            dim_fundamental = score_fundamental_quick(candidate, fund)
+            memberships = candidate.get("sector_memberships") or [
+                build_sector_membership(
+                    candidate.get("sector_code", ""),
+                    candidate.get("sector_name", ""),
+                    context={
+                        "hot_score": candidate.get("sector_hot_score", 50),
+                        "sector_actionable": candidate.get(
+                            "sector_actionable", False),
+                    }, stock=candidate)
+            ]
+            primary_membership = select_primary_sector_membership(memberships)
+            dim_sector = score_sector_membership(
+                candidate, primary_membership, peer_cohorts)
+            raw_dimensions = {
+                "momentum": dim_momentum,
+                "volume_price": dim_volume,
+                "capital": dim_capital,
+                "fundamental": dim_fundamental,
+                "sector_strength": dim_sector,
+            }
+            if enable_wyckoff:
+                raw_dimensions["wyckoff"] = score_wyckoff(wk)
+            composite = composite_from_dimensions(raw_dimensions)
+            dims = {name: round(value, 1)
+                    for name, value in raw_dimensions.items()}
+            signals = _detect_signals(candidate, kline, cap, fund)
+            warnings = _detect_warnings(
+                candidate, kline, cap, fund, dim_momentum, dim_volume,
+                dim_fundamental)
+            base_data_quality = assess_candidate_data(
+                kline=kline, capital=cap, fundamental=fund,
+                as_of_date=as_of_date,
+                source_evidence=source_evidence | {
+                    "capital": source_evidence["capital"].get(
+                        ts_code, {}),
+                    "fundamental": source_evidence["fundamental"].get(
+                        ts_code, {}),
+                })
+            data_quality = apply_membership_quality(
+                base_data_quality, primary_membership, as_of_date=as_of_date)
+            raw_composite = round(composite, 1)
+            quality_adjusted = round(
+                raw_composite * data_quality["coverage_factor"]
+                * data_quality["freshness_factor"], 1)
+            sector_code = primary_membership.get(
+                "code", candidate.get("sector_code", ""))
+            changes_in_sector = sorted(
+                peer_cohorts.get(sector_code, [candidate.get("change_pct", 0)]),
+                reverse=True)
+            change_pct = candidate.get("change_pct", 0)
+            sector_rank = (
+                changes_in_sector.index(change_pct) + 1
+                if change_pct in changes_in_sector else len(changes_in_sector))
+            item = {
+                "code": candidate["code"], "ts_code": ts_code,
+                "name": candidate["name"], "sector_code": sector_code,
+                "sector_name": primary_membership.get(
+                    "name", candidate.get("sector_name", sector_code)),
+                "sector_hot_score": primary_membership.get(
+                    "hot_score", candidate.get("sector_hot_score", 50)),
+                "composite_score": raw_composite,
+                "raw_composite_score": raw_composite,
+                "quality_adjusted_score": quality_adjusted,
+                "raw_dimensions": raw_dimensions, "dimensions": dims,
+                "signals": signals, "warnings": warnings,
+                "base_data_quality": copy.deepcopy(base_data_quality),
+                "data_quality": data_quality,
+                "membership_source": primary_membership.get(
+                    "membership_source", "realtime"),
+                "membership_data_date": primary_membership.get(
+                    "membership_data_date", ""),
+                "membership_quality": primary_membership.get(
+                    "membership_quality", "good"),
+                "membership_cache_error": primary_membership.get(
+                    "membership_cache_error", ""),
+                "membership_cache_at": primary_membership.get(
+                    "membership_cache_at", ""),
+                "membership_cache_age_hours": primary_membership.get(
+                    "membership_cache_age_hours"),
+                "membership_cache_tier": primary_membership.get(
+                    "membership_cache_tier", ""),
+                "membership_fallback_reason": primary_membership.get(
+                    "membership_fallback_reason", ""),
+                "membership_provider_attempts": primary_membership.get(
+                    "membership_provider_attempts", 0),
+                "membership_fetch_evidence": copy.deepcopy(
+                    primary_membership.get("membership_fetch_evidence", {})),
+                "source_evidence": {
+                    source: copy.deepcopy(source_evidence.get(source, {}).get(
+                        ts_code, {}))
+                    for source in ("kline", "capital", "fundamental")
+                } | {
+                    "membership": copy.deepcopy(primary_membership.get(
+                        "membership_fetch_evidence", {})),
+                },
+                "sector_memberships": merge_sector_memberships(memberships),
+                "change_pct": change_pct,
+                "sector_relative_rank": sector_rank,
+                "sector_total": len(changes_in_sector),
+            }
+            if enable_wyckoff and wk:
+                short_term = wk.get("short_term") or {
+                    "phase": wk.get("phase", {}).get("primary", ""),
+                    "phase_name": wk.get("phase", {}).get("primary_name", ""),
+                    "sub_phase": wk.get("phase", {}).get("primary_sub_phase", ""),
+                    "sub_phase_name": wk.get("phase", {}).get("sub_phase_name", ""),
+                    "confidence": wk.get("phase", {}).get("confidence", 0),
+                    "signal_status": wk.get("signal", {}).get("status", "confirmed"),
+                    "signal_age_bars": wk.get("signal", {}).get("age_bars", 0),
+                }
+                long_term = wk.get("long_term") or {"eligible": False}
+                item["wyckoff"] = {
+                    "phase": wk.get("phase", {}).get("primary_name", ""),
+                    "sub_phase": wk.get("phase", {}).get("sub_phase_name", ""),
+                    "confidence": wk.get("phase", {}).get("confidence", 0),
+                    "score": round(raw_dimensions["wyckoff"], 1),
+                    "verdict": wk.get("wyckoff_signals", {}).get("verdict", ""),
+                    "trading_implication": wk.get("wyckoff_signals", {}).get(
+                        "trading_implication", ""),
+                    "minor_phase": short_term.get("minor_phase") or wk.get(
+                        "phase", {}).get("minor_phase", {}),
+                    "short_term": short_term, "long_term": long_term,
+                    "alignment": wk.get("alignment") or build_period_alignment(
+                        short_term, long_term),
+                }
+            if trade_plan_policy is not None:
+                try:
+                    item["trade_plan"] = build_candidate_trade_plan(
+                        candidate["code"], kline, item.get("wyckoff", {}),
+                        trade_plan_policy, as_of_date,
+                        _candidate_counterargument(item))
+                    verdict = validate_trade_plan(
+                        item["trade_plan"], trade_plan_policy, as_of_date)
+                    item["trade_plan_status"] = (
+                        "complete" if verdict["complete"] else "incomplete")
+                    item["trade_plan_reasons"] = verdict["reasons"]
+                    item["trade_plan_target_source"] = (
+                        item.get("trade_plan", {}).get("target_source")
+                        or "unavailable")
+                except (KeyError, TypeError, ValueError):
+                    item["trade_plan"] = None
+                    item["trade_plan_status"] = "error"
+                    item["trade_plan_reasons"] = ["trade_plan_build_error"]
+                    item["trade_plan_target_source"] = "unavailable"
+            scored.append(item)
+        return scored
+
+    def _quality_valid(scored):
+        return [item for item in scored
+                if item.get("data_quality", {}).get("eligible", False)]
+
+    def _can_stop(scored, remaining):
+        if requested_min_candidates <= 0:
+            return True
+        valid = _quality_valid(scored)
+        if len(valid) < requested_min_candidates:
+            return False
+        provisional_by_code = {
+            candidate["code"]: _safe_float(
+                candidate.get("provisional_score"), 0.0)
+            for candidate in priority_queue
+        }
+        valid_scores = sorted(
+            (provisional_by_code.get(item.get("code"),
+                                    _safe_float(item.get("composite_score")))
+             for item in valid), reverse=True)
+        cutoff = valid_scores[requested_min_candidates - 1]
+        return not any(
+            provisional_by_code.get(item["code"], 0.0) > cutoff
+            for item in remaining)
+
+    capital_started = time.monotonic()
+    processed_codes = set()
+    batches = queue_info["batches"]
+    # Queue ordering uses the provisional score; defer full output assembly
+    # until a live/cache enrichment batch has completed.  This avoids doing
+    # trade-plan work twice for the first batch while retaining the required
+    # re-score after every batch.
+    latest_scored = []
+    for batch in batches:
+        if (isinstance(source_health, RunSourceHealth)
+                and time.monotonic() >= source_health.live_deadline):
+            break
+        # Fundamental live work is scoped to exactly the same priority
+        # batches as capital.  Both dimensions share the 170s deadline.
+        capital_results = []
+        fundamental_results = []
+        with ThreadPoolExecutor(max_workers=2) as dimension_pool:
+            capital_future = dimension_pool.submit(
+                _run_live_batch, "capital", batch)
+            fundamental_batch = [
+                candidate for candidate in batch
+                if candidate["ts_code"] not in fundamental_cache_valid_codes
+            ]
+            fundamental_future = dimension_pool.submit(
+                _run_live_batch, "fundamental", fundamental_batch)
+            capital_results = capital_future.result()
+            fundamental_results = fundamental_future.result()
+        _consume_live_results("capital", capital_results)
+        _consume_live_results("fundamental", fundamental_results)
+        processed_codes.update(candidate["code"] for candidate in batch)
+        latest_scored = _score_current()
+        remaining = [candidate for candidate in priority_queue
+                     if candidate["code"] not in processed_codes]
+        if _can_stop(latest_scored, remaining):
+            break
+
+    # Explicitly distinguish budget omission from provider failure.  A
+    # priority candidate whose batch never started is a deadline omission;
+    # candidates outside the initial queue are simply not selected.
+    deadline_reached = (
+        isinstance(source_health, RunSourceHealth)
+        and time.monotonic() >= source_health.live_deadline)
+    status_changed = False
+    for candidate in eligible_candidates:
+        ts_code = candidate["ts_code"]
+        if ts_code in capital_cache_valid_codes:
+            continue
+        evidence = source_evidence["capital"].setdefault(
+            ts_code, live_attempt(attempted=False))
+        current_status = evidence.get("status", "")
+        if current_status in SOURCE_EVIDENCE_STATUSES \
+                and current_status not in ("cache_miss", "cache_stale"):
+            continue
+        if candidate["code"] in processed_codes:
+            continue
+        status = (
+            "not_started_deadline" if deadline_reached
+            and candidate["code"] in queue_by_code
+            else "not_selected_for_enrichment")
+        if current_status == "cache_stale":
+            evidence["cache_status"] = current_status
+        status_changed = status_changed or current_status != status
+        evidence["status"] = status
+        evidence["reason"] = status
+        evidence["cache_used"] = False
+        evidence["stale"] = False
+        source_evidence["capital"][ts_code] = evidence
+
+    # Candidates in the live scope with no fundamental cache and no completed
+    # fundamental result receive the same explicit non-provider status.  A
+    # membership fallback remains usable for candidates outside that scope.
+    for candidate in eligible_candidates:
+        ts_code = candidate["ts_code"]
+        if ts_code in fundamental_cache_valid_codes \
+                or ts_code in fundamental_fallback_data \
+                and candidate["code"] not in queue_by_code:
+            continue
+        evidence = source_evidence["fundamental"].setdefault(
+            ts_code, live_attempt(attempted=False))
+        if evidence.get("status") in SOURCE_EVIDENCE_STATUSES \
+                and evidence.get("status") not in ("cache_miss", "cache_stale"):
+            continue
+        if candidate["code"] in processed_codes:
+            continue
+        status = (
+            "not_started_deadline" if deadline_reached
+            and candidate["code"] in queue_by_code
+            else "not_selected_for_enrichment")
+        if evidence.get("status") == "cache_stale":
+            evidence["cache_status"] = evidence.get("status")
+        status_changed = status_changed or evidence.get("status") != status
+        evidence.update({
+            "status": status, "reason": status,
+            "cache_used": False, "stale": False,
+        })
+        source_evidence["fundamental"][ts_code] = evidence
+
+    # Re-score after all statuses are final; this is the only result returned
+    # to callers, so a provisional neutral capital score cannot be promoted.
+    if not latest_scored or status_changed:
+        latest_scored = _score_current()
+    metrics_ref["capital_valid_count"] = (
+        metrics_ref.get("capital_valid_count", 0)
+        + sum(_usable_capital_payload(capital_data.get(candidate["ts_code"]))
+              for candidate in eligible_candidates))
+    metrics_ref["capital_skipped_by_budget"] = (
+        metrics_ref.get("capital_skipped_by_budget", 0)
+        + sum(
+            source_evidence["capital"].get(candidate["ts_code"], {}).get(
+                "status") in {"not_selected_for_enrichment",
+                                "not_started_deadline"}
+            for candidate in eligible_candidates))
+    metrics_ref["capital_seconds"] = metrics_ref.get("capital_seconds", 0.0) + (
+        time.monotonic() - capital_started +
+        time.monotonic() - cache_probe_started) / 2
+    metrics_ref["fundamental_seconds"] = metrics_ref.get(
+        "fundamental_seconds", 0.0) + (time.monotonic() - capital_started)
+    metrics_ref["capital_requests"] = metrics_ref.get(
+        "capital_requests", 0) + len(priority_queue)
+    metrics_ref["fundamental_requests"] = metrics_ref.get(
+        "fundamental_requests", 0) + sum(
+            candidate["ts_code"] not in fundamental_cache_valid_codes
+            for candidate in priority_queue)
+    return latest_scored
 
 
 # ──────────────────────── Signal & Warning Detection ────────────────────────

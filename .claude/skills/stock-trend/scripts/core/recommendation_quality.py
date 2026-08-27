@@ -5,6 +5,11 @@ from datetime import datetime
 
 WEIGHTS = {"kline": 0.55, "capital": 0.25, "fundamental": 0.20}
 MIN_COVERAGE = 0.70
+NON_PROVIDER_STATUSES = frozenset({
+    "cache_miss", "cache_stale", "not_selected_for_enrichment",
+    "not_started_deadline",
+})
+SUCCESS_STATUSES = frozenset({"live_success", "cache_valid"})
 
 
 def _iso_date(value):
@@ -30,7 +35,10 @@ def latest_data_date(payload):
     return max(valid) if valid else ""
 
 
-def _dimension(name, payload, expected_date="", require_date=False):
+def _dimension(name, payload, expected_date="", require_date=False,
+               evidence=None):
+    evidence = evidence if isinstance(evidence, dict) else {}
+    source_status = str(evidence.get("status") or "")
     returned = isinstance(payload, dict) and bool(payload)
     available = returned
     quality = "missing"
@@ -76,6 +84,18 @@ def _dimension(name, payload, expected_date="", require_date=False):
             quality = "error"
         if quality in ("error", "stale"):
             available = False
+    if source_status in NON_PROVIDER_STATUSES:
+        # A scheduler/cache status is evidence about what was (or was not)
+        # requested, not a provider failure.  Keep the dimension unavailable
+        # so it can never promote a candidate through a diagnostic wrapper.
+        available = False
+        quality = "stale" if source_status == "cache_stale" else "missing"
+    elif source_status and source_status not in SUCCESS_STATUSES:
+        # A live attempt that returned an invalid payload or failed outright
+        # remains a genuine source error even when a stale fallback object is
+        # attached for diagnostics.
+        available = False
+        quality = "error" if returned or name == "capital" else "missing"
     data_date = latest_data_date(payload)
     source = meta.get("data_source") or meta.get("source")
     fetched_at = meta.get("fetch_time") or meta.get("fetched_at")
@@ -91,7 +111,15 @@ def _dimension(name, payload, expected_date="", require_date=False):
         fetched_date = _iso_date(str(fetched_at)[:8])
         fresh = available and bool(fetched_date) and fetched_date >= expected_date
     stale_reason = ""
-    if returned and quality == "error":
+    if source_status in NON_PROVIDER_STATUSES:
+        stale_reason = (
+            f"{name}_stale" if source_status == "cache_stale"
+            else source_status
+        )
+    elif source_status and source_status not in SUCCESS_STATUSES \
+            and (returned or name == "capital"):
+        stale_reason = f"{name}_error"
+    elif returned and quality == "error":
         stale_reason = f"{name}_error"
     elif returned and quality == "stale":
         stale_reason = f"{name}_stale"
@@ -108,17 +136,31 @@ def _dimension(name, payload, expected_date="", require_date=False):
         "source": source,
         "quality": quality,
         "stale_reason": stale_reason,
+        "source_status": source_status,
     }
 
 
-def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
+def assess_candidate_data(kline, capital, fundamental, as_of_date="",
+                          source_evidence=None, capital_evidence=None):
+    source_evidence = source_evidence if isinstance(source_evidence, dict) else {}
+    if capital_evidence is not None:
+        source_evidence = {
+            **source_evidence,
+            "capital": capital_evidence,
+        }
     normalized_as_of = _iso_date(as_of_date)
     kline_date = latest_data_date(kline)
     expected = normalized_as_of or kline_date
     dimensions = {
-        "kline": _dimension("kline", kline, expected, require_date=True),
-        "capital": _dimension("capital", capital, expected, require_date=True),
-        "fundamental": _dimension("fundamental", fundamental, expected),
+        "kline": _dimension(
+            "kline", kline, expected, require_date=True,
+            evidence=source_evidence.get("kline")),
+        "capital": _dimension(
+            "capital", capital, expected, require_date=True,
+            evidence=source_evidence.get("capital")),
+        "fundamental": _dimension(
+            "fundamental", fundamental, expected,
+            evidence=source_evidence.get("fundamental")),
     }
     coverage = round(sum(
         WEIGHTS[name]
@@ -135,6 +177,14 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
     )
     if not secondary_available:
         reasons.append("secondary_data_missing")
+    capital_status = dimensions["capital"].get("source_status", "")
+    if not dimensions["capital"]["fresh"]:
+        if capital_status in NON_PROVIDER_STATUSES:
+            reasons.append(capital_status)
+        elif capital_status:
+            reasons.append("capital_error")
+        elif not dimensions["capital"]["returned"]:
+            reasons.append("capital_missing")
     returned_errors = [
         f"{name}_error" for name in ("capital", "fundamental")
         if dimensions[name]["returned"] and dimensions[name]["quality"] == "error"
@@ -146,6 +196,14 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
         and dimensions[name]["stale_reason"] == f"{name}_stale"
     ]
     reasons.extend(returned_stale)
+    evidence_errors = [
+        f"{name}_error" for name in ("capital", "fundamental")
+        if dimensions[name].get("source_status")
+        and dimensions[name].get("source_status") not in (
+            *NON_PROVIDER_STATUSES, *SUCCESS_STATUSES)
+    ]
+    reasons.extend(evidence_errors)
+    reasons = list(dict.fromkeys(reasons))
     has_stale_or_error = any(
         status["stale_reason"] for status in dimensions.values()
     )
@@ -159,6 +217,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date=""):
         "confidence": round(coverage_factor * freshness_factor, 2),
         "eligible": (
             dimensions["kline"]["fresh"]
+            and dimensions["capital"]["fresh"]
             and coverage >= MIN_COVERAGE
             and secondary_available
             and not returned_errors

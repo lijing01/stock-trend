@@ -63,6 +63,10 @@ REASON_LABELS = {
     "secondary_data_missing": "资金面和基本面数据均缺失",
     "capital_error": "资金面数据返回错误",
     "fundamental_error": "基本面数据返回错误",
+    "cache_miss": "未命中有效缓存，尚未完成增强",
+    "cache_stale": "缓存存在但已过期或不覆盖目标日期",
+    "not_selected_for_enrichment": "未进入资金增强优先队列（预算内未选中）",
+    "not_started_deadline": "达到截止时间，资金增强尚未开始",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
     "history_insufficient": "板块历史快照不足，尚不能验证持续性",
     "breadth_capital_divergence": "普涨但市场资金背离，需板块资金或共振确认",
@@ -89,6 +93,10 @@ DATA_REASON_CODES = {
     "secondary_data_missing",
     "capital_error",
     "fundamental_error",
+    "cache_miss",
+    "cache_stale",
+    "not_selected_for_enrichment",
+    "not_started_deadline",
     "stale_cache",
     "partial_realtime",
     "regime_missing",
@@ -124,6 +132,9 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "output_candidate_count", "final_valid_count", "data_eligible_count",
     "data_rejected_count",
     "actionable_count",
+    "capital_priority_count", "capital_live_started", "capital_valid_count",
+    "capital_cache_valid_count", "capital_skipped_by_budget",
+    "capital_enrichment_population",
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
@@ -158,6 +169,7 @@ def _complete_performance(performance, source_health, candidates, buckets,
                           min_score, total_seconds):
     """Finalize the additive public performance contract from run evidence."""
     completed = performance
+    supplied_fields = set(completed)
     for field in _PERFORMANCE_PHASE_FIELDS:
         completed.setdefault(field, 0.0)
     for field in _PERFORMANCE_FUNNEL_FIELDS:
@@ -184,6 +196,44 @@ def _complete_performance(performance, source_health, candidates, buckets,
         completed.setdefault("sector_expanded_count", 0)
     completed.pop("sector_expanded_codes", None)
     completed["actionable_count"] = len(buckets.get("actionable", []))
+    # Keep a useful audit even for compatibility callers that do not pass the
+    # scanner's shared metrics dictionary.  Production runs populate these
+    # counters directly in run_phase2; this fallback only fills absent keys.
+    candidate_capital_statuses = [
+        (item.get("source_evidence", {}) or {}).get("capital", {})
+        for item in candidates
+    ]
+    inferred_capital = {
+        "capital_priority_count": sum(
+            status.get("status") not in {
+                "cache_valid", "not_selected_for_enrichment",
+                "cache_miss", "cache_stale",
+            }
+            for status in candidate_capital_statuses
+            if status.get("status")
+        ),
+        "capital_live_started": sum(
+            bool(status.get("attempted")) for status in candidate_capital_statuses
+        ),
+        "capital_valid_count": sum(
+            status.get("status") in {"live_success", "cache_valid"}
+            for status in candidate_capital_statuses
+        ),
+        "capital_cache_valid_count": sum(
+            status.get("status") == "cache_valid"
+            for status in candidate_capital_statuses
+        ),
+        "capital_skipped_by_budget": sum(
+            status.get("status") in {
+                "not_selected_for_enrichment", "not_started_deadline",
+            }
+            for status in candidate_capital_statuses
+        ),
+        "capital_enrichment_population": len(candidates),
+    }
+    for field, value in inferred_capital.items():
+        if field not in supplied_fields:
+            completed[field] = int(value)
     completed["total_seconds"] = max(0.0, float(total_seconds))
     completed.setdefault("degradation_reasons", [])
     completed.setdefault("advisory_reasons", [])
@@ -293,6 +343,14 @@ def _performance_markdown(performance):
         f"数据失效 {performance.get('data_rejected_count', 0)} → "
         f"可执行 {performance.get('actionable_count', 0)}",
         "",
+        "**资金增强审计**: "
+        f"优先队列 {performance.get('capital_priority_count', 0)} → "
+        f"已启动 {performance.get('capital_live_started', 0)} → "
+        f"有效 {performance.get('capital_valid_count', 0)}（缓存有效 "
+        f"{performance.get('capital_cache_valid_count', 0)}） → "
+        f"预算跳过 {performance.get('capital_skipped_by_budget', 0)} | "
+        f"增强总体 {performance.get('capital_enrichment_population', 0)}",
+        "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
         f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
         "",
@@ -356,6 +414,14 @@ def _performance_html(performance):
         f"rejected={performance.get('data_rejected_count', 0)}→"
         f"actionable={performance.get('actionable_count', 0)}"
     )
+    capital_text = (
+        f"capital_priority={performance.get('capital_priority_count', 0)} "
+        f"capital_live_started={performance.get('capital_live_started', 0)} "
+        f"capital_valid={performance.get('capital_valid_count', 0)} "
+        f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
+        f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
+        f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)}"
+    )
     scan_status = escape(str(performance.get("scan_status", "complete")))
     degradation_reasons = escape(
         "、".join(performance.get("degradation_reasons", [])) or "无")
@@ -375,6 +441,7 @@ def _performance_html(performance):
         "性能与数据源审计</h2>"
         f"<p class='dt'>{phase_text}</p><p class='dt'>{funnel_text}</p>"
         f"<p class='dt'>{escape(coverage_text)}</p>"
+        f"<p class='dt'>{escape(capital_text)}</p>"
         f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
         f"<p class='dt'>辅助提示={advisory_reasons}</p>"
         "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
@@ -397,6 +464,14 @@ def _emit_performance_summary(performance):
         f"{field.removesuffix('_seconds')}="
         f"{float(performance.get(field, 0)):.3f}s"
         for field in _PERFORMANCE_PHASE_FIELDS)
+    capital_text = (
+        f"capital_priority={performance.get('capital_priority_count', 0)} "
+        f"capital_live_started={performance.get('capital_live_started', 0)} "
+        f"capital_valid={performance.get('capital_valid_count', 0)} "
+        f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
+        f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
+        f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)}"
+    )
     print(
         f"[performance] {phase_text} "
         f"sectors={performance.get('sector_universe_count', 0)}->"
@@ -411,6 +486,7 @@ def _emit_performance_summary(performance):
         f"data_rejected={performance.get('data_rejected_count', 0)} "
         f"final_valid={performance.get('final_valid_count', 0)} "
         f"actionable={performance.get('actionable_count', 0)} "
+        f"{capital_text} "
         f"sources=[{source_text}]",
         file=sys.stderr,
     )
@@ -930,6 +1006,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
                  sector_context=None, source_health=None, metrics=None,
                  trade_plan_policy=None,
+                 capital_top=30,
                  initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION):
@@ -1073,14 +1150,25 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     new_candidates, enable_wyckoff=True,
                     as_of_date=as_of_date,
                     source_health=source_health, metrics=metrics,
-                    trade_plan_policy=trade_plan_policy)
+                    trade_plan_policy=trade_plan_policy,
+                    top=capital_top, min_candidates=min_candidates)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
-                        "source_health", "metrics", "trade_plan_policy")):
+                        "source_health", "metrics", "trade_plan_policy",
+                        "top", "min_candidates")):
                     raise
-                scored = run_phase2(
-                    new_candidates, enable_wyckoff=True,
-                    as_of_date=as_of_date)
+                try:
+                    scored = run_phase2(
+                        new_candidates, enable_wyckoff=True,
+                        as_of_date=as_of_date,
+                        top=capital_top, min_candidates=min_candidates)
+                except TypeError as compat_exc:
+                    if not any(name in str(compat_exc) for name in (
+                            "top", "min_candidates")):
+                        raise
+                    scored = run_phase2(
+                        new_candidates, enable_wyckoff=True,
+                        as_of_date=as_of_date)
             for scored_item in scored:
                 code = scored_item.get("code", "")
                 raw = phase1_candidates.get(code, {})
@@ -1160,6 +1248,18 @@ def _reason_detail(code, item):
         "capital_error": "capital",
         "fundamental_error": "fundamental",
     }.get(code)
+    if dimension_name is None and code in {
+            "cache_miss", "cache_stale", "not_selected_for_enrichment",
+            "not_started_deadline"}:
+        evidence_by_source = item.get("source_evidence", {})
+        for source in ("capital", "fundamental"):
+            evidence = evidence_by_source.get(source, {}) \
+                if isinstance(evidence_by_source, dict) else {}
+            dimension = dimensions.get(source, {})
+            if (evidence.get("status") == code
+                    or dimension.get("source_status") == code):
+                dimension_name = source
+                break
     if dimension_name:
         dimension = dimensions.get(dimension_name, {})
         details = []
@@ -1176,6 +1276,8 @@ def _reason_detail(code, item):
             if isinstance(evidence, dict) else {}
         if evidence.get("reason"):
             details.append(f"抓取原因码{evidence['reason']}")
+        if evidence.get("status") and evidence.get("status") != code:
+            details.append(f"状态码{evidence['status']}")
         if evidence.get("provider_attempts"):
             details.append(f"Provider尝试{evidence['provider_attempts']}次")
         if evidence.get("cache_used"):
@@ -2014,6 +2116,7 @@ def main():
         source_health=source_health,
         metrics=performance,
         trade_plan_policy=policy,
+        capital_top=args.top,
         max_sector_expansion=getattr(
             args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION),
     )

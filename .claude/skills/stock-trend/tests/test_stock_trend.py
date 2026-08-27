@@ -1596,8 +1596,70 @@ def run_daily_recommendation_tests():
             p, f = runner()
             PASSED += p
             FAILED += f
+        run_prioritized_enrichment_timing_tests()
     except ImportError as e:
         print(f"  [SKIP] daily recommendation tests — {e}")
+
+
+def run_prioritized_enrichment_timing_tests():
+    """Exercise the 180s envelope without waiting on real wall-clock time."""
+    print("\n⏱️ 优先资金增强时序测试 (Prioritized Enrichment)")
+    print("=" * 50)
+    from unittest.mock import patch
+
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    from scans import stock_scanner as scanner
+    from core.source_health import SCAN_DEADLINE_SECONDS, RunSourceHealth
+
+    health = RunSourceHealth()
+    now = time.monotonic()
+    health.started_at = now - 104
+    health.live_deadline = health.started_at + 170
+    candidate = {
+        "code": "699999", "ts_code": "699999.SH", "name": "时序测试",
+        "sector_code": "BK9999", "sector_name": "测试板块",
+        "sector_hot_score": 80, "change_pct": 1.0,
+        "amount": 1e8, "market_cap": 1e10, "pe": 20.0,
+    }
+
+    def fake_kline(ts_code, with_evidence=False, **_kwargs):
+        payload = _build_synthetic_kline(ts_code, days=60)
+        attempt = scanner.live_attempt(
+            attempted=True, provider_attempts=1, status="live_success")
+        return (scanner.source_result(payload, attempt)
+                if with_evidence else payload)
+
+    def unavailable_source(*_args, with_evidence=False, **_kwargs):
+        attempt = scanner.live_attempt(
+            attempted=True, provider_attempts=1,
+            reason="empty", status="empty")
+        return (scanner.source_result(None, attempt)
+                if with_evidence else None)
+
+    started = time.monotonic()
+    with patch.object(scanner, "_fetch_kline", side_effect=fake_kline), \
+         patch.object(scanner, "_fetch_capital_flow",
+                      side_effect=unavailable_source), \
+         patch.object(scanner, "_fetch_fundamental",
+                      side_effect=unavailable_source):
+        scored = scanner.run_phase2(
+            [candidate], source_health=health, enable_wyckoff=False,
+            min_candidates=0)
+    elapsed = time.monotonic() - started
+    capital_state = health.snapshot()["capital"]
+
+    test("E2E-budget: 104s K线占用后仍启动资金请求",
+         capital_state["logical_live_requests"] > 0,
+         f"capital_requests={capital_state['logical_live_requests']}",
+         "daily_recommendation")
+    test("E2E-budget: 未获得资金数据时零正式推荐",
+         not any(item.get("data_quality", {}).get("eligible", False)
+                 for item in scored),
+         f"eligible={sum(item.get('data_quality', {}).get('eligible', False) for item in scored)}",
+         "daily_recommendation")
+    test("E2E-budget: 扫描未越过180秒预算",
+         elapsed < SCAN_DEADLINE_SECONDS,
+         f"elapsed={elapsed:.3f}s", "daily_recommendation")
 
 
 def run_golden_diff_tests():
