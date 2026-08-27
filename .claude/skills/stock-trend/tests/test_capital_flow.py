@@ -67,13 +67,14 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
         cached = {"meta": {"data_source": "error"}, "data": [VALID_FLOW]}
         self.assertFalse(capital_flow.is_valid_capital_result(cached))
 
-    def _run_main(self, cached, fetched=None):
+    def _run_main(self, cached, fetched=None, argv=None):
         outputs = []
         fetched = fetched or {
             "meta": {"data_source": "eastmoney", "record_count": 1},
             "data": [VALID_FLOW],
         }
-        with patch.object(sys, "argv", ["capital_flow.py", "600519.SH"]), \
+        argv = argv or ["capital_flow.py", "600519.SH"]
+        with patch.object(sys, "argv", argv), \
                 patch.object(capital_flow, "load_cache", return_value=cached), \
                 patch.object(capital_flow, "output_json", side_effect=lambda value, **_: outputs.append(value)), \
                 patch.object(capital_flow, "resolve_secid", return_value="1.600519"), \
@@ -85,6 +86,88 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
                 patch.object(capital_flow, "save_cache") as save:
             capital_flow.main()
         return outputs[0], fetch, save
+
+    def test_skip_extended_omits_optional_enrichment(self):
+        outputs = []
+        fetched = {
+            "meta": {"data_source": "eastmoney", "record_count": 1},
+            "data": [VALID_FLOW],
+        }
+        with patch.object(sys, "argv", [
+                "capital_flow.py", "600519.SH", "--skip-extended",
+            ]), \
+                patch.object(capital_flow, "load_cache", return_value=None), \
+                patch.object(capital_flow, "resolve_secid", return_value="1.600519"), \
+                patch.object(capital_flow,
+                             "fetch_stock_capital_flow_with_fallbacks",
+                             return_value=fetched), \
+                patch.object(capital_flow, "fetch_northbound_flow") as northbound, \
+                patch.object(capital_flow,
+                             "fetch_individual_northbound") as individual, \
+                patch.object(capital_flow, "fetch_margin_detail") as margin, \
+                patch.object(capital_flow, "fetch_longhubang") as lhb, \
+                patch.object(capital_flow, "output_json",
+                             side_effect=lambda value, **_: outputs.append(value)), \
+                patch.object(capital_flow, "save_cache") as save:
+            capital_flow.main()
+
+        result = outputs[0]
+        self.assertEqual(result["data"], [VALID_FLOW])
+        self.assertEqual(result["meta"]["enrichment"], "skipped")
+        self.assertNotIn("northbound_market", result["data_extended"])
+        self.assertNotIn("northbound_individual", result["data_extended"])
+        self.assertNotIn("margin", result["data_extended"])
+        self.assertNotIn("longhubang", result["data_extended"])
+        self.assertIn("individual_streak", result["data_extended"])
+        northbound.assert_not_called()
+        individual.assert_not_called()
+        margin.assert_not_called()
+        lhb.assert_not_called()
+        save.assert_not_called()
+
+    def test_default_mode_keeps_optional_enrichment(self):
+        result, _, _ = self._run_main(None)
+        self.assertEqual(result["meta"]["enrichment"], "attempted")
+
+    def test_default_mode_refetches_skip_extended_cache(self):
+        cached = {
+            "meta": {
+                "data_source": "eastmoney",
+                "enrichment": "skipped",
+            },
+            "data": [VALID_FLOW],
+        }
+        result, fetch, save = self._run_main(cached)
+        fetch.assert_called_once()
+        self.assertEqual(result["meta"]["enrichment"], "attempted")
+        save.assert_called_once()
+
+    def test_skip_mode_normalizes_full_cache(self):
+        cached = {
+            "meta": {
+                "data_source": "eastmoney",
+                "enrichment": "attempted",
+            },
+            "data": [VALID_FLOW],
+            "data_extended": {
+                "northbound_market": [{"date": "20260807"}],
+                "margin": [{"date": "20260807"}],
+                "individual_streak": {"main_streak": 1, "total_streak": 0},
+            },
+            "warnings": ["旧的扩展抓取告警"],
+        }
+        result, fetch, save = self._run_main(
+            cached,
+            argv=["capital_flow.py", "600519.SH", "--skip-extended"],
+        )
+        fetch.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(result["meta"]["enrichment"], "skipped")
+        self.assertEqual(
+            result["data_extended"],
+            {"individual_streak": {"main_streak": 1, "total_streak": 0}},
+        )
+        self.assertNotIn("warnings", result)
 
     def test_empty_success_cache_is_refetched(self):
         cached = {"meta": {"data_source": "eastmoney"}, "data": []}

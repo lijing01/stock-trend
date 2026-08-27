@@ -91,6 +91,25 @@ def is_valid_capital_result(result, min_date=""):
     return True
 
 
+def _without_extended_enrichment(result):
+    """Return a primary-only copy suitable for skip-extended callers."""
+    if not isinstance(result, dict):
+        return result
+    normalized = dict(result)
+    meta = normalized.get("meta")
+    normalized["meta"] = dict(meta) if isinstance(meta, dict) else {}
+    normalized["meta"]["enrichment"] = "skipped"
+    extended = normalized.get("data_extended")
+    if isinstance(extended, dict) and "individual_streak" in extended:
+        normalized["data_extended"] = {
+            "individual_streak": extended["individual_streak"],
+        }
+    else:
+        normalized["data_extended"] = {}
+    normalized.pop("warnings", None)
+    return normalized
+
+
 def fetch_stock_capital_flow_tushare(ts_code, days=5, timeout=10):
     """Fetch capital flow from Tushare moneyflow API as fallback."""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as TEO
@@ -454,18 +473,36 @@ def main():
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
     parser.add_argument("--expected-date", help="YYYY-MM-DD trading day the result must cover; stale-by-date cache is ignored")
+    parser.add_argument(
+        "--skip-extended", action="store_true",
+        help="Skip optional northbound, margin, and 龙虎榜 enrichment",
+    )
     args = parser.parse_args()
-
-    cache_key = f"capital_flow_{args.ts_code}"
-    if not args.no_cache:
-        cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        if is_valid_capital_result(cached, min_date=args.expected_date):
-            output_json(cached, output_path=args.output)
-            return
 
     code = args.ts_code.split(".")[0]
     suffix = "." + args.ts_code.split(".")[1] if "." in args.ts_code else ""
     asset = args.asset or ("FD" if code.startswith(("5", "15")) else "E")
+    is_hk = suffix == ".HK" or args.ts_code.endswith(".HK")
+    skip_extended = args.skip_extended and asset == "E" and not is_hk
+
+    cache_key = f"capital_flow_{args.ts_code}"
+    if not args.no_cache:
+        cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
+        cached_enrichment = (
+            cached.get("meta", {}).get("enrichment")
+            if isinstance(cached, dict)
+            and isinstance(cached.get("meta"), dict)
+            else None
+        )
+        full_cache_compatible = (
+            skip_extended or cached_enrichment != "skipped"
+        )
+        if (full_cache_compatible
+                and is_valid_capital_result(cached, min_date=args.expected_date)):
+            if skip_extended:
+                cached = _without_extended_enrichment(cached)
+            output_json(cached, output_path=args.output)
+            return
 
     errors = []
     result = {"meta": {}, "data": [], "data_extended": {}}
@@ -520,33 +557,36 @@ def main():
             result["meta"] = primary["meta"]
             result["data"] = primary["data"]
 
-    is_hk = suffix == ".HK" or args.ts_code.endswith(".HK")
     if asset == "E" and not is_hk:
-        try:
-            nb_market = fetch_northbound_flow()
-            if nb_market:
-                result["data_extended"]["northbound_market"] = nb_market
-        except Exception as e:
-            errors.append(f"北向资金: {e}")
-        try:
-            nb_individual = fetch_individual_northbound(code)
-            if nb_individual:
-                result["data_extended"]["northbound_individual"] = nb_individual
-        except Exception as e:
-            errors.append(f"个股北向: {e}")
-        try:
-            exchange = "SH" if suffix == ".SH" else "SZ"
-            margin = fetch_margin_detail(code, exchange)
-            if margin:
-                result["data_extended"]["margin"] = margin
-        except Exception as e:
-            errors.append(f"融资融券: {e}")
-        try:
-            lhb = fetch_longhubang(code)
-            if lhb:
-                result["data_extended"]["longhubang"] = lhb
-        except Exception as e:
-            errors.append(f"龙虎榜: {e}")
+        result["meta"]["enrichment"] = (
+            "skipped" if skip_extended else "attempted"
+        )
+        if not skip_extended:
+            try:
+                nb_market = fetch_northbound_flow()
+                if nb_market:
+                    result["data_extended"]["northbound_market"] = nb_market
+            except Exception as e:
+                errors.append(f"北向资金: {e}")
+            try:
+                nb_individual = fetch_individual_northbound(code)
+                if nb_individual:
+                    result["data_extended"]["northbound_individual"] = nb_individual
+            except Exception as e:
+                errors.append(f"个股北向: {e}")
+            try:
+                exchange = "SH" if suffix == ".SH" else "SZ"
+                margin = fetch_margin_detail(code, exchange)
+                if margin:
+                    result["data_extended"]["margin"] = margin
+            except Exception as e:
+                errors.append(f"融资融券: {e}")
+            try:
+                lhb = fetch_longhubang(code)
+                if lhb:
+                    result["data_extended"]["longhubang"] = lhb
+            except Exception as e:
+                errors.append(f"龙虎榜: {e}")
 
     # Compute individual stock capital flow streak (consecutive net inflow days)
     if asset == "E" and result.get("data"):
@@ -573,7 +613,8 @@ def main():
     result.setdefault("meta", {})["fetch_time"] = (
         datetime.now().strftime("%Y%m%d-%H%M%S"))
 
-    if is_valid_capital_result(result, min_date=args.expected_date):
+    if (is_valid_capital_result(result, min_date=args.expected_date)
+            and not skip_extended):
         save_cache(cache_key, result)
 
     output_json(result, output_path=args.output)

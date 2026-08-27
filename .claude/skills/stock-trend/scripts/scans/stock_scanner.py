@@ -951,7 +951,7 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
 
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/capital_flow.py"),
-        ts_code, "--asset", "E", "-o", str(cache_path),
+        ts_code, "--asset", "E", "--skip-extended", "-o", str(cache_path),
     ]
     if expected_trading_date:
         cmd.extend(["--expected-date", expected_trading_date])

@@ -297,6 +297,20 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(result, refreshed)
         run.assert_called_once()
 
+    def test_capital_subprocess_skips_optional_enrichment(self):
+        refreshed = self._valid_capital("20260813")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(sc, "_read_json", side_effect=[None, refreshed]), \
+                patch.object(sc, "run_script",
+                             return_value={"success": True}) as run:
+            sc._fetch_capital_flow(
+                "600001.SH", expected_trading_date="2026-08-13")
+
+        cmd = run.call_args.args[0]
+        self.assertIn("--skip-extended", cmd)
+        self.assertEqual(cmd[cmd.index("--expected-date") + 1], "2026-08-13")
+
     def test_invalid_cache_only_payload_is_diagnostic_and_non_actionable(self):
         capital = self._valid_capital("20260812")
         with tempfile.TemporaryDirectory() as tmpdir, \
