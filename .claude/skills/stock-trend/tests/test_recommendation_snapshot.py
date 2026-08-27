@@ -53,6 +53,37 @@ class T(unittest.TestCase):
   self.assertEqual(build_snapshot(first)['content_sha256'],
                    build_snapshot(second)['content_sha256'])
 
+ def test_build_normalizes_compact_nested_dates(self):
+  source = src()
+  source['candidates'][0]['wyckoff'] = {'trigger_date': '20260820'}
+  snapshot = build_snapshot(source)
+  self.assertEqual(
+      snapshot['content']['candidates'][0]['wyckoff']['trigger_date'],
+      '2026-08-20',
+  )
+
+ def test_build_normalizes_compact_recommendation_date(self):
+  source = src()
+  source['recommendation_date'] = '20260820'
+  snapshot = build_snapshot(source)
+  self.assertEqual(snapshot['content']['recommendation_date'],
+                   '2026-08-20')
+
+ def test_build_rejects_impossible_compact_date(self):
+  source = src()
+  source['candidates'][0]['wyckoff'] = {'trigger_date': '20260230'}
+  with self.assertRaises(SnapshotValidationError):
+   build_snapshot(source)
+
+ def test_build_allows_missing_optional_date_value(self):
+  source = src()
+  source['candidates'][0]['data_quality']['capital'] = {'data_date': ''}
+  snapshot = build_snapshot(source)
+  self.assertEqual(
+      snapshot['content']['candidates'][0]['data_quality']['capital']['data_date'],
+      '',
+  )
+
 def run_recommendation_snapshot_tests():
  suite = unittest.defaultTestLoader.loadTestsFromTestCase(T)
  result = unittest.TextTestRunner(stream=sys.stderr, verbosity=0).run(suite)

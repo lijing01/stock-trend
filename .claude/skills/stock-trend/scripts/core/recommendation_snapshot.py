@@ -26,6 +26,12 @@ class SnapshotResult:
         self.normalization_warnings = list(normalization_warnings or [])
 
 
+def _is_date_field(path):
+    """Return whether a JSON path names a field carrying a calendar date."""
+    field = path.rsplit('.', 1)[-1].lower()
+    return field.endswith('date') or field in ('as_of', 'basis_date')
+
+
 def _normalize_for_json(value, path="$", warnings=None):
     """Return a JSON-safe detached value and record lossy repairs.
 
@@ -34,6 +40,15 @@ def _normalize_for_json(value, path="$", warnings=None):
     snapshot from being persisted, but the repair remains observable.
     """
     warnings = warnings if warnings is not None else []
+    if isinstance(value, str) and _is_date_field(path) \
+            and len(value) == 8 and value.isdigit():
+        try:
+            return date(
+                int(value[:4]), int(value[4:6]), int(value[6:]),
+            ).isoformat()
+        except ValueError as exc:
+            raise SnapshotValidationError(
+                f"invalid date at {path}: {value}") from exc
     if value is None or isinstance(value, (str, bool)):
         return value
     if isinstance(value, (date, datetime)):
@@ -148,6 +163,8 @@ def _validate(src):
             for k, v in x.items():
                 if isinstance(v, str) and (
                         'date' in k.lower() or k in ('as_of', 'basis_date')):
+                    if not v:
+                        continue
                     try:
                         is_plan_date = (
                             'trade_plan' in path

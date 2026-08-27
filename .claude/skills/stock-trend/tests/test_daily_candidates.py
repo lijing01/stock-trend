@@ -7,6 +7,7 @@ import tempfile
 import types
 import unittest
 import copy
+import numpy as np
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -230,6 +231,18 @@ class TestRecommendationPolicy(unittest.TestCase):
                          ["resonance_error:RuntimeError"])
         self.assertEqual(completed["failed_batches"][0]["sectors"], ["BK1"])
 
+    def test_advisory_reason_does_not_degrade_scan_status(self):
+        performance = {
+            "advisory_reasons": ["resonance_stale:date_mismatch"],
+        }
+        completed = _complete_performance(
+            performance, None, [],
+            {"actionable": [], "waiting_trigger": [], "observation": []},
+            min_score=50, total_seconds=1.0)
+        self.assertEqual(completed["scan_status"], "complete")
+        self.assertEqual(completed["advisory_reasons"],
+                         ["resonance_stale:date_mismatch"])
+
     def test_complete_performance_marks_all_failed_batches_as_error(self):
         performance = {
             "batch_count": 2,
@@ -272,6 +285,10 @@ class TestRecommendationPolicy(unittest.TestCase):
             "unique_candidate_count": 1, "wyckoff_pass_count": 1,
             "final_candidate_count": 1, "final_valid_count": 1,
             "actionable_count": 1,
+            "advisory_reasons": ["resonance_stale:date_mismatch"],
+            "sector_scan_coverage": 0.5,
+            "sector_expansion_truncated": True,
+            "sector_expansion_total_count": 7,
             "sources": {
                 name: dict(source_row) for name in (
                     "sector_ranking", "sector_membership", "kline",
@@ -294,6 +311,12 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("sector_membership", report)
         self.assertIn("性能与数据源审计", html)
         self.assertIn("sector_membership", html)
+        self.assertIn("板块覆盖率", report)
+        self.assertIn("板块覆盖率", html)
+        self.assertIn("--max-sector-expansion 7", report)
+        self.assertIn("--max-sector-expansion 7", html)
+        self.assertIn("resonance_stale:date_mismatch", report)
+        self.assertIn("resonance_stale:date_mismatch", html)
         self.assertIn("[performance]", stderr.getvalue())
         self.assertIn("final_valid=1", stderr.getvalue())
         for field in (
@@ -964,8 +987,10 @@ class TestRecommendationPolicy(unittest.TestCase):
                 min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
         self.assertEqual(picked[0]["resonance_quality"], "stale")
         self.assertEqual(picked[0]["resonance_reason"], "date_mismatch")
+        self.assertNotIn("resonance_stale:date_mismatch",
+                         metrics.get("degradation_reasons", []))
         self.assertIn("resonance_stale:date_mismatch",
-                      metrics["degradation_reasons"])
+                      metrics["advisory_reasons"])
 
     def test_pick_hot_sectors_uses_cache_when_live_sources_fail(self):
         row = {
@@ -1238,7 +1263,22 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(metrics["sector_expansion_limit"], 5)
         self.assertIn("sector_expansion_capped:5",
                       metrics["degradation_reasons"])
+        self.assertEqual(metrics["sector_scan_coverage"], round(5 / len(contexts), 4))
+        self.assertTrue(metrics["sector_expansion_truncated"])
+        self.assertEqual(metrics["sector_expansion_total_count"], len(contexts))
         self.assertEqual(len(result), 5)
+
+        full_metrics = {}
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            full_result = dc.scan_sectors(
+                list(contexts), min_candidates=99,
+                sector_context=contexts, source_health=sc.RunSourceHealth(),
+                metrics=full_metrics, initial_sector_window=3,
+                sector_expansion_step=2, max_sector_expansion=len(contexts))
+        self.assertEqual(full_metrics["sector_scan_coverage"], 1.0)
+        self.assertFalse(full_metrics["sector_expansion_truncated"])
+        self.assertEqual(len(full_result), len(contexts))
 
     def test_multi_batch_scan_fetches_ranking_snapshot_exactly_once(self):
         """One scan run owns one immutable full-market ranking snapshot."""
@@ -2112,6 +2152,58 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(performance["failed_batches"][0]["sectors"], ["BK1"])
         self.assertIn("batch_error:OSError",
                       performance["degradation_reasons"])
+
+    def test_main_persists_candidate_snapshot_with_compact_trigger_date(self):
+        item = candidate("000001")
+        item["wyckoff"]["trigger_date"] = "20260806"
+        item["signals"]["provider_flag"] = np.bool_(True)
+
+        def fake_scan(*_args, metrics=None, **_kwargs):
+            metrics.update({"batch_count": 1})
+            return [item]
+
+        with tempfile.TemporaryDirectory() as history_dir, \
+             tempfile.TemporaryDirectory() as report_dir, \
+             patch.object(dc, "load_regime_context", return_value={
+                 "score": 80, "data_date": "2026-08-06",
+             }), \
+             patch("fetchers.sector_data.get_last_trading_day",
+                   return_value=("2026-08-06", "snapshot")), \
+             patch.object(dc, "resolve_recommendation_date",
+                          return_value="2026-08-06"), \
+             patch.object(dc, "is_recommendation_session", return_value=False), \
+             patch.object(dc, "pick_hot_sectors", return_value=[{
+                 "code": "BK1", "name": "测试板块", "sector_score": 60,
+             }]), \
+             patch.object(dc, "scan_sectors", side_effect=fake_scan), \
+             patch.object(
+                 dc, "save_snapshot_if_official",
+                 side_effect=lambda source: (
+                     __import__("core.recommendation_snapshot",
+                                fromlist=["save_snapshot_if_official"])
+                     .save_snapshot_if_official(source, Path(history_dir))
+                 ),
+             ), \
+             patch.object(dc, "REPORTS_DIR", Path(report_dir)), \
+             patch.object(sys, "argv", ["daily_candidates.py", "--json",
+                                          "--no-html"]):
+            first_stdout = io.StringIO()
+            with redirect_stdout(first_stdout):
+                dc.main()
+            second_stdout = io.StringIO()
+            with redirect_stdout(second_stdout):
+                dc.main()
+
+        first = json.loads(first_stdout.getvalue())
+        second = json.loads(second_stdout.getvalue())
+        self.assertEqual(first["meta"]["tracking"]["status"], "created")
+        self.assertEqual(second["meta"]["tracking"]["status"], "unchanged")
+        self.assertEqual(
+            first["meta"]["tracking"]["path"],
+            second["meta"]["tracking"]["path"],
+        )
+        self.assertTrue(first["meta"]["tracking"]["path"].endswith(
+            "2026-08-06.json"))
 
 
 def run_daily_candidates_tests():

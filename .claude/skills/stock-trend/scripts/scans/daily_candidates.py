@@ -48,6 +48,7 @@ from core.source_health import (
 )
 from core.recommendation_snapshot import save_snapshot_if_official
 from core.recommendation_snapshot import SnapshotConflict, SnapshotValidationError
+from core.recommendation_snapshot import _normalize_for_json
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
 DEFAULT_MAX_SECTOR_EXPANSION = 120
@@ -137,6 +138,13 @@ def _record_degradation(metrics, reason):
         reasons.append(reason)
 
 
+def _record_advisory(metrics, reason):
+    """Record non-blocking provenance advice without degrading scan health."""
+    reasons = metrics.setdefault("advisory_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+
+
 def _record_failed_batch(metrics, batch, exc):
     """Retain the failed batch and its exception type in the public audit."""
     metrics.setdefault("failed_batches", []).append({
@@ -154,6 +162,10 @@ def _complete_performance(performance, source_health, candidates, buckets,
         completed.setdefault(field, 0.0)
     for field in _PERFORMANCE_FUNNEL_FIELDS:
         completed.setdefault(field, 0)
+    completed.setdefault(
+        "sector_expansion_total_count",
+        completed.get("sector_qualified_count", 0),
+    )
     completed["final_candidate_count"] = len(candidates)
     # Alias the historical ``final`` name with the business-facing output
     # stage used in the repair plan and downstream dashboards.
@@ -174,6 +186,7 @@ def _complete_performance(performance, source_health, candidates, buckets,
     completed["actionable_count"] = len(buckets.get("actionable", []))
     completed["total_seconds"] = max(0.0, float(total_seconds))
     completed.setdefault("degradation_reasons", [])
+    completed.setdefault("advisory_reasons", [])
     completed.setdefault("failed_batches", [])
     attempted_batches = int(completed.get("batch_count", 0))
     failed_batches = len(completed["failed_batches"])
@@ -236,6 +249,11 @@ def _attach_performance_audit(output, performance, output_format):
 def _performance_markdown(performance):
     if not performance:
         return []
+    expansion_total = (
+        performance.get("sector_expansion_total_count")
+        or performance.get("sector_qualified_count")
+        or performance.get("sector_universe_count", 0)
+    )
     phase_labels = (
         ("板块排行", "sector_ranking_seconds"),
         ("板块成分", "sector_membership_seconds"),
@@ -254,6 +272,16 @@ def _performance_markdown(performance):
         f"热度合格 {performance.get('sector_qualified_count', 0)} → "
         f"实际展开 {performance.get('sector_expanded_count', 0)}",
         "",
+        f"**板块覆盖率**: "
+        f"{float(performance.get('sector_scan_coverage', 1.0)):.1%} | "
+        f"是否截断: "
+        f"{'是' if performance.get('sector_expansion_truncated') else '否'}"
+        + (
+            f" | 如需完整展开可复跑 `--max-sector-expansion "
+            f"{expansion_total}`"
+            if performance.get('sector_expansion_truncated') else ""
+        ),
+        "",
         "**股票漏斗**: "
         f"批次 {performance.get('batch_count', 0)} → "
         f"原始 {performance.get('raw_candidate_count', 0)} → "
@@ -267,6 +295,9 @@ def _performance_markdown(performance):
         "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
         f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
+        "",
+        f"**辅助提示**: "
+        f"{'、'.join(performance.get('advisory_reasons', [])) or '无'}",
         "",
         "| 数据源 | 逻辑请求 | Provider尝试 | 缓存命中 | 失败 | 熔断 | 状态 | 失败原因 |",
         "|---|---:|---:|---:|---:|---:|---|---|",
@@ -288,6 +319,11 @@ def _performance_markdown(performance):
 def _performance_html(performance):
     if not performance:
         return ""
+    expansion_total = (
+        performance.get("sector_expansion_total_count")
+        or performance.get("sector_qualified_count")
+        or performance.get("sector_universe_count", 0)
+    )
     rows = []
     for source in SOURCE_HEALTH_NAMES:
         state = performance.get("sources", {}).get(source, {})
@@ -323,11 +359,24 @@ def _performance_html(performance):
     scan_status = escape(str(performance.get("scan_status", "complete")))
     degradation_reasons = escape(
         "、".join(performance.get("degradation_reasons", [])) or "无")
+    advisory_reasons = escape(
+        "、".join(performance.get("advisory_reasons", [])) or "无")
+    coverage_text = (
+        f"板块覆盖率={float(performance.get('sector_scan_coverage', 1.0)):.1%} | "
+        f"是否截断={'是' if performance.get('sector_expansion_truncated') else '否'}"
+        + (
+            f" | 完整展开可复跑 --max-sector-expansion "
+            f"{expansion_total}"
+            if performance.get('sector_expansion_truncated') else ""
+        )
+    )
     return (
         "<section><h2 style='font-size:18px;margin:18px 0 8px'>"
         "性能与数据源审计</h2>"
         f"<p class='dt'>{phase_text}</p><p class='dt'>{funnel_text}</p>"
+        f"<p class='dt'>{escape(coverage_text)}</p>"
         f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
+        f"<p class='dt'>辅助提示={advisory_reasons}</p>"
         "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
         "<th>Provider尝试</th><th>缓存</th><th>失败</th><th>熔断</th>"
         "<th>状态</th><th>失败原因</th></tr></thead><tbody>"
@@ -846,7 +895,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             else:
                 resonance_quality = "stale"
                 resonance_reason = "date_mismatch"
-                _record_degradation(metrics, "resonance_stale:date_mismatch")
+                _record_advisory(metrics, "resonance_stale:date_mismatch")
         except Exception as exc:
             resonance_quality = "error"
             resonance_reason = type(exc).__name__
@@ -942,6 +991,11 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         expansion_step = max(1, int(sector_expansion_step))
         expansion_limit = max(1, int(max_sector_expansion))
         scan_limit = min(len(ordered_sector_codes), expansion_limit)
+        total_sector_count = len(ordered_sector_codes)
+        metrics["sector_expansion_total_count"] = total_sector_count
+        metrics["sector_scan_coverage"] = round(
+            scan_limit / max(1, total_sector_count), 4)
+        metrics["sector_expansion_truncated"] = total_sector_count > scan_limit
         if len(ordered_sector_codes) > scan_limit:
             metrics["sector_expansion_limit"] = expansion_limit
             reasons = metrics.setdefault("degradation_reasons", [])
@@ -956,6 +1010,9 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
             cursor += window_size
             window_size = min(expansion_step, scan_limit - cursor)
     else:
+        metrics["sector_expansion_total_count"] = len(ordered_sector_codes)
+        metrics["sector_scan_coverage"] = 1.0
+        metrics["sector_expansion_truncated"] = False
         windows = [
             (i, min(batch_size, len(ordered_sector_codes) - i))
             for i in range(0, len(ordered_sector_codes), batch_size)
@@ -1996,7 +2053,8 @@ def main():
             except Exception as e:
                 print(f"⚠️ HTML 生成失败: {e}", file=sys.stderr)
         _emit_performance_summary(performance)
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        print(json.dumps(_normalize_for_json(out),
+                         ensure_ascii=False, indent=2))
         return
 
     # Assemble every requested format exactly once before freezing one shared
