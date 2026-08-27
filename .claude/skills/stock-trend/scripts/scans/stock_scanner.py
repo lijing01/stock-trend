@@ -148,6 +148,16 @@ def build_sector_membership(sector_code, sector_name="", context=None,
         "membership_data_date": stock.get("membership_data_date", ""),
         "membership_quality": stock.get("membership_quality", "good"),
         "membership_cache_error": stock.get("membership_cache_error", ""),
+        "membership_cache_at": stock.get("membership_cache_at", ""),
+        "membership_cache_age_hours": stock.get(
+            "membership_cache_age_hours"),
+        "membership_cache_tier": stock.get("membership_cache_tier", ""),
+        "membership_fallback_reason": stock.get(
+            "membership_fallback_reason", ""),
+        "membership_provider_attempts": stock.get(
+            "membership_provider_attempts", 0),
+        "membership_fetch_evidence": copy.deepcopy(
+            stock.get("membership_fetch_evidence", {})),
         "sector_type": context.get("sector_type", ""),
         "capital_evidence": context.get("capital_evidence", "unknown"),
     }
@@ -276,6 +286,15 @@ def _evidenced_fetch(fetcher, *args, usable=None, **kwargs):
         attempted=True, provider_attempts=1, reason=reason))
 
 
+def _unpack_source_result(result):
+    """Return payload and evidence from either new or legacy fetchers."""
+    if isinstance(result, dict) and set(
+            ("payload", "live_attempt")) <= set(result):
+        return result["payload"], result["live_attempt"]
+    return result, live_attempt(
+        attempted=False, cache_used=bool(result), stale=False)
+
+
 def _cache_fetch(fetcher, *args, **kwargs):
     """Call cache-only while retaining compatibility with older test doubles."""
     try:
@@ -335,13 +354,39 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     all_stocks = []  # list of (stock_dict, sector_info)
 
     def _fetch_one_sector(code):
+        def _with_evidence(stocks, attempt):
+            return [
+                {**stock, "membership_fetch_evidence": copy.deepcopy(attempt)}
+                for stock in (stocks or [])
+            ]
+
         try:
             cache_only = _source_unavailable(source_health, "sector_membership")
-            stocks = (
-                get_sector_stocks_cached(code, top_n=top_n_per_sector)
-                if cache_only else
-                get_sector_stocks(code, top_n=top_n_per_sector)
-            )
+            if cache_only:
+                stocks = get_sector_stocks_cached(
+                    code, top_n=top_n_per_sector)
+                attempt = live_attempt(
+                    attempted=False, cache_used=bool(stocks),
+                    stale=bool(stocks), reason="cache_only" if stocks else "")
+            else:
+                try:
+                    fetched = get_sector_stocks(
+                        code, top_n=top_n_per_sector, with_evidence=True)
+                except TypeError as exc:
+                    if "with_evidence" not in str(exc):
+                        raise
+                    fetched = get_sector_stocks(
+                        code, top_n=top_n_per_sector)
+                if isinstance(fetched, dict) and set(
+                        ("payload", "live_attempt")) <= set(fetched):
+                    stocks = fetched["payload"]
+                    attempt = fetched["live_attempt"]
+                else:
+                    stocks = fetched
+                    attempt = live_attempt(
+                        attempted=True, provider_attempts=1,
+                        reason="" if stocks else "empty")
+            stocks = _with_evidence(stocks, attempt)
             if metrics is not None:
                 key = ("sector_membership_cache_hits" if cache_only or (
                     stocks and stocks[0].get("membership_source") == "cache")
@@ -399,6 +444,10 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                 attempt = live_attempt(
                     attempted=True, provider_attempts=1,
                     reason="" if stocks else "empty")
+            stocks = [
+                {**stock, "membership_fetch_evidence": copy.deepcopy(attempt)}
+                for stock in (stocks or [])
+            ]
             return source_result(_membership_payload(code, stocks), attempt)
         except Exception as exc:
             attempts = getattr(exc, "provider_attempts", 0)
@@ -411,8 +460,15 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             )
 
     def _fetch_membership_cache(code):
-        return _membership_payload(
-            code, get_sector_stocks_cached(code, top_n=top_n_per_sector))
+        stocks = get_sector_stocks_cached(code, top_n=top_n_per_sector)
+        attempt = live_attempt(
+            attempted=False, cache_used=bool(stocks), stale=bool(stocks),
+            reason="cache_only" if stocks else "")
+        stocks = [
+            {**stock, "membership_fetch_evidence": copy.deepcopy(attempt)}
+            for stock in (stocks or [])
+        ]
+        return _membership_payload(code, stocks)
 
     if isinstance(source_health, RunSourceHealth):
         fetched = bounded_source_map(
@@ -503,6 +559,17 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             "membership_quality": primary.get("membership_quality", "good"),
             "membership_cache_error": primary.get(
                 "membership_cache_error", ""),
+            "membership_cache_at": primary.get("membership_cache_at", ""),
+            "membership_cache_age_hours": primary.get(
+                "membership_cache_age_hours"),
+            "membership_cache_tier": primary.get(
+                "membership_cache_tier", ""),
+            "membership_fallback_reason": primary.get(
+                "membership_fallback_reason", ""),
+            "membership_provider_attempts": primary.get(
+                "membership_provider_attempts", 0),
+            "membership_fetch_evidence": copy.deepcopy(
+                primary.get("membership_fetch_evidence", {})),
             "sector_memberships": memberships,
         })
 
@@ -791,6 +858,72 @@ def _usable_fundamental_payload(payload):
     return _validate_fundamental_cache(payload)["valid"]
 
 
+def _fundamental_failure_reason(payload, verdict=None):
+    """Preserve provider/cache reason when a fetcher returned an invalid payload."""
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    provider_failures = meta.get("provider_failures", [])
+    if isinstance(provider_failures, list):
+        for failure in provider_failures:
+            if isinstance(failure, dict) and failure.get("reason"):
+                return str(failure["reason"])
+
+    errors = payload.get("errors", []) if isinstance(payload, dict) else []
+    if isinstance(errors, (list, tuple)):
+        error_text = " ".join(str(error) for error in errors if error)
+    else:
+        error_text = str(errors or "")
+    if error_text:
+        classified = classify_failure(error_text)
+        return classified if classified != "unknown" else "provider_error"
+
+    reasons = verdict.get("reasons", []) if isinstance(verdict, dict) else []
+    for reason in ("wrong_trading_date", "cache_expired", "quality_error",
+                   "source_error", "payload_error", "insufficient_data"):
+        if reason in reasons:
+            return reason
+    return "empty"
+
+
+def _same_day_membership_fundamental_fallback(candidate, as_of_date=""):
+    """Build scan-grade PE evidence from a verified live member snapshot.
+
+    The sector constituent response already contains the current dynamic PE.
+    It is safe to use that one metric only when the membership response was
+    live, marked good, and covers the exact recommendation date.  Cached or
+    degraded membership never crosses this boundary, so this fallback cannot
+    promote the stale snapshot seen in the report.
+    """
+    if not as_of_date:
+        return None
+    if candidate.get("membership_source") != "realtime" \
+            or candidate.get("membership_quality") != "good" \
+            or candidate.get("membership_data_date") != as_of_date:
+        return None
+    pe = _optional_number(candidate.get("pe"))
+    if pe is None or not math.isfinite(pe) or pe <= 0:
+        return None
+    market_cap = _optional_number(candidate.get("market_cap"))
+    summary = {
+        "data_quality": "partial",
+        "pe_ttm": round(pe, 2),
+        "_fallback_source": "sector_membership_quote",
+    }
+    if market_cap is not None and math.isfinite(market_cap) and market_cap > 0:
+        summary["market_cap_billion"] = round(market_cap / 1e8, 2)
+    return {
+        "meta": {
+            "ts_code": candidate.get("ts_code", ""),
+            "data_source": "sector_membership_quote",
+            "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "fetch_mode": "same_day_fallback",
+        },
+        "summary": summary,
+        "data": {},
+        "errors": [],
+    }
+
+
 def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
                         live_deadline=None, expected_trading_date=""):
     """Fetch capital flow for a stock via CLI."""
@@ -872,7 +1005,7 @@ def _fetch_fundamental(ts_code, cache_only=False, with_evidence=False,
 
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/fundamental.py"),
-        ts_code, "--asset", "E", "-o", str(cache_path),
+        ts_code, "--asset", "E", "--fast", "-o", str(cache_path),
     ]
     result = run_script(
         cmd, label=f"fund_{ts_code}",
@@ -884,7 +1017,8 @@ def _fetch_fundamental(ts_code, cache_only=False, with_evidence=False,
         refreshed_verdict = _validate_fundamental_cache(
             payload, expected_trading_date)
         if not refreshed_verdict["valid"]:
-            attempt["reason"] = "empty"
+            attempt["reason"] = _fundamental_failure_reason(
+                payload, refreshed_verdict)
             payload = _with_cache_verdict(payload, refreshed_verdict)
         wrapped = source_result(payload, attempt)
         return wrapped if with_evidence else payload
@@ -1075,7 +1209,10 @@ def score_capital(candidate, capital_data):
 def score_fundamental_quick(candidate, fundamental_data):
     """Score fundamental dimension (0-100).
 
-    Components: PE percentile + ROE + profit growth + revenue growth.
+    Components: PE percentile + conservative absolute PE/PB fallback + ROE +
+    profit growth + revenue growth.  The absolute valuation fallback is only
+    used when no historical percentile is available, which is the scan-grade
+    shape returned by the lightweight providers.
     """
     if not fundamental_data:
         return 50.0
@@ -1095,6 +1232,42 @@ def score_fundamental_quick(candidate, fundamental_data):
             score += 10
         elif pe_pct > 80:
             score -= 15
+    else:
+        # Partial quote providers do not have a 3-year distribution.  Use
+        # broad, deliberately capped valuation priors so PE=5 and PE=500 do
+        # not collapse to the same neutral score.  This is only 15 points of
+        # the 100-point dimension and is not a substitute for fundamentals.
+        pe = _optional_number(summary.get("pe_ttm"))
+        if pe is not None and math.isfinite(pe):
+            if pe <= 0:
+                score -= 10
+            elif pe <= 8:
+                score += 10
+            elif pe <= 15:
+                score += 7
+            elif pe <= 25:
+                score += 3
+            elif pe <= 40:
+                score -= 2
+            elif pe <= 80:
+                score -= 6
+            else:
+                score -= 10
+
+        pb = _optional_number(summary.get("pb"))
+        if pb is not None and math.isfinite(pb):
+            if pb <= 0:
+                score -= 5
+            elif pb <= 1:
+                score += 5
+            elif pb <= 2:
+                score += 3
+            elif pb <= 4:
+                pass
+            elif pb <= 8:
+                score -= 3
+            else:
+                score -= 5
 
     # ROE
     roe = _safe_float(summary.get("roe"))
@@ -1292,37 +1465,50 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     # Pre-fetch all K-line data in parallel
     print(f"  Fetching K-line data...", file=sys.stderr)
     kline_data = {}
+    source_evidence = {
+        "kline": {}, "capital": {}, "fundamental": {},
+    }
+
+    def _record_source_evidence(source, ts_code, attempt):
+        if isinstance(attempt, dict):
+            source_evidence[source][ts_code] = copy.deepcopy(attempt)
 
     stage_start = time.monotonic()
 
     def _fetch_one_kline(c):
         ts_code = c["ts_code"]
         cache_only = _source_unavailable(source_health, "kline")
-        try:
-            kline = _fetch_kline(
-                ts_code, as_of_date=as_of_date, cache_only=cache_only)
-        except TypeError as exc:
-            if "cache_only" not in str(exc):
-                raise
-            kline = _fetch_kline(ts_code, as_of_date=as_of_date)
+        fetch_kwargs = {"as_of_date": as_of_date}
+        if cache_only:
+            fetch_kwargs["cache_only"] = True
+        wrapped = _evidenced_fetch(
+            _fetch_kline, ts_code, **fetch_kwargs,
+            usable=lambda payload: bool(
+                payload and payload.get("data")
+                and (not as_of_date
+                     or latest_data_date(payload) >= as_of_date)
+                and not payload.get("meta", {}).get("refresh_error")))
+        kline, attempt = _unpack_source_result(wrapped)
+        _record_source_evidence("kline", ts_code, attempt)
         kline_current = bool(
             kline and kline.get("data")
             and (not as_of_date or latest_data_date(kline) >= as_of_date)
             and not kline.get("meta", {}).get("refresh_error")
         )
         if kline and kline.get("data"):
-            if cache_only and metrics is not None:
+            if not attempt.get("attempted") and metrics is not None:
                 metrics["kline_cache_hits"] = metrics.get("kline_cache_hits", 0) + 1
-            if not cache_only:
-                if kline_current:
+            if attempt.get("attempted"):
+                if kline_current and not attempt.get("reason"):
                     _source_succeeded(source_health, "kline")
                 else:
                     _source_failed(source_health, "kline")
         else:
-            _source_failed(source_health, "kline")
+            if attempt.get("attempted"):
+                _source_failed(source_health, "kline")
             if metrics is not None:
                 metrics["kline_failures"] = metrics.get("kline_failures", 0) + 1
-        return ts_code, kline
+        return ts_code, kline, attempt
 
     if isinstance(source_health, RunSourceHealth):
         def _live_kline(candidate):
@@ -1340,14 +1526,17 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             lambda candidate: _cache_fetch(
                 _fetch_kline, candidate["ts_code"],
                 as_of_date=as_of_date),
-            source_health.live_deadline, max_workers=max_workers)
-        kline_data.update({item["ts_code"]: payload
-                           for item, payload in fetched})
+            source_health.live_deadline, max_workers=max_workers,
+            include_evidence=True)
+        for item, result in fetched:
+            payload, attempt = _unpack_source_result(result)
+            kline_data[item["ts_code"]] = payload
+            _record_source_evidence("kline", item["ts_code"], attempt)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_fetch_one_kline, c) for c in candidates]
             for fut in as_completed(futures):
-                ts_code, kline = fut.result()
+                ts_code, kline, _ = fut.result()
                 kline_data[ts_code] = kline
 
     if metrics is not None:
@@ -1407,17 +1596,19 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     def _fetch_one_cap(c):
         ts_code = c["ts_code"]
         cache_only = _source_unavailable(source_health, "capital")
-        try:
-            data = _fetch_capital_for_run(ts_code, cache_only=cache_only)
-        except TypeError as exc:
-            if "cache_only" not in str(exc):
-                raise
-            data = _fetch_capital_for_run(ts_code)
-        if _usable_capital_payload(data) and not cache_only:
-            _source_succeeded(source_health, "capital")
-        elif not cache_only:
-            _source_failed(source_health, "capital")
-        return ts_code, data
+        fetch_kwargs = {"cache_only": True} if cache_only else {}
+        wrapped = _evidenced_fetch(
+            _fetch_capital_for_run, ts_code, **fetch_kwargs,
+            usable=_usable_capital_payload)
+        data, attempt = _unpack_source_result(wrapped)
+        _record_source_evidence("capital", ts_code, attempt)
+        usable = _usable_capital_payload(data)
+        if attempt.get("attempted"):
+            if usable and not attempt.get("reason"):
+                _source_succeeded(source_health, "capital")
+            else:
+                _source_failed(source_health, "capital")
+        return ts_code, data, attempt
 
     if isinstance(source_health, RunSourceHealth):
         with ThreadPoolExecutor(max_workers=2) as dimension_pool:
@@ -1430,7 +1621,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     usable=_usable_capital_payload),
                 lambda candidate: _cache_fetch(
                     _fetch_capital_for_run, candidate["ts_code"]),
-                source_health.live_deadline, max_workers)
+                source_health.live_deadline, max_workers,
+                include_evidence=True)
             fundamental_future = dimension_pool.submit(
                 bounded_source_map,
                 "fundamental", eligible_candidates, source_health,
@@ -1440,17 +1632,20 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     usable=_usable_fundamental_payload),
                 lambda candidate: _cache_fetch(
                     _fetch_fundamental_for_run, candidate["ts_code"]),
-                source_health.live_deadline, max_workers)
+                source_health.live_deadline, max_workers,
+                include_evidence=True)
             fetched = capital_future.result()
             prefetched_fundamental = fundamental_future.result()
-        capital_data.update({item["ts_code"]: payload
-                             for item, payload in fetched})
+        for item, result in fetched:
+            payload, attempt = _unpack_source_result(result)
+            capital_data[item["ts_code"]] = payload
+            _record_source_evidence("capital", item["ts_code"], attempt)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_fetch_one_cap, c)
                        for c in eligible_candidates]
             for fut in as_completed(futures):
-                ts_code, cap = fut.result()
+                ts_code, cap, _ = fut.result()
                 capital_data[ts_code] = cap
     if metrics is not None:
         metrics["capital_seconds"] = metrics.get("capital_seconds", 0.0) + (
@@ -1467,35 +1662,59 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     def _fetch_one_fund(c):
         ts_code = c["ts_code"]
         cache_only = _source_unavailable(source_health, "fundamental")
-        try:
-            data = _fetch_fundamental_for_run(
-                ts_code, cache_only=cache_only)
-        except TypeError as exc:
-            if "cache_only" not in str(exc):
-                raise
-            data = _fetch_fundamental_for_run(ts_code)
-        if _usable_fundamental_payload(data) and not cache_only:
-            _source_succeeded(source_health, "fundamental")
-        elif not cache_only:
-            _source_failed(source_health, "fundamental")
-        return ts_code, data
+        fetch_kwargs = {}
+        if cache_only:
+            fetch_kwargs["cache_only"] = True
+        wrapped = _evidenced_fetch(
+            _fetch_fundamental_for_run, ts_code, **fetch_kwargs,
+            usable=_usable_fundamental_payload)
+        data, attempt = _unpack_source_result(wrapped)
+        _record_source_evidence("fundamental", ts_code, attempt)
+        usable = _usable_fundamental_payload(data)
+        if attempt.get("attempted"):
+            if usable and not attempt.get("reason"):
+                _source_succeeded(source_health, "fundamental")
+            else:
+                _source_failed(source_health, "fundamental")
+        return ts_code, data, attempt
 
     if isinstance(source_health, RunSourceHealth):
-        fundamental_data.update({item["ts_code"]: payload
-                                 for item, payload
-                                 in (prefetched_fundamental or [])})
+        for item, result in prefetched_fundamental or []:
+            payload, attempt = _unpack_source_result(result)
+            fundamental_data[item["ts_code"]] = payload
+            _record_source_evidence(
+                "fundamental", item["ts_code"], attempt)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_fetch_one_fund, c)
                        for c in eligible_candidates]
             for fut in as_completed(futures):
-                ts_code, fund = fut.result()
+                ts_code, fund, _ = fut.result()
                 fundamental_data[ts_code] = fund
     if metrics is not None:
         metrics["fundamental_seconds"] = metrics.get(
             "fundamental_seconds", 0.0) + (time.monotonic() - stage_start)
         metrics["fundamental_requests"] = metrics.get(
             "fundamental_requests", 0) + len(eligible_candidates)
+
+    # A live sector response contains one same-day PE field.  Use it only as
+    # an explicit partial fallback after the independent fundamental fetch is
+    # unusable; the recommendation quality gate still sees this as partial
+    # fundamental coverage rather than pretending it is a full report.
+    for candidate in eligible_candidates:
+        ts_code = candidate["ts_code"]
+        if _usable_fundamental_payload(fundamental_data.get(ts_code)):
+            continue
+        fallback = _same_day_membership_fundamental_fallback(
+            candidate, as_of_date=as_of_date)
+        if fallback is None:
+            continue
+        fundamental_data[ts_code] = fallback
+        attempt = source_evidence["fundamental"].get(ts_code)
+        if not isinstance(attempt, dict):
+            attempt = live_attempt(attempted=False)
+            source_evidence["fundamental"][ts_code] = attempt
+        attempt["fallback_source"] = "sector_membership_quote"
 
     # Compute scores
     scored = []
@@ -1610,6 +1829,26 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             "membership_data_date": membership_date,
             "membership_quality": membership_quality,
             "membership_cache_error": membership_cache_error,
+            "membership_cache_at": primary_membership.get(
+                "membership_cache_at", ""),
+            "membership_cache_age_hours": primary_membership.get(
+                "membership_cache_age_hours"),
+            "membership_cache_tier": primary_membership.get(
+                "membership_cache_tier", ""),
+            "membership_fallback_reason": primary_membership.get(
+                "membership_fallback_reason", ""),
+            "membership_provider_attempts": primary_membership.get(
+                "membership_provider_attempts", 0),
+            "membership_fetch_evidence": copy.deepcopy(
+                primary_membership.get("membership_fetch_evidence", {})),
+            "source_evidence": {
+                source: copy.deepcopy(source_evidence.get(source, {}).get(
+                    ts, {}))
+                for source in ("kline", "capital", "fundamental")
+            } | {
+                "membership": copy.deepcopy(
+                    primary_membership.get("membership_fetch_evidence", {})),
+            },
             "sector_memberships": merge_sector_memberships(memberships),
             "change_pct": c.get("change_pct", 0),
             "sector_relative_rank": sector_rank,

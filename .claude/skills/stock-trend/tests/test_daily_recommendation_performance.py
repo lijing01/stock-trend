@@ -272,11 +272,45 @@ class TestRunSourceHealthContract(unittest.TestCase):
         self.assertIn("cache_miss", [
             event["event"] for event in health.events()])
 
+    def test_bounded_source_map_can_return_live_attempt_evidence(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth()
+        attempt = _attempt(provider_attempts=2, reason="timeout")
+        results = contract.bounded_source_map(
+            "fundamental", ["600001"], health,
+            lambda item: contract.source_result(
+                {"code": item}, attempt),
+            lambda item: {"cached": item}, time.monotonic() + 1,
+            max_workers=1, include_evidence=True)
+
+        self.assertEqual(results[0][0], "600001")
+        self.assertEqual(
+            results[0][1]["live_attempt"]["reason"], "timeout")
+        self.assertEqual(results[0][1]["payload"], {"code": "600001"})
+
+    def test_deadline_cache_evidence_explains_live_work_was_skipped(self):
+        contract = _source_health_contract(self)
+        for cached in (None, {"cached": True}):
+            with self.subTest(cache_hit=bool(cached)):
+                health = contract.RunSourceHealth()
+                results = contract.bounded_source_map(
+                    "fundamental", ["600001"], health,
+                    lambda item: self.fail("deadline must force cache-only"),
+                    lambda item: cached, time.monotonic() - 1,
+                    max_workers=1, include_evidence=True)
+
+                attempt = results[0][1]["live_attempt"]
+                self.assertFalse(attempt["attempted"])
+                self.assertEqual(attempt["reason"], "deadline")
+                self.assertEqual(attempt["cache_used"], bool(cached))
+
 
 class TestProductionPerformanceContract(unittest.TestCase):
     def test_production_deadline_and_budget_constants_bound_critical_path(self):
         contract = _source_health_contract(self)
-        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 75)
+        # The production budget was widened with the 25s provider fallback
+        # chain; keep the contract aligned with the current source constant.
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 110)
         self.assertGreater(contract.FINALIZATION_RESERVE_SECONDS, 0)
         self.assertEqual(set(contract.LIVE_ATTEMPT_TIMEOUT_SECONDS), set(SOURCES))
         self.assertEqual(set(contract.MAX_PROVIDER_ATTEMPTS), set(SOURCES))

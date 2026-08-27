@@ -1969,6 +1969,32 @@ class TestRecommendationPolicy(unittest.TestCase):
         detail = _candidate_diagnostic_text(candidate("1"))
         self.assertIn("数据问题/异常：无", detail)
 
+    def test_diagnostic_shows_provider_reason_for_fundamental_error(self):
+        item = candidate("1", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["fundamental_error"],
+            "dimensions": {
+                "fundamental": {
+                    "source": "error",
+                    "stale_reason": "fundamental_error",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "fundamental": {
+                "reason": "timeout",
+                "provider_attempts": 2,
+                "cache_used": True,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("抓取原因码timeout", detail)
+        self.assertIn("已回退缓存", detail)
+
     def test_json_output_keeps_candidates_and_adds_action_buckets(self):
         items = [candidate("1")]
         policy = {

@@ -633,8 +633,24 @@ def _rebind_primary_sector(item, peer_cohorts=None, as_of_date=""):
         "membership_data_date": primary.get("membership_data_date", ""),
         "membership_quality": primary.get("membership_quality", "good"),
         "membership_cache_error": primary.get("membership_cache_error", ""),
+        "membership_cache_at": primary.get("membership_cache_at", ""),
+        "membership_cache_age_hours": primary.get(
+            "membership_cache_age_hours"),
+        "membership_cache_tier": primary.get("membership_cache_tier", ""),
+        "membership_fallback_reason": primary.get(
+            "membership_fallback_reason", ""),
+        "membership_provider_attempts": primary.get(
+            "membership_provider_attempts", 0),
+        "membership_fetch_evidence": copy.deepcopy(
+            primary.get("membership_fetch_evidence", {})),
         "sector_memberships": memberships,
     })
+    evidence = rebound.setdefault("source_evidence", {})
+    if not isinstance(evidence, dict):
+        evidence = {}
+        rebound["source_evidence"] = evidence
+    evidence["membership"] = copy.deepcopy(
+        primary.get("membership_fetch_evidence", {}))
 
     dimensions = rebound.get("dimensions")
     raw_dimensions = rebound.get("raw_dimensions")
@@ -1062,6 +1078,15 @@ def _reason_detail(code, item):
             details.append(f"来源{dimension['source']}")
         if dimension.get("stale_reason"):
             details.append(f"原因码{dimension['stale_reason']}")
+        evidence = item.get("source_evidence", {})
+        evidence = evidence.get(dimension_name, {}) \
+            if isinstance(evidence, dict) else {}
+        if evidence.get("reason"):
+            details.append(f"抓取原因码{evidence['reason']}")
+        if evidence.get("provider_attempts"):
+            details.append(f"Provider尝试{evidence['provider_attempts']}次")
+        if evidence.get("cache_used"):
+            details.append("已回退缓存")
         suffix = f"（{'，'.join(details)}）" if details else ""
         return f"{REASON_LABELS[code]}{suffix}"
     return REASON_LABELS.get(code, str(code))
@@ -1089,6 +1114,17 @@ def _candidate_diagnostic_text(item):
                 detail += f"（来源{source}）"
             if cause:
                 detail += f"：{cause}"
+            evidence = item.get("source_evidence", {})
+            evidence = evidence.get(prefix, {}) \
+                if isinstance(evidence, dict) else {}
+            fallback_reason = item.get(
+                f"{prefix}_fallback_reason", "")
+            reason = evidence.get("reason") or fallback_reason
+            if reason and reason != "cache_only":
+                detail += f"，实时回退原因码{reason}"
+            age_hours = item.get(f"{prefix}_cache_age_hours")
+            if source == "cache" and isinstance(age_hours, (int, float)):
+                detail += f"，缓存年龄{age_hours:.1f}小时"
             data_reasons.append(detail)
 
     parts = []
@@ -1712,12 +1748,23 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         )
 
     performance_html = _performance_html(performance)
+    tracking_error = ""
+    tracking_warnings = ""
+    if tracking:
+        if tracking.get("error_type") or tracking.get("reason"):
+            tracking_error = (
+                f" | {escape(str(tracking.get('error_type')))}: "
+                f"{escape(str(tracking.get('reason')))}"
+            )
+        if tracking.get("normalization_warnings"):
+            tracking_warnings = (
+                " | 规范化字段 "
+                f"{len(tracking.get('normalization_warnings', []))}"
+            )
     tracking_html = (
         f"<p class='dt'>推荐快照追踪：{escape(str(tracking.get('status')))}"
         f"{(' | ' + escape(str(tracking.get('path')))) if tracking.get('path') else ''}"
-        f"{(' | ' + escape(str(tracking.get('error_type'))) + ': '
-            + escape(str(tracking.get('reason')))) if tracking.get('error_type') or tracking.get('reason') else ''}"
-        f"{(' | 规范化字段 ' + str(len(tracking.get('normalization_warnings', [])))) if tracking.get('normalization_warnings') else ''}</p>"
+        f"{tracking_error}{tracking_warnings}</p>"
         if tracking else ""
     )
 

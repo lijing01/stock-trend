@@ -102,6 +102,15 @@ def _check_result(result: dict) -> dict:
     return result["data"]
 
 
+def _unpack_fetch_result(result):
+    """Accept evidence-aware fetches and legacy test/provider payloads."""
+    if (isinstance(result, dict)
+            and set(("payload", "live_attempt")) <= set(result)
+            and isinstance(result.get("live_attempt"), dict)):
+        return result["payload"], result["live_attempt"]
+    return result, None
+
+
 # ──────────────────────── Sector List & Rankings ────────────────────────
 
 
@@ -184,13 +193,12 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
         try:
             fetched = _fetch_json(
                 url, timeout=timeout, retries=retries,
-                with_evidence=with_evidence, deadline=deadline)
-            if with_evidence:
-                provider_attempts += fetched["live_attempt"][
-                    "provider_attempts"]
-                data = fetched["payload"]
-            else:
-                data = fetched
+                # Evidence is collected internally even for the historical
+                # payload-only public API.
+                with_evidence=True, deadline=deadline)
+            data, attempt = _unpack_fetch_result(fetched)
+            if attempt:
+                provider_attempts += attempt.get("provider_attempts", 0)
             items = _check_result(data).get("diff", [])
             valid_items = [item for item in items if item.get("f12")]
             if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE:
@@ -383,6 +391,7 @@ def rank_hot_sectors(rankings: dict, top_n: int = 10,
 
 SECTOR_STOCKS_CACHE_DIR = CACHE_DIR / "sector_stocks"
 SECTOR_STOCKS_MAX_AGE_HOURS = 24 * 30
+SECTOR_STOCKS_RECENT_CACHE_MAX_AGE_HOURS = 24 * 5
 
 
 def _sector_stocks_cache_path(sector_code: str) -> Path:
@@ -425,26 +434,64 @@ def load_sector_stocks_cache(sector_code: str) -> Optional[dict]:
         return None
 
 
+def _sector_cache_metadata(cached_at: str) -> dict:
+    """Return bounded, display-safe age metadata for a cache snapshot."""
+    metadata = {
+        "cached_at": str(cached_at or ""),
+        "age_hours": None,
+        "tier": "unknown",
+    }
+    try:
+        cached_dt = datetime.fromisoformat(str(cached_at))
+        if cached_dt.tzinfo is not None:
+            cached_dt = cached_dt.replace(tzinfo=None)
+        age_hours = max(0.0, (datetime.now() - cached_dt).total_seconds() / 3600)
+    except (TypeError, ValueError):
+        return metadata
+    metadata["age_hours"] = round(age_hours, 1)
+    if cached_dt.date() == datetime.now().date():
+        metadata["tier"] = "same_day"
+    elif age_hours <= SECTOR_STOCKS_RECENT_CACHE_MAX_AGE_HOURS:
+        metadata["tier"] = "recent"
+    else:
+        metadata["tier"] = "old"
+    return metadata
+
+
 def _tag_sector_stocks(stocks: list[dict], source: str, data_date: str,
-                       quality: str) -> list[dict]:
+                       quality: str, cache_metadata: dict | None = None,
+                       fallback_reason: str = "",
+                       provider_attempts: int = 0) -> list[dict]:
+    cache_metadata = cache_metadata or {}
     return [{
         **stock,
         "membership_source": source,
         "membership_data_date": data_date,
         "membership_quality": quality,
+        "membership_cache_at": cache_metadata.get("cached_at", ""),
+        "membership_cache_age_hours": cache_metadata.get("age_hours"),
+        "membership_cache_tier": cache_metadata.get("tier", ""),
+        "membership_fallback_reason": fallback_reason,
+        "membership_provider_attempts": max(
+            0, int(provider_attempts or 0)),
     } for stock in stocks]
 
 
 def _load_tagged_sector_stocks_cache(sector_code: str,
-                                     top_n: int) -> list[dict]:
+                                     top_n: int, fallback_reason: str = "",
+                                     provider_attempts: int = 0) -> list[dict]:
     cached = load_sector_stocks_cache(sector_code)
     if not cached:
         return []
+    cache_metadata = _sector_cache_metadata(cached.get("cached_at", ""))
     return _tag_sector_stocks(
         cached["stocks"],
         source="cache",
         data_date=str(cached["cached_at"])[:10],
         quality="degraded",
+        cache_metadata=cache_metadata,
+        fallback_reason=fallback_reason,
+        provider_attempts=provider_attempts,
     )[:top_n]
 
 
@@ -452,7 +499,8 @@ def get_sector_stocks_cached(sector_code: str,
                              top_n: int = 50) -> list[dict]:
     """Return cached constituents without attempting a live request."""
     _sector_stocks_cache_path(sector_code)
-    return _load_tagged_sector_stocks_cache(sector_code, top_n)
+    return _load_tagged_sector_stocks_cache(
+        sector_code, top_n, fallback_reason="cache_only")
 
 
 def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
@@ -492,17 +540,18 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
     try:
         fetched = _fetch_json(
             url, timeout=timeout, retries=retries,
-            with_evidence=with_evidence, deadline=deadline)
-        if with_evidence:
-            provider_attempts = fetched["live_attempt"]["provider_attempts"]
-            data = fetched["payload"]
-        else:
-            data = fetched
+            # Keep attempt counts even when callers request plain stock rows.
+            with_evidence=True, deadline=deadline)
+        data, attempt = _unpack_fetch_result(fetched)
+        if attempt:
+            provider_attempts = attempt.get("provider_attempts", 0)
         items = _check_result(data).get("diff", [])
     except Exception as e:
         provider_attempts += getattr(e, "provider_attempts", 0)
         failure_reason = getattr(e, "reason", "") or classify_failure(e)
-        cached = _load_tagged_sector_stocks_cache(sector_code, top_n)
+        cached = _load_tagged_sector_stocks_cache(
+            sector_code, top_n, fallback_reason=failure_reason,
+            provider_attempts=provider_attempts)
         if cached:
             wrapped = source_result(cached, live_attempt(
                 attempted=provider_attempts > 0,
@@ -515,7 +564,9 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
             "无有效成分股且无可用快照") from e
     if not items:
         failure_reason = "empty"
-        cached = _load_tagged_sector_stocks_cache(sector_code, top_n)
+        cached = _load_tagged_sector_stocks_cache(
+            sector_code, top_n, fallback_reason=failure_reason,
+            provider_attempts=provider_attempts)
         if cached:
             wrapped = source_result(cached, live_attempt(
                 attempted=True, provider_attempts=provider_attempts,
@@ -539,7 +590,9 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
             stocks.append(stock)
     if not stocks:
         failure_reason = "empty"
-        cached = _load_tagged_sector_stocks_cache(sector_code, top_n)
+        cached = _load_tagged_sector_stocks_cache(
+            sector_code, top_n, fallback_reason=failure_reason,
+            provider_attempts=provider_attempts)
         if cached:
             wrapped = source_result(cached, live_attempt(
                 attempted=True, provider_attempts=provider_attempts,
@@ -563,6 +616,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         source="realtime",
         data_date=datetime.now().strftime("%Y-%m-%d"),
         quality="partial" if cache_error else "good",
+        provider_attempts=provider_attempts,
     )
     if cache_error:
         for stock in tagged:

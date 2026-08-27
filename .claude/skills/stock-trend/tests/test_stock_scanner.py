@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans import stock_scanner as sc
 from fetchers import sector_data as sd
+from fetchers import fundamental as fd
 
 
 def _make_kline(n=60, ts_code="TEST"):
@@ -453,6 +454,30 @@ class TestMetadata(unittest.TestCase):
 
         run.assert_called_once()
         self.assertEqual(result["summary"]["data_quality"], "good")
+        self.assertIn("--fast", run.call_args.args[0])
+
+    def test_error_fundamental_refresh_preserves_provider_reason(self):
+        error_payload = {
+            "meta": {
+                "data_source": "error",
+                "provider_failures": [{
+                    "provider": "eastmoney_quote", "reason": "dns",
+                }],
+            },
+            "summary": {"data_quality": "error"},
+            "errors": ["eastmoney_quote:dns"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json",
+                          side_effect=[None, error_payload]), \
+             patch.object(sc, "_cache_file_is_fresh", return_value=False), \
+             patch.object(sc, "run_script",
+                          return_value={"success": True}):
+            wrapped = sc._fetch_fundamental(
+                "600001.SH", with_evidence=True)
+
+        self.assertEqual(wrapped["live_attempt"]["reason"], "dns")
 
     def test_valid_fundamental_cache_skips_subprocess(self):
         cached = {
@@ -598,6 +623,146 @@ class TestSourceEvidenceAdapters(unittest.TestCase):
         self.assertEqual(wrapped["live_attempt"]["reason"], "dns")
         self.assertTrue(wrapped["live_attempt"]["cache_used"])
 
+    def test_gather_candidates_propagates_membership_fallback_evidence(self):
+        stocks = [{
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+        }]
+        wrapped = sd.source_result(stocks, sd.live_attempt(
+            attempted=True, provider_attempts=2, reason="dns",
+            cache_used=True, stale=True))
+        with patch.object(sd, "get_sector_stocks", return_value=wrapped):
+            result = sc.gather_candidates(
+                ["BK0001"], sector_context={"BK0001": {}},
+                source_health=sc.RunSourceHealth())
+
+        evidence = result["candidates"][0]["membership_fetch_evidence"]
+        self.assertEqual(evidence["reason"], "dns")
+        self.assertEqual(evidence["provider_attempts"], 2)
+        self.assertTrue(evidence["cache_used"])
+
+    def test_fast_fundamental_path_uses_quote_before_heavy_apis(self):
+        quote = {
+            "pe_ttm": 18.5, "pb": 1.7, "market_cap_billion": 123.4,
+        }
+        with patch.object(fd, "_fetch_em_quote_fallback",
+                          return_value=quote) as fallback:
+            result = fd.fetch_a_share_fundamentals_fast("600001")
+
+        fallback.assert_called_once_with("600001", with_evidence=True)
+        self.assertEqual(result["data_quality"], "partial")
+        self.assertEqual(result["_data_source"], "eastmoney_quote")
+        self.assertEqual(result["pe_ttm"], 18.5)
+
+    def test_full_fundamental_mode_does_not_reuse_fast_cache(self):
+        fast_payload = {
+            "meta": {"data_source": "eastmoney_quote", "fetch_mode": "fast"},
+            "summary": {"data_quality": "partial", "pe_ttm": 18.5},
+        }
+        with patch.object(fd, "load_cache",
+                          side_effect=[fast_payload, None]) as load, \
+             patch.object(fd, "fetch_a_share_fundamentals",
+                          return_value={"data_quality": "good"}) as full, \
+             patch.object(fd, "output_json"), \
+             patch.object(fd, "save_cache"), \
+             patch.object(sys, "argv", ["fundamental.py", "600001.SH"]):
+            fd.main()
+
+        full.assert_called_once_with("600001")
+        self.assertEqual(
+            load.call_args_list[0].args[0], "fundamental_600001.SH_full")
+        self.assertEqual(
+            load.call_args_list[1].args[0], "fundamental_600001.SH")
+
+    def test_fast_fundamental_preserves_provider_failure_evidence(self):
+        with patch.object(fd, "_fetch_em_quote_fallback",
+                          side_effect=RuntimeError("DNS lookup failed")), \
+             patch.object(fd, "fetch_a_share_fundamentals_tushare",
+                          side_effect=RuntimeError("provider timeout")):
+            result = fd.fetch_a_share_fundamentals_fast("600001")
+
+        self.assertEqual(result["data_quality"], "error")
+        self.assertEqual(
+            [failure["reason"] for failure in result["_provider_failures"]],
+            ["dns", "timeout"],
+        )
+        self.assertIn("eastmoney_quote:dns", result["_errors"])
+        self.assertIn("tushare_daily_basic:timeout", result["_errors"])
+
+    def test_partial_quote_fundamental_score_uses_available_valuation(self):
+        low = {"summary": {"data_quality": "partial", "pe_ttm": 5, "pb": 1}}
+        high = {"summary": {"data_quality": "partial", "pe_ttm": 500, "pb": 20}}
+
+        self.assertGreater(
+            sc.score_fundamental_quick(_make_candidate(), low),
+            sc.score_fundamental_quick(_make_candidate(), high),
+        )
+
+    def test_run_phase2_keeps_per_stock_source_evidence(self):
+        candidate = _make_candidate("600001")
+        kline = _make_kline(60, candidate["ts_code"])
+        fundamental = {
+            "meta": {"data_source": "error"},
+            "summary": {"data_quality": "error"},
+        }
+
+        def evidenced(fetch_payload, attempt):
+            return lambda *args, with_evidence=False, **kwargs: (
+                sc.source_result(fetch_payload, attempt)
+                if with_evidence else fetch_payload
+            )
+
+        with patch.object(sc, "_fetch_kline", side_effect=evidenced(
+                kline, sc.live_attempt(attempted=True, provider_attempts=1))), \
+             patch.object(sc, "_fetch_capital_flow", side_effect=evidenced(
+                 None, sc.live_attempt(attempted=True, provider_attempts=1,
+                                      reason="timeout"))), \
+             patch.object(sc, "_fetch_fundamental", side_effect=evidenced(
+                 fundamental, sc.live_attempt(
+                     attempted=True, provider_attempts=1, reason="timeout"))):
+            item = sc.run_phase2(
+                [candidate], max_workers=1,
+                source_health=sc.RunSourceHealth())[0]
+
+        self.assertEqual(
+            item["source_evidence"]["fundamental"]["reason"], "timeout")
+        self.assertEqual(
+            item["source_evidence"]["capital"]["reason"], "timeout")
+
+    def test_same_day_live_membership_pe_is_safe_fundamental_fallback(self):
+        candidate = _make_candidate("600001")
+        candidate.update({
+            "pe": 18.0,
+            "membership_source": "realtime",
+            "membership_quality": "good",
+            "membership_data_date": "2026-08-06",
+        })
+        capital = {
+            "meta": {"data_source": "eastmoney"},
+            "data": [{"date": "20260806", "main_net_inflow": 1}],
+        }
+        error_fundamental = {
+            "meta": {"data_source": "error"},
+            "summary": {"data_quality": "error"},
+        }
+        with patch.object(sc, "_fetch_kline",
+                          return_value=_make_dated_kline(
+                              60, candidate["ts_code"], "20260806")), \
+             patch.object(sc, "_fetch_capital_flow", return_value=capital), \
+             patch.object(sc, "_fetch_fundamental",
+                          return_value=error_fundamental):
+            item = sc.run_phase2(
+                [candidate], as_of_date="2026-08-06", max_workers=1)[0]
+
+        fundamental = item["data_quality"]["dimensions"]["fundamental"]
+        self.assertTrue(fundamental["available"])
+        self.assertEqual(fundamental["quality"], "partial")
+        self.assertEqual(fundamental["source"], "sector_membership_quote")
+        self.assertNotIn("fundamental_error", item["data_quality"]["reasons"])
+        self.assertEqual(
+            item["source_evidence"]["fundamental"]["fallback_source"],
+            "sector_membership_quote")
+
     def test_ranking_adapter_aggregates_exact_provider_attempts(self):
         rows = [{
             "f12": f"BK{i}", "f14": f"板块{i}", "f3": 1,
@@ -668,11 +833,14 @@ class TestSectorConstituentFallback(unittest.TestCase):
         self.assertEqual(stocks[0]["membership_source"], "cache")
         self.assertEqual(stocks[0]["membership_quality"], "degraded")
         self.assertTrue(stocks[0]["membership_data_date"])
+        self.assertEqual(
+            stocks[0]["membership_fallback_reason"], "dns")
+        self.assertIn("membership_cache_age_hours", stocks[0])
 
     def test_empty_live_sector_stocks_fall_back_to_snapshot(self):
         empty_payload = {"rc": 0, "data": {"diff": []}}
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)):
+                patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)):
             with patch.object(sd, "_fetch_json", return_value=self.payload):
                 sd.get_sector_stocks("BK0001")
             with patch.object(sd, "_fetch_json", return_value=empty_payload):
@@ -680,6 +848,17 @@ class TestSectorConstituentFallback(unittest.TestCase):
 
         self.assertEqual(stocks[0]["membership_source"], "cache")
         self.assertEqual(stocks[0]["membership_quality"], "degraded")
+
+    def test_default_sector_stocks_keeps_provider_attempt_count(self):
+        fetched = sc.source_result(
+            self.payload,
+            sc.live_attempt(attempted=True, provider_attempts=2),
+        )
+        with patch.object(sd, "_fetch_json", return_value=fetched):
+            stocks = sd.get_sector_stocks("BK0001")
+
+        self.assertEqual(stocks[0]["membership_source"], "realtime")
+        self.assertEqual(stocks[0]["membership_provider_attempts"], 2)
 
     def test_empty_live_sector_stocks_without_snapshot_raise(self):
         empty_payload = {"rc": 0, "data": {"diff": []}}

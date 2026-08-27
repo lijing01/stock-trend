@@ -312,9 +312,14 @@ def bounded_source_map(
         source: str, items: Iterable[Any], health: RunSourceHealth,
         live_fetch: Callable[[Any], dict], cache_fetch: Callable[[Any], Any],
         live_deadline: float, max_workers: int = 4,
-        cache_usable: Callable[[Any], bool] | None = None
+        cache_usable: Callable[[Any], bool] | None = None,
+        include_evidence: bool = False,
         ) -> list[tuple[Any, Any]]:
     """Run admitted live work incrementally, then finish cache-only.
+
+    When ``include_evidence`` is true, the second tuple value is the internal
+    ``source_result`` wrapper.  The default remains the historical payload-only
+    contract so existing callers do not receive internal attempt metadata.
 
     The executor is deliberately shut down without waiting after the deadline;
     completed late work cannot mutate health because its permit is finalized by
@@ -326,13 +331,20 @@ def bounded_source_map(
     exhausted = False
     pool = ThreadPoolExecutor(max_workers=max_workers)
 
-    def cached(item: Any) -> Any:
+    def cached(item: Any, evidence_reason: str = "cache_only") -> Any:
         payload = cache_fetch(item)
         usable = cache_usable(payload) if cache_usable else bool(payload)
         health.record_cache_result(
             source, payload if usable else None, stale=usable,
+            # Keep the health event vocabulary stable; the wrapper carries
+            # the more precise scheduler reason for per-item diagnostics.
             reason="cache_only")
-        return payload
+        if not include_evidence:
+            return payload
+        return source_result(payload, live_attempt(
+            attempted=False, cache_used=usable, stale=usable,
+            reason=evidence_reason if evidence_reason else (
+                "cache_only" if usable else "")))
 
     try:
         while not exhausted or futures:
@@ -385,24 +397,55 @@ def bounded_source_map(
                     else:
                         health.mark_started(token)
                         health.complete_success(token, attempt)
-                    results.append((item, payload))
+                    results.append((
+                        item, wrapped if include_evidence else payload))
                 except Exception as exc:
-                    health.mark_started(token)
-                    health.complete_failure(token, live_attempt(
+                    failure = live_attempt(
                         attempted=True, provider_attempts=1,
-                        reason=classify_failure(exc)))
-                    results.append((item, cached(item)))
+                        reason=classify_failure(exc))
+                    health.mark_started(token)
+                    health.complete_failure(token, failure)
+                    fallback = cached(item)
+                    if include_evidence:
+                        fallback = source_result(
+                            fallback["payload"], {
+                                **failure,
+                                "cache_used": fallback["live_attempt"].get(
+                                    "cache_used", False),
+                                "stale": fallback["live_attempt"].get(
+                                    "stale", False),
+                            })
+                    results.append((item, fallback))
 
         for future, (item, token) in list(futures.items()):
             if future.cancel():
                 health.release_unstarted(token, "cancelled")
+                attempt = live_attempt(
+                    attempted=False, reason="cancelled")
             else:
                 health.mark_started(token)
-                health.complete_failure(token, live_attempt(
-                    attempted=True, provider_attempts=1, reason="timeout"))
-            results.append((item, cached(item)))
+                attempt = live_attempt(
+                    attempted=True, provider_attempts=1, reason="timeout")
+                health.complete_failure(token, attempt)
+            fallback = cached(item)
+            if include_evidence:
+                fallback = source_result(
+                    fallback["payload"], {
+                        **attempt,
+                        "cache_used": fallback["live_attempt"].get(
+                            "cache_used", False),
+                        "stale": fallback["live_attempt"].get(
+                            "stale", False),
+                    })
+            results.append((item, fallback))
+        if health.unavailable(source):
+            pending_reason = "source_unavailable"
+        elif time.monotonic() >= live_deadline:
+            pending_reason = "deadline"
+        else:
+            pending_reason = "scheduler_capacity"
         for item in pending_items:
-            results.append((item, cached(item)))
+            results.append((item, cached(item, pending_reason)))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
     return results

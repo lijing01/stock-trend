@@ -23,6 +23,7 @@ import sys
 import time
 import logging
 from core.cache_utils import load_cache, safe_float, save_cache, retry, get_market_day_ttl, output_json
+from core.source_health import classify_failure
 from datetime import datetime
 
 logging.getLogger("akshare").setLevel(logging.ERROR)
@@ -31,7 +32,34 @@ logging.getLogger("akshare").setLevel(logging.ERROR)
 _sf = lambda v: safe_float(v, round_to=2)
 
 
-def _fetch_em_quote_fallback(code):
+def _provider_failure(provider, error=None, reason=None):
+    """Build stable evidence for a lightweight provider attempt."""
+    failure = {
+        "provider": provider,
+        "reason": reason or classify_failure(error),
+    }
+    if error:
+        failure["error"] = str(error)
+    return failure
+
+
+def _provider_result(payload, failure=None, with_evidence=False):
+    """Keep legacy dict returns while allowing fast mode to retain evidence."""
+    if with_evidence:
+        return payload, failure
+    return payload
+
+
+def _unpack_provider_result(result):
+    """Accept both legacy dict adapters and evidence-aware tuples."""
+    if (isinstance(result, tuple) and len(result) == 2
+            and isinstance(result[0], dict)
+            and (result[1] is None or isinstance(result[1], dict))):
+        return result
+    return result, None
+
+
+def _fetch_em_quote_fallback(code, with_evidence=False):
     """Fallback: fetch basic PE/PB/market cap from eastmoney stock quote API.
 
     Used when AKShare calls fail entirely. Returns dict with at minimum
@@ -43,7 +71,9 @@ def _fetch_em_quote_fallback(code):
     ts_code = f"{code}.SZ" if not code.startswith("6") else f"{code}.SH"
     secid = build_secid(ts_code)
     if secid is None:
-        return {}
+        return _provider_result(
+            {}, _provider_failure("eastmoney_quote", reason="invalid_code"),
+            with_evidence)
 
     def _do_fetch(host):
         url = (f"https://{host}/api/qt/stock/get"
@@ -58,8 +88,9 @@ def _fetch_em_quote_fallback(code):
 
     try:
         data, used_host = rotate_push2_host(_do_fetch, max_retries=2)
-    except Exception:
-        return {}
+    except Exception as exc:
+        return _provider_result(
+            {}, _provider_failure("eastmoney_quote", exc), with_evidence)
 
     out = {}
     pe = safe_float(data.get("f115")) or safe_float(data.get("f116"))
@@ -76,10 +107,14 @@ def _fetch_em_quote_fallback(code):
         est_div_yield = (0.30 / out["pe_ttm"]) * 100
         out["dividend_yield_pct"] = round(est_div_yield, 2)
 
-    return out
+    if not out:
+        failure = _provider_failure(
+            "eastmoney_quote", reason="empty")
+        return _provider_result(out, failure, with_evidence)
+    return _provider_result(out, None, with_evidence)
 
 
-def fetch_a_share_fundamentals_tushare(code):
+def fetch_a_share_fundamentals_tushare(code, with_evidence=False):
     """Tushare fallback for A-share fundamentals when AKShare fails entirely.
 
     Uses ``pro.daily_basic`` to recover at least PE/PB/market cap. Returns a
@@ -121,10 +156,83 @@ def fetch_a_share_fundamentals_tushare(code):
     with ThreadPoolExecutor(1) as pool:
         fut = pool.submit(_do_fetch)
         try:
-            return fut.result(timeout=10)
+            out = fut.result(timeout=10)
+            if not out:
+                return _provider_result(
+                    out, _provider_failure(
+                        "tushare_daily_basic", reason="empty"),
+                    with_evidence)
+            return _provider_result(out, None, with_evidence)
         except Exception as exc:
-            print(f"Tushare fundamental fallback failed: {exc}", file=sys.stderr)
-            return {}
+            if not with_evidence:
+                print(
+                    f"Tushare fundamental fallback failed: {exc}",
+                    file=sys.stderr)
+            return _provider_result(
+                {}, _provider_failure("tushare_daily_basic", exc),
+                with_evidence)
+
+
+def fetch_a_share_fundamentals_fast(code):
+    """Fetch scan-grade fundamentals from bounded, lightweight providers.
+
+    The daily candidate scan only needs enough valuation evidence to score the
+    fundamental dimension.  Try the single-stock quote endpoint first so a
+    slow/failing historical AKShare call cannot turn a usable stock into an
+    ``fundamental_error``.  The full AKShare path remains available to detail
+    reports and callers that need ROE/growth/valuation history.
+    """
+    provider_failures = []
+    try:
+        quote, quote_failure = _unpack_provider_result(
+            _fetch_em_quote_fallback(code, with_evidence=True))
+    except Exception as exc:  # defensive: fallback adapters must not abort scan
+        quote = {}
+        quote_failure = _provider_failure("eastmoney_quote", exc)
+    if quote:
+        return {
+            **quote,
+            "data_quality": "partial",
+            "_data_source": "eastmoney_quote",
+            "_fallback_source": "eastmoney_quote",
+            "_fast_mode": True,
+        }
+
+    provider_failures.append(
+        quote_failure or _provider_failure("eastmoney_quote", reason="empty"))
+
+    # Keep one independent lightweight fallback for environments where the
+    # Eastmoney quote host is unavailable.  Do not call the full multi-endpoint
+    # AKShare path here: the scanner has a strict per-source deadline.
+    try:
+        tushare, tushare_failure = _unpack_provider_result(
+            fetch_a_share_fundamentals_tushare(code, with_evidence=True))
+    except Exception as exc:  # pragma: no cover - adapter already catches most
+        tushare = {}
+        tushare_failure = _provider_failure("tushare_daily_basic", exc)
+    if tushare:
+        return {
+            **tushare,
+            "data_quality": "partial",
+            "_data_source": "tushare",
+            "_fallback_source": "tushare",
+            "_fast_mode": True,
+        }
+
+    provider_failures.append(
+        tushare_failure or _provider_failure(
+            "tushare_daily_basic", reason="empty"))
+    errors = [
+        f"{failure['provider']}:{failure['reason']}"
+        for failure in provider_failures
+    ]
+    return {
+        "data_quality": "error",
+        "_data_source": "error",
+        "_fast_mode": True,
+        "_provider_failures": provider_failures,
+        "_errors": errors,
+    }
 
 
 def fetch_a_share_fundamentals(code):
@@ -365,18 +473,51 @@ def fetch_hk_fundamentals(code, full_code=None):
     return result
 
 
+def _fundamental_cache_key(ts_code, fast=False):
+    """Return a cache key isolated by fetch mode."""
+    mode = "fast" if fast else "full"
+    return f"fundamental_{ts_code}_{mode}"
+
+
+def _cache_payload_matches_mode(payload, fast):
+    """Reject a fast payload when a caller explicitly requested full data."""
+    if not isinstance(payload, dict):
+        return False
+    meta = payload.get("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    return fast or meta.get("fetch_mode") != "fast"
+
+
+def _load_fundamental_cache(ts_code, fast, ttl_seconds):
+    """Load mode-specific cache, with a guarded legacy-key fallback."""
+    keys = [_fundamental_cache_key(ts_code, fast), f"fundamental_{ts_code}"]
+    for key in dict.fromkeys(keys):
+        cached = load_cache(key, ttl_seconds=ttl_seconds)
+        if cached and _cache_payload_matches_mode(cached, fast):
+            return cached
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch fundamental data")
     parser.add_argument("ts_code", help="Tushare-style code, e.g. 600519.SH, 00700.HK")
     parser.add_argument("--asset", choices=["E", "FD"], help="Asset type (auto-detected)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="扫描快路径：先使用轻量报价/日频估值回退，不调用完整历史基本面接口",
+    )
     args = parser.parse_args()
 
     # Check cache
-    cache_key = f"fundamental_{args.ts_code}"
+    cache_key = _fundamental_cache_key(args.ts_code, args.fast)
     if not args.no_cache:
-        cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl(trading_ttl=1800, after_hours_ttl=57600))
+        cached = _load_fundamental_cache(
+            args.ts_code, args.fast,
+            ttl_seconds=get_market_day_ttl(
+                trading_ttl=1800, after_hours_ttl=57600))
         if cached:
             output_json(cached, output_path=args.output)
             return
@@ -417,14 +558,22 @@ def main():
             "errors": errors,
         }
     else:
-        fund_data = fetch_a_share_fundamentals(code)
+        fund_data = (
+            fetch_a_share_fundamentals_fast(code)
+            if args.fast else fetch_a_share_fundamentals(code)
+        )
         errors = fund_data.pop("_errors", [])
+        provider_failures = fund_data.pop("_provider_failures", [])
+        data_source = fund_data.pop("_data_source", "akshare")
+        fast_mode = bool(fund_data.pop("_fast_mode", False))
         result = {
             "meta": {
                 "ts_code": args.ts_code,
-                "data_source": "akshare",
+                "data_source": data_source,
                 "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
                 "asset": "E",
+                "fetch_mode": "fast" if fast_mode else "full",
+                "provider_failures": provider_failures,
             },
             "summary": fund_data,
             "data": {},
