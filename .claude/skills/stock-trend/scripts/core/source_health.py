@@ -314,6 +314,7 @@ def bounded_source_map(
         live_deadline: float, max_workers: int = 4,
         cache_usable: Callable[[Any], bool] | None = None,
         include_evidence: bool = False,
+        cache_fetch_with_reason: Callable[[Any, str], Any] | None = None,
         ) -> list[tuple[Any, Any]]:
     """Run admitted live work incrementally, then finish cache-only.
 
@@ -332,7 +333,10 @@ def bounded_source_map(
     pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def cached(item: Any, evidence_reason: str = "cache_only") -> Any:
-        payload = cache_fetch(item)
+        if cache_fetch_with_reason is not None:
+            payload = cache_fetch_with_reason(item, evidence_reason)
+        else:
+            payload = cache_fetch(item)
         usable = cache_usable(payload) if cache_usable else bool(payload)
         health.record_cache_result(
             source, payload if usable else None, stale=usable,

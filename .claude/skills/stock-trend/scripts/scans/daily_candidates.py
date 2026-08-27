@@ -48,6 +48,9 @@ from core.source_health import (
 )
 from core.recommendation_snapshot import save_snapshot_if_official
 from core.recommendation_snapshot import SnapshotConflict, SnapshotValidationError
+DEFAULT_INITIAL_SECTOR_WINDOW = 60
+DEFAULT_SECTOR_EXPANSION_STEP = 20
+DEFAULT_MAX_SECTOR_EXPANSION = 120
 SIGNAL_LABELS = {
     "volume_breakout": "放量突破",
     "northbound_adding": "北向增持",
@@ -436,8 +439,10 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
     """Attach absolute strength, persistence, relative strength and action gate."""
     dates = sorted(history.keys())[-10:] if history else []
     enriched = []
-    for source in ranked:
+    for position, source in enumerate(ranked, start=1):
         sector = dict(source)
+        sector["ranking_position"] = (
+            sector.get("ranking_position") or position)
         code = sector.get("code", "")
         aligned_entries = []
         for date_str in dates:
@@ -875,7 +880,10 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
                  sector_context=None, source_health=None, metrics=None,
-                 trade_plan_policy=None):
+                 trade_plan_policy=None,
+                 initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
+                 sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
+                 max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION):
     """Expand until enough score-qualified, data-eligible candidates exist."""
     metrics = metrics if metrics is not None else {}
     if sector_context is None:
@@ -925,8 +933,36 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
     metrics.setdefault("raw_candidate_count", 0)
     metrics.setdefault("unique_candidate_count", 0)
     metrics.setdefault("sector_expanded_codes", [])
-    for i in range(0, len(ordered_sector_codes), batch_size):
-        batch = ordered_sector_codes[i:i + batch_size]
+    if isinstance(source_health, RunSourceHealth):
+        # Membership is the fan-out stage. Finish a bounded first window
+        # before starting expensive per-stock phase 2 so late cache-only
+        # fallback cannot starve the leading sectors. Expand only when the
+        # current window has not produced enough eligible candidates.
+        initial_window = max(1, int(initial_sector_window))
+        expansion_step = max(1, int(sector_expansion_step))
+        expansion_limit = max(1, int(max_sector_expansion))
+        scan_limit = min(len(ordered_sector_codes), expansion_limit)
+        if len(ordered_sector_codes) > scan_limit:
+            metrics["sector_expansion_limit"] = expansion_limit
+            reasons = metrics.setdefault("degradation_reasons", [])
+            reason = f"sector_expansion_capped:{expansion_limit}"
+            if reason not in reasons:
+                reasons.append(reason)
+        windows = []
+        cursor = 0
+        window_size = min(initial_window, scan_limit)
+        while cursor < scan_limit:
+            windows.append((cursor, window_size))
+            cursor += window_size
+            window_size = min(expansion_step, scan_limit - cursor)
+    else:
+        windows = [
+            (i, min(batch_size, len(ordered_sector_codes) - i))
+            for i in range(0, len(ordered_sector_codes), batch_size)
+        ]
+
+    for i, window_size in windows:
+        batch = ordered_sector_codes[i:i + window_size]
         metrics["sector_expanded_codes"].extend(batch)
         metrics["batch_count"] += 1
         membership_started = time.monotonic()
@@ -1844,6 +1880,10 @@ def main():
     parser.add_argument("--top", type=int, default=30, help="输出上限(默认30)")
     parser.add_argument("--min-candidates", type=int, default=20,
                         help="候选数量下限,不足则扩展板块(默认20)")
+    parser.add_argument(
+        "--max-sector-expansion", type=int,
+        default=DEFAULT_MAX_SECTOR_EXPANSION,
+        help="单次运行最多展开的热点板块数(默认120)")
     parser.add_argument("--min-score", type=float, default=50, help="最低综合分(默认50)")
     parser.add_argument("--sectors", type=str,
                         help="手动指定板块,逗号分隔(覆盖自动选板块)")
@@ -1917,6 +1957,8 @@ def main():
         source_health=source_health,
         metrics=performance,
         trade_plan_policy=policy,
+        max_sector_expansion=getattr(
+            args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION),
     )
 
     # 过滤 + 排序 + 归一化到 top

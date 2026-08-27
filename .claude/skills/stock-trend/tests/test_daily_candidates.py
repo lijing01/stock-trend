@@ -728,6 +728,17 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertGreater(sector["capital_persistence"], 50)
         self.assertEqual(sector["capital_evidence"], "positive_verified")
 
+    def test_enriched_sector_context_preserves_hot_rank_position(self):
+        ranked = [
+            {"code": "BK0732", "name": "高热度", "absolute_hot_score": 80},
+            {"code": "BK0001", "name": "低热度", "absolute_hot_score": 50},
+        ]
+
+        enriched = enrich_sector_context(ranked, {})
+
+        self.assertEqual(
+            [sector["ranking_position"] for sector in enriched], [1, 2])
+
     def test_sector_without_history_is_single_day_observation(self):
         ranked = [{
             "code": "BK1", "name": "单日脉冲",
@@ -1182,6 +1193,52 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertTrue(all(call[1] is context for call in gather_calls))
         self.assertEqual({item["code"] for item in result},
                          {"600001", "600002"})
+
+    def test_source_health_scan_prefetches_membership_in_bounded_windows(self):
+        gather_calls = []
+        phase2_calls = []
+        contexts = {
+            f"BK{i:02d}": {
+                "name": f"板块{i}", "ranking_position": i,
+                "sector_actionable": True, "sector_score": 80,
+            }
+            for i in range(1, 8)
+        }
+
+        def fake_gather(batch, **_kwargs):
+            gather_calls.append(tuple(batch))
+            return {"candidates": [{
+                "code": f"600{int(code[2:]):03d}", "sector_code": code,
+            } for code in batch]}
+
+        def fake_phase2(candidates, **_kwargs):
+            phase2_calls.append([item["code"] for item in candidates])
+            return [{
+                **item, "composite_score": 80,
+                "quality_adjusted_score": 80,
+                "data_quality": {"eligible": True},
+            } for item in candidates]
+
+        metrics = {}
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            result = dc.scan_sectors(
+                list(contexts), min_candidates=99,
+                sector_context=contexts, source_health=sc.RunSourceHealth(),
+                metrics=metrics, initial_sector_window=3,
+                sector_expansion_step=2, max_sector_expansion=5)
+
+        self.assertEqual(gather_calls, [
+            ("BK01", "BK02", "BK03"), ("BK04", "BK05"),
+        ])
+        self.assertEqual(len(phase2_calls), 2)
+        self.assertEqual(metrics["sector_expanded_codes"], [
+            "BK01", "BK02", "BK03", "BK04", "BK05",
+        ])
+        self.assertEqual(metrics["sector_expansion_limit"], 5)
+        self.assertIn("sector_expansion_capped:5",
+                      metrics["degradation_reasons"])
+        self.assertEqual(len(result), 5)
 
     def test_multi_batch_scan_fetches_ranking_snapshot_exactly_once(self):
         """One scan run owns one immutable full-market ranking snapshot."""

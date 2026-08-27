@@ -459,13 +459,20 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                     or classify_failure(exc)),
             )
 
-    def _fetch_membership_cache(code):
-        stocks = get_sector_stocks_cached(code, top_n=top_n_per_sector)
+    def _fetch_membership_cache(code, scheduler_reason="cache_only"):
+        fallback_reason = (
+            "cache_only" if scheduler_reason in ("", "cache_only")
+            else f"cache_only_{scheduler_reason}")
+        stocks = get_sector_stocks_cached(
+            code, top_n=top_n_per_sector,
+            fallback_reason=fallback_reason)
         attempt = live_attempt(
             attempted=False, cache_used=bool(stocks), stale=bool(stocks),
-            reason="cache_only" if stocks else "")
+            reason=scheduler_reason if stocks else "")
         stocks = [
-            {**stock, "membership_fetch_evidence": copy.deepcopy(attempt)}
+            {**stock,
+             "membership_fallback_reason": fallback_reason,
+             "membership_fetch_evidence": copy.deepcopy(attempt)}
             for stock in (stocks or [])
         ]
         return _membership_payload(code, stocks)
@@ -475,7 +482,8 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             "sector_membership", sector_codes, source_health,
             _fetch_membership_live, _fetch_membership_cache,
             source_health.live_deadline, max_workers=max_workers,
-            cache_usable=lambda payload: bool(payload.get("stocks")))
+            cache_usable=lambda payload: bool(payload.get("stocks")),
+            cache_fetch_with_reason=_fetch_membership_cache)
         results = [result for _, result in fetched]
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:

@@ -304,6 +304,27 @@ class TestRunSourceHealthContract(unittest.TestCase):
                 self.assertEqual(attempt["reason"], "deadline")
                 self.assertEqual(attempt["cache_used"], bool(cached))
 
+    def test_deadline_reason_reaches_reason_aware_cache_fetch(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth()
+        reasons = []
+
+        def cache_fetch(item, reason):
+            reasons.append((item, reason))
+            return {"cached": item}
+
+        results = contract.bounded_source_map(
+            "sector_membership", ["BK0001"], health,
+            lambda item: self.fail("deadline must force cache-only"),
+            lambda item: self.fail("reason-aware callback should be used"),
+            time.monotonic() - 1, max_workers=1,
+            include_evidence=True,
+            cache_fetch_with_reason=cache_fetch)
+
+        self.assertEqual(reasons, [("BK0001", "deadline")])
+        self.assertEqual(
+            results[0][1]["live_attempt"]["reason"], "deadline")
+
 
 class TestProductionPerformanceContract(unittest.TestCase):
     def test_production_deadline_and_budget_constants_bound_critical_path(self):

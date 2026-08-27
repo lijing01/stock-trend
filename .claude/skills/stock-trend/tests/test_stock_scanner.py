@@ -655,6 +655,26 @@ class TestSourceEvidenceAdapters(unittest.TestCase):
         self.assertEqual(evidence["provider_attempts"], 2)
         self.assertTrue(evidence["cache_used"])
 
+    def test_membership_deadline_fallback_is_attached_to_cached_stock(self):
+        stocks = [{
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+        }]
+        health = sc.RunSourceHealth()
+        health.live_deadline = sc.time.monotonic() - 1
+        with patch.object(sd, "get_sector_stocks_cached",
+                          return_value=stocks):
+            result = sc.gather_candidates(
+                ["BK0001"], sector_context={"BK0001": {}},
+                source_health=health)
+
+        candidate = result["candidates"][0]
+        self.assertEqual(
+            candidate["membership_fallback_reason"],
+            "cache_only_deadline")
+        self.assertEqual(
+            candidate["membership_fetch_evidence"]["reason"], "deadline")
+
     def test_fast_fundamental_path_uses_quote_before_heavy_apis(self):
         quote = {
             "pe_ttm": 18.5, "pb": 1.7, "market_cap_billion": 123.4,
@@ -817,6 +837,37 @@ class TestSectorConstituentFallback(unittest.TestCase):
 
         self.assertEqual(stocks[0]["membership_source"], "realtime")
         self.assertEqual(stocks[0]["membership_quality"], "good")
+
+    def test_live_sector_cache_persists_refresh_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "_fetch_json", return_value=self.payload):
+            sd.get_sector_stocks("BK0001")
+            cache = json.loads(
+                (Path(tmpdir) / "BK0001.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(cache["schema_version"], 2)
+        self.assertEqual(cache["provider"], "eastmoney")
+        self.assertEqual(cache["data_date"], datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(cache["fetched_at"], cache["cached_at"])
+
+    def test_tagged_sector_cache_prefers_explicit_data_date(self):
+        cached_at = datetime.now().isoformat()
+        payload = {
+            "schema_version": 2,
+            "cached_at": cached_at,
+            "fetched_at": cached_at,
+            "data_date": "2026-08-26",
+            "provider": "eastmoney",
+            "stocks": [{"code": "600001", "name": "测试股份"}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)):
+            (Path(tmpdir) / "BK0001.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            stocks = sd.get_sector_stocks_cached("BK0001")
+
+        self.assertEqual(stocks[0]["membership_data_date"], "2026-08-26")
 
     def test_sector_code_cannot_escape_cache_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir, \

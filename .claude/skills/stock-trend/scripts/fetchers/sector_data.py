@@ -390,6 +390,7 @@ def rank_hot_sectors(rankings: dict, top_n: int = 10,
 
 
 SECTOR_STOCKS_CACHE_DIR = CACHE_DIR / "sector_stocks"
+SECTOR_STOCKS_CACHE_SCHEMA_VERSION = 2
 SECTOR_STOCKS_MAX_AGE_HOURS = 24 * 30
 SECTOR_STOCKS_RECENT_CACHE_MAX_AGE_HOURS = 24 * 5
 
@@ -405,12 +406,19 @@ def _sector_stocks_cache_path(sector_code: str) -> Path:
     return path
 
 
-def save_sector_stocks_cache(sector_code: str, stocks: list[dict]) -> None:
+def save_sector_stocks_cache(sector_code: str, stocks: list[dict],
+                             data_date: str = "",
+                             provider: str = "eastmoney") -> None:
     """Persist a successful constituent response for outage fallback."""
     path = _sector_stocks_cache_path(sector_code)
     SECTOR_STOCKS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fetched_at = datetime.now().isoformat()
     payload = {
-        "cached_at": datetime.now().isoformat(),
+        "schema_version": SECTOR_STOCKS_CACHE_SCHEMA_VERSION,
+        "cached_at": fetched_at,
+        "fetched_at": fetched_at,
+        "data_date": data_date or fetched_at[:10],
+        "provider": provider,
         "stocks": stocks,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -483,11 +491,12 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
     cached = load_sector_stocks_cache(sector_code)
     if not cached:
         return []
-    cache_metadata = _sector_cache_metadata(cached.get("cached_at", ""))
+    fetched_at = cached.get("fetched_at") or cached.get("cached_at", "")
+    cache_metadata = _sector_cache_metadata(fetched_at)
     return _tag_sector_stocks(
         cached["stocks"],
         source="cache",
-        data_date=str(cached["cached_at"])[:10],
+        data_date=str(cached.get("data_date") or fetched_at)[:10],
         quality="degraded",
         cache_metadata=cache_metadata,
         fallback_reason=fallback_reason,
@@ -495,12 +504,12 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
     )[:top_n]
 
 
-def get_sector_stocks_cached(sector_code: str,
-                             top_n: int = 50) -> list[dict]:
+def get_sector_stocks_cached(sector_code: str, top_n: int = 50,
+                             fallback_reason: str = "cache_only") -> list[dict]:
     """Return cached constituents without attempting a live request."""
     _sector_stocks_cache_path(sector_code)
     return _load_tagged_sector_stocks_cache(
-        sector_code, top_n, fallback_reason="cache_only")
+        sector_code, top_n, fallback_reason=fallback_reason)
 
 
 def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
@@ -602,6 +611,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
             f"获取板块{sector_code}成分股失败: "
             "实时接口未返回有效股票代码; 无有效成分股且无可用快照")
     cache_error = ""
+    data_date = datetime.now().strftime("%Y-%m-%d")
     if stocks:
         try:
             save_sector_stocks_cache(sector_code, stocks)
@@ -614,7 +624,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
     tagged = _tag_sector_stocks(
         stocks,
         source="realtime",
-        data_date=datetime.now().strftime("%Y-%m-%d"),
+        data_date=data_date,
         quality="partial" if cache_error else "good",
         provider_attempts=provider_attempts,
     )
