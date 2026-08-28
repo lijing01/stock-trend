@@ -23,6 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 SNAPSHOT_DIR = CACHE_DIR / "lhb_snapshots"
+STATUS_DIR = SNAPSHOT_DIR / "status"
 REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -35,6 +36,7 @@ except ImportError:
 
 from fetchers.longhubang_agg import run_lhb_analysis, fetch_lhb_jgmmtj
 from fetchers.sector_mapper import get_mapping
+from core.source_health import classify_failure, live_attempt
 
 
 def _safe_float(val) -> float:
@@ -46,21 +48,29 @@ def _safe_float(val) -> float:
 # ──────────────── 快照 ────────────────
 
 
-def save_daily_snapshot(date_str: Optional[str] = None) -> dict:
-    """取今日龙虎榜数据 + 板块行情，保存快照.
+def _write_status(date_str: str, meta: dict) -> None:
+    """Persist one collection status sidecar for the requested date."""
+    payload = {
+        "date": date_str,
+        "attempted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status": meta.get("status", "error"),
+        "requested_date": meta.get("requested_date", date_str.replace("-", "")),
+        "data_date": meta.get("data_date", ""),
+        "total_lhb_stocks": meta.get("total_lhb_stocks", 0),
+        "total_sectors": meta.get("total_sectors", 0),
+        "mapping_stale": bool(meta.get("mapping_stale", False)),
+        "live_attempt": meta.get("live_attempt", {}),
+        "failure_reasons": list(meta.get("failure_reasons", []) or []),
+        "errors": list(meta.get("errors", []) or []),
+    }
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = STATUS_DIR / f"{date_str}.json"
+    filepath.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    Returns snapshot dict or empty dict on failure.
-    """
-    if date_str is None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # 取龙虎榜板块数据
-    result = run_lhb_analysis(date_str.replace("-", ""))
-    sectors = result.get("sectors", [])
-    if not sectors:
-        return {}
-
-    # 取板块行情（涨跌幅）
+def _fetch_sector_changes() -> dict[str, float]:
+    """Fetch optional sector change percentages for a successful snapshot."""
     sector_changes = {}
     try:
         df = ak.stock_board_industry_summary_ths()
@@ -71,40 +81,108 @@ def save_daily_snapshot(date_str: Optional[str] = None) -> dict:
         if df_c is not None and not df_c.empty:
             for _, row in df_c.iterrows():
                 sector_changes[str(row.get("概念名称", ""))] = _safe_float(row.get("涨跌幅"))
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"  Warning: 板块涨跌幅补充失败: {exc}", file=sys.stderr)
+    return sector_changes
 
-    # 构建快照
-    snapshot = {
-        "date": date_str,
-        "save_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total_lhb_stocks": result["meta"].get("total_lhb_stocks", 0),
-        "sectors": [],
+
+def collect_daily_snapshot(date_str: Optional[str] = None) -> dict:
+    """Run one LHB collection and persist status regardless of its outcome."""
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        result = run_lhb_analysis(date_str.replace("-", ""))
+    except Exception as exc:
+        reason = classify_failure(exc)
+        result = {
+            "meta": {
+                "date": date_str.replace("-", ""),
+                "requested_date": date_str.replace("-", ""),
+                "data_date": "",
+                "total_lhb_stocks": 0,
+                "total_sectors": 0,
+                "status": "error",
+                "mapping_stale": False,
+                "live_attempt": live_attempt(
+                    attempted=True, provider_attempts=1, reason=reason,
+                    status="error", error_type=type(exc).__name__,
+                    failure_detail=str(exc)),
+                "failure_reasons": [reason],
+                "errors": [f"tracker: {reason}: {exc}"],
+            },
+            "sectors": [],
+        }
+    meta = dict(result.get("meta", {}) or {})
+    status = str(meta.get("status", "") or "")
+    if not status:
+        status = "live_success" if result.get("sectors") else "no_data"
+    meta["status"] = status
+    snapshot = {}
+
+    # Only a successful aggregation can create a signal snapshot.  Empty or
+    # failed runs are represented solely by their status sidecar.
+    if status == "live_success" and result.get("sectors"):
+        sector_changes = _fetch_sector_changes()
+        snapshot = {
+            "date": date_str,
+            "save_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_lhb_stocks": meta.get("total_lhb_stocks", 0),
+            "sectors": [],
+        }
+        for sector in result["sectors"]:
+            name = sector.get("sector_name", "")
+            snapshot["sectors"].append({
+                "sector_code": sector.get("sector_code", ""),
+                "sector_name": name,
+                "sector_type": sector.get("sector_type", ""),
+                "lhb_score": sector.get("lhb_score", 0),
+                "direction": sector.get("direction", ""),
+                "inst_net_yi": sector.get("total_inst_net_yi", 0),
+                "stock_count": sector.get("stock_count", 0),
+                "inst_buy_count": sector.get("inst_buy_count", 0),
+                "inst_sell_count": sector.get("inst_sell_count", 0),
+                "member_names": list(sector.get("member_names", []) or [])[:3],
+                "change_pct": sector_changes.get(name),
+                "return_3d": None,
+                "return_5d": None,
+                "return_10d": None,
+            })
+        try:
+            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            filepath = SNAPSHOT_DIR / f"{date_str}.json"
+            filepath.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except Exception as exc:
+            status = "error"
+            meta["status"] = status
+            meta.setdefault("failure_reasons", []).append("storage")
+            meta.setdefault("errors", []).append(
+                f"snapshot: storage: {exc}")
+            snapshot = {}
+
+    collection = {
+        "status": status,
+        "snapshot": snapshot,
+        "meta": meta,
+        "status_write_error": "",
     }
+    try:
+        _write_status(date_str, meta)
+    except Exception as exc:
+        collection["status_write_error"] = str(exc)
+        meta["status_write_error"] = str(exc)
+        print(f"  Warning: 龙虎榜状态写入失败: {exc}", file=sys.stderr)
+    return collection
 
-    for s in sectors:
-        name = s["sector_name"]
-        snapshot["sectors"].append({
-            "sector_code": s["sector_code"],
-            "sector_name": name,
-            "sector_type": s["sector_type"],
-            "lhb_score": s["lhb_score"],
-            "direction": s["direction"],
-            "inst_net_yi": s["total_inst_net_yi"],
-            "stock_count": s["stock_count"],
-            "inst_buy_count": s["inst_buy_count"],
-            "inst_sell_count": s["inst_sell_count"],
-            "member_names": s["member_names"][:3],
-            "change_pct": sector_changes.get(name, None),
-            "return_3d": None,   # 待回填
-            "return_5d": None,
-            "return_10d": None,
-        })
 
-    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    filepath = SNAPSHOT_DIR / f"{date_str}.json"
-    filepath.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-    return snapshot
+def save_daily_snapshot(date_str: Optional[str] = None) -> dict:
+    """Compatibility wrapper returning only a successful snapshot dict."""
+    collection = collect_daily_snapshot(date_str)
+    if collection.get("status") == "live_success":
+        return collection.get("snapshot", {})
+    return {}
 
 
 # ──────────────── 历史加载 ────────────────
@@ -412,11 +490,26 @@ def main():
 
     # 1. 保存今日快照
     print("[Phase 1/3] 保存今日龙虎榜快照...")
-    snap = save_daily_snapshot()
+    collection = collect_daily_snapshot()
+    collection_meta = collection.get("meta", {})
+    snap = collection.get("snapshot", {})
+    print(
+        f"  状态: {collection.get('status', 'error')} | "
+        f"请求日期: {collection_meta.get('requested_date', '-')} | "
+        f"实际日期: {collection_meta.get('data_date') or '-'} | "
+        f"股票: {collection_meta.get('total_lhb_stocks', 0)} | "
+        f"板块: {collection_meta.get('total_sectors', 0)} | "
+        f"映射stale: {bool(collection_meta.get('mapping_stale', False))}"
+    )
+    reasons = collection_meta.get("failure_reasons", []) or []
+    if reasons:
+        print(f"  失败原因: {', '.join(map(str, reasons))}")
     if snap:
-        print(f"  ✓ 快照已保存 ({snap['date']}, { snap['total_lhb_stocks']} 只股票, {len(snap['sectors'])} 板块)")
+        print(f"  ✓ 快照已保存 ({snap['date']})")
     else:
-        print("  ⚠️ 今日无龙虎榜数据（非交易日）")
+        print(f"  ⚠️ 未写入信号快照: {collection_meta.get('note', '无可用数据')}")
+    if collection.get("status_write_error"):
+        print(f"  ⚠️ 状态 sidecar 写入失败: {collection['status_write_error']}")
 
     if args.snapshot_only:
         return

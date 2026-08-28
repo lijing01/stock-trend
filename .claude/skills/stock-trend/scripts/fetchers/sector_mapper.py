@@ -159,49 +159,68 @@ def save_mapping(data: dict) -> None:
     print(f"  Cached to {MAP_CACHE_FILE}")
 
 
-def load_mapping() -> Optional[dict]:
-    """Load cached mapping if fresh enough.
-
-    Returns mapping dict or None if missing/expired.
-    """
+def load_mapping(allow_stale: bool = False) -> Optional[dict]:
+    """Load a non-empty mapping, optionally allowing an explicitly stale copy."""
     if not MAP_CACHE_FILE.exists():
         return None
     try:
         data = json.loads(MAP_CACHE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data.get("mapping"), dict) or not data.get("mapping"):
+            return None
         built_at = data.get("meta", {}).get("built_at", "")
+        age_hours = 0.0
         if built_at:
             cached_at = datetime.fromisoformat(built_at)
-            age = datetime.now() - cached_at
-            if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            now = datetime.now(cached_at.tzinfo) if cached_at.tzinfo else datetime.now()
+            age_hours = max(0.0, (now - cached_at).total_seconds() / 3600)
+            stale = age_hours > MAX_CACHE_AGE_HOURS
+            if stale and not allow_stale:
                 return None
-        if data.get("mapping"):
-            return data
-        return None
+        else:
+            stale = False
+
+        # Never annotate the object returned from the JSON parser in place:
+        # callers may retain it and compare it with a later fresh read.
+        loaded = json.loads(json.dumps(data, ensure_ascii=False))
+        loaded.setdefault("meta", {})["stale"] = bool(stale)
+        loaded["meta"]["age_hours"] = round(age_hours, 1)
+        return loaded
     except Exception:
         return None
 
 
-def get_stock_sectors(code: str) -> list[dict]:
+def get_stock_sectors(code: str, allow_stale: bool = False) -> list[dict]:
     """Lookup sectors for a single stock code.
 
     Returns list of {code, name, type} or empty list.
     """
-    data = get_mapping()
+    data = get_mapping(allow_stale=allow_stale)
     if not data:
         return []
     return data.get("mapping", {}).get(code, [])
 
 
-def get_mapping(rebuild: bool = False) -> Optional[dict]:
-    """Get mapping (load cache or build if needed)."""
+def get_mapping(rebuild: bool = False,
+                allow_stale: bool = False) -> Optional[dict]:
+    """Get a fresh mapping, optionally falling back to a marked stale copy."""
     if not rebuild:
-        cached = load_mapping()
+        cached = load_mapping(allow_stale=False)
         if cached:
             return cached
+        if allow_stale:
+            stale = load_mapping(allow_stale=True)
+            if stale:
+                return stale
     data = build_stock_sector_map()
     if data and data.get("mapping"):
         save_mapping(data)
-    return data
+        data.setdefault("meta", {})["stale"] = False
+        return data
+    # A failed rebuild must never replace a previously usable cache with an
+    # empty mapping.  Explicit stale consumers may still use that old copy.
+    if allow_stale:
+        return load_mapping(allow_stale=True)
+    return None
 
 
 # ──────────────── DDX 板块聚合 ────────────────

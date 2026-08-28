@@ -41,65 +41,152 @@ except ImportError:
 
 from fetchers.sector_mapper import get_mapping
 from analysis.ths_theme import _safe_float, _safe_int
+from core.source_health import classify_failure, live_attempt
 
 
 # ──────────────── 数据获取 ────────────────
 
 
-def fetch_lhb_jgmmtj(date_str: Optional[str] = None) -> list[dict]:
-    """Fetch 龙虎榜 institutional buy/sell data via AKShare.
+def _date_candidates(requested_date: str, max_days: int = 5) -> list[str]:
+    """Return the requested day plus at most four preceding calendar days."""
+    start = datetime.strptime(requested_date, "%Y%m%d")
+    return [
+        (start - timedelta(days=offset)).strftime("%Y%m%d")
+        for offset in range(max(1, max_days))
+    ]
 
-    Args:
-        date_str: YYYYMMDD date string. Defaults to last trading day.
 
-    Returns:
-        List of dicts with keys:
-            code, name, close, change_pct, inst_buy_count, inst_sell_count,
-            inst_buy_total, inst_sell_total, inst_net_amount, total_amount,
-            net_ratio, turnover_rate, market_cap, reason, date
-        Empty list on failure.
+def _normalise_date(value, fallback: str) -> str:
+    """Normalise AKShare date values to YYYYMMDD where possible."""
+    text = str(value or "")
+    digits = "".join(char for char in text if char.isdigit())
+    if len(digits) >= 8:
+        return digits[:8]
+    return fallback
+
+
+def fetch_lhb_jgmmtj_with_evidence(
+        date_str: Optional[str] = None) -> dict:
+    """Fetch LHB data and retain date/failure evidence.
+
+    Empty responses may walk a bounded five-calendar-day window.  A provider
+    exception stops the walk immediately because retrying the same failed
+    network path only multiplies outage latency.
     """
-    if not HAS_AKSHARE:
-        return []
-
-    if date_str is None:
-        # Default to today, fallback to yesterday
-        date_str = datetime.now().strftime("%Y%m%d")
-
+    requested_date = date_str or datetime.now().strftime("%Y%m%d")
+    errors = []
     try:
-        df = ak.stock_lhb_jgmmtj_em(start_date=date_str, end_date=date_str)
-        if df is None or df.empty:
-            # Try yesterday
-            dt = datetime.strptime(date_str, "%Y%m%d")
-            prev = (dt - timedelta(days=1)).strftime("%Y%m%d")
-            df = ak.stock_lhb_jgmmtj_em(start_date=prev, end_date=prev)
-            if df is None or df.empty:
-                return []
-            date_str = prev
-    except Exception:
-        return []
+        candidates = _date_candidates(requested_date)
+    except (TypeError, ValueError) as exc:
+        reason = classify_failure(exc)
+        return {
+            "data": [], "status": "error", "source": "eastmoney_akshare",
+            "requested_date": requested_date, "data_date": "",
+            "live_attempt": live_attempt(
+                attempted=False, reason=reason, status="error",
+                error_type=type(exc).__name__, failure_detail=str(exc)),
+            "errors": [f"{requested_date}: {reason}: {exc}"],
+        }
 
-    results = []
-    for _, row in df.iterrows():
-        inst_net = _safe_float(row.get("机构买入净额", 0))
-        results.append({
-            "code": str(row.get("代码", "")),
-            "name": str(row.get("名称", "")),
-            "close": _safe_float(row.get("收盘价")),
-            "change_pct": _safe_float(row.get("涨跌幅")),
-            "inst_buy_count": _safe_int(row.get("买方机构数")),
-            "inst_sell_count": _safe_int(row.get("卖方机构数")),
-            "inst_buy_total": _safe_float(row.get("机构买入总额")),
-            "inst_sell_total": _safe_float(row.get("机构卖出总额")),
-            "inst_net_amount": inst_net,
-            "total_amount": _safe_float(row.get("市场总成交额")),
-            "net_ratio": _safe_float(row.get("机构净买额占总成交额比")),
-            "turnover_rate": _safe_float(row.get("换手率")),
-            "market_cap": _safe_float(row.get("流通市值")),
-            "reason": str(row.get("上榜原因", "")),
-            "date": str(row.get("上榜日期", date_str)),
-        })
-    return results
+    if not HAS_AKSHARE:
+        error = "AKShare 未安装"
+        return {
+            "data": [], "status": "error", "source": "eastmoney_akshare",
+            "requested_date": requested_date, "data_date": "",
+            "live_attempt": live_attempt(
+                attempted=False, reason="unknown", status="error",
+                error_type="ImportError", failure_detail=error),
+            "errors": [f"{requested_date}: unknown: {error}"],
+        }
+
+    provider_attempts = 0
+    failure_chain = []
+    for candidate in candidates:
+        provider_attempts += 1
+        try:
+            df = ak.stock_lhb_jgmmtj_em(
+                start_date=candidate, end_date=candidate)
+            if df is None or getattr(df, "empty", False):
+                continue
+
+            results = []
+            for _, row in df.iterrows():
+                code = str(row.get("代码", "") or "").strip()
+                if not code or code.lower() == "nan":
+                    continue
+                inst_net = _safe_float(row.get("机构买入净额", 0))
+                results.append({
+                    "code": code,
+                    "name": str(row.get("名称", "") or ""),
+                    "close": _safe_float(row.get("收盘价")),
+                    "change_pct": _safe_float(row.get("涨跌幅")),
+                    "inst_buy_count": _safe_int(row.get("买方机构数")),
+                    "inst_sell_count": _safe_int(row.get("卖方机构数")),
+                    "inst_buy_total": _safe_float(row.get("机构买入总额")),
+                    "inst_sell_total": _safe_float(row.get("机构卖出总额")),
+                    "inst_net_amount": inst_net,
+                    "total_amount": _safe_float(row.get("市场总成交额")),
+                    "net_ratio": _safe_float(row.get("机构净买额占总成交额比")),
+                    "turnover_rate": _safe_float(row.get("换手率")),
+                    "market_cap": _safe_float(row.get("流通市值")),
+                    "reason": str(row.get("上榜原因", "") or ""),
+                    "date": _normalise_date(
+                        row.get("上榜日期", candidate), candidate),
+                })
+            if not results:
+                errors.append(f"{candidate}: parse: 未返回有效股票代码")
+                failure_chain.append("parse")
+                return {
+                    "data": [], "status": "error", "source": "eastmoney_akshare",
+                    "requested_date": requested_date, "data_date": candidate,
+                    "live_attempt": live_attempt(
+                        attempted=True, provider_attempts=provider_attempts,
+                        reason="parse", status="error",
+                        failure_chain=failure_chain),
+                    "errors": errors,
+                }
+            data_date = results[0].get("date", candidate)
+            return {
+                "data": results, "status": "live_success",
+                "source": "eastmoney_akshare",
+                "requested_date": requested_date,
+                "data_date": data_date,
+                "live_attempt": live_attempt(
+                    attempted=True, provider_attempts=provider_attempts,
+                    status="success", failure_chain=failure_chain),
+                "errors": errors,
+            }
+        except Exception as exc:
+            reason = classify_failure(exc)
+            failure_chain.append(reason)
+            error = f"{candidate}: {reason}: {exc}"
+            errors.append(error)
+            print(f"  [AKShare] 获取龙虎榜失败: {exc}", file=sys.stderr)
+            return {
+                "data": [], "status": "error", "source": "eastmoney_akshare",
+                "requested_date": requested_date, "data_date": "",
+                "live_attempt": live_attempt(
+                    attempted=True, provider_attempts=provider_attempts,
+                    reason=reason, status="error",
+                    failure_chain=failure_chain,
+                    error_type=type(exc).__name__,
+                    failure_detail=str(exc)),
+                "errors": errors,
+            }
+
+    return {
+        "data": [], "status": "no_data", "source": "eastmoney_akshare",
+        "requested_date": requested_date, "data_date": "",
+        "live_attempt": live_attempt(
+            attempted=True, provider_attempts=provider_attempts,
+            reason="empty", status="empty", failure_chain=failure_chain),
+        "errors": errors,
+    }
+
+
+def fetch_lhb_jgmmtj(date_str: Optional[str] = None) -> list[dict]:
+    """Compatibility wrapper returning only LHB rows."""
+    return fetch_lhb_jgmmtj_with_evidence(date_str).get("data", [])
 
 
 # ──────────────── 板块聚合 ────────────────
@@ -408,35 +495,68 @@ def run_lhb_analysis(date_str: Optional[str] = None,
             sectors: scored sector list
     """
     start = time.time()
+    requested_date = date_str or datetime.now().strftime("%Y%m%d")
     result = {
-        "meta": {"date": date_str or datetime.now().strftime("%Y%m%d"),
+        "meta": {"date": requested_date,
                  "total_lhb_stocks": 0, "total_sectors": 0, "note": "",
-                 "elapsed_seconds": 0},
+                 "elapsed_seconds": 0, "status": "not_run",
+                 "requested_date": requested_date, "data_date": "",
+                 "mapping_stale": False, "failure_reasons": [],
+                 "errors": []},
         "sectors": [],
     }
 
     if not HAS_AKSHARE:
         result["meta"]["note"] = "AKShare 未安装"
+        result["meta"]["status"] = "error"
+        result["meta"]["failure_reasons"] = ["unknown"]
         return result
 
     # Step 1: Fetch LHB data
-    records = fetch_lhb_jgmmtj(date_str)
+    evidence = fetch_lhb_jgmmtj_with_evidence(requested_date)
+    result["meta"].update({
+        "status": evidence.get("status", "error"),
+        "requested_date": evidence.get("requested_date", requested_date),
+        "data_date": evidence.get("data_date", ""),
+        "live_attempt": evidence.get("live_attempt", {}),
+        "errors": list(evidence.get("errors", []) or []),
+    })
+    reason = evidence.get("live_attempt", {}).get("reason", "")
+    if reason and reason != "empty":
+        result["meta"]["failure_reasons"] = [reason]
+    records = evidence.get("data", []) or []
     if not records:
-        result["meta"]["note"] = "今日无龙虎榜数据（非交易日或尚无数据）"
+        if result["meta"]["status"] == "error":
+            result["meta"]["note"] = "龙虎榜数据获取失败"
+        else:
+            result["meta"]["status"] = "no_data"
+            result["meta"]["note"] = "今日无龙虎榜数据（非交易日或尚无数据）"
+        result["meta"]["elapsed_seconds"] = round(time.time() - start, 1)
         return result
 
     result["meta"]["total_lhb_stocks"] = len(records)
 
     # Step 2: Load sector mapping
-    mapping = get_mapping()
+    mapping = get_mapping(allow_stale=True)
     if not mapping:
+        result["meta"]["status"] = "mapping_error"
+        result["meta"]["failure_reasons"] = ["mapping"]
         result["meta"]["note"] = "无板块映射表（需先运行 sector_mapper）"
+        result["meta"]["elapsed_seconds"] = round(time.time() - start, 1)
         return result
+    result["meta"]["mapping_stale"] = bool(
+        mapping.get("meta", {}).get("stale", False))
 
     # Step 3: Aggregate by sector
     sectors = aggregate_lhb_by_sector(records, mapping)
     result["meta"]["total_sectors"] = len(sectors)
     result["sectors"] = sectors[:top_n]
+    if not sectors:
+        result["meta"]["status"] = "mapping_error"
+        result["meta"]["failure_reasons"] = ["mapping"]
+        result["meta"]["note"] = "龙虎榜明细未匹配到可用板块映射"
+    else:
+        result["meta"]["status"] = "live_success"
 
     elapsed = time.time() - start
     result["meta"]["elapsed_seconds"] = round(elapsed, 1)

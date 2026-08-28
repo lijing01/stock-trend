@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+from html import escape
 import json
 import sys
 import time
@@ -36,6 +37,8 @@ LHB_SNAPSHOT_DIR = CACHE_DIR / "lhb_snapshots"
 REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
+
+from core.source_health import classify_failure, live_attempt
 
 try:
     import akshare as ak
@@ -63,30 +66,210 @@ def load_market_snapshots(days: int = 10) -> dict[str, list[dict]]:
 
 
 def load_lhb_snapshots(days: int = 10) -> list[dict]:
-    """Load LHB institutional snapshots."""
+    """Compatibility wrapper returning only loaded LHB snapshots."""
+    return load_lhb_snapshot_bundle(days=days).get("snapshots", [])
+
+
+def _read_json_file(filepath: Path) -> Optional[dict]:
+    """Read a JSON object, treating malformed files as unavailable."""
+    try:
+        payload = json.loads(filepath.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def load_lhb_snapshot_bundle(days: int = 10) -> dict:
+    """Load LHB snapshots together with per-day collection evidence.
+
+    A snapshot without a status sidecar is intentionally labelled
+    ``legacy_snapshot``.  It remains usable for historical aggregation, but
+    it is not counted as a current collection attempt.
+    """
     snapshots = []
+    available_days = 0
+    attempted_days = 0
+    status_days = {}
+    failure_reasons = []
+    mapping_stale_days = []
+    status_dir = LHB_SNAPSHOT_DIR / "status"
     today = date.today()
-    for i in range(days):
-        d = (today - timedelta(days=i)).isoformat()
-        fp = LHB_SNAPSHOT_DIR / f"{d}.json"
-        if fp.exists():
-            try:
-                snapshots.append(json.loads(fp.read_text(encoding="utf-8")))
-            except Exception:
-                continue
-    return sorted(snapshots, key=lambda s: s["date"])
+
+    for i in range(max(0, days)):
+        day = (today - timedelta(days=i)).isoformat()
+        snapshot = _read_json_file(LHB_SNAPSHOT_DIR / f"{day}.json")
+        sidecar = _read_json_file(status_dir / f"{day}.json")
+        sidecar_status = str(sidecar.get("status", "")) if sidecar else ""
+
+        if sidecar is not None:
+            attempted_days += 1
+            status = sidecar_status or "error"
+            status_days[day] = status
+            if sidecar.get("mapping_stale"):
+                mapping_stale_days.append(day)
+            reasons = sidecar.get("failure_reasons", []) or []
+            if isinstance(reasons, str):
+                reasons = [reasons]
+            failure_reasons.extend(str(reason) for reason in reasons if reason)
+            if status == "live_success" and snapshot and snapshot.get("sectors"):
+                snapshots.append(snapshot)
+                available_days += 1
+            continue
+
+        if snapshot and snapshot.get("sectors"):
+            status_days[day] = "legacy_snapshot"
+            snapshots.append(snapshot)
+            available_days += 1
+        else:
+            status_days[day] = "not_run"
+
+    status_counts = Counter(status_days.values())
+    if available_days:
+        overall_status = "live_success" if status_counts.get("live_success") else "legacy_snapshot"
+    elif attempted_days and any(
+            status_counts.get(status, 0) for status in ("error", "mapping_error")):
+        overall_status = "error" if status_counts.get("error") else "mapping_error"
+    elif attempted_days:
+        overall_status = "no_data"
+    else:
+        overall_status = "not_run"
+
+    return {
+        "snapshots": sorted(snapshots, key=lambda s: s.get("date", "")),
+        "available_days": available_days,
+        "attempted_days": attempted_days,
+        "status_days": status_days,
+        "failure_reasons": sorted(set(failure_reasons)),
+        "mapping_stale_days": sorted(mapping_stale_days),
+        "status": overall_status,
+    }
+
+
+def _unpack_source_result(result) -> tuple[dict, Optional[dict]]:
+    """Accept source_health wrappers and legacy payloads."""
+    if (isinstance(result, dict)
+            and isinstance(result.get("payload"), dict)
+            and isinstance(result.get("live_attempt"), dict)):
+        return result["payload"], result["live_attempt"]
+    return result if isinstance(result, dict) else {}, None
+
+
+def _fallback_industry_rows(payload: dict) -> list[dict]:
+    """Convert East Money ranking rows to the THS scoring input contract."""
+    rows = []
+    for sector in payload.get("sectors", []) or []:
+        if sector.get("type") != "industry":
+            continue
+        name = str(sector.get("name", "") or "").strip()
+        if not name:
+            continue
+        rows.append({
+            "name": name,
+            "code": str(sector.get("code", "") or ""),
+            "change_pct": _safe_float(sector.get("change_pct")),
+            "net_flow": _safe_float(sector.get("main_force_net")),
+            "total_amount": _safe_float(sector.get("amount")),
+            "total_volume": 0,
+            "up_count": int(_safe_float(sector.get("up_count"))),
+            "down_count": int(_safe_float(sector.get("down_count"))),
+            "leader_name": "",
+            "leader_change": 0.0,
+        })
+    return rows
+
+
+def fetch_current_industry_data() -> dict:
+    """Fetch and score today's industries with THS/EM evidence.
+
+    THS remains the preferred source.  East Money is an independent fallback
+    and is only labelled successful when it returns valid industry rows.
+    """
+    from analysis.ths_theme import (
+        fetch_industry_data_with_evidence,
+        score_industries,
+    )
+
+    ths = fetch_industry_data_with_evidence()
+    ths_attempt = ths.get("live_attempt", {}) or {}
+    errors = list(ths.get("errors", []) or [])
+    if ths.get("status") == "live_success" and ths.get("data"):
+        return {
+            **ths,
+            "data": score_industries(list(ths["data"])),
+        }
+
+    em_attempt = {}
+    em_payload = {}
+    try:
+        from fetchers.sector_data import get_sector_rankings
+        fetched = get_sector_rankings(with_evidence=True)
+        em_payload, em_attempt = _unpack_source_result(fetched)
+        em_attempt = em_attempt or {}
+        em_meta = em_payload.get("meta", {}) or {}
+        em_errors = list(em_meta.get("errors", []) or [])
+        for error in em_errors:
+            text = f"eastmoney_push2: {error}"
+            if text not in errors:
+                errors.append(text)
+        # get_sector_rankings has an historical AKShare fallback when its
+        # response is empty.  Reject that path here: this boundary must not
+        # label THS data as an independent East Money success.
+        em_used_internal_fallback = bool(em_meta.get("upstream_errors"))
+        fallback_rows = [] if em_used_internal_fallback else _fallback_industry_rows(em_payload)
+        if em_used_internal_fallback:
+            errors.append("eastmoney_push2: rejected internal AKShare fallback")
+        if fallback_rows:
+            provider_attempts = int(ths_attempt.get("provider_attempts", 0) or 0)
+            provider_attempts += int(em_attempt.get("provider_attempts", 0) or 0)
+            return {
+                "data": score_industries(fallback_rows),
+                "status": "live_success",
+                "source": "eastmoney_push2",
+                "live_attempt": live_attempt(
+                    attempted=bool(ths_attempt.get("attempted")
+                                   or em_attempt.get("attempted")),
+                    provider_attempts=provider_attempts,
+                    status="success", failure_chain=[
+                        ths_attempt.get("reason", "")
+                    ] if ths_attempt.get("reason") else None,
+                ),
+                "errors": errors,
+            }
+    except Exception as exc:
+        reason = classify_failure(exc)
+        errors.append(f"eastmoney_push2: {reason}: {exc}")
+        em_attempt = live_attempt(
+            attempted=True, provider_attempts=1, reason=reason,
+            status="error", error_type=type(exc).__name__,
+            failure_detail=str(exc),
+        )
+
+    provider_attempts = int(ths_attempt.get("provider_attempts", 0) or 0)
+    provider_attempts += int(em_attempt.get("provider_attempts", 0) or 0)
+    reasons = [
+        str(ths_attempt.get("reason", "") or ""),
+        str(em_attempt.get("reason", "") or ""),
+    ]
+    reason = next((item for item in reasons if item and item != "empty"), "empty")
+    status = "error" if reason != "empty" else "no_data"
+    return {
+        "data": [],
+        "status": status,
+        "source": "none",
+        "live_attempt": live_attempt(
+            attempted=bool(ths_attempt.get("attempted")
+                           or em_attempt.get("attempted")),
+            provider_attempts=provider_attempts,
+            reason=reason,
+            status="error" if status == "error" else "empty",
+        ),
+        "errors": errors,
+    }
 
 
 def fetch_industry_data() -> list[dict]:
-    """Fetch today's industry heat data via ths-theme."""
-    try:
-        from analysis.ths_theme import fetch_industry_data, score_industries
-        industries = fetch_industry_data()
-        if industries:
-            return score_industries(industries)
-    except Exception:
-        pass
-    return []
+    """Compatibility wrapper returning today's scored industry rows."""
+    return fetch_current_industry_data().get("data", [])
 
 
 # ──────────────── 聚合评分 ────────────────
@@ -94,11 +277,31 @@ def fetch_industry_data() -> list[dict]:
 
 def aggregate_sectors(market_snapshots: dict[str, list[dict]],
                        lhb_snapshots: list[dict],
-                       today_industries: list[dict]) -> list[dict]:
+                       today_industries: list[dict],
+                       lhb_meta: Optional[dict] = None) -> list[dict]:
     """Aggregate sector data across all sources.
 
     Returns scored sectors with weekly_score (0-100).
     """
+    # An explicit bundle controls whether LHB evidence is usable.  The
+    # legacy three-argument call infers availability from its snapshot list.
+    if lhb_meta is None:
+        lhb_available_days = len(lhb_snapshots)
+        lhb_status = "live_success" if lhb_available_days else "not_run"
+    else:
+        lhb_available_days = int(lhb_meta.get("available_days", 0) or 0)
+        lhb_status = str(lhb_meta.get("status", "not_run") or "not_run")
+    lhb_enabled = lhb_available_days > 0
+    score_weights = {
+        "avg_hot": 0.30,
+        "frequency": 0.25,
+        "latest_hot": 0.25,
+        "trend": 0.10,
+        "lhb": 0.10 if lhb_enabled else 0,
+        "base_total": 1.0 if lhb_enabled else 0.90,
+    }
+    usable_lhb_snapshots = lhb_snapshots if lhb_enabled else []
+
     # Track all sectors and their daily data
     sector_days = defaultdict(list)  # sector_name → list of {date, hot_score, ...}
     sector_codes = {}
@@ -185,10 +388,10 @@ def aggregate_sectors(market_snapshots: dict[str, list[dict]],
         # LHB cross-ref
         lhb_net = 0
         lhb_direction = ""
-        for snap in lhb_snapshots:
+        for snap in usable_lhb_snapshots:
             for sec in snap.get("sectors", []):
-                if sec["sector_name"] == name or sec.get("matched_industry") == name:
-                    lhb_net += sec.get("inst_net_yi", 0)
+                if sec.get("sector_name") == name or sec.get("matched_industry") == name:
+                    lhb_net += _safe_float(sec.get("inst_net_yi", 0))
         if lhb_net > 0.5:
             lhb_direction = "净买"
             lhb_score = 80
@@ -196,16 +399,22 @@ def aggregate_sectors(market_snapshots: dict[str, list[dict]],
             lhb_direction = "净卖"
             lhb_score = 20
         else:
-            lhb_score = 50
+            lhb_score = 50 if lhb_enabled else None
 
         # Composite weekly score
-        weekly = (avg_hot * 0.30 + freq * 100 * 0.25
-                  + latest_hot * 0.25 + trend_score * 0.10
-                  + lhb_score * 0.10)
+        base_weekly = (avg_hot * score_weights["avg_hot"]
+                       + freq * 100 * score_weights["frequency"]
+                       + latest_hot * score_weights["latest_hot"]
+                       + trend_score * score_weights["trend"])
+        weekly = base_weekly
+        if lhb_enabled:
+            weekly += (lhb_score or 0) * score_weights["lhb"]
+        else:
+            weekly = base_weekly / score_weights["base_total"]
         weekly = round(max(0, min(100, weekly)), 1)
 
         net_flow = latest_entry.get("net_flow", 0) or 0
-        leader = latest_entry.get("leader", "")
+        leader = latest_entry.get("leader", "") or latest_entry.get("leader_name", "")
         change = latest_entry.get("change_pct", 0) or 0
 
         results.append({
@@ -223,6 +432,8 @@ def aggregate_sectors(market_snapshots: dict[str, list[dict]],
             "trend_score": trend_score,
             "lhb_net_yi": round(lhb_net, 2),
             "lhb_direction": lhb_direction,
+            "lhb_status": lhb_status,
+            "score_weights": dict(score_weights),
             "leader": leader,
         })
 
@@ -244,6 +455,50 @@ def classify_weekly(scored: list[dict]) -> dict:
 # ──────────────── 报告 ────────────────
 
 
+def _coverage_lines(meta: dict) -> list[str]:
+    """Render data-source coverage and failure evidence for Markdown."""
+    lines = []
+    industry_status = meta.get("industry_status")
+    if industry_status:
+        source = meta.get("industry_source") or "none"
+        lines.append(f"▸ 行业热力: {industry_status} (source={source})")
+        if industry_status != "live_success":
+            lines.append("⚠️ 行业数据不可用，周报仅使用已有历史数据（如有）")
+        industry_errors = meta.get("industry_errors", []) or []
+        if industry_errors:
+            lines.append(f"  行业失败原因: {'; '.join(map(str, industry_errors[:3]))}")
+
+    if "lhb_available_days" in meta:
+        available = int(meta.get("lhb_available_days", 0) or 0)
+        attempted = int(meta.get("lhb_attempted_days", 0) or 0)
+        status_days = meta.get("lhb_status_days", {}) or {}
+        not_run = sum(1 for status in status_days.values() if status == "not_run")
+        lines.append(
+            f"▸ 龙虎榜覆盖: 有效{available}天 / 尝试{attempted}天 / 未运行{not_run}天")
+        if meta.get("mapping_stale_days"):
+            lines.append(
+                f"  映射过期但显式使用: {len(meta['mapping_stale_days'])}天")
+        reasons = meta.get("lhb_failure_reasons", []) or []
+        if reasons:
+            lines.append(f"  龙虎榜失败原因: {'; '.join(map(str, reasons[:3]))}")
+        if available == 0:
+            lines.append(
+                "⚠️ 本周无有效龙虎榜验证，周分已重归一，不代表机构资金确认")
+    warnings = meta.get("warnings", []) or []
+    if warnings:
+        lines.append(f"⚠️ 数据提示: {'; '.join(map(str, warnings[:5]))}")
+    return lines
+
+
+def _coverage_html(meta: dict) -> str:
+    """Render the same coverage evidence as a compact HTML block."""
+    lines = _coverage_lines(meta)
+    if not lines:
+        return ""
+    rendered = "<br>".join(escape(str(line)) for line in lines)
+    return f'<div class="coverage">{rendered}</div>'
+
+
 def generate_report(scored: list[dict], classified: dict,
                     meta: dict) -> str:
     """Generate MD report."""
@@ -254,6 +509,10 @@ def generate_report(scored: list[dict], classified: dict,
     lines.append(f"▸ 数据区间: {meta.get('period', '')}")
     lines.append(f"▸ 覆盖板块: {meta.get('total_sectors', 0)} 个")
     lines.append(f"▸ 数据天数: {meta.get('total_dates', 0)} 天")
+    coverage = _coverage_lines(meta)
+    if coverage:
+        lines.append("")
+        lines.extend(coverage)
     lines.append("")
 
     strong = classified["strong"]
@@ -385,9 +644,12 @@ th{{background:#1d4ed8;color:#fff;font-weight:600;font-size:13px}}
 .card .num{{font-size:22px;font-weight:700;color:#1d4ed8}}
 .card .lbl{{font-size:12px;color:#86868b;margin-top:2px}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:32px}}
+.coverage{{background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 16px;margin:16px 0;color:#9a3412;font-size:13px;line-height:1.7}}
 </style></head><body><div class="w">
 <h1>📅 周主线报告</h1>
 <p class="dt">{meta.get('time','')} | {meta.get('period','')} | {meta.get('total_sectors',0)} 板块 | {meta.get('total_dates',0)} 天数据</p>
+
+{_coverage_html(meta)}
 
 <div class="summary-cards">
 <div class="card"><div class="num" style="color:#dc2626">{len(strong)}</div><div class="lbl">中期主线</div></div>
@@ -418,10 +680,6 @@ def main():
     parser.add_argument("--json", action="store_true", help="JSON 输出")
     args = parser.parse_args()
 
-    if not HAS_AKSHARE:
-        print("⚠️ AKShare 未安装")
-        return
-
     days = args.weeks * 7
     start = time.time()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -435,27 +693,73 @@ def main():
     print(f"  {len(market_snapshots)} 天快照")
 
     print(f"[2/4] 加载龙虎榜快照 ({days}天)...")
-    lhb_snapshots = load_lhb_snapshots(days=days)
-    print(f"  {len(lhb_snapshots)} 天快照")
+    lhb_bundle = load_lhb_snapshot_bundle(days=days)
+    lhb_snapshots = lhb_bundle["snapshots"]
+    print(
+        f"  有效 {lhb_bundle['available_days']} 天 / "
+        f"尝试 {lhb_bundle['attempted_days']} 天 / "
+        f"状态 {lhb_bundle['status']}"
+    )
 
     print("[3/4] 获取今日行业热力...")
-    today_industries = fetch_industry_data()
+    industry_evidence = fetch_current_industry_data()
+    today_industries = industry_evidence.get("data", [])
     if today_industries:
-        print(f"  {len(today_industries)} 个行业")
+        print(
+            f"  {len(today_industries)} 个行业 "
+            f"(source={industry_evidence.get('source', 'none')})"
+        )
+    else:
+        print(
+            f"  ⚠️ 行业数据不可用 "
+            f"(status={industry_evidence.get('status', 'error')})"
+        )
 
     print("[4/4] 聚合评分...")
-    scored = aggregate_sectors(market_snapshots, lhb_snapshots, today_industries)
-    if not scored:
-        print("⚠️ 无数据")
-        return
-
-    classified = classify_weekly(scored)
+    scored = aggregate_sectors(
+        market_snapshots, lhb_snapshots, today_industries,
+        lhb_meta=lhb_bundle,
+    )
+    warnings = []
+    if industry_evidence.get("status") != "live_success":
+        warnings.append("industry unavailable")
+    if lhb_bundle.get("available_days", 0) == 0:
+        warnings.append("no valid LHB verification")
     meta = {
         "time": now,
         "period": f"{period_start} ~ {period_end}",
         "total_sectors": len(scored),
         "total_dates": len(market_snapshots) + (1 if today_industries else 0),
+        "industry_status": industry_evidence.get("status", "error"),
+        "industry_source": industry_evidence.get("source", "none"),
+        "industry_live_attempt": industry_evidence.get("live_attempt", {}),
+        "industry_errors": industry_evidence.get("errors", []),
+        "lhb_available_days": lhb_bundle.get("available_days", 0),
+        "lhb_attempted_days": lhb_bundle.get("attempted_days", 0),
+        "lhb_status_days": lhb_bundle.get("status_days", {}),
+        "lhb_failure_reasons": lhb_bundle.get("failure_reasons", []),
+        "mapping_stale_days": lhb_bundle.get("mapping_stale_days", []),
+        "warnings": warnings,
+        "score_weights": (
+            scored[0].get("score_weights", {}) if scored else {
+                "avg_hot": 0.30, "frequency": 0.25, "latest_hot": 0.25,
+                "trend": 0.10, "lhb": 0,
+                "base_total": 0.90 if not lhb_bundle.get("available_days") else 1.0,
+            }
+        ),
     }
+    if not scored:
+        print("⚠️ 无数据")
+        if args.json:
+            print(json.dumps({
+                "meta": meta, "strong": [], "active": [], "lhb_buy": [],
+            }, ensure_ascii=False, indent=2))
+        else:
+            for line in _coverage_lines(meta):
+                print(line)
+        return
+
+    classified = classify_weekly(scored)
 
     if args.json:
         output = {

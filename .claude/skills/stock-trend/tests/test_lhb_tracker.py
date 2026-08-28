@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from analysis.lhb_tracker import (
     save_daily_snapshot,
+    collect_daily_snapshot,
     load_history,
     backfill_returns,
     verify_signals,
@@ -16,6 +17,17 @@ from analysis.lhb_tracker import (
     SNAPSHOT_DIR,
     HAS_AKSHARE,
 )
+import analysis.lhb_tracker as lhb_tracker
+import fetchers.longhubang_agg as lhb_agg
+
+
+class _FakeFrame:
+    def __init__(self, rows=None):
+        self._rows = list(rows or [])
+        self.empty = not self._rows
+
+    def iterrows(self):
+        return enumerate(self._rows)
 
 
 # ──────────────── Mock 快照 ────────────────
@@ -170,8 +182,14 @@ def test_load_history_empty():
     assert isinstance(result, list)
 
 
-def test_load_history_with_mock():
+def test_load_history_with_mock(monkeypatch):
     """Mock snapshots should load in date order."""
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 30)
+
+    monkeypatch.setattr(lhb_tracker, "date", _FixedDate)
     _clean_mock_snapshots()
     _write_mock_snapshot(MOCK_SNAPSHOT_1)
     _write_mock_snapshot(MOCK_SNAPSHOT_2)
@@ -268,8 +286,177 @@ def test_save_daily_snapshot_live():
     assert "direction" in snap["sectors"][0]
 
 
-def test_load_history_correct_count():
+def test_lhb_fetch_dns_stops_date_fallback(monkeypatch):
+    calls = []
+
+    def fail(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("NameResolutionError: getaddrinfo failed")
+
+    monkeypatch.setattr(lhb_agg.ak, "stock_lhb_jgmmtj_em", fail)
+    result = lhb_agg.fetch_lhb_jgmmtj_with_evidence("20260828")
+
+    assert result["status"] == "error"
+    assert result["data"] == []
+    assert result["live_attempt"]["reason"] == "dns"
+    assert result["live_attempt"]["provider_attempts"] == 1
+    assert len(calls) == 1
+
+
+def test_lhb_fetch_empty_falls_back_only_four_days(monkeypatch):
+    calls = []
+
+    def empty(**kwargs):
+        calls.append(kwargs)
+        return _FakeFrame()
+
+    monkeypatch.setattr(lhb_agg.ak, "stock_lhb_jgmmtj_em", empty)
+    result = lhb_agg.fetch_lhb_jgmmtj_with_evidence("20260828")
+
+    assert result["status"] == "no_data"
+    assert result["live_attempt"]["reason"] == "empty"
+    assert result["live_attempt"]["provider_attempts"] == 5
+    assert [c["start_date"] for c in calls] == [
+        "20260828", "20260827", "20260826", "20260825", "20260824",
+    ]
+
+
+def test_lhb_fetch_reports_actual_row_date(monkeypatch):
+    row = {"代码": "600519", "名称": "测试股", "上榜日期": "2026-08-27"}
+    monkeypatch.setattr(lhb_agg.ak, "stock_lhb_jgmmtj_em",
+                        lambda **kwargs: _FakeFrame([row]))
+
+    result = lhb_agg.fetch_lhb_jgmmtj_with_evidence("20260828")
+
+    assert result["status"] == "live_success"
+    assert result["data_date"] == "20260827"
+    assert result["data"][0]["date"] == "20260827"
+
+
+def test_run_lhb_analysis_propagates_fetch_error(monkeypatch):
+    monkeypatch.setattr(lhb_agg, "fetch_lhb_jgmmtj_with_evidence", lambda _: {
+        "data": [], "status": "error", "requested_date": "20260828",
+        "data_date": "", "live_attempt": {
+            "attempted": True, "provider_attempts": 1,
+            "reason": "dns", "status": "error",
+        }, "errors": ["20260828: dns"],
+    })
+
+    result = lhb_agg.run_lhb_analysis("20260828")
+
+    assert result["meta"]["status"] == "error"
+    assert result["meta"]["failure_reasons"] == ["dns"]
+    assert result["sectors"] == []
+
+
+def test_run_lhb_analysis_marks_mapping_error(monkeypatch):
+    monkeypatch.setattr(lhb_agg, "fetch_lhb_jgmmtj_with_evidence", lambda _: {
+        "data": [{"code": "600519", "name": "测试股"}],
+        "status": "live_success", "requested_date": "20260828",
+        "data_date": "20260828", "live_attempt": {
+            "attempted": True, "provider_attempts": 1,
+            "reason": "", "status": "success",
+        }, "errors": [],
+    })
+    monkeypatch.setattr(lhb_agg, "get_mapping", lambda **kwargs: None)
+
+    result = lhb_agg.run_lhb_analysis("20260828")
+
+    assert result["meta"]["status"] == "mapping_error"
+    assert result["meta"]["total_lhb_stocks"] == 1
+    assert result["meta"]["failure_reasons"] == ["mapping"]
+
+
+def _mock_lhb_result(status, date_str):
+    return {
+        "meta": {
+            "date": date_str.replace("-", ""), "requested_date": date_str.replace("-", ""),
+            "data_date": date_str.replace("-", ""), "status": status,
+            "total_lhb_stocks": 1 if status != "no_data" else 0,
+            "total_sectors": 1 if status == "live_success" else 0,
+            "mapping_stale": status == "live_success",
+            "live_attempt": {"attempted": True, "provider_attempts": 1,
+                              "reason": "" if status == "live_success" else status,
+                              "status": status},
+            "failure_reasons": [] if status == "live_success" else [status],
+            "errors": [],
+        },
+        "sectors": [{
+            "sector_code": "BK0001", "sector_name": "测试行业",
+            "sector_type": "industry", "lhb_score": 70,
+            "direction": "净买", "total_inst_net_yi": 1.2,
+            "stock_count": 1, "inst_buy_count": 1, "inst_sell_count": 0,
+            "member_names": ["测试股"],
+        }] if status == "live_success" else [],
+    }
+
+
+def test_collect_daily_snapshot_writes_status_for_each_outcome(tmp_path, monkeypatch):
+    monkeypatch.setattr(lhb_tracker, "SNAPSHOT_DIR", tmp_path / "lhb")
+    monkeypatch.setattr(lhb_tracker, "STATUS_DIR", tmp_path / "lhb" / "status")
+    monkeypatch.setattr(lhb_tracker.ak, "stock_board_industry_summary_ths",
+                        lambda: _FakeFrame())
+    monkeypatch.setattr(lhb_tracker.ak, "stock_board_concept_summary_ths",
+                        lambda: _FakeFrame())
+
+    outcomes = iter([
+        _mock_lhb_result("live_success", "2026-08-28"),
+        _mock_lhb_result("no_data", "2026-08-27"),
+        _mock_lhb_result("mapping_error", "2026-08-26"),
+    ])
+    monkeypatch.setattr(lhb_tracker, "run_lhb_analysis", lambda _: next(outcomes))
+
+    success = collect_daily_snapshot("2026-08-28")
+    no_data = collect_daily_snapshot("2026-08-27")
+    mapping_error = collect_daily_snapshot("2026-08-26")
+
+    assert success["status"] == "live_success"
+    assert (tmp_path / "lhb" / "2026-08-28.json").exists()
+    assert no_data["status"] == "no_data"
+    assert mapping_error["status"] == "mapping_error"
+    assert not (tmp_path / "lhb" / "2026-08-27.json").exists()
+    for d, status in [("2026-08-28", "live_success"),
+                      ("2026-08-27", "no_data"),
+                      ("2026-08-26", "mapping_error")]:
+        sidecar = json.loads((tmp_path / "lhb" / "status" / f"{d}.json").read_text())
+        assert sidecar["status"] == status
+        assert sidecar["date"] == d
+
+
+def test_save_daily_snapshot_legacy_wrapper(monkeypatch):
+    snapshot = {"date": "2026-08-28", "sectors": []}
+    monkeypatch.setattr(lhb_tracker, "collect_daily_snapshot",
+                        lambda _: {"status": "live_success", "snapshot": snapshot})
+    assert save_daily_snapshot("2026-08-28") == snapshot
+
+
+def test_collect_snapshot_keeps_result_when_status_write_fails(tmp_path, monkeypatch):
+    snapshot = {"date": "2026-08-28", "sectors": []}
+    monkeypatch.setattr(lhb_tracker, "SNAPSHOT_DIR", tmp_path / "lhb")
+    monkeypatch.setattr(lhb_tracker, "run_lhb_analysis", lambda _: {
+        "meta": {"status": "live_success", "total_lhb_stocks": 1,
+                  "total_sectors": 1},
+        "sectors": [{"sector_name": "测试行业"}],
+    })
+    monkeypatch.setattr(lhb_tracker, "_fetch_sector_changes", lambda: {})
+    monkeypatch.setattr(lhb_tracker, "_write_status",
+                        lambda *_: (_ for _ in ()).throw(OSError("read-only")))
+
+    result = lhb_tracker.collect_daily_snapshot("2026-08-28")
+
+    assert result["status"] == "live_success"
+    assert result["snapshot"]["date"] == snapshot["date"]
+    assert "read-only" in result["status_write_error"]
+
+
+def test_load_history_correct_count(monkeypatch):
     """load_history should return only snapshots within requested days."""
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 5, 30)
+
+    monkeypatch.setattr(lhb_tracker, "date", _FixedDate)
     _clean_mock_snapshots()
     _write_mock_snapshot(MOCK_SNAPSHOT_1)
     _write_mock_snapshot(MOCK_SNAPSHOT_2)

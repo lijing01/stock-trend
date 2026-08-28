@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from analysis.ths_theme import (
     fetch_industry_data,
+    fetch_industry_data_with_evidence,
     fetch_concept_catalysts,
     score_industries,
     classify_industries,
@@ -14,6 +15,16 @@ from analysis.ths_theme import (
     generate_report,
     HAS_AK,
 )
+import analysis.ths_theme as ths_theme
+
+
+class _FakeFrame:
+    def __init__(self, rows=None):
+        self._rows = list(rows or [])
+        self.empty = not self._rows
+
+    def iterrows(self):
+        return enumerate(self._rows)
 
 
 # ──────────────── 数据获取 ────────────────
@@ -31,6 +42,46 @@ def test_fetch_industry_data_returns_list():
     if not industries:
         return
     assert len(industries) >= 10, f"Expected >=10 industries, got {len(industries)}"
+
+
+def test_fetch_industry_data_evidence_classifies_dns(monkeypatch):
+    """DNS failures are observable while the legacy API remains a list."""
+    error = RuntimeError("NameResolutionError: getaddrinfo failed")
+    monkeypatch.setattr(ths_theme.ak, "stock_board_industry_summary_ths",
+                        lambda: (_ for _ in ()).throw(error))
+
+    evidence = fetch_industry_data_with_evidence()
+
+    assert evidence["status"] == "error"
+    assert evidence["source"] == "none"
+    assert evidence["data"] == []
+    assert evidence["live_attempt"]["reason"] == "dns"
+    assert evidence["live_attempt"]["provider_attempts"] == 1
+    assert evidence["errors"]
+    assert "dns" in str(evidence["errors"][0])
+    assert fetch_industry_data() == []
+
+
+def test_fetch_industry_data_evidence_maps_rows(monkeypatch):
+    monkeypatch.setattr(ths_theme.ak, "stock_board_industry_summary_ths",
+                        lambda: _FakeFrame([{
+                            "板块": "测试行业",
+                            "涨跌幅": 2.0,
+                            "净流入": 1.5,
+                            "总成交额": 10.0,
+                            "总成交量": 100,
+                            "上涨家数": 8,
+                            "下跌家数": 2,
+                            "领涨股": "测试股",
+                            "领涨股-涨跌幅": 5.0,
+                        }]))
+
+    evidence = fetch_industry_data_with_evidence()
+
+    assert evidence["status"] == "live_success"
+    assert evidence["source"] == "ths_akshare"
+    assert evidence["data"][0]["net_flow"] == 1.5e8
+    assert evidence["data"][0]["leader_name"] == "测试股"
 
 
 def _have_data():

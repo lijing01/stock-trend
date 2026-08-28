@@ -37,40 +37,114 @@ from fetchers.sector_akshare import (
     get_sector_list_akshare,
     HAS_AKSHARE as HAS_AK,
 )
+from core.source_health import classify_failure, live_attempt
+
+try:
+    import akshare as ak
+except ImportError:  # pragma: no cover - exercised through the evidence path
+    ak = None
 
 # ──────────────── 数据获取 ────────────────
 
 
-def fetch_industry_data() -> list[dict]:
-    """Fetch industry sector real-time rankings via AKShare.
+def _industry_evidence(data: list[dict], *, status: str, source: str,
+                       attempt: dict, errors: list[str]) -> dict:
+    """Build the stable business-level evidence shape for industry data."""
+    return {
+        "data": data,
+        "status": status,
+        "source": source,
+        "live_attempt": attempt,
+        "errors": list(errors),
+    }
 
-    Returns list of dicts:
-        name, change_pct, net_flow, total_amount, up_count, down_count,
-        leader_name, leader_change
-    Returns empty list on failure.
+
+def fetch_industry_data_with_evidence() -> dict:
+    """Fetch THS industry rankings and retain failure evidence.
+
+    The legacy :func:`fetch_industry_data` deliberately remains a list-only
+    wrapper.  This function is the boundary used by reports that need to
+    distinguish a real empty market from a failed provider request.
     """
-    import akshare as ak
+    errors = []
+    if ak is None or not HAS_AK:
+        error = "AKShare 未安装"
+        errors.append(f"ths_akshare: {error}")
+        return _industry_evidence(
+            [], status="error", source="none",
+            attempt=live_attempt(attempted=False, reason="unknown",
+                                 status="error", error_type="ImportError",
+                                 failure_detail=error),
+            errors=errors,
+        )
+
+    provider_attempts = 1
     try:
         df = ak.stock_board_industry_summary_ths()
-        if df is None or df.empty:
-            return []
+        if df is None or getattr(df, "empty", False):
+            return _industry_evidence(
+                [], status="no_data", source="none",
+                attempt=live_attempt(
+                    attempted=True, provider_attempts=provider_attempts,
+                    reason="empty", status="empty"),
+                errors=errors,
+            )
+        columns = getattr(df, "columns", None)
+        if columns is not None and "板块" not in columns:
+            raise ValueError("parse: 缺少板块字段")
+
         results = []
         for _, row in df.iterrows():
+            raw_name = row.get("板块", "")
+            if raw_name is None:
+                continue
+            name = str(raw_name).strip()
+            if not name or name.lower() == "nan":
+                continue
             results.append({
-                "name": str(row.get("板块", "")),
+                "name": name,
                 "change_pct": _safe_float(row.get("涨跌幅")),
                 "net_flow": _safe_float(row.get("净流入")) * 1e8,  # 亿→元
                 "total_amount": _safe_float(row.get("总成交额")) * 1e8,
                 "total_volume": _safe_float(row.get("总成交量")),
                 "up_count": _safe_int(row.get("上涨家数")),
                 "down_count": _safe_int(row.get("下跌家数")),
-                "leader_name": str(row.get("领涨股", "")),
+                "leader_name": str(row.get("领涨股", "") or ""),
                 "leader_change": _safe_float(row.get("领涨股-涨跌幅")),
             })
-        return results
-    except Exception as e:
-        print(f"  [AKShare] 获取行业排行失败: {e}", file=sys.stderr)
-        return []
+        if not results:
+            return _industry_evidence(
+                [], status="no_data", source="none",
+                attempt=live_attempt(
+                    attempted=True, provider_attempts=provider_attempts,
+                    reason="empty", status="empty"),
+                errors=errors,
+            )
+        return _industry_evidence(
+            results, status="live_success", source="ths_akshare",
+            attempt=live_attempt(
+                attempted=True, provider_attempts=provider_attempts,
+                status="success"),
+            errors=errors,
+        )
+    except Exception as exc:
+        reason = classify_failure(exc)
+        error = f"ths_akshare: {reason}: {exc}"
+        errors.append(error)
+        print(f"  [AKShare] 获取行业排行失败: {exc}", file=sys.stderr)
+        return _industry_evidence(
+            [], status="error", source="none",
+            attempt=live_attempt(
+                attempted=True, provider_attempts=provider_attempts,
+                reason=reason, status="error", error_type=type(exc).__name__,
+                failure_detail=str(exc)),
+            errors=errors,
+        )
+
+
+def fetch_industry_data() -> list[dict]:
+    """Compatibility wrapper returning only the raw industry rows."""
+    return fetch_industry_data_with_evidence().get("data", [])
 
 
 def fetch_concept_catalysts() -> list[dict]:
