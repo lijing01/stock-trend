@@ -167,6 +167,26 @@ class TestRecommendationQuality(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertIn("capital_error", result["reasons"])
 
+    def test_source_unavailable_is_non_provider_scheduler_state(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260806"}]),
+            capital=None,
+            fundamental=payload([], quality="good"),
+            as_of_date="2026-08-06",
+            source_evidence={
+                "capital": {
+                    "attempted": False,
+                    "status": "source_unavailable",
+                    "reason": "source_unavailable",
+                },
+            },
+        )
+        capital = result["dimensions"]["capital"]
+        self.assertFalse(capital["available"])
+        self.assertEqual(capital["stale_reason"], "source_unavailable")
+        self.assertIn("source_unavailable", result["reasons"])
+        self.assertNotIn("capital_error", result["reasons"])
+
     def test_nominally_successful_empty_capital_is_an_error(self):
         empty_capital = {
             "meta": {"data_source": "eastmoney", "record_count": 0},

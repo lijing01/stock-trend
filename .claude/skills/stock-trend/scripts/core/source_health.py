@@ -85,9 +85,11 @@ def classify_failure(error: BaseException | str | None) -> str:
 def live_attempt(*, attempted: bool, provider_attempts: int = 0,
                  reason: str = "", cache_used: bool = False,
                  stale: bool = False, subprocess_started: bool = False,
-                 status: str = "") -> dict:
+                 status: str = "", failure_chain: list | None = None,
+                 error_type: str = "", stale_sources: list | None = None,
+                 failure_detail: str = "") -> dict:
     """Build the common evidence record used by every source adapter."""
-    return {
+    evidence = {
         "attempted": bool(attempted),
         "reason": reason,
         "cache_used": bool(cache_used),
@@ -96,6 +98,17 @@ def live_attempt(*, attempted: bool, provider_attempts: int = 0,
         "provider_attempts": max(0, int(provider_attempts or 0)),
         "status": str(status or ""),
     }
+    # Keep the successful/legacy evidence shape stable.  Diagnostics are
+    # attached only when a failed payload actually provides them.
+    if failure_chain:
+        evidence["failure_chain"] = list(failure_chain)
+    if error_type:
+        evidence["error_type"] = str(error_type)
+    if stale_sources:
+        evidence["stale_sources"] = list(stale_sources)
+    if failure_detail:
+        evidence["failure_detail"] = str(failure_detail)
+    return evidence
 
 
 def source_result(payload: Any, attempt: dict | None = None) -> dict:

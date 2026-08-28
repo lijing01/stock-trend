@@ -7,7 +7,7 @@ WEIGHTS = {"kline": 0.55, "capital": 0.25, "fundamental": 0.20}
 MIN_COVERAGE = 0.70
 NON_PROVIDER_STATUSES = frozenset({
     "cache_miss", "cache_stale", "not_selected_for_enrichment",
-    "not_started_deadline",
+    "not_started_deadline", "source_unavailable",
 })
 SUCCESS_STATUSES = frozenset({"live_success", "cache_valid"})
 

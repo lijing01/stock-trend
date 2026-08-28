@@ -312,6 +312,36 @@ class TestMetadata(unittest.TestCase):
         self.assertIn("--skip-extended", cmd)
         self.assertEqual(cmd[cmd.index("--expected-date") + 1], "2026-08-13")
 
+    def test_capital_error_payload_keeps_fallback_chain_in_live_evidence(self):
+        payload = {
+            "meta": {
+                "data_source": "error",
+                "error_type": "stale_data",
+                "stale_sources": ["eastmoney"],
+                "failure_chain": [
+                    {"source": "eastmoney", "reason": "stale_data"},
+                    {"source": "tushare_fallback", "reason": "empty"},
+                ],
+                "error": "资金流向获取失败: 东方财富数据过期",
+            },
+            "data": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(sc, "_read_json", side_effect=[None, payload]), \
+                patch.object(sc, "run_script", return_value={"success": True}):
+            wrapped = sc._fetch_capital_flow(
+                "600001.SH", with_evidence=True,
+                expected_trading_date="2026-08-13")
+
+        attempt = wrapped["live_attempt"]
+        self.assertEqual(attempt["reason"], "stale_data")
+        self.assertEqual(attempt["status"], "stale_data")
+        self.assertEqual(attempt["stale_sources"], ["eastmoney"])
+        self.assertEqual(
+            attempt["failure_chain"], payload["meta"]["failure_chain"])
+        self.assertIn("东方财富", attempt["failure_detail"])
+
     def test_invalid_cache_only_payload_is_diagnostic_and_non_actionable(self):
         capital = self._valid_capital("20260812")
         with tempfile.TemporaryDirectory() as tmpdir, \
@@ -1198,6 +1228,31 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertTrue(all(
             not item["data_quality"]["eligible"] for item in unselected))
         self.assertLess(len(capital_calls), len(candidates))
+
+    def test_failed_capital_calls_stay_within_fixed_queue_budget(self):
+        candidates = [_make_candidate(f"612{index:03d}") for index in range(37)]
+        capital_calls = []
+
+        def fetch_capital(ts_code, with_evidence=False, **_kwargs):
+            capital_calls.append(ts_code)
+            attempt = sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                reason="eastmoney_empty", status="eastmoney_empty")
+            result = sc.source_result(None, attempt)
+            return result if with_evidence else None
+
+        with patch.object(sc, "_fetch_kline",
+                          side_effect=lambda ts_code, **_kwargs:
+                          _make_dated_kline(60, ts_code, "20260827")), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental", return_value=None):
+            scored = sc.run_phase2(
+                candidates, enable_wyckoff=False, min_candidates=20)
+
+        self.assertLessEqual(len(capital_calls), sc.CAPITAL_PREFETCH_LIMIT)
+        self.assertTrue(all(
+            not item["data_quality"]["eligible"] for item in scored))
 
     def test_expected_trading_date_reaches_all_cache_validators(self):
         seen = {"kline": [], "capital": [], "fundamental": []}

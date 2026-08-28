@@ -2168,6 +2168,149 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("资金面数据返回错误", detail)
         self.assertIn("抓取原因码timeout", detail)
 
+    def test_called_capital_failure_is_distinct_from_scheduler_omission(self):
+        item = candidate("capital-empty", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["capital_error"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "eastmoney_empty",
+                    "stale_reason": "capital_error",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "attempted": True,
+                "status": "eastmoney_empty",
+                "reason": "eastmoney_empty",
+                "cache_used": False,
+                "failure_chain": [
+                    {"source": "eastmoney", "reason": "empty"},
+                ],
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("资金面数据返回错误", detail)
+        self.assertIn("接口已调用", detail)
+        self.assertIn("抓取原因码eastmoney_empty", detail)
+        self.assertIn("失败链路eastmoney:empty", detail)
+        self.assertNotIn("调度原因码", detail)
+
+    def test_not_selected_capital_is_rendered_as_unrequested_scheduler_state(self):
+        item = candidate("not-selected", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["not_selected_for_enrichment"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "not_selected_for_enrichment",
+                    "stale_reason": "not_selected_for_enrichment",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "attempted": False,
+                "status": "not_selected_for_enrichment",
+                "reason": "not_selected_for_enrichment",
+                "cache_used": False,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("未进入资金增强优先队列（预算内未选中）", detail)
+        self.assertIn("未调用", detail)
+        self.assertIn("调度原因码not_selected_for_enrichment", detail)
+        self.assertNotIn("抓取原因码not_selected_for_enrichment", detail)
+
+    def test_source_unavailable_capital_is_rendered_as_unrequested_scheduler_state(self):
+        item = candidate("source-unavailable", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["source_unavailable"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "source_unavailable",
+                    "stale_reason": "source_unavailable",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "attempted": False,
+                "status": "source_unavailable",
+                "reason": "source_unavailable",
+                "cache_used": False,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("资金增强源不可用，本轮未调用", detail)
+        self.assertIn("未调用", detail)
+        self.assertIn("调度原因码source_unavailable", detail)
+        self.assertNotIn("抓取原因码source_unavailable", detail)
+
+    def test_capital_failure_audit_excludes_unrequested_scheduler_states(self):
+        provider_failure = candidate("provider-failure", eligible=False)
+        provider_failure["source_evidence"] = {
+            "capital": {
+                "attempted": True,
+                "status": "eastmoney_empty",
+                "reason": "eastmoney_empty",
+            },
+        }
+        scheduler_omission = candidate("scheduler-omission", eligible=False)
+        scheduler_omission["source_evidence"] = {
+            "capital": {
+                "attempted": False,
+                "status": "not_selected_for_enrichment",
+                "reason": "not_selected_for_enrichment",
+            },
+        }
+        buckets = {
+            "actionable": [], "waiting_trigger": [],
+            "observation": [provider_failure, scheduler_omission],
+        }
+
+        performance = _complete_performance(
+            {}, None, [provider_failure, scheduler_omission], buckets,
+            min_score=50, total_seconds=1.0)
+
+        self.assertEqual(
+            performance["capital_failure_reasons"],
+            {"eastmoney_empty": 1},
+        )
+
+    def test_capital_failure_audit_prefers_full_source_health_counts(self):
+        health = dc.RunSourceHealth()
+        token = health.try_acquire_live_permit("capital")
+        health.mark_started(token)
+        health.complete_failure(token, dc.live_attempt(
+            attempted=True, provider_attempts=1,
+            reason="eastmoney_empty", status="eastmoney_empty"))
+
+        performance = _complete_performance(
+            {}, health, [], {"actionable": [], "waiting_trigger": [],
+                             "observation": []},
+            min_score=50, total_seconds=1.0)
+
+        self.assertEqual(
+            performance["capital_failure_reasons"],
+            {"eastmoney_empty": 1},
+        )
+
     def test_capital_audit_fields_reconcile_cache_live_and_skipped(self):
         cache_hit = candidate("cache")
         cache_hit["source_evidence"] = {

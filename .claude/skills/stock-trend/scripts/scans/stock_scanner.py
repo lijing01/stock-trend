@@ -27,7 +27,11 @@ from datetime import datetime
 
 from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
-from core.recommendation_quality import assess_candidate_data, latest_data_date
+from core.recommendation_quality import (
+    NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
+    assess_candidate_data,
+    latest_data_date,
+)
 from core.source_health import (
     CAPITAL_PREFETCH_BATCH_SIZE,
     CAPITAL_PREFETCH_LIMIT,
@@ -58,10 +62,7 @@ SOURCE_HARD_FAILURE_THRESHOLD = 8
 SOURCE_EVIDENCE_STATUSES = frozenset({
     "live_success", "cache_valid", "cache_miss", "cache_stale",
     "not_selected_for_enrichment", "not_started_deadline",
-})
-NON_PROVIDER_ENRICHMENT_STATUSES = frozenset({
-    "cache_miss", "cache_stale", "not_selected_for_enrichment",
-    "not_started_deadline",
+    "source_unavailable",
 })
 
 # ──────────────────────── Helpers ────────────────────────
@@ -1044,6 +1045,42 @@ def _fundamental_failure_reason(payload, verdict=None):
     return "empty"
 
 
+def _capital_failure_reason(payload, verdict=None):
+    """Return a stable capital failure code and retain source-level detail."""
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get("error_type") == "stale_data":
+        return "stale_data"
+
+    chain = meta.get("failure_chain", [])
+    sources = {
+        item.get("source"): item.get("reason")
+        for item in chain
+        if isinstance(item, dict) and item.get("source")
+    }
+    for source, prefix in (("eastmoney", "eastmoney"),
+                           ("tushare_fallback", "tushare")):
+        source_reason = sources.get(source)
+        if source_reason in {"empty", "timeout", "dns", "http", "parse",
+                             "subprocess"}:
+            return f"{prefix}_{source_reason}"
+        if source_reason == "stale_data":
+            return "stale_data"
+    if sources.get("kline_estimate") in {"missing", "empty"}:
+        return "kline_missing"
+    if sources.get("kline_estimate") == "stale_data":
+        return "stale_data"
+
+    error_text = meta.get("error", "")
+    classified = classify_failure(error_text)
+    if classified != "unknown":
+        return classified
+    reasons = verdict.get("reasons", []) if isinstance(verdict, dict) else []
+    if "wrong_trading_date" in reasons:
+        return "stale_data"
+    return "output_invalid"
+
+
 def _same_day_membership_fundamental_fallback(candidate, as_of_date=""):
     """Build scan-grade PE evidence from a verified live member snapshot.
 
@@ -1129,8 +1166,18 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
         refreshed_verdict = _validate_capital_cache(
             payload, expected_trading_date)
         if not refreshed_verdict["valid"]:
-            attempt["reason"] = "empty"
-            attempt["status"] = "empty"
+            meta = payload.get("meta", {}) \
+                if isinstance(payload, dict) else {}
+            meta = meta if isinstance(meta, dict) else {}
+            reason = _capital_failure_reason(payload, refreshed_verdict)
+            attempt.update({
+                "reason": reason,
+                "status": reason,
+                "failure_chain": meta.get("failure_chain", []),
+                "error_type": meta.get("error_type", ""),
+                "stale_sources": meta.get("stale_sources", []),
+                "failure_detail": meta.get("error", ""),
+            })
             payload = _with_cache_verdict(payload, refreshed_verdict)
         else:
             attempt["status"] = "live_success"

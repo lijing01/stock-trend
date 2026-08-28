@@ -38,6 +38,9 @@ from scans.stock_scanner import (
     score_sector_membership,
     select_primary_sector_membership,
 )
+from core.recommendation_quality import (
+    NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
+)
 from core.source_health import (
     LIVE_ATTEMPT_TIMEOUT_SECONDS,
     MAX_PROVIDER_ATTEMPTS,
@@ -67,6 +70,7 @@ REASON_LABELS = {
     "cache_stale": "缓存存在但已过期或不覆盖目标日期",
     "not_selected_for_enrichment": "未进入资金增强优先队列（预算内未选中）",
     "not_started_deadline": "达到截止时间，资金增强尚未开始",
+    "source_unavailable": "资金增强源不可用，本轮未调用",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
     "history_insufficient": "板块历史快照不足，尚不能验证持续性",
     "breadth_capital_divergence": "普涨但市场资金背离，需板块资金或共振确认",
@@ -97,6 +101,7 @@ DATA_REASON_CODES = {
     "cache_stale",
     "not_selected_for_enrichment",
     "not_started_deadline",
+    "source_unavailable",
     "stale_cache",
     "partial_realtime",
     "regime_missing",
@@ -104,7 +109,6 @@ DATA_REASON_CODES = {
     "intraday_provisional",
     "data_quality_ineligible",
 }
-
 
 def candidate_rank_score(item):
     """Return the quality-adjusted rank score with legacy fallback."""
@@ -231,9 +235,20 @@ def _complete_performance(performance, source_health, candidates, buckets,
         ),
         "capital_enrichment_population": len(candidates),
     }
+    capital_failure_reasons = {}
+    for status in candidate_capital_statuses:
+        if not status.get("attempted") \
+                or status.get("status") in {"live_success", "cache_valid"}:
+            continue
+        reason = status.get("reason") or status.get("status") or "unknown"
+        capital_failure_reasons[reason] = (
+            capital_failure_reasons.get(reason, 0) + 1)
+    inferred_capital["capital_failure_reasons"] = capital_failure_reasons
     for field, value in inferred_capital.items():
         if field not in supplied_fields:
-            completed[field] = int(value)
+            completed[field] = (
+                dict(value) if field == "capital_failure_reasons"
+                else int(value))
     completed["total_seconds"] = max(0.0, float(total_seconds))
     completed.setdefault("degradation_reasons", [])
     completed.setdefault("advisory_reasons", [])
@@ -248,6 +263,11 @@ def _complete_performance(performance, source_health, candidates, buckets,
     snapshot = (source_health.snapshot()
                 if isinstance(source_health, RunSourceHealth)
                 else completed.get("sources", {}))
+    if "capital_failure_reasons" not in supplied_fields \
+            and isinstance(source_health, RunSourceHealth):
+        capital_state = snapshot.get("capital", {})
+        completed["capital_failure_reasons"] = dict(
+            capital_state.get("failure_reasons", {}))
     sources = {}
     for source in SOURCE_HEALTH_NAMES:
         state = snapshot.get(source, {})
@@ -349,7 +369,8 @@ def _performance_markdown(performance):
         f"有效 {performance.get('capital_valid_count', 0)}（缓存有效 "
         f"{performance.get('capital_cache_valid_count', 0)}） → "
         f"预算跳过 {performance.get('capital_skipped_by_budget', 0)} | "
-        f"增强总体 {performance.get('capital_enrichment_population', 0)}",
+        f"增强总体 {performance.get('capital_enrichment_population', 0)} | "
+        f"接口失败原因 {json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}",
         "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
         f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
@@ -420,7 +441,8 @@ def _performance_html(performance):
         f"capital_valid={performance.get('capital_valid_count', 0)} "
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
         f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
-        f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)}"
+        f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)} "
+        f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
     )
     scan_status = escape(str(performance.get("scan_status", "complete")))
     degradation_reasons = escape(
@@ -470,7 +492,8 @@ def _emit_performance_summary(performance):
         f"capital_valid={performance.get('capital_valid_count', 0)} "
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
         f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
-        f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)}"
+        f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)} "
+        f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
     )
     print(
         f"[performance] {phase_text} "
@@ -1249,8 +1272,8 @@ def _reason_detail(code, item):
         "fundamental_error": "fundamental",
     }.get(code)
     if dimension_name is None and code in {
-            "cache_miss", "cache_stale", "not_selected_for_enrichment",
-            "not_started_deadline"}:
+        "cache_miss", "cache_stale", "not_selected_for_enrichment",
+        "not_started_deadline", "source_unavailable"}:
         evidence_by_source = item.get("source_evidence", {})
         for source in ("capital", "fundamental"):
             evidence = evidence_by_source.get(source, {}) \
@@ -1274,8 +1297,24 @@ def _reason_detail(code, item):
         evidence = item.get("source_evidence", {})
         evidence = evidence.get(dimension_name, {}) \
             if isinstance(evidence, dict) else {}
+        if evidence.get("attempted"):
+            details.append("接口已调用")
+        elif code in NON_PROVIDER_ENRICHMENT_STATUSES \
+                and evidence.get("attempted") is False:
+            details.append("未调用")
+        failure_chain = evidence.get("failure_chain", [])
+        if isinstance(failure_chain, list):
+            chain_text = "→".join(
+                f"{entry.get('source', 'unknown')}:{entry.get('reason', 'unknown')}"
+                for entry in failure_chain
+                if isinstance(entry, dict))
+            if chain_text:
+                details.append(f"失败链路{chain_text}")
         if evidence.get("reason"):
-            details.append(f"抓取原因码{evidence['reason']}")
+            reason_label = (
+                "调度原因码" if code in NON_PROVIDER_ENRICHMENT_STATUSES
+                else "抓取原因码")
+            details.append(f"{reason_label}{evidence['reason']}")
         if evidence.get("status") and evidence.get("status") != code:
             details.append(f"状态码{evidence['status']}")
         if evidence.get("provider_attempts"):

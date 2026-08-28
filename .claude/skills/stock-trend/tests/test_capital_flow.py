@@ -3,6 +3,7 @@
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,14 +18,42 @@ VALID_FLOW = {"date": "20260807", "main_net_inflow": 1.0}
 
 
 class TestCapitalFlowFallback(unittest.TestCase):
-    def _fetch(self, eastmoney, tushare, estimate):
+    def _fetch(self, eastmoney, tushare, estimate, expected_date=""):
         with patch.object(capital_flow, "fetch_stock_capital_flow", return_value=eastmoney) as em, \
                 patch.object(capital_flow, "fetch_stock_capital_flow_tushare", return_value=tushare) as ts, \
                 patch.object(capital_flow, "estimate_capital_flow_from_kline", return_value=estimate) as kl:
             result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
-                "600519.SH", "1.600519", "600519"
+                "600519.SH", "1.600519", "600519",
+                expected_date=expected_date,
             )
         return result, em, ts, kl
+
+    def test_tushare_timeout_remains_classifiable_to_fallback_caller(self):
+        fake_tushare = types.ModuleType("tushare")
+
+        def timeout_pro_api():
+            raise TimeoutError("upstream timed out")
+
+        fake_tushare.pro_api = timeout_pro_api
+        with patch.dict(sys.modules, {"tushare": fake_tushare}):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                capital_flow.fetch_stock_capital_flow_tushare(
+                    "600519.SH", timeout=1)
+
+    def test_tushare_timeout_is_recorded_in_fallback_chain(self):
+        with patch.object(capital_flow, "fetch_stock_capital_flow",
+                          return_value=[]), \
+                patch.object(capital_flow, "fetch_stock_capital_flow_tushare",
+                             side_effect=TimeoutError("upstream timed out")), \
+                patch.object(capital_flow, "estimate_capital_flow_from_kline",
+                             return_value=[]):
+            result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
+                "600519.SH", "1.600519", "600519")
+
+        self.assertEqual(
+            result["meta"]["failure_chain"][1],
+            {"source": "tushare_fallback", "reason": "timeout"},
+        )
 
     def test_nonempty_eastmoney_result_skips_fallbacks(self):
         result, _, ts, kl = self._fetch([VALID_FLOW], None, None)
@@ -46,6 +75,24 @@ class TestCapitalFlowFallback(unittest.TestCase):
         result, _, _, _ = self._fetch([], [], [])
         self.assertEqual(result["meta"]["data_source"], "error")
         self.assertEqual(result["data"], [])
+        self.assertEqual(
+            result["meta"]["failure_chain"],
+            [
+                {"source": "eastmoney", "reason": "empty"},
+                {"source": "tushare_fallback", "reason": "empty"},
+                {"source": "kline_estimate", "reason": "missing"},
+            ],
+        )
+
+    def test_stale_primary_records_chain_without_losing_stale_marker(self):
+        stale = [{"date": "20260825", "main_net_inflow": 1.0}]
+        result, _, _, _ = self._fetch(
+            stale, [], [], expected_date="2026-08-26")
+        self.assertEqual(result["meta"]["error_type"], "stale_data")
+        self.assertEqual(result["meta"]["failure_chain"][0], {
+            "source": "eastmoney", "reason": "stale_data",
+        })
+        self.assertIn("eastmoney", result["meta"]["stale_sources"])
 
     def test_rows_without_valid_dates_fall_back(self):
         invalid = [{"date": "not-a-date", "main_net_inflow": 1.0}]
