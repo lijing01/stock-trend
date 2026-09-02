@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from analysis import wyckoff as wyckoff_module
 from analysis.wyckoff import (
     compute_atr, compute_ma, detect_swing_points, mark_climaxes,
     detect_trading_range, detect_trading_ranges, analyze_vsa, compute_cause_effect,
@@ -664,6 +665,61 @@ class TestLongTermWyckoffContext(unittest.TestCase):
         self.assertEqual(result["short_term"]["phase"], PHASE_MARKUP)
         self.assertEqual(result["long_term"]["phase"], PHASE_ACCUMULATION)
         self.assertEqual(result["long_term"]["reason_code"], "")
+
+    def test_post_lps_reconfirmation_requires_later_confirmed_sos_same_range(self):
+        self.assertTrue(hasattr(wyckoff_module, "_is_post_lps_reconfirmation"))
+        helper = wyckoff_module._is_post_lps_reconfirmation
+        lps = {
+            "type": "lps", "status": "confirmed", "event_index": 40,
+            "detected_index": 41, "range_id": "minor_1",
+        }
+        later_sos = {
+            "type": "sos", "status": "confirmed", "event_index": 50,
+            "detected_index": 51, "range_id": "minor_1",
+        }
+
+        self.assertTrue(helper(later_sos, [lps, later_sos]))
+        self.assertFalse(helper(
+            {**later_sos, "status": "candidate"}, [lps, later_sos]))
+        self.assertFalse(helper(
+            {**later_sos, "range_id": "minor_2"}, [lps, later_sos]))
+        self.assertFalse(helper(
+            later_sos, [{**lps, "detected_index": 52}, later_sos]))
+
+    def test_short_term_payload_marks_post_lps_sos_reconfirmation(self):
+        context = {
+            "id": "context_1", "level": "context", "support": 90.0,
+            "resistance": 110.0, "quality_score": 0.8, "support_idx": 0,
+            "resistance_idx": 200, "duration_bars": 200,
+            "is_clear_range": True,
+        }
+        events = [
+            {
+                "type": "lps", "status": "confirmed", "event_index": 230,
+                "detected_index": 231, "event_date": "20260907",
+                "detected_date": "20260908", "age_bars": 18,
+                "structure_level": "context", "range_id": "context_1",
+                "confidence": 0.78,
+            },
+            {
+                "type": "sos", "status": "confirmed", "event_index": 248,
+                "detected_index": 249, "event_date": "20260925",
+                "detected_date": "20260926", "age_bars": 0,
+                "structure_level": "context", "range_id": "context_1",
+                "confidence": 0.82,
+            },
+        ]
+        with patch("analysis.wyckoff.detect_trading_ranges",
+                   return_value=[context]), \
+                patch("analysis.wyckoff.detect_wyckoff_events",
+                      return_value=events), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=((PHASE_ACCUMULATION, SUB_LPS, 0.65), [])):
+            result = analyze_kline_dict(self._trending_kline(250))
+
+        self.assertEqual(result["short_term"]["sub_phase"], SUB_JAC)
+        self.assertEqual(result["short_term"]["signal_status"], "confirmed")
+        self.assertTrue(result["short_term"]["post_lps_reconfirmation"])
 
 
 if __name__ == "__main__":

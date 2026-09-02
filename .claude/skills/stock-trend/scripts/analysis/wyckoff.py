@@ -1202,6 +1202,27 @@ def _current_event(events: list[dict]) -> dict | None:
     ) if pool else None
 
 
+def _is_post_lps_reconfirmation(active_event: dict | None,
+                                event_history: list[dict]) -> bool:
+    """Whether a confirmed SOS occurs after a confirmed LPS in one range."""
+    if (not active_event
+            or active_event.get("type") != "sos"
+            or active_event.get("status") != "confirmed"):
+        return False
+    sos_index = active_event.get("event_index")
+    range_id = active_event.get("range_id")
+    if not isinstance(sos_index, int) or not range_id:
+        return False
+    return any(
+        event.get("type") == "lps"
+        and event.get("status") == "confirmed"
+        and event.get("range_id") == range_id
+        and isinstance(event.get("detected_index"), int)
+        and event["detected_index"] < sos_index
+        for event in event_history
+    )
+
+
 def _latest_confirmed_sos(events: list[dict]) -> dict | None:
     """Return the latest live confirmed SOS for post-breakout validation."""
     sos_events = [
@@ -1558,6 +1579,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "confidence": round(confidence, 2),
         "signal_status": signal.get("status", "none"),
         "signal_age_bars": signal.get("age_bars", 0),
+        "post_lps_reconfirmation": _is_post_lps_reconfirmation(
+            active_event, event_history),
         "range_level": (trading_range or {}).get("level", ""),
         "minor_phase": build_minor_phase(phase, sub_phase, trigger),
     }

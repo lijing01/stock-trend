@@ -1429,13 +1429,47 @@ def _minor_phase_text(wyckoff):
 
 
 def _minor_phase_html(wyckoff):
-    text = _minor_phase_text(wyckoff)
-    minor = wyckoff.get("minor_phase", {})
-    if (minor.get("code") == "D"
-            and str(wyckoff.get("sub_phase", "")).lower() == "lps"
-            and wyckoff.get("signal_status") == "confirmed"):
-        return f"<span style='background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:4px'>{text}</span>"
-    return text
+    return _minor_phase_text(wyckoff)
+
+
+def _wyckoff_buy_level(wyckoff):
+    """Return the confirmed execution level used by the actionable HTML table."""
+    short_term = wyckoff.get("short_term", {})
+    signal_status = (
+        short_term.get("signal_status") or wyckoff.get("signal_status") or ""
+    )
+    if str(signal_status).lower() != "confirmed":
+        return None
+
+    sub_phase = str(
+        short_term.get("sub_phase") or wyckoff.get("sub_phase") or ""
+    ).strip().lower()
+    level_by_sub_phase = {
+        "spring": (1, "Spring/Test", "试错仓"),
+        "lps": (2, "SOS 后 LPS", "核心仓"),
+    }
+    display_aliases = {
+        "spring（弹簧效应/震仓）": "spring",
+        "最后支撑点（lps）": "lps",
+        "跃过小溪（jac）": "jac",
+    }
+    sub_phase = display_aliases.get(sub_phase, sub_phase)
+    level = (
+        (3, "JAC/BU 后再确认", "趋势仓")
+        if (sub_phase == "jac"
+            and short_term.get("post_lps_reconfirmation") is True)
+        else level_by_sub_phase.get(sub_phase)
+    )
+    if not level:
+        return None
+    number, label, role = level
+    return {
+        "number": number,
+        "name": {1: "一级", 2: "二级", 3: "三级"}[number],
+        "label": label,
+        "role": role,
+        "css_class": f"wyckoff-buy-level-{number}",
+    }
 
 
 def _long_term_confidence_text(wyckoff):
@@ -1911,18 +1945,31 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     return "\n".join(lines)
 
 
-def _html_candidate_rows(items):
+def _html_candidate_rows(items, highlight_buy_levels=False):
     if not items:
         return '<tr><td colspan="14">无</td></tr>'
     rows = []
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
+        buy_level = (
+            _wyckoff_buy_level(wyckoff) if highlight_buy_levels else None
+        )
+        row_class = (
+            f" class='{buy_level['css_class']}'" if buy_level else ""
+        )
+        buy_level_badge = (
+            "<br><span class='wyckoff-buy-level-badge'>"
+            f"{buy_level['name']} · {buy_level['label']} · "
+            f"{buy_level['role']}</span>"
+            if buy_level else ""
+        )
         quality = item.get("data_quality", {})
         detail = _candidate_diagnostic_text(item)
         plan_text = escape(_trade_plan_text(item))
         rows.append(
-            f"<tr><td>{index}</td><td><strong>{item['name']}</strong><br>"
-            f"<span style='color:#86868b;font-size:12px'>{item['code']}</span></td>"
+            f"<tr{row_class}><td>{index}</td><td><strong>{item['name']}</strong><br>"
+            f"<span style='color:#86868b;font-size:12px'>{item['code']}</span>"
+            f"{buy_level_badge}</td>"
             f"<td>{_sector_text(item)}</td>"
             f"<td>{_minor_phase_html(wyckoff)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
@@ -1945,7 +1992,8 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
     performance = performance or {}
     regime = load_regime_context()
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
-    actionable_rows = _html_candidate_rows(buckets["actionable"])
+    actionable_rows = _html_candidate_rows(
+        buckets["actionable"], highlight_buy_levels=True)
     waiting_rows = _html_candidate_rows(buckets["waiting_trigger"])
     confirmation_rows = _html_candidate_rows(buckets.get("next_day_confirmation", []))
     observation_rows = _html_candidate_rows(buckets["observation"])
@@ -2024,6 +2072,15 @@ table{{width:100%;border-collapse:collapse;margin:12px 0;border-radius:8px;overf
 th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:14px}}
 th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .buy{{color:#dc2626;font-weight:600}}
+.wyckoff-buy-level-1>td{{background:#fff7d6}}
+.wyckoff-buy-level-2>td{{background:#dcfce7}}
+.wyckoff-buy-level-3>td{{background:#dbeafe}}
+.wyckoff-buy-level-badge{{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:999px;background:rgba(255,255,255,.72);font-size:11px;font-weight:700;color:#374151;white-space:nowrap}}
+.buy-level-legend{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 4px;font-size:12px}}
+.buy-level-legend span{{padding:4px 8px;border-radius:999px;color:#374151}}
+.buy-level-legend .level-1{{background:#fff7d6}}
+.buy-level-legend .level-2{{background:#dcfce7}}
+.buy-level-legend .level-3{{background:#dbeafe}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:28px}}
 </style></head><body><div class="w">
 <h1>📋 每日候选股 {datetime.now().strftime('%Y-%m-%d')}</h1>
@@ -2036,6 +2093,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {tracking_html}
 {provisional_banner}
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行{tier_suffix}</h2>
+<div class="buy-level-legend" aria-label="维科夫买点分级图例">
+<span class="level-1">一级 · Spring/Test · 试错仓</span>
+<span class="level-2">二级 · SOS 后 LPS · 核心仓</span>
+<span class="level-3">三级 · JAC/BU 后再确认 · 趋势仓</span>
+</div>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发{tier_suffix}</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>

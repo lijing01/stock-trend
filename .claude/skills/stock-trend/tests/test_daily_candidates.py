@@ -1991,17 +1991,73 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("需求占优，回踩缩量后等待向上确认", html)
         self.assertIn("股市有风险，投资需谨慎", html)
 
-    def test_html_highlights_confirmed_lps_with_yellow_background(self):
+    def test_wyckoff_buy_level_uses_canonical_short_term_fields(self):
+        cases = (
+            ("spring", False, 1, "试错仓"),
+            ("lps", False, 2, "核心仓"),
+            ("jac", True, 3, "趋势仓"),
+        )
+        for (sub_phase, post_lps_reconfirmation,
+             expected_number, expected_role) in cases:
+            with self.subTest(sub_phase=sub_phase):
+                level = dc._wyckoff_buy_level({
+                    "sub_phase": "中文展示字段不应覆盖规范字段",
+                    "short_term": {
+                        "sub_phase": sub_phase,
+                        "signal_status": "confirmed",
+                        "post_lps_reconfirmation": post_lps_reconfirmation,
+                    },
+                })
+                self.assertEqual(level["number"], expected_number)
+                self.assertEqual(level["role"], expected_role)
+
+    def test_wyckoff_buy_level_rejects_unconfirmed_or_unknown_setup(self):
+        self.assertIsNone(dc._wyckoff_buy_level({
+            "short_term": {
+                "sub_phase": "backup",
+                "signal_status": "candidate",
+            },
+        }))
+        self.assertIsNone(dc._wyckoff_buy_level({
+            "short_term": {
+                "sub_phase": "continuation",
+                "signal_status": "confirmed",
+            },
+        }))
+        for sub_phase in ("secondary_test", "st", "backup"):
+            with self.subTest(sub_phase=sub_phase):
+                self.assertIsNone(dc._wyckoff_buy_level({
+                    "short_term": {
+                        "sub_phase": sub_phase,
+                        "signal_status": "confirmed",
+                    },
+                }))
+        self.assertIsNone(dc._wyckoff_buy_level({
+            "short_term": {
+                "sub_phase": "jac",
+                "signal_status": "confirmed",
+                "post_lps_reconfirmation": False,
+            },
+        }))
+        self.assertIsNone(dc._wyckoff_buy_level({"sub_phase": "LPS"}))
+
+    def test_html_highlights_confirmed_lps_as_level_two_row(self):
         item = candidate("lps")
         item["wyckoff"]["minor_phase"] = {
             "code": "D", "name": "阶段D：LPS已确认",
             "description": "回踩后已重新转强",
         }
         item["wyckoff"]["sub_phase"] = "lps"
-        item["wyckoff"]["signal_status"] = "confirmed"
-        html = dc._html_candidate_rows([item])
-        self.assertIn("#fef3c7", html)
+        item["wyckoff"]["short_term"] = {
+            "sub_phase": "lps", "signal_status": "confirmed",
+        }
+        html = dc._html_candidate_rows([item], highlight_buy_levels=True)
+        self.assertIn("<tr class='wyckoff-buy-level-2'>", html)
+        self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
         self.assertIn("阶段D：LPS已确认", html)
+
+        plain_html = dc._html_candidate_rows([item])
+        self.assertNotIn("wyckoff-buy-level-2", plain_html)
 
     def test_html_does_not_highlight_bu_candidate_as_lps(self):
         item = candidate("bu")
@@ -2010,10 +2066,45 @@ class TestRecommendationPolicy(unittest.TestCase):
             "description": "缩量守位，等待再次转强",
         }
         item["wyckoff"]["sub_phase"] = "backup"
-        item["wyckoff"]["signal_status"] = "candidate"
-        html = dc._html_candidate_rows([item])
-        self.assertNotIn("#fef3c7", html)
+        item["wyckoff"]["short_term"] = {
+            "sub_phase": "backup", "signal_status": "candidate",
+        }
+        html = dc._html_candidate_rows([item], highlight_buy_levels=True)
+        self.assertNotIn("wyckoff-buy-level-", html)
         self.assertIn("阶段D：BU回踩待确认", html)
+
+    def test_generated_html_highlights_buy_levels_only_in_actionable_table(self):
+        actionable = candidate("actionable")
+        actionable["wyckoff"]["short_term"] = {
+            "sub_phase": "lps", "signal_status": "confirmed",
+        }
+        observation = copy.deepcopy(actionable)
+        observation["code"] = "observation"
+        observation["name"] = "测试observation"
+        buckets = {
+            "actionable": [actionable],
+            "waiting_trigger": [],
+            "next_day_confirmation": [],
+            "observation": [observation],
+            "data_rejected": [],
+        }
+        html = _generate_html(
+            [actionable, observation],
+            [("BK1", "测试板块", 80)],
+            1.0,
+            "20260902-160000",
+            {
+                "mode": "actionable", "max_recommendations": 5,
+                "max_portfolio_pct": 60, "reasons": [],
+            },
+            buckets,
+        )
+
+        self.assertEqual(
+            html.count("<tr class='wyckoff-buy-level-2'>"), 1)
+        self.assertIn("一级 · Spring/Test · 试错仓", html)
+        self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
+        self.assertIn("三级 · JAC/BU 后再确认 · 趋势仓", html)
 
     def test_report_explains_unavailable_long_term_structure(self):
         item = candidate("1")
