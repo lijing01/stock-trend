@@ -160,7 +160,9 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "actionable_count",
     "capital_priority_count", "capital_live_started", "capital_valid_count",
     "capital_cache_valid_count", "capital_skipped_by_budget",
-    "capital_enrichment_population",
+    "capital_enrichment_population", "capital_initial_priority_count",
+    "capital_topup_selected_count", "capital_topup_live_started",
+    "capital_topup_valid_count", "capital_topup_skipped_deadline",
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
@@ -230,6 +232,29 @@ def _complete_performance(performance, source_health, candidates, buckets,
         for item in candidates
     ]
     inferred_capital = {
+        "capital_initial_priority_count": sum(
+            status.get("selection_stage") == "initial"
+            for status in candidate_capital_statuses
+        ),
+        "capital_topup_selected_count": sum(
+            status.get("selection_stage") == "topup"
+            for status in candidate_capital_statuses
+        ),
+        "capital_topup_live_started": sum(
+            status.get("selection_stage") == "topup"
+            and bool(status.get("attempted"))
+            for status in candidate_capital_statuses
+        ),
+        "capital_topup_valid_count": sum(
+            status.get("selection_stage") == "topup"
+            and status.get("status") in {"live_success", "cache_valid"}
+            for status in candidate_capital_statuses
+        ),
+        "capital_topup_skipped_deadline": sum(
+            status.get("selection_stage") == "topup"
+            and status.get("status") == "not_started_deadline"
+            for status in candidate_capital_statuses
+        ),
         "capital_priority_count": sum(
             status.get("status") not in {
                 "cache_valid", "not_selected_for_enrichment",
@@ -387,6 +412,10 @@ def _performance_markdown(performance):
         "",
         "**资金增强审计**: "
         f"优先队列 {performance.get('capital_priority_count', 0)} → "
+        f"二轮补齐 {performance.get('capital_topup_selected_count', 0)}"
+        f"（启动 {performance.get('capital_topup_live_started', 0)}，"
+        f"有效 {performance.get('capital_topup_valid_count', 0)}，"
+        f"截止未启动 {performance.get('capital_topup_skipped_deadline', 0)}） → "
         f"已启动 {performance.get('capital_live_started', 0)} → "
         f"有效 {performance.get('capital_valid_count', 0)}（缓存有效 "
         f"{performance.get('capital_cache_valid_count', 0)}） → "
@@ -459,6 +488,11 @@ def _performance_html(performance):
     )
     capital_text = (
         f"capital_priority={performance.get('capital_priority_count', 0)} "
+        f"capital_initial_priority={performance.get('capital_initial_priority_count', 0)} "
+        f"capital_topup_selected={performance.get('capital_topup_selected_count', 0)} "
+        f"capital_topup_live_started={performance.get('capital_topup_live_started', 0)} "
+        f"capital_topup_valid={performance.get('capital_topup_valid_count', 0)} "
+        f"capital_topup_skipped_deadline={performance.get('capital_topup_skipped_deadline', 0)} "
         f"capital_live_started={performance.get('capital_live_started', 0)} "
         f"capital_valid={performance.get('capital_valid_count', 0)} "
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
@@ -510,6 +544,11 @@ def _emit_performance_summary(performance):
         for field in _PERFORMANCE_PHASE_FIELDS)
     capital_text = (
         f"capital_priority={performance.get('capital_priority_count', 0)} "
+        f"capital_initial_priority={performance.get('capital_initial_priority_count', 0)} "
+        f"capital_topup_selected={performance.get('capital_topup_selected_count', 0)} "
+        f"capital_topup_live_started={performance.get('capital_topup_live_started', 0)} "
+        f"capital_topup_valid={performance.get('capital_topup_valid_count', 0)} "
+        f"capital_topup_skipped_deadline={performance.get('capital_topup_skipped_deadline', 0)} "
         f"capital_live_started={performance.get('capital_live_started', 0)} "
         f"capital_valid={performance.get('capital_valid_count', 0)} "
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
@@ -1421,11 +1460,12 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     new_candidates, enable_wyckoff=True,
                     as_of_date=as_of_date,
                     source_health=source_health, metrics=metrics,
-                    top=capital_top, min_candidates=min_candidates)
+                    top=capital_top, min_candidates=min_candidates,
+                    min_score=min_score)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
                         "source_health", "metrics",
-                        "top", "min_candidates")):
+                        "top", "min_candidates", "min_score")):
                     raise
                 try:
                     scored = run_phase2(
@@ -1547,6 +1587,14 @@ def _reason_detail(code, item):
         evidence = item.get("source_evidence", {})
         evidence = evidence.get(dimension_name, {}) \
             if isinstance(evidence, dict) else {}
+        selection_stage = evidence.get("selection_stage")
+        if selection_stage:
+            stage_label = {
+                "initial": "首轮队列",
+                "topup": "二轮补齐",
+                "omitted": "队列外",
+            }.get(selection_stage, selection_stage)
+            details.append(f"调度阶段{stage_label}")
         if evidence.get("attempted"):
             details.append("接口已调用")
         elif code in NON_PROVIDER_ENRICHMENT_STATUSES \

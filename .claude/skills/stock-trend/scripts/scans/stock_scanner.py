@@ -35,6 +35,7 @@ from core.recommendation_quality import (
 from core.source_health import (
     CAPITAL_PREFETCH_BATCH_SIZE,
     CAPITAL_PREFETCH_LIMIT,
+    CAPITAL_TOPUP_LIMIT,
     LIVE_ATTEMPT_TIMEOUT_SECONDS,
     MAX_IN_FLIGHT,
     MAX_PROVIDER_ATTEMPTS,
@@ -1771,6 +1772,69 @@ def rank_capital_enrichment_candidates(candidates, capital_data=None, top=30,
     }
 
 
+def select_capital_topup_candidates(
+        candidates, provisional_scores, processed_codes=None,
+        capital_cache_valid_codes=None, top=30, limit=CAPITAL_TOPUP_LIMIT,
+        ranked_candidates=None):
+    """Select a bounded second-pass queue for likely report candidates.
+
+    The first pass deliberately enriches only the highest provisional-score
+    cache misses.  A provider failure or early-stop can leave a candidate in
+    the eventual report outside the completed first-pass frontier.  This
+    helper selects the highest-ranked candidates in the supplied report scope
+    (or the provisional scope when no final ranking is supplied) that still
+    need capital evidence, without changing final scores.
+    """
+    provisional_scores = provisional_scores or {}
+    processed_codes = set(processed_codes or ())
+    capital_cache_valid_codes = set(capital_cache_valid_codes or ())
+    try:
+        top = max(0, int(top))
+    except (TypeError, ValueError):
+        top = 30
+    try:
+        limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        limit = CAPITAL_TOPUP_LIMIT
+    if top <= 0 or limit <= 0:
+        return []
+
+    def provisional_key(candidate):
+        score = _optional_number(
+            provisional_scores.get(candidate.get("code")))
+        if score is None:
+            score = _optional_number(candidate.get("provisional_score"))
+        if score is None:
+            score = _optional_number(candidate.get("composite_score"))
+        if score is None:
+            score = 0.0
+        return -score, str(candidate.get("code", ""))
+
+    if ranked_candidates is None:
+        ordered = sorted(list(candidates or []), key=provisional_key)
+    else:
+        # ``ranked_candidates`` is the post-enrichment report frontier. Keep
+        # the original eligible-candidate objects for the live fetch call so
+        # membership and sector context are not lost.
+        original_by_code = {
+            candidate.get("code"): candidate for candidate in candidates or []
+        }
+        ordered = []
+        seen_codes = set()
+        for candidate in ranked_candidates:
+            code = candidate.get("code")
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            ordered.append(original_by_code.get(code, candidate))
+    report_scope = ordered[:top]
+    return [
+        candidate for candidate in report_scope
+        if candidate.get("code") not in processed_codes
+        and candidate.get("ts_code") not in capital_cache_valid_codes
+    ][:limit]
+
+
 def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                as_of_date="", source_health=None, metrics=None,
                trade_plan_policy=None):
@@ -2236,14 +2300,17 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
 
 def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                as_of_date="", source_health=None, metrics=None,
-               trade_plan_policy=None, top=30, min_candidates=20):
+               trade_plan_policy=None, top=30, min_candidates=20,
+               min_score=50):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
     then cover the whole qualified set without provider calls; only the
     highest provisional-score cache misses enter live enrichment batches.
-    Capital remains a hard quality gate even though it is neutral in the
-    provisional queue score.
+    After the first-pass frontier is scored, one bounded top-up batch may
+    enrich report-scope candidates that still lack capital evidence. Capital
+    remains a hard quality gate even though it is neutral in the provisional
+    queue score.
     """
     candidates = list(candidates or [])
     print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
@@ -2259,6 +2326,10 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         requested_min_candidates = max(0, int(min_candidates))
     except (TypeError, ValueError):
         requested_min_candidates = 20
+    try:
+        requested_min_score = float(min_score)
+    except (TypeError, ValueError):
+        requested_min_score = 50.0
 
     peer_cohorts = build_sector_peer_cohorts(candidates)
     kline_data = {}
@@ -2517,8 +2588,25 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     priority_queue = queue_info["priority_queue"]
     queue_by_code = {candidate["code"]: candidate
                      for candidate in priority_queue}
+    provisional_scores = {
+        candidate["code"]: _safe_float(candidate.get("provisional_score"))
+        for candidate in priority_inputs
+    }
+
+    def _set_selection_stage(batch, stage):
+        for candidate in batch:
+            ts_code = candidate["ts_code"]
+            for source in ("capital", "fundamental"):
+                evidence = source_evidence[source].setdefault(
+                    ts_code, live_attempt(attempted=False))
+                evidence["selection_stage"] = stage
+
+    _set_selection_stage(priority_queue, "initial")
     metrics_ref["capital_priority_count"] = (
         metrics_ref.get("capital_priority_count", 0) + len(priority_queue))
+    metrics_ref["capital_initial_priority_count"] = (
+        metrics_ref.get("capital_initial_priority_count", 0)
+        + len(priority_queue))
 
     # The priority scope is the live capital queue.  A valid capital cache is
     # already complete for the hard gate and never enters provider work.
@@ -2583,7 +2671,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                             reason=reason, status=reason))))
         return results
 
-    def _consume_live_results(source, results):
+    def _consume_live_results(source, results, stage="initial"):
         usable = (_usable_capital_payload if source == "capital"
                   else _usable_fundamental_payload)
         for candidate, result in results:
@@ -2598,6 +2686,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 elif attempt.get("reason") == "source_unavailable":
                     evidence["status"] = "source_unavailable"
                     evidence["cache_used"] = False
+            evidence["selection_stage"] = stage
             _record_source_evidence(source, ts_code, evidence)
             if source == "capital":
                 capital_data[ts_code] = payload if usable(payload) else None
@@ -2609,6 +2698,13 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 if evidence.get("status") == "live_success":
                     metrics_ref["capital_live_success_count"] = (
                         metrics_ref.get("capital_live_success_count", 0) + 1)
+                    if stage == "topup":
+                        metrics_ref["capital_topup_valid_count"] = (
+                            metrics_ref.get("capital_topup_valid_count", 0)
+                            + 1)
+                if stage == "topup" and evidence.get("attempted"):
+                    metrics_ref["capital_topup_live_started"] = (
+                        metrics_ref.get("capital_topup_live_started", 0) + 1)
             else:
                 if usable(payload):
                     fundamental_data[ts_code] = payload
@@ -2822,6 +2918,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
 
     capital_started = time.monotonic()
     processed_codes = set()
+    capital_processed_codes = set()
     batches = queue_info["batches"]
     # Queue ordering uses the provisional score; defer full output assembly
     # until a live/cache enrichment batch has completed.  This avoids doing
@@ -2847,14 +2944,121 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 _run_live_batch, "fundamental", fundamental_batch)
             capital_results = capital_future.result()
             fundamental_results = fundamental_future.result()
-        _consume_live_results("capital", capital_results)
-        _consume_live_results("fundamental", fundamental_results)
+        _consume_live_results("capital", capital_results, stage="initial")
+        _consume_live_results(
+            "fundamental", fundamental_results, stage="initial")
         processed_codes.update(candidate["code"] for candidate in batch)
+        capital_processed_codes.update(
+            candidate["code"] for candidate in batch)
         latest_scored = _score_current()
         remaining = [candidate for candidate in priority_queue
                      if candidate["code"] not in processed_codes]
         if _can_stop(latest_scored, remaining):
             break
+
+    # A successful early stop or provider degradation can leave candidates
+    # that are still likely to appear in the final report outside the
+    # completed first-pass frontier.  Use one bounded second pass for that
+    # report scope.  It is intentionally gated by the same source health and
+    # absolute deadline as the first pass.
+    report_scope_candidates = []
+    if latest_scored:
+        report_scope_candidates = [
+            item for item in latest_scored
+            if _safe_float(item.get("composite_score"), 0.0)
+            >= requested_min_score
+        ]
+
+        def report_key(item):
+            adjusted = _safe_float(
+                item.get("quality_adjusted_score"),
+                _safe_float(item.get("composite_score"), 0.0))
+            raw = _safe_float(item.get("composite_score"), 0.0)
+            promotable = (
+                adjusted >= requested_min_score
+                and item.get("data_quality", {}).get("eligible", False)
+                and item.get("sector_actionable", True)
+            )
+            return not promotable, -adjusted, -raw, str(item.get("code", ""))
+
+        report_scope_candidates.sort(key=report_key)
+    topup_candidates = select_capital_topup_candidates(
+        eligible_candidates, provisional_scores,
+        processed_codes=capital_processed_codes,
+        capital_cache_valid_codes=capital_cache_valid_codes,
+        top=max(top, requested_min_candidates),
+        limit=CAPITAL_TOPUP_LIMIT,
+        ranked_candidates=report_scope_candidates or None)
+    topup_deadline_codes = set()
+    topup_fundamental_batch = []
+    if topup_candidates:
+        _set_selection_stage(topup_candidates, "topup")
+        metrics_ref["capital_topup_selected_count"] = (
+            metrics_ref.get("capital_topup_selected_count", 0)
+            + len(topup_candidates))
+        remaining_time = (
+            source_health.live_deadline - time.monotonic()
+            if isinstance(source_health, RunSourceHealth) else None)
+        if _source_unavailable(source_health, "capital"):
+            for candidate in topup_candidates:
+                evidence = source_evidence["capital"].setdefault(
+                    candidate["ts_code"], live_attempt(attempted=False))
+                evidence.update({
+                    "status": "source_unavailable",
+                    "reason": "source_unavailable",
+                    "attempted": False,
+                    "cache_used": False,
+                    "stale": False,
+                    "selection_stage": "topup",
+                })
+        elif remaining_time is not None and remaining_time < \
+                LIVE_ATTEMPT_TIMEOUT_SECONDS["capital"]:
+            topup_deadline_codes = {
+                candidate["code"] for candidate in topup_candidates
+            }
+            metrics_ref["capital_topup_skipped_deadline"] = (
+                metrics_ref.get("capital_topup_skipped_deadline", 0)
+                + len(topup_deadline_codes))
+            for candidate in topup_candidates:
+                evidence = source_evidence["capital"].setdefault(
+                    candidate["ts_code"], live_attempt(attempted=False))
+                evidence.update({
+                    "status": "not_started_deadline",
+                    "reason": "not_started_deadline",
+                    "attempted": False,
+                    "cache_used": False,
+                    "stale": False,
+                    "selection_stage": "topup",
+                })
+        else:
+            # Keep the full fundamental gate for a candidate that was in the
+            # initial queue but had not reached its joint batch.  Candidates
+            # outside that queue can use the verified membership fallback;
+            # only missing fallbacks need a fundamental request here.
+            topup_fundamental_batch = [
+                candidate for candidate in topup_candidates
+                if candidate["ts_code"] not in fundamental_cache_valid_codes
+                and (
+                    candidate["code"] in queue_by_code
+                    or candidate["ts_code"] not in fundamental_fallback_data
+                )
+            ]
+            with ThreadPoolExecutor(max_workers=2) as dimension_pool:
+                capital_future = dimension_pool.submit(
+                    _run_live_batch, "capital", topup_candidates)
+                fundamental_future = dimension_pool.submit(
+                    _run_live_batch, "fundamental", topup_fundamental_batch)
+                capital_results = capital_future.result()
+                fundamental_results = fundamental_future.result()
+            _consume_live_results(
+                "capital", capital_results, stage="topup")
+            _consume_live_results(
+                "fundamental", fundamental_results, stage="topup")
+            capital_processed_codes.update(
+                candidate["code"] for candidate in topup_candidates)
+            processed_codes.update(
+                candidate["code"] for candidate in topup_fundamental_batch)
+            latest_scored = _score_current()
 
     # Explicitly distinguish budget omission from provider failure.  A
     # priority candidate whose batch never started is a deadline omission;
@@ -2873,12 +3077,19 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         if current_status in SOURCE_EVIDENCE_STATUSES \
                 and current_status not in ("cache_miss", "cache_stale"):
             continue
-        if candidate["code"] in processed_codes:
+        if candidate["code"] in capital_processed_codes:
             continue
+        selection_stage = evidence.get("selection_stage")
+        if not selection_stage:
+            selection_stage = (
+                "topup" if candidate["code"] in topup_deadline_codes
+                else "omitted")
         status = (
             "not_started_deadline" if deadline_reached
             and candidate["code"] in queue_by_code
             else "not_selected_for_enrichment")
+        if candidate["code"] in topup_deadline_codes:
+            status = "not_started_deadline"
         if current_status == "cache_stale":
             evidence["cache_status"] = current_status
         status_changed = status_changed or current_status != status
@@ -2886,6 +3097,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         evidence["reason"] = status
         evidence["cache_used"] = False
         evidence["stale"] = False
+        evidence["selection_stage"] = selection_stage
         source_evidence["capital"][ts_code] = evidence
 
     # Candidates in the live scope with no fundamental cache and no completed
@@ -2904,6 +3116,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             continue
         if candidate["code"] in processed_codes:
             continue
+        selection_stage = evidence.get("selection_stage") or "omitted"
         status = (
             "not_started_deadline" if deadline_reached
             and candidate["code"] in queue_by_code
@@ -2914,6 +3127,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         evidence.update({
             "status": status, "reason": status,
             "cache_used": False, "stale": False,
+            "selection_stage": selection_stage,
         })
         source_evidence["fundamental"][ts_code] = evidence
 
@@ -2938,11 +3152,11 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     metrics_ref["fundamental_seconds"] = metrics_ref.get(
         "fundamental_seconds", 0.0) + (time.monotonic() - capital_started)
     metrics_ref["capital_requests"] = metrics_ref.get(
-        "capital_requests", 0) + len(priority_queue)
+        "capital_requests", 0) + len(priority_queue) + len(topup_candidates)
     metrics_ref["fundamental_requests"] = metrics_ref.get(
         "fundamental_requests", 0) + sum(
             candidate["ts_code"] not in fundamental_cache_valid_codes
-            for candidate in priority_queue)
+            for candidate in priority_queue) + len(topup_fundamental_batch)
     return latest_scored
 
 

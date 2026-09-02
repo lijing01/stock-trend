@@ -1187,6 +1187,162 @@ class TestRunPhase2Funnel(unittest.TestCase):
                           for item in batch}
             for code in cached_codes))
 
+    def test_capital_topup_targets_unprocessed_report_scope(self):
+        candidates = [
+            _make_candidate(f"613{index:03d}") for index in range(8)
+        ]
+        provisional_scores = {
+            candidate["code"]: 100 - index
+            for index, candidate in enumerate(candidates)
+        }
+
+        selected = sc.select_capital_topup_candidates(
+            list(reversed(candidates)), provisional_scores,
+            processed_codes={candidates[0]["code"]},
+            capital_cache_valid_codes={candidates[1]["ts_code"]},
+            top=6, limit=3)
+
+        self.assertEqual(
+            [candidate["code"] for candidate in selected],
+            [candidates[2]["code"], candidates[3]["code"],
+             candidates[4]["code"]],
+        )
+
+        selected_from_final_scope = sc.select_capital_topup_candidates(
+            candidates, provisional_scores,
+            processed_codes={candidates[0]["code"]},
+            capital_cache_valid_codes={candidates[1]["ts_code"]},
+            top=6, limit=3,
+            ranked_candidates=list(reversed(candidates)))
+        self.assertEqual(
+            [candidate["code"] for candidate in selected_from_final_scope],
+            [candidates[7]["code"], candidates[6]["code"],
+             candidates[5]["code"]],
+        )
+
+    def test_capital_topup_enriches_unprocessed_top_candidates_once(self):
+        candidates = [
+            _make_candidate(f"614{index:03d}") for index in range(40)
+        ]
+        for candidate in candidates:
+            candidate.update({
+                "membership_source": "realtime",
+                "membership_quality": "good",
+                "membership_data_date": "20260827",
+            })
+        capital_calls = []
+
+        def fetch_capital(ts_code, **_kwargs):
+            capital_calls.append(ts_code)
+            return {
+                "meta": {"data_source": "eastmoney"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+
+        fundamental = {
+            "meta": {
+                "data_source": "akshare",
+                "fetch_time": "20260827-160000",
+            },
+            "summary": {"data_quality": "good"},
+        }
+
+        with patch.object(
+                sc, "_fetch_kline",
+                side_effect=lambda ts_code, **_kwargs:
+                _make_dated_kline(60, ts_code, "20260827")), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental", return_value=fundamental):
+            metrics = {}
+            scored = sc.run_phase2(
+                candidates, as_of_date="20260827", max_workers=4,
+                min_candidates=20, top=30, metrics=metrics)
+
+        self.assertGreater(metrics.get("capital_topup_selected_count", 0), 0)
+        self.assertLessEqual(
+            metrics.get("capital_topup_selected_count", 0),
+            sc.CAPITAL_TOPUP_LIMIT)
+        self.assertEqual(len(capital_calls), len(set(capital_calls)))
+        topup_items = [
+            item for item in scored
+            if item["source_evidence"]["capital"].get(
+                "selection_stage") == "topup"
+        ]
+        self.assertTrue(topup_items)
+        self.assertTrue(all(
+            item["source_evidence"]["capital"].get("status")
+            == "live_success"
+            for item in topup_items
+        ))
+        self.assertTrue(all(
+            item["data_quality"]["eligible"] for item in topup_items
+        ))
+
+    def test_capital_topup_is_not_started_when_deadline_is_near(self):
+        candidates = [
+            _make_candidate(f"615{index:03d}") for index in range(40)
+        ]
+        for candidate in candidates:
+            candidate.update({
+                "membership_source": "realtime",
+                "membership_quality": "good",
+                "membership_data_date": "20260827",
+            })
+        health = sc.RunSourceHealth()
+        kline_calls = []
+        capital_calls = []
+
+        def fetch_kline(ts_code, **_kwargs):
+            kline_calls.append(ts_code)
+            if len(kline_calls) == len(candidates):
+                health.live_deadline = time.monotonic() + 1.0
+            return _make_dated_kline(60, ts_code, "20260827")
+
+        def fetch_capital(ts_code, **_kwargs):
+            capital_calls.append(ts_code)
+            return {
+                "meta": {"data_source": "eastmoney"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+
+        fundamental = {
+            "meta": {
+                "data_source": "akshare",
+                "fetch_time": "20260827-160000",
+            },
+            "summary": {"data_quality": "good"},
+        }
+
+        with patch.object(sc, "_fetch_kline", side_effect=fetch_kline), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental",
+                          return_value=fundamental):
+            metrics = {}
+            scored = sc.run_phase2(
+                candidates, as_of_date="20260827", source_health=health,
+                max_workers=4, min_candidates=20, top=30,
+                metrics=metrics)
+
+        self.assertGreater(metrics.get("capital_topup_selected_count", 0), 0)
+        self.assertEqual(
+            metrics.get("capital_topup_live_started", 0), 0)
+        self.assertEqual(
+            metrics.get("capital_topup_skipped_deadline", 0),
+            metrics.get("capital_topup_selected_count", 0))
+        topup_items = [
+            item for item in scored
+            if item["source_evidence"]["capital"].get(
+                "selection_stage") == "topup"
+        ]
+        self.assertTrue(topup_items)
+        self.assertTrue(all(
+            item["source_evidence"]["capital"].get("status")
+            == "not_started_deadline"
+            for item in topup_items
+        ))
+
     def test_kline_phase_deadline_leaves_time_for_capital(self):
         health = sc.RunSourceHealth()
         now = time.monotonic()

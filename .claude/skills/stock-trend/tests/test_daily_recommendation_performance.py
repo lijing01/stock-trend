@@ -335,6 +335,7 @@ class TestProductionPerformanceContract(unittest.TestCase):
         self.assertEqual(contract.KLINE_PHASE_SECONDS, 110)
         self.assertEqual(contract.CAPITAL_PREFETCH_LIMIT, 36)
         self.assertEqual(contract.CAPITAL_PREFETCH_BATCH_SIZE, 12)
+        self.assertEqual(contract.CAPITAL_TOPUP_LIMIT, 12)
         self.assertEqual(contract.MAX_IN_FLIGHT["capital"], 4)
         self.assertGreater(contract.FINALIZATION_RESERVE_SECONDS, 0)
         self.assertEqual(set(contract.LIVE_ATTEMPT_TIMEOUT_SECONDS), set(SOURCES))

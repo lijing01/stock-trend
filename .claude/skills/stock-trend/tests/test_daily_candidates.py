@@ -274,6 +274,18 @@ class TestRecommendationPolicy(unittest.TestCase):
             "unique_candidate_count": 1, "wyckoff_pass_count": 1,
             "final_candidate_count": 1, "final_valid_count": 1,
             "actionable_count": 1,
+            "capital_priority_count": 36,
+            "capital_initial_priority_count": 36,
+            "capital_topup_selected_count": 6,
+            "capital_topup_live_started": 4,
+            "capital_topup_valid_count": 3,
+            "capital_topup_skipped_deadline": 2,
+            "capital_live_started": 20,
+            "capital_valid_count": 8,
+            "capital_cache_valid_count": 1,
+            "capital_skipped_by_budget": 69,
+            "capital_enrichment_population": 105,
+            "capital_failure_reasons": {"timeout": 1},
             "advisory_reasons": ["resonance_stale:date_mismatch"],
             "sector_scan_coverage": 0.5,
             "sector_expansion_truncated": True,
@@ -306,7 +318,10 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("--max-sector-expansion 7", html)
         self.assertIn("resonance_stale:date_mismatch", report)
         self.assertIn("resonance_stale:date_mismatch", html)
+        self.assertIn("二轮补齐 6（启动 4，有效 3，截止未启动 2）", report)
+        self.assertIn("capital_topup_selected=6", html)
         self.assertIn("[performance]", stderr.getvalue())
+        self.assertIn("capital_topup_selected=6", stderr.getvalue())
         self.assertIn("final_valid=1", stderr.getvalue())
         for field in (
                 "sector_ranking", "sector_membership", "kline", "wyckoff",
@@ -3167,6 +3182,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                 "status": "not_selected_for_enrichment",
                 "reason": "not_selected_for_enrichment",
                 "cache_used": False,
+                "selection_stage": "omitted",
             },
         }
 
@@ -3175,6 +3191,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("未进入资金增强优先队列（预算内未选中）", detail)
         self.assertIn("未调用", detail)
         self.assertIn("调度原因码not_selected_for_enrichment", detail)
+        self.assertIn("调度阶段队列外", detail)
         self.assertNotIn("抓取原因码not_selected_for_enrichment", detail)
 
     def test_source_unavailable_capital_is_rendered_as_unrequested_scheduler_state(self):
