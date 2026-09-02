@@ -2101,6 +2101,14 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .buy-level-legend .level-1{{background:#fff7d6}}
 .buy-level-legend .level-2{{background:#dcfce7}}
 .buy-level-legend .level-3{{background:#dbeafe}}
+.wyckoff-observation-buy-level-1>td{{background:#fffdf4}}
+.wyckoff-observation-buy-level-2>td{{background:#f3fcf6}}
+.wyckoff-observation-buy-level-3>td{{background:#f4f8ff}}
+.wyckoff-buy-level-badge.observation{{background:transparent;border:1px dashed #9ca3af;color:#6b7280}}
+.observation-buy-level-note{{margin:8px 0;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;color:#4b5563;font-size:12px}}
+.observation-buy-level-legend .level-1{{background:#fffdf4}}
+.observation-buy-level-legend .level-2{{background:#f3fcf6}}
+.observation-buy-level-legend .level-3{{background:#f4f8ff}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:28px}}
 </style></head><body><div class="w">
 <h1>📋 每日候选股 {datetime.now().strftime('%Y-%m-%d')}</h1>
@@ -2124,6 +2132,16 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
+<div class="observation-buy-level-note" role="note">
+<strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>
+市场环境、数据质量、板块持续性和完整交易计划仍是硬门槛；
+只有“今日可执行”区域具备推荐资格。
+</div>
+<div class="buy-level-legend observation-buy-level-legend" aria-label="观察池潜在维科夫买点分级图例">
+<span class="level-1">潜在一级 · Spring/Test</span>
+<span class="level-2">潜在二级 · SOS 后 LPS</span>
+<span class="level-3">潜在三级 · JAC/BU 后再确认</span>
+</div>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
 <table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>

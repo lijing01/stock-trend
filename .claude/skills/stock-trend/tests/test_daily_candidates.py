@@ -2113,7 +2113,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertNotIn("wyckoff-buy-level-", html)
         self.assertIn("阶段D：BU回踩待确认", html)
 
-    def test_generated_html_highlights_buy_levels_only_in_actionable_table(self):
+    def test_generated_html_distinguishes_actionable_and_observation_buy_levels(self):
         actionable = candidate("actionable")
         actionable["wyckoff"]["short_term"] = {
             "sub_phase": "lps", "signal_status": "confirmed",
@@ -2142,9 +2142,50 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         self.assertEqual(
             html.count("<tr class='wyckoff-buy-level-2'>"), 1)
+        self.assertEqual(
+            html.count("<tr class='wyckoff-observation-buy-level-2'>"), 1)
+        self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
+        self.assertIn(
+            "潜在二级 · SOS 后 LPS · 观察｜不可执行", html)
+        self.assertIn(
+            "观察池分级仅表示维科夫结构成熟度，不是买入建议", html)
+        self.assertIn("只有“今日可执行”区域具备推荐资格", html)
+        self.assertIn("observation-buy-level-legend", html)
         self.assertIn("一级 · Spring/Test · 试错仓", html)
         self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
         self.assertIn("三级 · JAC/BU 后再确认 · 趋势仓", html)
+
+    def test_non_observation_watch_buckets_do_not_receive_buy_level_classes(self):
+        lps = candidate("lps")
+        lps["wyckoff"]["short_term"] = {
+            "sub_phase": "lps",
+            "signal_status": "confirmed",
+        }
+        buckets = {
+            "actionable": [],
+            "waiting_trigger": [copy.deepcopy(lps)],
+            "next_day_confirmation": [copy.deepcopy(lps)],
+            "observation": [],
+            "data_rejected": [copy.deepcopy(lps)],
+        }
+
+        html = dc._generate_html(
+            [lps],
+            [("BK1", "测试板块", 80)],
+            1.0,
+            "20260902-160000",
+            {
+                "mode": "observation",
+                "max_recommendations": 0,
+                "max_portfolio_pct": 0,
+                "reasons": ["regime_weak"],
+            },
+            buckets,
+        )
+
+        self.assertNotIn("<tr class='wyckoff-buy-level-2'>", html)
+        self.assertNotIn(
+            "<tr class='wyckoff-observation-buy-level-2'>", html)
 
     def test_report_explains_unavailable_long_term_structure(self):
         item = candidate("1")
