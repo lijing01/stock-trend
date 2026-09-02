@@ -2108,7 +2108,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         item["wyckoff"]["short_term"] = {
             "sub_phase": "backup", "signal_status": "candidate",
         }
-        html = dc._html_candidate_rows([item], highlight_buy_levels=True)
+        html = dc._html_candidate_rows(
+            [item], buy_level_display="actionable")
         self.assertNotIn("wyckoff-buy-level-", html)
         self.assertIn("阶段D：BU回踩待确认", html)
 

@@ -1945,24 +1945,43 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     return "\n".join(lines)
 
 
-def _html_candidate_rows(items, highlight_buy_levels=False):
+_BUY_LEVEL_DISPLAY_CONTEXTS = {"none", "actionable", "observation"}
+
+
+def _html_candidate_rows(items, buy_level_display="none"):
+    if buy_level_display not in _BUY_LEVEL_DISPLAY_CONTEXTS:
+        raise ValueError(
+            f"unsupported buy level display: {buy_level_display}")
     if not items:
         return '<tr><td colspan="14">无</td></tr>'
     rows = []
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         buy_level = (
-            _wyckoff_buy_level(wyckoff) if highlight_buy_levels else None
+            _wyckoff_buy_level(wyckoff)
+            if buy_level_display != "none"
+            else None
         )
-        row_class = (
-            f" class='{buy_level['css_class']}'" if buy_level else ""
-        )
-        buy_level_badge = (
-            "<br><span class='wyckoff-buy-level-badge'>"
-            f"{buy_level['name']} · {buy_level['label']} · "
-            f"{buy_level['role']}</span>"
-            if buy_level else ""
-        )
+        if not buy_level:
+            row_class = ""
+            buy_level_badge = ""
+        elif buy_level_display == "observation":
+            row_class = (
+                " class='wyckoff-observation-buy-level-"
+                f"{buy_level['number']}'"
+            )
+            buy_level_badge = (
+                "<br><span class='wyckoff-buy-level-badge observation'>"
+                f"潜在{buy_level['name']} · {buy_level['label']} · "
+                "观察｜不可执行</span>"
+            )
+        else:
+            row_class = f" class='{buy_level['css_class']}'"
+            buy_level_badge = (
+                "<br><span class='wyckoff-buy-level-badge'>"
+                f"{buy_level['name']} · {buy_level['label']} · "
+                f"{buy_level['role']}</span>"
+            )
         quality = item.get("data_quality", {})
         detail = _candidate_diagnostic_text(item)
         plan_text = escape(_trade_plan_text(item))
@@ -1993,10 +2012,11 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
     regime = load_regime_context()
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
     actionable_rows = _html_candidate_rows(
-        buckets["actionable"], highlight_buy_levels=True)
+        buckets["actionable"], buy_level_display="actionable")
     waiting_rows = _html_candidate_rows(buckets["waiting_trigger"])
     confirmation_rows = _html_candidate_rows(buckets.get("next_day_confirmation", []))
-    observation_rows = _html_candidate_rows(buckets["observation"])
+    observation_rows = _html_candidate_rows(
+        buckets["observation"], buy_level_display="observation")
     rejected_rows = _html_candidate_rows(buckets.get("data_rejected", []))
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
