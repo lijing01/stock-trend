@@ -2051,13 +2051,52 @@ class TestRecommendationPolicy(unittest.TestCase):
         item["wyckoff"]["short_term"] = {
             "sub_phase": "lps", "signal_status": "confirmed",
         }
-        html = dc._html_candidate_rows([item], highlight_buy_levels=True)
+        html = dc._html_candidate_rows(
+            [item], buy_level_display="actionable")
         self.assertIn("<tr class='wyckoff-buy-level-2'>", html)
         self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
         self.assertIn("阶段D：LPS已确认", html)
 
         plain_html = dc._html_candidate_rows([item])
         self.assertNotIn("wyckoff-buy-level-2", plain_html)
+
+    def test_html_marks_confirmed_lps_as_non_executable_observation_level(self):
+        item = candidate("observation-lps")
+        item["wyckoff"]["short_term"] = {
+            "sub_phase": "lps",
+            "signal_status": "confirmed",
+        }
+
+        html = dc._html_candidate_rows(
+            [item], buy_level_display="observation")
+
+        self.assertIn(
+            "<tr class='wyckoff-observation-buy-level-2'>", html)
+        self.assertIn("潜在二级 · SOS 后 LPS · 观察｜不可执行", html)
+        self.assertNotIn("核心仓", html)
+        self.assertNotIn("<tr class='wyckoff-buy-level-2'>", html)
+
+    def test_observation_level_three_requires_post_lps_reconfirmation(self):
+        first_jac = candidate("first-jac")
+        first_jac["wyckoff"]["short_term"] = {
+            "sub_phase": "jac",
+            "signal_status": "confirmed",
+            "post_lps_reconfirmation": False,
+        }
+        reconfirmed_jac = copy.deepcopy(first_jac)
+        reconfirmed_jac["code"] = "reconfirmed-jac"
+        reconfirmed_jac["wyckoff"]["short_term"][
+            "post_lps_reconfirmation"] = True
+
+        html = dc._html_candidate_rows(
+            [first_jac, reconfirmed_jac],
+            buy_level_display="observation",
+        )
+
+        self.assertEqual(
+            html.count("wyckoff-observation-buy-level-3"), 1)
+        self.assertIn(
+            "潜在三级 · JAC/BU 后再确认 · 观察｜不可执行", html)
 
     def test_html_does_not_highlight_bu_candidate_as_lps(self):
         item = candidate("bu")
