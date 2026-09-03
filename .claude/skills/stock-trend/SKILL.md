@@ -284,7 +284,7 @@ python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] 
 open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 ```
 3. 每只候选附 `data_quality`：统一输出各维度 `data_date/fetched_at/source/quality/stale_reason`；K 线必须覆盖最近有效推荐依据日，总覆盖率必须 ≥70%，已返回的资金/基本面维度不得为错误状态。不满足者保留在观察池，并明确缺失或过期原因。报告将该指标标为“数据维度覆盖率”，另列中期结构所用的 K 线根数，二者不得混用。
-4. 自动读取 `market_regime.json` 并执行硬门控：评分 `<60`、数据缺失或日期过期时仅输出观察池；`60–79` 最多 2 只等待触发、组合仓位上限 30%；`≥80` 最多 5 只今日可执行、组合仓位上限 60%。**盘中(交易时间内)强制 observation-only**：`max_recommendations=0`、`max_portfolio_pct=0`，保留原评分档位于 `provisional_target_mode`，并标记 `provisional: true` + reason `intraday_provisional`；收盘后需复跑 `/daily-review` + `/candidates` 确认最终结论。
+4. 自动读取 `market_regime.json` 并执行硬门控：评分 `<60`、数据缺失或日期过期时仅输出观察池；`60–79` 最多 2 只等待触发、组合仓位上限 30%；`≥80` 最多 5 只今日可执行、组合仓位上限 60%。**盘中(交易时间内)保留上述市场环境档位和数量/仓位限制**，但所有结果标记 `provisional: true` + reason `intraday_provisional`，顶部报告保留“盘中临时(未收盘确认)”警告，行级诊断显示为“盘中临时状态”而非数据异常；盘中结果不写入正式推荐历史，收盘后需复跑 `/daily-review` + `/candidates` 确认最终结论。
 5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。
 6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。正式持续性快照只接受收盘后的东方财富 `push2` 行业+概念完整截面；AKShare 行业数据、BK 历史 K 线和旧 Top-30 记录只能作旁证，不能提升完整覆盖天数。
 7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。正式可执行项必须携带 `candidate-trade-plan/v1`：入场区间、确认/失效、止损、三级目标、重算 R:R≥1.5、风险预算仓位、20–120 交易日周期、3 日有效期、反向论据和事件状态；不完整计划降级并列出稳定原因码。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy`、三层推荐、`meta.tracking`。

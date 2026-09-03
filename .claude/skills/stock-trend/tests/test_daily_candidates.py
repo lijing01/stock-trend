@@ -2211,23 +2211,29 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = build_recommendation_policy(regime, "2026-08-06")
         self.assertEqual(policy["mode"], "observation")
 
-    def test_intraday_is_observation_only_and_provisional(self):
+    def test_intraday_preserves_actionable_tier_but_marks_provisional(self):
         regime = {"score": 90, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(
             regime, "2026-08-06", market_open=True)
-        self.assertEqual(policy["mode"], "observation")
-        self.assertEqual(policy["max_recommendations"], 0)
-        self.assertEqual(policy["max_portfolio_pct"], 0)
+        self.assertEqual(policy["mode"], "actionable")
+        self.assertEqual(policy["max_recommendations"], 5)
+        self.assertEqual(policy["max_portfolio_pct"], 60)
         self.assertEqual(policy["provisional_target_mode"], "actionable")
         self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
+        buckets = classify_candidates([candidate("intraday-action")], policy)
+        self.assertEqual(
+            [item["code"] for item in buckets["actionable"]],
+            ["intraday-action"],
+        )
 
-    def test_intraday_neutral_tier_is_observation_only(self):
+    def test_intraday_preserves_waiting_tier_but_marks_provisional(self):
         regime = {"score": 70, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(
             regime, "2026-08-06", market_open=True)
-        self.assertEqual(policy["mode"], "observation")
-        self.assertEqual(policy["max_recommendations"], 0)
+        self.assertEqual(policy["mode"], "waiting_trigger")
+        self.assertEqual(policy["max_recommendations"], 2)
+        self.assertEqual(policy["max_portfolio_pct"], 30)
         self.assertEqual(policy["provisional_target_mode"], "waiting_trigger")
         self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
@@ -2240,13 +2246,24 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("regime_weak", policy["reasons"])
         self.assertIn("intraday_provisional", policy["reasons"])
 
-    def test_intraday_stale_regime_still_observation(self):
+    def test_intraday_stale_regime_is_provisional_observation(self):
         regime = {"score": 90, "data_date": "2026-08-05"}
         policy = build_recommendation_policy(
             regime, "2026-08-06", market_open=True)
         self.assertEqual(policy["mode"], "observation")
         self.assertIn("regime_stale", policy["reasons"])
-        self.assertFalse(policy.get("provisional"))
+        self.assertIn("intraday_provisional", policy["reasons"])
+        self.assertTrue(policy.get("provisional"))
+        self.assertEqual(policy["provisional_target_mode"], "observation")
+
+    def test_intraday_missing_regime_is_provisional_observation(self):
+        policy = build_recommendation_policy(
+            None, "2026-08-06", market_open=True)
+        self.assertEqual(policy["mode"], "observation")
+        self.assertIn("regime_missing", policy["reasons"])
+        self.assertIn("intraday_provisional", policy["reasons"])
+        self.assertTrue(policy.get("provisional"))
+        self.assertEqual(policy["provisional_target_mode"], "observation")
 
     def test_intraday_observation_pool_marked_provisional(self):
         policy = build_recommendation_policy(
@@ -2256,6 +2273,48 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn(
             "intraday_provisional",
             buckets["observation"][0]["observation_reasons"])
+
+    def test_intraday_reason_is_rendered_as_transient_status(self):
+        item = candidate("intraday")
+        item["observation_reasons"] = [
+            "intraday_provisional", "history_insufficient",
+        ]
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn(
+            "盘中临时状态：盘中数据尚未收盘确认", detail)
+        self.assertNotIn(
+            "数据问题/异常：盘中数据尚未收盘确认", detail)
+        self.assertIn(
+            "其他原因：板块历史快照不足，尚不能验证持续性", detail)
+
+    def test_provisional_report_keeps_top_warning_without_downgrade_label(self):
+        item = candidate("intraday-report")
+        policy = {
+            "mode": "actionable",
+            "max_recommendations": 5,
+            "max_portfolio_pct": 60,
+            "reasons": ["intraday_provisional"],
+            "provisional": True,
+            "provisional_target_mode": "actionable",
+        }
+        buckets = {
+            "actionable": [item],
+            "waiting_trigger": [],
+            "next_day_confirmation": [],
+            "observation": [],
+            "data_rejected": [],
+        }
+
+        report = generate_report([item], [], 1.0, policy, buckets)
+
+        self.assertIn(
+            "盘中临时(未收盘确认)", report)
+        self.assertIn(
+            "## 今日可执行(盘中临时,收盘确认)", report)
+        self.assertNotIn(
+            "推荐降级: intraday_provisional", report)
 
     def test_neutral_regime_limits_waiting_list_to_two(self):
         regime = {"score": 70, "data_date": "2026-08-06"}
@@ -3148,6 +3207,58 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         self.assertTrue(first["meta"]["tracking"]["path"].endswith(
             "2026-08-06.json"))
+
+    def test_main_allows_intraday_candidate_without_official_snapshot(self):
+        item = candidate("000001")
+
+        def fake_scan(*_args, metrics=None, **_kwargs):
+            metrics.update({"batch_count": 1})
+            return [item]
+
+        with tempfile.TemporaryDirectory() as history_dir, \
+             tempfile.TemporaryDirectory() as report_dir, \
+             patch.object(dc, "load_regime_context", return_value={
+                 "score": 80, "label": "强势", "data_date": "2026-08-06",
+                 "advice": "可建仓",
+             }), \
+             patch("fetchers.sector_data.get_last_trading_day",
+                   return_value=("2026-08-06", "snapshot")), \
+             patch.object(dc, "resolve_recommendation_date",
+                          return_value="2026-08-06"), \
+             patch.object(dc, "is_recommendation_session", return_value=True), \
+             patch.object(dc, "pick_hot_sectors", return_value=[{
+                 "code": "BK1", "name": "测试板块", "sector_score": 60,
+             }]), \
+             patch.object(dc, "scan_sectors", side_effect=fake_scan), \
+             patch.object(
+                 dc, "save_snapshot_if_official",
+                 side_effect=lambda source: (
+                     __import__("core.recommendation_snapshot",
+                                fromlist=["save_snapshot_if_official"])
+                     .save_snapshot_if_official(source, Path(history_dir))
+                 ),
+             ), \
+             patch.object(dc, "REPORTS_DIR", Path(report_dir)), \
+             patch.object(sys, "argv", ["daily_candidates.py", "--top", "1",
+                                          "--min-candidates", "1"]):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                dc.main()
+            markdown_paths = list(Path(report_dir).glob("candidates-*.md"))
+            html_paths = list(Path(report_dir).glob("candidates-*.html"))
+            self.assertEqual(len(markdown_paths), 1)
+            self.assertEqual(len(html_paths), 1)
+            report = markdown_paths[0].read_text(encoding="utf-8")
+            html = html_paths[0].read_text(encoding="utf-8")
+            self.assertIn(
+                "**推荐模式**: actionable | 推荐上限 5 只 | 组合仓位上限 60%",
+                report)
+            self.assertIn("## 今日可执行(盘中临时,收盘确认)", report)
+            self.assertIn("盘中临时(未收盘确认)", report)
+            self.assertIn("**推荐快照追踪**: skipped_provisional", report)
+            self.assertIn("今日可执行(盘中临时,收盘确认)", html)
+            self.assertIn("盘中临时(未收盘确认)", html)
+            self.assertEqual(list(Path(history_dir).glob("*.json")), [])
 
 
 def run_daily_candidates_tests():

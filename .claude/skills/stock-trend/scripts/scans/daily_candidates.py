@@ -1554,13 +1554,17 @@ def _reason_detail(code, item):
 
 
 def _candidate_diagnostic_text(item):
-    """Render data problems and other demotion causes in the final column."""
+    """Render data problems, transient status, and demotion causes."""
     quality = item.get("data_quality", {})
     reasons = list(item.get("observation_reasons", [])) \
         or list(quality.get("reasons", []))
     data_reasons = []
     other_reasons = []
+    transient_reasons = []
     for code in reasons:
+        if code == "intraday_provisional":
+            transient_reasons.append(_reason_detail(code, item))
+            continue
         target = data_reasons if code in DATA_REASON_CODES else other_reasons
         target.append(_reason_detail(code, item))
 
@@ -1597,6 +1601,8 @@ def _candidate_diagnostic_text(item):
         parts.append("其他原因：" + "、".join(dict.fromkeys(other_reasons)))
     elif not data_reasons:
         parts.append("信号：" + _signal_text(item.get("signals", {})))
+    if transient_reasons:
+        parts.append("盘中临时状态：" + "、".join(dict.fromkeys(transient_reasons)))
     wyckoff = item.get("wyckoff", {})
     signal_status = wyckoff.get("signal_status") or wyckoff.get("short_term", {}).get("signal_status", "")
     sub_phase = str(wyckoff.get("sub_phase", "")).lower()
@@ -1909,42 +1915,40 @@ def load_regime_context():
 
 def build_recommendation_policy(regime, expected_date, market_open=False):
     if not regime or regime.get("score") is None:
-        return {
+        policy = {
             "mode": "observation", "max_recommendations": 0,
             "max_portfolio_pct": 0, "reasons": ["regime_missing"],
         }
-    if regime.get("data_date") != expected_date:
-        return {
+    elif regime.get("data_date") != expected_date:
+        policy = {
             "mode": "observation", "max_recommendations": 0,
             "max_portfolio_pct": 0, "reasons": ["regime_stale"],
         }
-    score = float(regime["score"])
-    capital_score = regime.get("capital_score")
-    divergence = capital_score is not None and float(capital_score) < 35
-    if score < 60:
-        policy = {
-            "mode": "observation", "max_recommendations": 0,
-            "max_portfolio_pct": 0, "reasons": ["regime_weak"],
-        }
-    elif score < 80:
-        policy = {
-            "mode": "waiting_trigger", "max_recommendations": 2,
-            "max_portfolio_pct": 30, "reasons": [],
-            "requires_sector_capital_proof": divergence,
-        }
     else:
-        policy = {
-            "mode": "actionable", "max_recommendations": 5,
-            "max_portfolio_pct": 60, "reasons": [],
-            "requires_sector_capital_proof": divergence,
-        }
-    # 盘中结果只用于观察，不能产生正式推荐或仓位建议。
+        score = float(regime["score"])
+        capital_score = regime.get("capital_score")
+        divergence = capital_score is not None and float(capital_score) < 35
+        if score < 60:
+            policy = {
+                "mode": "observation", "max_recommendations": 0,
+                "max_portfolio_pct": 0, "reasons": ["regime_weak"],
+            }
+        elif score < 80:
+            policy = {
+                "mode": "waiting_trigger", "max_recommendations": 2,
+                "max_portfolio_pct": 30, "reasons": [],
+                "requires_sector_capital_proof": divergence,
+            }
+        else:
+            policy = {
+                "mode": "actionable", "max_recommendations": 5,
+                "max_portfolio_pct": 60, "reasons": [],
+                "requires_sector_capital_proof": divergence,
+            }
+    # 盘中结果仍标记为临时，不写入正式推荐历史；是否可执行由市场层级和候选资格决定。
     if market_open:
         previous_mode = policy.get("mode", "observation")
         policy.update({
-            "mode": "observation",
-            "max_recommendations": 0,
-            "max_portfolio_pct": 0,
             "provisional": True,
             "provisional_target_mode": previous_mode,
         })
@@ -2167,8 +2171,12 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
             f"**市场环境**: {regime['score']} {regime['label']} "
             f"(数据 {regime['data_date']}) — {regime.get('advice', '')}",
         ])
-    if policy.get("reasons"):
-        lines.extend(["", f"> ⚠️ 推荐降级: {', '.join(policy['reasons'])}"])
+    downgrade_reasons = [
+        reason for reason in policy.get("reasons", [])
+        if reason != "intraday_provisional"
+    ]
+    if downgrade_reasons:
+        lines.extend(["", f"> ⚠️ 推荐降级: {', '.join(downgrade_reasons)}"])
     if policy.get("provisional"):
         lines.extend([
             "",
