@@ -175,7 +175,7 @@ python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-day
 
 ## /wyckoff-backtest [--codes 600519,000001] [--sectors BK0477,...] [--from-candidates <json>] [--lookback-days N] [--eval-windows 5,10,20] [--min-confidence N] [--min-gap N] [--output <path>] [--output-html]
 
-维科夫买点回测 — 验证 `/candidates` 买点信号的历史胜率。历史重放：每采样日用截至当日 K 线跑维科夫分析，检测买点（吸筹/拉升阶段 + Spring/LPS/ST/PRE_MARKUP/JAC/BU 子阶段 + 置信度≥阈值），测 5/10/20 日前向收益，对照全样本基线。
+维科夫买点回测 — 验证 `/candidates` 买点信号的历史胜率。历史重放：每采样日用截至当日 K 线跑维科夫分析，检测买点（吸筹/拉升阶段 + Spring/LPS/ST/PRE_MARKUP/JAC/BU 子阶段 + 置信度≥阈值），测 5/10/20 日前向收益，对照全样本基线；同时严格区分一级 Spring/Test、二级 SOS 后 LPS、三级 JAC/BU 后再确认与未分级信号，输出各等级收益、MAE/MFE、样本数和证据状态。
 
 **步骤**：
 
@@ -191,9 +191,9 @@ python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --sec
 
 2. 默认 120 天 / 窗口 5,10,20 / 采样间隔 5 / 置信度≥0.3(与漏斗一致) / 同标的信号去重间隔 10 天。
 
-3. 输出 JSON(stdout)：`summary`(信号vs基线 胜率/均收益/α)、`by_sub_phase`/`by_confidence`/`by_phase`/`by_score_100`(分桶胜率)、`ic`(置信度/100分→前向收益)、`strategy_stats`(主窗口,供凯利)、`signals` 明细。`--output-html` 生成 `reports/lists/wyckoff-backtest-*.html`。
+3. 输出 JSON(stdout)：`summary`(信号vs基线 胜率/均收益/α)、`by_sub_phase`/`by_buy_level`/`by_confidence`/`by_phase`/`by_score_100`(分桶胜率)、`risk_by_buy_level`(各等级 MAE/MFE)、`evidence`(各等级样本数及是否达到最低证据门槛)、`ic`(置信度/100分→前向收益)、`strategy_stats`(主窗口,供凯利)、`signals` 明细。`--output-html` 生成 `reports/lists/wyckoff-backtest-*.html`。
 
-4. 判读：信号胜率显著高于基线=买点有 edge；某子阶段/置信度档位胜率突出=漏斗参数可据此收紧。
+4. 判读：信号胜率显著高于基线=买点有 edge；某子阶段/置信度档位胜率突出=漏斗参数可据此收紧。`evidence.status != ready` 时，分级奖励只视为保守先验，不得据此放大；至少积累每级 100 个信号后，才可据 5/10/20 日收益与 MAE/MFE 调整或归零奖励。
 
 **局限**：close-to-close 无成本无止损模拟；宇宙=当前成分股(幸存者偏差)；买点稀缺时样本少，需用完整 `/candidates` 宇宙跑，单看几只意义不大。
 
@@ -285,7 +285,7 @@ open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 ```
 3. 每只候选附 `data_quality`：统一输出各维度 `data_date/fetched_at/source/quality/stale_reason`；K 线必须覆盖最近有效推荐依据日，总覆盖率必须 ≥70%，已返回的资金/基本面维度不得为错误状态。不满足者保留在观察池，并明确缺失或过期原因。报告将该指标标为“数据维度覆盖率”；候选表只展示小级别维科夫阶段、短线买点和短线置信度，不展示中线结构、周期结论、中线置信度或中期结构 K 线根数。今日推荐分桶不读取长短周期对齐结论，仍由短线买点、市场环境、数据质量和板块持续性共同决定，不以交易计划字段作为候选资格门槛。
 4. 自动读取 `market_regime.json` 并执行硬门控：评分 `<60`、数据缺失或日期过期时仅输出观察池；`60–79` 最多 2 只等待触发；`≥80` 最多 5 只今日可执行。**盘中(交易时间内)保留上述市场环境档位和数量限制**，但所有结果标记 `provisional: true` + reason `intraday_provisional`，顶部报告保留“盘中临时(未收盘确认)”警告，行级诊断显示为“盘中临时状态”而非数据异常；盘中结果不写入正式推荐历史，收盘后需复跑 `/daily-review` + `/candidates` 确认最终结论。
-5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。
+5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。候选资格继续使用 `quality_adjusted_score`；同一推荐层级内使用 `execution_priority_score = min(100, quality_adjusted_score + buy_point_priority_bonus)` 排序。严格一级/二级/三级奖励分别为 `+1/+3/+2`；普通 JAC、未确认或过期信号不奖励。买点优先分不能越过市场环境、数据质量、板块持续性、资金背离、`retest_pending`、`failed_breakout` 或最低质量分门槛。`evidence.status != ready` 时奖励属于保守先验，只允许通过后续回测缩小、归零或调整，不允许自动放大。
 6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。正式持续性快照只接受收盘后的东方财富 `push2` 行业+概念完整截面；AKShare 行业数据、BK 历史 K 线和旧 Top-30 记录只能作旁证，不能提升完整覆盖天数。
 7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。候选报告只呈现候选发现、维科夫分层、市场/板块资格和数据质量；不展示入场、止损、目标、R:R、仓位或有效期等交易计划字段，也不以交易计划完整性进行升降级。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy`、三层推荐、`meta.tracking`。
 8. 复核：候选仍需人工确认基本面和事件公告后再入场；弱市、盘中或证据不足时允许“今日无推荐”。正式收盘结果按交易日写入 `.cache/stock-trend/recommendation_history/YYYY-MM-DD.json`，同内容重复运行幂等、不同内容冲突且不覆盖；保存失败只降低追踪状态，不抑制报告输出。P0 不代表完整生产链收益已经验证。

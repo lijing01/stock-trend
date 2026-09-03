@@ -1474,6 +1474,8 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
 
 def select_candidate_pool(scored, top, min_score):
     """Keep promotable candidates ahead of observation-only high scorers."""
+    # Retain the raw-score shortlist so quality-ineligible rows remain visible
+    # in the observation pool; score_eligible below is the hard quality gate.
     candidates = [
         item for item in scored
         if item.get("composite_score", 0) >= min_score

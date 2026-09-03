@@ -81,12 +81,30 @@
 - 港股仅 Tushare 支持；Tushare 不可用时港股技术面按 0 分处理
 - 东方财富无需 Token，3 节点轮换，最多 250 条数据
 
+## 3. `/candidates` 买点优先级合同
+
+候选资格继续使用 `quality_adjusted_score`；同一推荐层级内使用
+`execution_priority_score = min(100, quality_adjusted_score + buy_point_priority_bonus)`
+排序。严格一级 Spring/Test、二级 SOS 后 LPS、三级 JAC/BU 后再确认的奖励
+分别为 `+1/+3/+2`；普通 JAC、未确认或过期信号不奖励。
+
+买点优先分只能改变已通过资格检查的候选在同一分桶内的顺序，不能越过市场环境、
+数据质量、板块持续性、资金背离、`retest_pending`、`failed_breakout` 或最低质量分
+门槛。`quality_adjusted_score` 保持原义，不包含买点奖励；旧快照缺失新增字段时按
+质量分排序。
+
+维科夫等级回测必须同时输出 5/10/20 日收益、`MAE`、`MFE`、样本数和
+`evidence.status`。当 `evidence.status != ready` 时，`+1/+3/+2` 仅是保守先验，
+不得自动放大；后续每个等级至少累计 100 个信号后，才可依据分级收益和路径风险将
+奖励缩小、归零或调整。
+
 ---
 
 ## 变更日志
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v6 | 2026-09-03 | 固化 `/candidates` 买点优先分、硬门控与分级回测证据合同 |
 | v5 | 2026-05-15 | 精简规格，移除与 SKILL.md 重复的内容，仅保留示例和数据源配置 |
 | v4 | 2026-05-07 | 东方财富脚本增加 API 节点轮换（3节点）、完整浏览器请求头、BaoStock 降级 |
 | v3 | 2026-05-03 | 新增东方财富API作为降级数据源 |
