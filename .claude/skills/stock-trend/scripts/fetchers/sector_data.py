@@ -1069,6 +1069,46 @@ def _atomic_json_write(path: Path, payload: dict) -> None:
         raise
 
 
+def commit_candidate_sector_snapshot(
+        rankings: dict, data_date: str, min_stocks: int = 10,
+        min_up_ratio: float = 0.15) -> dict:
+    """Rank and persist one complete BK candidate-sector snapshot."""
+    meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
+    sectors = rankings.get("sectors", []) if isinstance(rankings, dict) else []
+    if meta.get("complete") is not True or not sectors:
+        return {"status": "incomplete", "ranked_count": 0}
+    if meta.get("source", "eastmoney") not in ("eastmoney", "realtime"):
+        return {"status": "unsupported_source", "ranked_count": 0}
+    if meta.get("sources") and not all(
+            meta["sources"].get(name) == "ok"
+            for name in ("industry", "concept")):
+        return {"status": "incomplete", "ranked_count": 0}
+
+    meta.setdefault("source", "eastmoney")
+    ranked = rank_hot_sectors(
+        rankings, top_n=None,
+        min_stocks=min_stocks, min_up_ratio=min_up_ratio,
+    )
+    if not ranked:
+        return {"status": "incomplete", "ranked_count": 0}
+    append_candidate_sector_snapshot(
+        rankings,
+        ranked=ranked,
+        override_date=data_date,
+        filter_meta={
+            "min_stocks": min_stocks,
+            "min_up_ratio": min_up_ratio,
+            "deduplicated": True,
+        },
+    )
+    return {
+        "status": "saved",
+        "data_date": data_date,
+        "universe_count": len(sectors),
+        "ranked_count": len(ranked),
+    }
+
+
 def append_candidate_sector_snapshot(
         rankings: dict, ranked: Optional[list[dict]] = None,
         override_date: str = "", filter_meta: Optional[dict] = None) -> None:

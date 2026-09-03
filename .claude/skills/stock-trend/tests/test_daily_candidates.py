@@ -539,6 +539,64 @@ class TestRecommendationPolicy(unittest.TestCase):
                     override_date="2026-08-07",
                 )
 
+    def test_commit_candidate_snapshot_accepts_only_complete_eastmoney_rankings(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {
+                "complete": True,
+                "source": "eastmoney",
+                "data_date": "2026-09-03",
+                "total_sectors": 12,
+                "sources": {"industry": "ok", "concept": "ok"},
+            },
+            "sectors": [
+                {
+                    "code": f"BK{i:04d}", "name": f"板块{i}",
+                    "change_pct": 1.0, "main_force_net": 1e8,
+                    "up_count": 9, "down_count": 1,
+                }
+                for i in range(12)
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+                sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                Path(tmpdir) / "candidate-history.json"):
+            result = sector_data.commit_candidate_sector_snapshot(
+                rankings, data_date="2026-09-03", min_stocks=1,
+            )
+            history = sector_data.load_candidate_sector_history(days=10)
+
+        self.assertEqual(result["status"], "saved")
+        self.assertEqual(result["ranked_count"], 12)
+        self.assertEqual(len(history["2026-09-03"]["sectors"]), 12)
+
+    def test_commit_candidate_snapshot_rejects_partial_provider_without_writing(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {
+                "complete": False,
+                "source": "akshare",
+                "data_date": "2026-09-03",
+                "sources": {"industry": "ok", "concept": "empty"},
+            },
+            "sectors": [{
+                "code": "881121", "name": "半导体", "change_pct": 1.0,
+                "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+                sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                Path(tmpdir) / "candidate-history.json"):
+            result = sector_data.commit_candidate_sector_snapshot(
+                rankings, data_date="2026-09-03", min_stocks=1,
+            )
+            exists = sector_data.CANDIDATE_SNAPSHOT_FILE.exists()
+
+        self.assertEqual(result["status"], "incomplete")
+        self.assertFalse(exists)
+
     def test_candidate_snapshot_prunes_to_recent_valid_trading_days(self):
         from fetchers import sector_data
 
