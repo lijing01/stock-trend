@@ -149,6 +149,50 @@ EVENT_MAX_AGE = {
     SUB_BC: 8, SUB_UTAD: 8,
 }
 
+# Strict execution-level metadata.  The level is intentionally separate from
+# the structural Wyckoff score so downstream ranking can audit its effect.
+BUY_POINT_LEVELS = {
+    SUB_SPRING: {
+        "number": 1,
+        "name": "一级",
+        "label": "Spring/Test",
+        "priority_bonus": 1.0,
+    },
+    SUB_LPS: {
+        "number": 2,
+        "name": "二级",
+        "label": "SOS 后 LPS",
+        "priority_bonus": 3.0,
+    },
+    SUB_JAC: {
+        "number": 3,
+        "name": "三级",
+        "label": "JAC/BU 后再确认",
+        "priority_bonus": 2.0,
+    },
+}
+
+
+def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
+    """Return a strict, fresh execution level for a short-term payload."""
+    if not isinstance(wyckoff, dict):
+        return None
+    short = wyckoff.get("short_term") or {}
+    sub_phase = str(short.get("sub_phase") or "").strip().lower()
+    status = str(short.get("signal_status") or "").strip().lower()
+    try:
+        age = int(short.get("signal_age_bars", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    level = BUY_POINT_LEVELS.get(sub_phase)
+    if level is None or status != "confirmed":
+        return None
+    if age < 0 or age > EVENT_MAX_AGE.get(sub_phase, 0):
+        return None
+    if sub_phase == SUB_JAC and short.get("post_lps_reconfirmation") is not True:
+        return None
+    return dict(level)
+
 # Post-breakout BU/LPS confirmation contract.  These values are deliberately
 # named constants so later backtests can tune them without scattering rules.
 LPS_CANDIDATE_MAX_AGE = 5

@@ -686,6 +686,32 @@ class TestLongTermWyckoffContext(unittest.TestCase):
         self.assertFalse(helper(
             later_sos, [{**lps, "detected_index": 52}, later_sos]))
 
+    def test_classify_buy_point_level_is_strict_and_fresh(self):
+        self.assertTrue(hasattr(wyckoff_module, "classify_buy_point_level"))
+        classify = wyckoff_module.classify_buy_point_level
+
+        def payload(sub_phase, *, status="confirmed", age=0,
+                    reconfirmed=False):
+            return {
+                "short_term": {
+                    "sub_phase": sub_phase,
+                    "signal_status": status,
+                    "signal_age_bars": age,
+                    "post_lps_reconfirmation": reconfirmed,
+                }
+            }
+
+        self.assertEqual(classify(payload("spring"))["number"], 1)
+        self.assertEqual(classify(payload("lps"))["number"], 2)
+        self.assertEqual(
+            classify(payload("jac", reconfirmed=True))["number"], 3)
+        self.assertIsNone(classify(payload("jac", reconfirmed=False)))
+        self.assertIsNone(classify(payload("lps", status="candidate")))
+        self.assertIsNone(classify(payload("spring", age=9)))
+        self.assertIsNone(classify(payload("lps", age=11)))
+        self.assertIsNone(
+            classify(payload("jac", age=9, reconfirmed=True)))
+
     def test_short_term_payload_marks_post_lps_sos_reconfirmation(self):
         context = {
             "id": "context_1", "level": "context", "support": 90.0,
