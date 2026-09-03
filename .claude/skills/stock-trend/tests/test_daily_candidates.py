@@ -1345,7 +1345,8 @@ class TestRecommendationPolicy(unittest.TestCase):
                    return_value=rankings), \
              patch("fetchers.sector_data.save_rankings_cache"), \
              patch("fetchers.sector_data.append_daily_snapshot"), \
-             patch("fetchers.sector_data.append_candidate_sector_snapshot") as write_snapshot, \
+             patch("fetchers.sector_data.commit_candidate_sector_snapshot") as commit_snapshot, \
+             patch("fetchers.sector_data.append_candidate_sector_snapshot") as legacy_append, \
              patch("fetchers.sector_data.load_candidate_sector_history",
                    return_value=prior_history), \
              patch("fetchers.sector_data.load_snapshot_history",
@@ -1355,10 +1356,13 @@ class TestRecommendationPolicy(unittest.TestCase):
                 metrics=metrics)
 
         self.assertEqual(len(picked), 1)
-        write_snapshot.assert_called_once()
-        written_ranked = write_snapshot.call_args.kwargs["ranked"]
-        self.assertEqual(len(written_ranked), 56)
-        self.assertEqual(written_ranked[30]["code"], "BK30")
+        commit_snapshot.assert_called_once_with(
+            rankings,
+            data_date="2026-08-06",
+            min_stocks=1,
+            min_up_ratio=0.15,
+        )
+        legacy_append.assert_not_called()
         self.assertEqual(picked[0]["history_coverage_days"], 2)
         self.assertEqual(picked[0]["hot_appearance_days"], 2)
         self.assertEqual(picked[0]["hot_streak"], 2)
@@ -1373,8 +1377,9 @@ class TestRecommendationPolicy(unittest.TestCase):
                    return_value=rankings), \
              patch("fetchers.sector_data.save_rankings_cache"), \
              patch("fetchers.sector_data.append_daily_snapshot"), \
-             patch("fetchers.sector_data.append_candidate_sector_snapshot",
-                   side_effect=OSError("disk full")), \
+             patch("fetchers.sector_data.commit_candidate_sector_snapshot",
+                   side_effect=OSError("disk full")) as commit_snapshot, \
+             patch("fetchers.sector_data.append_candidate_sector_snapshot"), \
              patch("fetchers.sector_data.load_candidate_sector_history",
                    return_value=prior_history), \
              patch("fetchers.sector_data.load_snapshot_history",
@@ -1382,6 +1387,12 @@ class TestRecommendationPolicy(unittest.TestCase):
             picked = dc.pick_hot_sectors(
                 min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
 
+        commit_snapshot.assert_called_once_with(
+            rankings,
+            data_date="2026-08-06",
+            min_stocks=1,
+            min_up_ratio=0.15,
+        )
         self.assertEqual(picked[0]["history_coverage_days"], 2)
         self.assertEqual(picked[0]["sector_type"], "emerging")
         self.assertIn(

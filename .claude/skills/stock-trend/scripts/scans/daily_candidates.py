@@ -1040,7 +1040,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     metrics = metrics if metrics is not None else {}
     from fetchers.sector_data import (
         append_daily_snapshot,
-        append_candidate_sector_snapshot,
+        commit_candidate_sector_snapshot,
         get_sector_rankings,
         load_candidate_sector_history,
         load_rankings_cache_full,
@@ -1168,15 +1168,11 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         })
     if active and live_meta.get("complete", False) and as_of_date:
         try:
-            append_candidate_sector_snapshot(
+            commit_candidate_sector_snapshot(
                 rankings,
-                ranked=ranked_universe,
-                override_date=as_of_date,
-                filter_meta={
-                    "min_stocks": min_stocks,
-                    "min_up_ratio": 0.15,
-                    "deduplicated": True,
-                },
+                data_date=as_of_date,
+                min_stocks=min_stocks,
+                min_up_ratio=0.15,
             )
         except (OSError, TypeError, ValueError) as exc:
             _record_degradation(
