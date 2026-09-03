@@ -86,7 +86,6 @@ REASON_LABELS = {
     "recommendation_limit": "超出当日推荐数量上限",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
-    "trade_plan_target_source_not_executable": "目标来源非结构化阻力位，仅供观察",
     "data_quality_ineligible": "关键数据质量不合格",
 }
 
@@ -1254,7 +1253,6 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
                  sector_context=None, source_health=None, metrics=None,
-                 trade_plan_policy=None,
                  capital_top=30,
                  initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
@@ -1399,11 +1397,10 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     new_candidates, enable_wyckoff=True,
                     as_of_date=as_of_date,
                     source_health=source_health, metrics=metrics,
-                    trade_plan_policy=trade_plan_policy,
                     top=capital_top, min_candidates=min_candidates)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
-                        "source_health", "metrics", "trade_plan_policy",
+                        "source_health", "metrics",
                         "top", "min_candidates")):
                     raise
                 try:
@@ -1709,8 +1706,8 @@ def _wyckoff_buy_level(wyckoff):
         short_term.get("sub_phase") or wyckoff.get("sub_phase") or ""
     ).strip().lower()
     level_by_sub_phase = {
-        "spring": (1, "Spring/Test", "试错仓"),
-        "lps": (2, "SOS 后 LPS", "核心仓"),
+        "spring": (1, "Spring/Test"),
+        "lps": (2, "SOS 后 LPS"),
     }
     display_aliases = {
         "spring（弹簧效应/震仓）": "spring",
@@ -1719,115 +1716,20 @@ def _wyckoff_buy_level(wyckoff):
     }
     sub_phase = display_aliases.get(sub_phase, sub_phase)
     level = (
-        (3, "JAC/BU 后再确认", "趋势仓")
+        (3, "JAC/BU 后再确认")
         if (sub_phase == "jac"
             and short_term.get("post_lps_reconfirmation") is True)
         else level_by_sub_phase.get(sub_phase)
     )
     if not level:
         return None
-    number, label, role = level
+    number, label = level
     return {
         "number": number,
         "name": {1: "一级", 2: "二级", 3: "三级"}[number],
         "label": label,
-        "role": role,
         "css_class": f"wyckoff-buy-level-{number}",
     }
-
-
-TARGET_SOURCE_LABELS = {
-    "resistance": "阻力位",
-    "atr_projection": "ATR投射（仅观察）",
-    "unavailable": "目标不可用",
-}
-
-
-def _target_source_audit(items, eligible_only=False):
-    counts = {source: 0 for source in TARGET_SOURCE_LABELS}
-    for item in items:
-        if eligible_only and not item.get("data_quality", {}).get(
-                "eligible", False):
-            continue
-        source = (item.get("trade_plan") or {}).get("target_source")
-        if source not in counts:
-            source = "unavailable"
-        counts[source] += 1
-    return (
-        f"目标来源审计：阻力位 {counts['resistance']}｜"
-        f"ATR投射（仅观察） {counts['atr_projection']}｜"
-        f"目标不可用 {counts['unavailable']}"
-    )
-
-
-def _is_finite_number(value):
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
-
-
-def _trade_plan_text(item):
-    """Render the additive compact trade-plan fields consistently."""
-    raw_plan = item.get("trade_plan")
-    plan = raw_plan if isinstance(raw_plan, dict) else {}
-    entry = plan.get("entry") if isinstance(plan.get("entry"), dict) else {}
-    stop = plan.get("stop_loss") if isinstance(plan.get("stop_loss"), dict) else {}
-    targets = plan.get("targets") if isinstance(plan.get("targets"), dict) else {}
-    position = plan.get("position") if isinstance(plan.get("position"), dict) else {}
-    if not plan:
-        return "交易计划：未生成"
-    source = plan.get("target_source")
-    if source not in TARGET_SOURCE_LABELS:
-        source = "unavailable"
-    source_text = TARGET_SOURCE_LABELS[source]
-    entry_high = entry.get("high")
-    stop_price = stop.get("price")
-    target_values = [targets.get(key) for key in
-                     ("conservative", "primary", "aggressive")]
-    valid_target_ladder = (
-        source in {"resistance", "atr_projection"}
-        and _is_finite_number(entry_high)
-        and _is_finite_number(stop_price)
-        and all(_is_finite_number(value) for value in target_values)
-        and stop_price < entry_high < target_values[0]
-        < target_values[1] < target_values[2]
-    )
-    rr_value = (
-        round((target_values[1] - entry_high) / (entry_high - stop_price), 2)
-        if valid_target_ladder else None
-    )
-    rr_text = (
-        f"{rr_value:.2f}" if _is_finite_number(rr_value) else "—"
-    )
-    stored_rr = plan.get("risk_reward")
-    if valid_target_ladder and isinstance(stored_rr, dict):
-        rr_low = stored_rr.get("rr_at_entry_low")
-        if _is_finite_number(rr_low):
-            rr_text += f"（下沿 {rr_low:.2f}）"
-    target_text = (
-        "/".join(str(value) for value in target_values)
-        if valid_target_ladder else "—/—/—"
-    )
-    reason = plan.get("target_reason")
-    reason_text = f"（{reason}）" if source == "unavailable" and reason else ""
-    stop_buffer = plan.get("stop_buffer")
-    buffer_text = ""
-    if isinstance(stop_buffer, dict):
-        required = stop_buffer.get("required")
-        actual = stop_buffer.get("actual")
-        if _is_finite_number(required) and _is_finite_number(actual):
-            state = "✓" if stop_buffer.get("valid") is True else "✗"
-            buffer_text = f" | 止损缓冲 {actual}/{required}{state}"
-    return (
-        f"交易计划：入场{entry.get('low', '-')}~{entry.get('high', '-')} | "
-        f"止损{stop.get('price', '-')}{buffer_text} | "
-        f"目标{target_text} | 目标来源 {source_text}{reason_text} | "
-        f"R:R {rr_text} | "
-        f"仓位≤{position.get('max_portfolio_pct', '-')}% | "
-        f"有效{(plan.get('validity') or {}).get('trading_sessions', '-')}个交易日"
-    )
 
 
 def _markdown_cell(value):
@@ -1848,7 +1750,6 @@ def _append_candidate_table(lines, title, items, empty_text):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
         detail = _markdown_cell(_candidate_diagnostic_text(item))
-        plan_text = _markdown_cell(_trade_plan_text(item))
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
@@ -1857,7 +1758,7 @@ def _append_candidate_table(lines, title, items, empty_text):
             f"{item['composite_score']:.1f} | "
             f"{candidate_rank_score(item):.1f} | "
             f"{quality.get('coverage', 0):.0%} | "
-            f"{detail}；{plan_text} |"
+            f"{detail} |"
         )
 
 
@@ -1888,12 +1789,12 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
     if not regime or regime.get("score") is None:
         policy = {
             "mode": "observation", "max_recommendations": 0,
-            "max_portfolio_pct": 0, "reasons": ["regime_missing"],
+            "reasons": ["regime_missing"],
         }
     elif regime.get("data_date") != expected_date:
         policy = {
             "mode": "observation", "max_recommendations": 0,
-            "max_portfolio_pct": 0, "reasons": ["regime_stale"],
+            "reasons": ["regime_stale"],
         }
     else:
         score = float(regime["score"])
@@ -1902,18 +1803,18 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
         if score < 60:
             policy = {
                 "mode": "observation", "max_recommendations": 0,
-                "max_portfolio_pct": 0, "reasons": ["regime_weak"],
+                "reasons": ["regime_weak"],
             }
         elif score < 80:
             policy = {
                 "mode": "waiting_trigger", "max_recommendations": 2,
-                "max_portfolio_pct": 30, "reasons": [],
+                "reasons": [],
                 "requires_sector_capital_proof": divergence,
             }
         else:
             policy = {
                 "mode": "actionable", "max_recommendations": 5,
-                "max_portfolio_pct": 60, "reasons": [],
+                "reasons": [],
                 "requires_sector_capital_proof": divergence,
             }
     # 盘中结果仍标记为临时，不写入正式推荐历史；是否可执行由市场层级和候选资格决定。
@@ -1925,29 +1826,6 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
         })
         policy["reasons"] = (policy.get("reasons") or []) + ["intraday_provisional"]
     return policy
-
-
-def _trade_plan_promotable(item):
-    """Only a complete resistance-backed v1 buy plan is recommendable."""
-    plan = item.get("trade_plan")
-    if not isinstance(plan, dict):
-        return False
-    targets = plan.get("targets") if isinstance(plan.get("targets"), dict) else {}
-    target_values = [targets.get(key) for key in
-                     ("conservative", "primary", "aggressive")]
-    risk_reward = plan.get("risk_reward") if isinstance(plan.get("risk_reward"), dict) else {}
-    rr_value = risk_reward.get("recomputed")
-    return (
-        item.get("trade_plan_status") == "complete"
-        and isinstance(plan, dict)
-        and plan.get("action") == "buy"
-        and plan.get("target_source") == "resistance"
-        and all(
-            _is_finite_number(value) for value in target_values
-        )
-        and target_values[0] < target_values[1] < target_values[2]
-        and _is_finite_number(rr_value)
-    )
 
 
 def _short_term_observation_reason(item):
@@ -1981,9 +1859,6 @@ def classify_candidates(candidates, policy):
         and (not policy.get("requires_sector_capital_proof", False)
              or item.get("sector_capital_evidence") == "positive_verified")
         and _short_term_observation_reason(item) is None
-        and (_trade_plan_promotable(item)
-             if policy.get("mode") in {"actionable", "waiting_trigger"}
-             else True)
     ]
     limit = policy.get("max_recommendations", 0)
     actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
@@ -1996,7 +1871,6 @@ def classify_candidates(candidates, policy):
                          and item.get("score_eligible", True)
                          and item.get("wyckoff")
                          and _short_term_observation_reason(item) is None
-                         and _trade_plan_promotable(item)
                          and item.get("code") not in promoted][:2]
         confirmations = [
             dict(item, confirmation_conditions=(
@@ -2022,14 +1896,6 @@ def classify_candidates(candidates, policy):
         short_term_reason = _short_term_observation_reason(item)
         if short_term_reason:
             reasons.append(short_term_reason)
-        if (policy.get("mode") in {"actionable", "waiting_trigger"}
-                and not _trade_plan_promotable(item)):
-            reasons.extend(item.get("trade_plan_reasons") or [])
-            if not item.get("trade_plan"):
-                reasons.append("trade_plan_missing")
-            elif (not isinstance(item.get("trade_plan"), dict)
-                  or item["trade_plan"].get("target_source") != "resistance"):
-                reasons.append("trade_plan_target_source_not_executable")
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
         if not reasons:
@@ -2131,18 +1997,16 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "",
         f"**推荐模式**: {policy['mode']} | "
         f"推荐上限 {policy['max_recommendations']} 只 | "
-        f"组合仓位上限 {policy['max_portfolio_pct']}%",
+        "候选资格仅依据市场、数据、板块和维科夫筛选",
         "",
         f"**筛选漏斗**: {funnel}",
-        "",
-        f"**{_target_source_audit(candidates, eligible_only=True)}**",
     ]
     regime = load_regime_context()
     if regime and regime.get("score") is not None:
         lines.extend([
             "",
             f"**市场环境**: {regime['score']} {regime['label']} "
-            f"(数据 {regime['data_date']}) — {regime.get('advice', '')}",
+            f"(数据 {regime['data_date']})",
         ])
     downgrade_reasons = [
         reason for reason in policy.get("reasons", [])
@@ -2228,11 +2092,10 @@ def _html_candidate_rows(items, buy_level_display="none"):
             buy_level_badge = (
                 "<br><span class='wyckoff-buy-level-badge'>"
                 f"{buy_level['name']} · {buy_level['label']} · "
-                f"{buy_level['role']}</span>"
+                "已确认</span>"
             )
         quality = item.get("data_quality", {})
         detail = _candidate_diagnostic_text(item)
-        plan_text = escape(_trade_plan_text(item))
         rows.append(
             f"<tr{row_class}><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span>"
@@ -2244,7 +2107,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
             f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
-            f"<td>{escape(detail)}；{plan_text}</td></tr>"
+            f"<td>{escape(detail)}</td></tr>"
         )
     return "".join(rows)
 
@@ -2270,8 +2133,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                                       len(sector_codes))
     policy_note = (
         f"推荐模式 {policy['mode']} | 推荐上限 "
-        f"{policy['max_recommendations']}只 | 组合仓位上限 "
-        f"{policy['max_portfolio_pct']}%"
+        f"{policy['max_recommendations']}只 | 候选资格由筛选门槛决定"
     )
     funnel_note = (
         f"筛选漏斗：板块评估 {sector_universe} → 热度合格 {sector_qualified} "
@@ -2280,13 +2142,11 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
         f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
     )
-    target_audit = _target_source_audit(candidates, eligible_only=True)
-
     regime_html = ""
     if regime and regime["score"] is not None:
         color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime["label"], "#86868b")
         weak_note = ('<p style="color:#b45309;font-weight:600">⚠️ 弱势市:候选仅作观察,'
-                     '不宜建仓,等大盘站回 MA20。</p>' if weak else "")
+                     '等大盘站回 MA20。</p>' if weak else "")
         regime_html = (
             f"<div class='score' style='color:{color}'>市场环境 {regime['score']} {regime['label']}"
             f"<span style='font-size:14px;color:#86868b'> (数据 {regime['data_date']})</span></div>"
@@ -2335,6 +2195,19 @@ h1{{font-size:24px}}
 table{{width:100%;border-collapse:collapse;margin:12px 0;border-radius:8px;overflow:hidden}}
 th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:14px}}
 th{{background:#1d4ed8;color:#fff;font-size:13px}}
+.candidate-table{{table-layout:fixed}}
+.candidate-table th:nth-child(1),.candidate-table td:nth-child(1){{width:3%}}
+.candidate-table th:nth-child(2),.candidate-table td:nth-child(2){{width:8%}}
+.candidate-table th:nth-child(3),.candidate-table td:nth-child(3){{width:18%}}
+.candidate-table th:nth-child(4),.candidate-table td:nth-child(4){{width:24%}}
+.candidate-table th:nth-child(5),.candidate-table td:nth-child(5){{width:9%}}
+.candidate-table th:nth-child(6),.candidate-table td:nth-child(6){{width:7%}}
+.candidate-table th:nth-child(7),.candidate-table td:nth-child(7){{width:6%}}
+.candidate-table th:nth-child(8),.candidate-table td:nth-child(8){{width:6%}}
+.candidate-table th:nth-child(9),.candidate-table td:nth-child(9){{width:8%}}
+.candidate-table th:nth-child(10),.candidate-table td:nth-child(10){{width:11%}}
+.candidate-table th,.candidate-table td{{overflow-wrap:anywhere}}
+.candidate-table .wyckoff-buy-level-badge{{white-space:normal}}
 .buy{{color:#dc2626;font-weight:600}}
 .wyckoff-buy-level-1>td{{background:#fff7d6}}
 .wyckoff-buy-level-2>td{{background:#dcfce7}}
@@ -2361,24 +2234,23 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 <p class="dt">{policy_note}</p>
 <p class="dt">{funnel_note}</p>
-<p class="dt">{escape(target_audit)}</p>
 {tracking_html}
 {provisional_banner}
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行{tier_suffix}</h2>
 <div class="buy-level-legend" aria-label="维科夫买点分级图例">
-<span class="level-1">一级 · Spring/Test · 试错仓</span>
-<span class="level-2">二级 · SOS 后 LPS · 核心仓</span>
-<span class="level-3">三级 · JAC/BU 后再确认 · 趋势仓</span>
+<span class="level-1">一级 · Spring/Test</span>
+<span class="level-2">二级 · SOS 后 LPS</span>
+<span class="level-3">三级 · JAC/BU 后再确认</span>
 </div>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发{tier_suffix}</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
+<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <div class="observation-buy-level-note" role="note">
 <strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>
-市场环境、数据质量、板块持续性和完整交易计划仍是硬门槛；
+市场环境、数据质量、板块持续性和维科夫筛选仍是硬门槛；
 只有“今日可执行”区域具备推荐资格。
 </div>
 <div class="buy-level-legend observation-buy-level-legend" aria-label="观察池潜在维科夫买点分级图例">
@@ -2386,9 +2258,9 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">潜在二级 · SOS 后 LPS</span>
 <span class="level-3">潜在三级 · JAC/BU 后再确认</span>
 </div>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>
+<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>
 {performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
@@ -2498,7 +2370,6 @@ def main():
         sector_context={c["code"]: c for c in sector_codes},
         source_health=source_health,
         metrics=performance,
-        trade_plan_policy=policy,
         capital_top=args.top,
         max_sector_expansion=getattr(
             args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION),

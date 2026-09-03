@@ -23,7 +23,6 @@ from scans.daily_candidates import (
     _generate_html,
     _is_final_valid_candidate,
     _freeze_output_envelope,
-    _trade_plan_text,
     build_json_output,
     build_recommendation_policy,
     candidate_rank_score,
@@ -134,91 +133,42 @@ def _full_candidate_history(code, scores, dates=None):
 
 
 class TestRecommendationPolicy(unittest.TestCase):
-    def test_trade_plan_text_discloses_source_and_unavailable_rr(self):
-        resistance_text = _trade_plan_text(candidate("resistance"))
-        self.assertIn("目标来源 阻力位", resistance_text)
-        self.assertIn("R:R 1.50", resistance_text)
+    def test_actionable_bucket_does_not_require_trade_plan(self):
+        item = candidate("without-plan")
+        item.pop("trade_plan")
+        item.pop("trade_plan_status")
+        item.pop("trade_plan_reasons")
+        policy = build_recommendation_policy(
+            {"score": 90, "data_date": "2026-08-06"},
+            "2026-08-06",
+        )
 
-        mismatch_item = candidate("mismatch")
-        mismatch_item["trade_plan"]["risk_reward"]["recomputed"] = 99.0
-        mismatch_text = _trade_plan_text(mismatch_item)
-        self.assertIn("R:R 1.50", mismatch_text)
-        self.assertNotIn("R:R 99.00", mismatch_text)
+        buckets = classify_candidates([item], policy)
 
-        atr_item = candidate("atr")
-        atr_item["trade_plan"].update({
-            "target_source": "atr_projection",
-            "risk_reward": {"supplied": 1.2, "recomputed": 1.23},
-        })
-        atr_text = _trade_plan_text(atr_item)
-        self.assertIn("目标来源 ATR投射（仅观察）", atr_text)
+        self.assertEqual(
+            [candidate["code"] for candidate in buckets["actionable"]],
+            ["without-plan"],
+        )
 
-        unavailable_item = candidate("unavailable")
-        unavailable_item["trade_plan"].update({
-            "target_source": "unavailable",
-            "target_reason": "没有高于计划入场价的有效目标梯度",
-            "targets": {"conservative": None, "primary": None,
-                        "aggressive": None},
-            "risk_reward": {"supplied": None, "recomputed": None},
-        })
-        unavailable_text = _trade_plan_text(unavailable_item)
-        self.assertIn("R:R —", unavailable_text)
-        self.assertIn("目标来源 目标不可用", unavailable_text)
-        self.assertNotIn("R:R 2.0", unavailable_text)
+    def test_candidate_reports_omit_execution_plan_fields(self):
+        item = candidate("report-fields")
+        policy = build_recommendation_policy(
+            {"score": 90, "data_date": "2026-08-06"},
+            "2026-08-06",
+        )
+        buckets = classify_candidates([item], policy)
 
-        legacy_item = candidate("legacy")
-        legacy_item["trade_plan"].update({
-            "target_source": "synthetic_fallback",
-            "risk_reward": {"supplied": 2.0, "recomputed": 2.0},
-            "targets": {"conservative": 11.0, "primary": 12.0,
-                        "aggressive": 14.0},
-        })
-        legacy_text = _trade_plan_text(legacy_item)
-        self.assertIn("目标来源 目标不可用", legacy_text)
-        self.assertIn("目标—/—/—", legacy_text)
-        self.assertIn("R:R —", legacy_text)
-        self.assertNotIn("R:R 2.00", legacy_text)
-
-        invalid_ladder_item = candidate("invalid-ladder")
-        invalid_ladder_item["trade_plan"].update({
-            "targets": {"conservative": 10.1, "primary": 10.2,
-                        "aggressive": 10.3},
-            "risk_reward": {"supplied": 2.0, "recomputed": 2.0},
-        })
-        invalid_ladder_text = _trade_plan_text(invalid_ladder_item)
-        self.assertIn("目标—/—/—", invalid_ladder_text)
-        self.assertIn("R:R —", invalid_ladder_text)
-
-    def test_report_contains_target_source_audit_in_markdown_and_html(self):
-        resistance = candidate("resistance")
-        atr = candidate("atr")
-        atr["trade_plan"]["target_source"] = "atr_projection"
-        unavailable = candidate("unavailable")
-        unavailable["trade_plan"].update({
-            "target_source": "unavailable",
-            "targets": {"conservative": None, "primary": None,
-                        "aggressive": None},
-            "risk_reward": {"supplied": None, "recomputed": None},
-        })
-        items = [resistance, atr, unavailable]
-        buckets = {
-            "actionable": [resistance], "waiting_trigger": [],
-            "next_day_confirmation": [], "observation": [atr, unavailable],
-        }
-        policy = {"mode": "actionable", "max_recommendations": 5,
-                  "max_portfolio_pct": 60, "reasons": []}
-        report = generate_report(items, [], 0.1, policy, buckets)
-        html = _generate_html(items, [], 0.1, "20260820-160000",
-                              policy, buckets)
-        audit = "目标来源审计：阻力位 1｜ATR投射（仅观察） 1｜目标不可用 1"
-        self.assertIn(audit, report)
-        self.assertIn(audit, html)
-
-    def test_markdown_trade_plan_pipes_are_escaped(self):
-        lines = []
-        _append_candidate_table(lines, "测试", [candidate("600000")], "无")
-        row = lines[-1]
-        self.assertIn(r"入场10.0~10.5 \| 止损9.5", row)
+        rendered = [
+            generate_report([item], [], 0.1, policy, buckets),
+            _generate_html([item], [], 0.1, "20260903-145744", policy, buckets),
+        ]
+        for output in rendered:
+            for removed_label in (
+                "交易计划", "目标", "R:R", "仓位", "建仓", "降仓", "空仓",
+                "试错仓", "核心仓", "趋势仓",
+                "目标来源审计", "组合仓位上限",
+            ):
+                self.assertNotIn(removed_label, output)
 
     def test_final_valid_count_uses_same_predicate_as_scan_early_stop(self):
         valid = candidate("valid", adjusted_score=70)
@@ -287,7 +237,7 @@ class TestRecommendationPolicy(unittest.TestCase):
     def test_performance_audit_renders_in_markdown_html_and_stderr(self):
         policy = {
             "mode": "actionable", "max_recommendations": 5,
-            "max_portfolio_pct": 60, "reasons": [],
+            "reasons": [],
         }
         items = [candidate("1")]
         buckets = {
@@ -367,7 +317,7 @@ class TestRecommendationPolicy(unittest.TestCase):
     def test_renderers_do_not_mutate_frozen_performance_snapshot(self):
         policy = {
             "mode": "actionable", "max_recommendations": 5,
-            "max_portfolio_pct": 60, "reasons": [],
+            "reasons": [],
         }
         items = [candidate("1")]
         buckets = {
@@ -2217,7 +2167,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             regime, "2026-08-06", market_open=True)
         self.assertEqual(policy["mode"], "actionable")
         self.assertEqual(policy["max_recommendations"], 5)
-        self.assertEqual(policy["max_portfolio_pct"], 60)
+        self.assertNotIn("max_portfolio_pct", policy)
         self.assertEqual(policy["provisional_target_mode"], "actionable")
         self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
@@ -2233,7 +2183,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             regime, "2026-08-06", market_open=True)
         self.assertEqual(policy["mode"], "waiting_trigger")
         self.assertEqual(policy["max_recommendations"], 2)
-        self.assertEqual(policy["max_portfolio_pct"], 30)
+        self.assertNotIn("max_portfolio_pct", policy)
         self.assertEqual(policy["provisional_target_mode"], "waiting_trigger")
         self.assertTrue(policy.get("provisional"))
         self.assertIn("intraday_provisional", policy["reasons"])
@@ -2294,7 +2244,6 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = {
             "mode": "actionable",
             "max_recommendations": 5,
-            "max_portfolio_pct": 60,
             "reasons": ["intraday_provisional"],
             "provisional": True,
             "provisional_target_mode": "actionable",
@@ -2329,7 +2278,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         self.assertEqual(buckets["observation"], [])
 
-    def test_waiting_trigger_excludes_non_structural_target_sources(self):
+    def test_waiting_trigger_ignores_trade_plan_target_sources(self):
         policy = build_recommendation_policy(
             {"score": 70, "data_date": "2026-08-06"}, "2026-08-06")
         resistance = candidate("resistance")
@@ -2341,11 +2290,11 @@ class TestRecommendationPolicy(unittest.TestCase):
             [resistance, atr, unavailable], policy)
         self.assertEqual(
             [row["code"] for row in buckets["waiting_trigger"]],
-            ["resistance"],
+            ["resistance", "atr"],
         )
         self.assertEqual(
-            {row["code"] for row in buckets["observation"]},
-            {"atr", "unavailable"},
+            [row["code"] for row in buckets["next_day_confirmation"]],
+            ["unavailable"],
         )
 
     def test_divergence_requires_verified_sector_capital(self):
@@ -2467,7 +2416,6 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = {
             "mode": "actionable",
             "max_recommendations": 5,
-            "max_portfolio_pct": 60,
             "reasons": [],
         }
         cached_observation = candidate("2", eligible=False)
@@ -2522,7 +2470,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         }
         policy = {
             "mode": "actionable", "max_recommendations": 5,
-            "max_portfolio_pct": 60, "reasons": [],
+            "reasons": [],
         }
 
         buckets = classify_candidates([item], policy)
@@ -2542,7 +2490,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         policy = {
             "mode": "actionable", "max_recommendations": 5,
-            "max_portfolio_pct": 60, "reasons": [],
+            "reasons": [],
         }
 
         for signal_status, reason in cases:
@@ -2571,7 +2519,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         policy = {
             "mode": "waiting_trigger", "max_recommendations": 2,
-            "max_portfolio_pct": 30, "reasons": [],
+            "reasons": [],
         }
 
         for signal_status, reason in cases:
@@ -2598,7 +2546,6 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = {
             "mode": "actionable",
             "max_recommendations": 5,
-            "max_portfolio_pct": 60,
             "reasons": [],
         }
         cached_observation = candidate("2", eligible=False)
@@ -2640,14 +2587,49 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("需求占优，回踩缩量后等待向上确认", html)
         self.assertIn("股市有风险，投资需谨慎", html)
 
+    def test_candidate_html_prioritizes_sector_and_minor_phase_columns(self):
+        html = _generate_html(
+            [candidate("1")],
+            [("BK1", "测试板块", 80)],
+            1.0,
+            "20260806-160000",
+            {
+                "mode": "actionable",
+                "max_recommendations": 5,
+                "reasons": [],
+            },
+            {
+                "actionable": [candidate("1")],
+                "waiting_trigger": [],
+                "next_day_confirmation": [],
+                "observation": [],
+                "data_rejected": [],
+            },
+        )
+
+        self.assertEqual(html.count('<table class="candidate-table">'), 5)
+        self.assertIn(".candidate-table{table-layout:fixed}", html)
+        self.assertIn(
+            ".candidate-table th:nth-child(2),.candidate-table td:nth-child(2){width:8%}",
+            html,
+        )
+        self.assertIn(
+            ".candidate-table th:nth-child(3),.candidate-table td:nth-child(3){width:18%}",
+            html,
+        )
+        self.assertIn(
+            ".candidate-table th:nth-child(4),.candidate-table td:nth-child(4){width:24%}",
+            html,
+        )
+
     def test_wyckoff_buy_level_uses_canonical_short_term_fields(self):
         cases = (
-            ("spring", False, 1, "试错仓"),
-            ("lps", False, 2, "核心仓"),
-            ("jac", True, 3, "趋势仓"),
+            ("spring", False, 1),
+            ("lps", False, 2),
+            ("jac", True, 3),
         )
         for (sub_phase, post_lps_reconfirmation,
-             expected_number, expected_role) in cases:
+             expected_number) in cases:
             with self.subTest(sub_phase=sub_phase):
                 level = dc._wyckoff_buy_level({
                     "sub_phase": "中文展示字段不应覆盖规范字段",
@@ -2658,7 +2640,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                     },
                 })
                 self.assertEqual(level["number"], expected_number)
-                self.assertEqual(level["role"], expected_role)
+                self.assertNotIn("role", level)
 
     def test_wyckoff_buy_level_rejects_unconfirmed_or_unknown_setup(self):
         self.assertIsNone(dc._wyckoff_buy_level({
@@ -2703,7 +2685,8 @@ class TestRecommendationPolicy(unittest.TestCase):
         html = dc._html_candidate_rows(
             [item], buy_level_display="actionable")
         self.assertIn("<tr class='wyckoff-buy-level-2'>", html)
-        self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
+        self.assertIn("二级 · SOS 后 LPS · 已确认", html)
+        self.assertNotIn("核心仓", html)
         self.assertIn("阶段D：LPS已确认", html)
 
         plain_html = dc._html_candidate_rows([item])
@@ -2784,7 +2767,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             "20260902-160000",
             {
                 "mode": "actionable", "max_recommendations": 5,
-                "max_portfolio_pct": 60, "reasons": [],
+                "reasons": [],
             },
             buckets,
         )
@@ -2793,16 +2776,19 @@ class TestRecommendationPolicy(unittest.TestCase):
             html.count("<tr class='wyckoff-buy-level-2'>"), 1)
         self.assertEqual(
             html.count("<tr class='wyckoff-observation-buy-level-2'>"), 1)
-        self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
+        self.assertIn("二级 · SOS 后 LPS · 已确认", html)
         self.assertIn(
             "潜在二级 · SOS 后 LPS · 观察｜不可执行", html)
         self.assertIn(
             "观察池分级仅表示维科夫结构成熟度，不是买入建议", html)
         self.assertIn("只有“今日可执行”区域具备推荐资格", html)
         self.assertIn("observation-buy-level-legend", html)
-        self.assertIn("一级 · Spring/Test · 试错仓", html)
-        self.assertIn("二级 · SOS 后 LPS · 核心仓", html)
-        self.assertIn("三级 · JAC/BU 后再确认 · 趋势仓", html)
+        self.assertIn("一级 · Spring/Test", html)
+        self.assertIn("二级 · SOS 后 LPS", html)
+        self.assertIn("三级 · JAC/BU 后再确认", html)
+        self.assertNotIn("试错仓", html)
+        self.assertNotIn("核心仓", html)
+        self.assertNotIn("趋势仓", html)
 
     def test_non_observation_watch_buckets_do_not_receive_buy_level_classes(self):
         lps = candidate("lps")
@@ -2826,7 +2812,6 @@ class TestRecommendationPolicy(unittest.TestCase):
             {
                 "mode": "observation",
                 "max_recommendations": 0,
-                "max_portfolio_pct": 0,
                 "reasons": ["regime_weak"],
             },
             buckets,
@@ -2853,7 +2838,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         report = generate_report(
             [item], [{"code": "BK1"}], 1.0,
             {"mode": "observation", "max_recommendations": 0,
-             "max_portfolio_pct": 0, "reasons": []},
+             "reasons": []},
             buckets,
         )
 
@@ -3177,7 +3162,6 @@ class TestRecommendationPolicy(unittest.TestCase):
         policy = {
             "mode": "actionable",
             "max_recommendations": 5,
-            "max_portfolio_pct": 60,
             "reasons": [],
         }
         buckets = {
@@ -3328,8 +3312,9 @@ class TestRecommendationPolicy(unittest.TestCase):
             report = markdown_paths[0].read_text(encoding="utf-8")
             html = html_paths[0].read_text(encoding="utf-8")
             self.assertIn(
-                "**推荐模式**: actionable | 推荐上限 5 只 | 组合仓位上限 60%",
+                "**推荐模式**: actionable | 推荐上限 5 只 | 候选资格仅依据市场、数据、板块和维科夫筛选",
                 report)
+            self.assertNotIn("可建仓", report)
             self.assertIn("## 今日可执行(盘中临时,收盘确认)", report)
             self.assertIn("盘中临时(未收盘确认)", report)
             self.assertIn("**推荐快照追踪**: skipped_provisional", report)
