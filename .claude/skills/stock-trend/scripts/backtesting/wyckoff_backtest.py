@@ -43,7 +43,12 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from scans.stock_scanner import _resolve_ts_code, _fetch_kline, gather_candidates, _is_a_share
-from analysis.wyckoff import analyze_kline_dict, is_buy_signal, normalize_score_100
+from analysis.wyckoff import (
+    analyze_kline_dict,
+    classify_buy_point_level,
+    is_buy_signal,
+    normalize_score_100,
+)
 
 # 与 stock_scanner wyckoff 漏斗保持一致
 MIN_KLINES = 60                      # 不足 60 根 K 线丢弃
@@ -88,6 +93,43 @@ def _forward_return(kline, now_idx, target_date):
     return None
 
 
+def _forward_excursion(kline, now_idx, target_date):
+    """Measure max adverse/favorable excursion until the target date."""
+    entry = _safe_close(kline[now_idx])
+    if not entry or entry <= 0:
+        return None
+    target = str(target_date).replace("-", "")
+    path = []
+    for row in kline[now_idx + 1:]:
+        path.append(row)
+        if _kline_date(row) >= target:
+            break
+    if not path or _kline_date(path[-1]) < target:
+        return None
+
+    lows = []
+    highs = []
+    for row in path:
+        try:
+            low = float(row.get("low"))
+        except (TypeError, ValueError):
+            low = _safe_close(row)
+        try:
+            high = float(row.get("high"))
+        except (TypeError, ValueError):
+            high = _safe_close(row)
+        if low is not None:
+            lows.append(low)
+        if high is not None:
+            highs.append(high)
+    if not lows or not highs:
+        return None
+    return {
+        "mae": round(min(lows) / entry - 1, 6),
+        "mfe": round(max(highs) / entry - 1, 6),
+    }
+
+
 def _classify_signal(analysis, min_confidence):
     """Extract (phase, sub, confidence, score_100) from wyckoff analysis.
 
@@ -101,11 +143,13 @@ def _classify_signal(analysis, min_confidence):
     conf = phase_info.get("confidence", 0.0) or 0.0
     if not phase or not sub:
         return None
+    level = classify_buy_point_level(analysis)
     return {
         "phase": phase,
         "sub_phase": sub,
         "confidence": round(float(conf), 3),
         "score_100": round(normalize_score_100(float(analysis.get("wyckoff_score", 0))), 1),
+        "buy_point_level": level["number"] if level else None,
     }
 
 
@@ -218,6 +262,39 @@ def _bucket_stats(signal_rets_by_window, key_fn):
     return out
 
 
+def _level_key(signal):
+    level = signal.get("buy_point_level")
+    return f"level_{level}" if level in (1, 2, 3) else "ungraded"
+
+
+def _risk_bucket_stats(signal_pairs_by_window, key_fn):
+    """Aggregate max adverse/favorable excursions by signal bucket."""
+    out = {}
+    for window, pairs in signal_pairs_by_window.items():
+        buckets = defaultdict(list)
+        for _, signal in pairs:
+            excursion = (signal.get("excursions") or {}).get(str(window))
+            if not isinstance(excursion, dict):
+                continue
+            try:
+                mae = float(excursion["mae"])
+                mfe = float(excursion["mfe"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(mae) and math.isfinite(mfe):
+                buckets[key_fn(signal)].append((mae, mfe))
+        out[window] = {
+            key: {
+                "count": len(paths),
+                "avg_mae": round(sum(path[0] for path in paths) / len(paths), 6),
+                "avg_mfe": round(sum(path[1] for path in paths) / len(paths), 6),
+            }
+            for key, paths in sorted(buckets.items())
+            if paths
+        }
+    return out
+
+
 # ── 核心回测 ────────────────────────────────────────────────────────────
 
 
@@ -279,13 +356,22 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
             if sig is None:
                 continue
             if is_buy_signal(analysis) and sig["confidence"] >= min_confidence:
-                per_stock_raw[s["ts_code"]].append((sidx, date, sig, fwd))
+                excursions = {}
+                for w in eval_windows:
+                    wk = str(w)
+                    if wk not in fwd or sidx + w >= len(all_dates):
+                        continue
+                    path = _forward_excursion(rows, now_idx, all_dates[sidx + w])
+                    if path is not None:
+                        excursions[wk] = path
+                per_stock_raw[s["ts_code"]].append(
+                    (sidx, date, sig, fwd, excursions))
 
     # Episode dedup per stock, flatten
     signals = []
     for code, obs in per_stock_raw.items():
         obs.sort(key=lambda x: x[0])
-        for sidx, date, sig, fwd in _select_signals(obs, min_gap):
+        for sidx, date, sig, fwd, excursions in _select_signals(obs, min_gap):
             signals.append({
                 "code": code.split(".")[0],
                 "ts_code": code,
@@ -295,7 +381,9 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
                 "sub_phase": sig["sub_phase"],
                 "confidence": sig["confidence"],
                 "score_100": sig["score_100"],
+                "buy_point_level": sig["buy_point_level"],
                 "returns": fwd,
+                "excursions": excursions,
             })
 
     return _build_result(valid, signals, baseline, eval_windows,
@@ -328,10 +416,25 @@ def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
         }
 
     by_sub_phase = _bucket_stats(signal_pairs, lambda s: s["sub_phase"])
+    by_buy_level = _bucket_stats(signal_pairs, _level_key)
+    risk_by_buy_level = _risk_bucket_stats(signal_pairs, _level_key)
     by_conf = _bucket_stats(signal_pairs, _conf_band)
     by_phase = _bucket_stats(signal_pairs, lambda s: "吸筹" if s["phase"] == "accumulation"
                              else ("拉升" if s["phase"] == "markup" else s["phase"]))
     by_score = _bucket_stats(signal_pairs, _score_band)
+
+    level_counts = {
+        level: sum(1 for signal in signals if _level_key(signal) == level)
+        for level in ("level_1", "level_2", "level_3")
+    }
+    evidence = {
+        "minimum_signals_per_level": 100,
+        "counts": level_counts,
+        "status": (
+            "ready" if all(count >= 100 for count in level_counts.values())
+            else "evidence_insufficient"
+        ),
+    }
 
     # IC: does confidence / 100分 rank predict forward return?
     ic = {}
@@ -391,6 +494,9 @@ def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
         },
         "summary": summary,
         "by_sub_phase": by_sub_phase,
+        "by_buy_level": by_buy_level,
+        "risk_by_buy_level": risk_by_buy_level,
+        "evidence": evidence,
         "by_confidence": by_conf,
         "by_phase": by_phase,
         "by_score_100": by_score,
@@ -498,6 +604,38 @@ def _render_md(result) -> str:
         if st:
             lines.append(f"| {sub} | {st['count']} | {st['win_rate']*100:.1f}% | {st['avg']*100:+.2f}% |")
     lines.append("")
+    lines.append("## 按买点等级表现与风险 (5日)")
+    lines.append("")
+    lines.append("| 买点 | 信号数 | 胜率 | 均收益 | 平均MAE | 平均MFE |")
+    lines.append("|---|---|---|---|---|---|")
+    level_labels = {
+        "level_1": "一级（Spring/Test）",
+        "level_2": "二级（SOS后LPS）",
+        "level_3": "三级（JAC/BU后再确认）",
+        "ungraded": "未分级",
+    }
+    level_stats = (result.get("by_buy_level") or {}).get("5", {})
+    level_risk = (result.get("risk_by_buy_level") or {}).get("5", {})
+    for level in ("level_1", "level_2", "level_3", "ungraded"):
+        st = level_stats.get(level) or {}
+        risk = level_risk.get(level) or {}
+        if not st and not risk:
+            continue
+        lines.append(
+            f"| {level_labels[level]} | {st.get('count', risk.get('count', 0))} | "
+            f"{st.get('win_rate', 0)*100:.1f}% | {st.get('avg', 0)*100:+.2f}% | "
+            f"{risk.get('avg_mae', 0)*100:+.2f}% | {risk.get('avg_mfe', 0)*100:+.2f}% |"
+        )
+    evidence = result.get("evidence") or {}
+    counts = evidence.get("counts") or {}
+    lines.append("")
+    lines.append(
+        f"> 证据状态: {evidence.get('status', '-')}；每级最低样本 "
+        f"{evidence.get('minimum_signals_per_level', '-')}；"
+        f"一级 {counts.get('level_1', 0)} / 二级 {counts.get('level_2', 0)} / "
+        f"三级 {counts.get('level_3', 0)}。"
+    )
+    lines.append("")
     lines.append("## IC (置信度/100分 对前向收益)")
     lines.append("")
     lines.append("| 窗口 | IC(置信度) | IC(100分) |")
@@ -544,6 +682,39 @@ def _generate_html(result, ts) -> str:
             sub_rows += (f"<tr><td>{sub}</td><td>{st['count']}</td>"
                          f"<td class='{'sp' if st['win_rate']>=0.5 else 'sn'}'>{st['win_rate']*100:.1f}%</td>"
                          f"<td class='{'sp' if st['avg']>0 else 'sn'}'>{_win(st['avg'])}</td></tr>")
+
+    level_labels = {
+        "level_1": "一级（Spring/Test）",
+        "level_2": "二级（SOS后LPS）",
+        "level_3": "三级（JAC/BU后再确认）",
+        "ungraded": "未分级",
+    }
+    level_stats = (result.get("by_buy_level") or {}).get("5", {})
+    level_risk = (result.get("risk_by_buy_level") or {}).get("5", {})
+    level_rows = ""
+    for level in ("level_1", "level_2", "level_3", "ungraded"):
+        st = level_stats.get(level) or {}
+        risk = level_risk.get(level) or {}
+        if not st and not risk:
+            continue
+        win_rate = st.get("win_rate", 0)
+        avg = st.get("avg", 0)
+        level_rows += (
+            f"<tr><td>{level_labels[level]}</td>"
+            f"<td>{st.get('count', risk.get('count', 0))}</td>"
+            f"<td class='{('sp' if win_rate >= 0.5 else 'sn')}'>{win_rate*100:.1f}%</td>"
+            f"<td class='{('sp' if avg > 0 else 'sn')}'>{_win(avg)}</td>"
+            f"<td>{_win(risk.get('avg_mae', 0))}</td>"
+            f"<td>{_win(risk.get('avg_mfe', 0))}</td></tr>"
+        )
+    evidence = result.get("evidence") or {}
+    evidence_counts = evidence.get("counts") or {}
+    evidence_note = (
+        f"证据状态: {evidence.get('status', '-')}；每级最低样本 "
+        f"{evidence.get('minimum_signals_per_level', '-')}；"
+        f"一级 {evidence_counts.get('level_1', 0)} / 二级 {evidence_counts.get('level_2', 0)} / "
+        f"三级 {evidence_counts.get('level_3', 0)}"
+    )
 
     ic_rows = ""
     for w in windows:
@@ -611,6 +782,9 @@ th{{background:#1d4ed8;color:#fff;font-size:12px}}
 <table><thead><tr><th>档位</th><th>信号数</th><th>胜率</th><th>均收益</th></tr></thead><tbody>{conf_rows or '<tr><td colspan="4">无信号</td></tr>'}</tbody></table></div>
 <div class="sec"><h2>🏷 按子阶段 (5日)</h2>
 <table><thead><tr><th>子阶段</th><th>信号数</th><th>胜率</th><th>均收益</th></tr></thead><tbody>{sub_rows or '<tr><td colspan="4">无信号</td></tr>'}</tbody></table></div>
+<div class="sec"><h2>🏷 按买点等级表现与风险 (5日)</h2>
+<table><thead><tr><th>买点</th><th>信号数</th><th>胜率</th><th>均收益</th><th>平均MAE</th><th>平均MFE</th></tr></thead><tbody>{level_rows or '<tr><td colspan="6">无信号</td></tr>'}</tbody></table>
+<p class="dt">{evidence_note}</p></div>
 <div class="sec"><h2>📐 IC (置信度/100分 → 前向收益)</h2>
 <table><thead><tr><th>窗口</th><th>IC置信度</th><th>IC100分</th></tr></thead><tbody>{ic_rows or '<tr><td colspan="3">样本不足</td></tr>'}</tbody></table></div>
 <div class="sec"><h2>📋 信号明细 (Top 50)</h2>

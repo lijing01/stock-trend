@@ -11,8 +11,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from backtesting.wyckoff_backtest import (
     run_backtest, _classify_signal, _select_signals, _stats,
-    _forward_return, slice_kline, _conf_band, _score_band,
-    _render_md, _generate_html,
+    _forward_return, _forward_excursion, _build_result, slice_kline,
+    _conf_band, _score_band, _render_md, _generate_html,
 )
 
 PASSED = 0
@@ -119,6 +119,39 @@ def test_forward_return_beyond():
     test("WBT-08: beyond range → None", r is None)
 
 
+def test_classify_signal_keeps_strict_buy_level():
+    analysis = {
+        "meta": {},
+        "phase": {"primary": "markup", "primary_sub_phase": "jac",
+                  "confidence": 0.9},
+        "signal": {"status": "confirmed", "age_bars": 0},
+        "short_term": {
+            "sub_phase": "jac", "signal_status": "confirmed",
+            "signal_age_bars": 0, "post_lps_reconfirmation": True,
+        },
+        "wyckoff_score": 2.0,
+    }
+    signal = _classify_signal(analysis, 0.3)
+    test("WBT-08c: strict reconfirmed JAC is level 3",
+         signal is not None and signal["buy_point_level"] == 3)
+
+    analysis["short_term"]["post_lps_reconfirmation"] = False
+    signal = _classify_signal(analysis, 0.3)
+    test("WBT-08d: first JAC is ungraded",
+         signal is not None and signal["buy_point_level"] is None)
+
+
+def test_forward_excursion():
+    rows = [
+        {"date": "20260101", "close": 10.0, "high": 10.0, "low": 10.0},
+        {"date": "20260102", "close": 10.5, "high": 11.0, "low": 9.0},
+        {"date": "20260103", "close": 10.8, "high": 12.0, "low": 9.5},
+    ]
+    result = _forward_excursion(rows, 0, "20260103")
+    test("WBT-08e: forward path returns MAE/MFE",
+         result == {"mae": -0.1, "mfe": 0.2}, f"result={result}")
+
+
 def test_forward_return_20_and_60_days():
     rows = [
         {
@@ -157,6 +190,38 @@ def test_stats_empty():
 def test_bands():
     test("WBT-14: conf band 70+", _conf_band({"confidence": 0.8}) == "置信≥0.7")
     test("WBT-15: score band 70+", _score_band({"score_100": 75}) == "100分≥70(强势)")
+
+
+def test_level_aggregation_and_evidence_status():
+    def signal(level, ret, mae, sub_phase):
+        return {
+            "code": "600001", "ts_code": "600001.SH", "name": "test",
+            "date": "20260101", "phase": "accumulation",
+            "sub_phase": sub_phase, "confidence": 0.8, "score_100": 70.0,
+            "buy_point_level": level, "returns": {"5": ret},
+            "excursions": {"5": {"mae": mae, "mfe": 0.1}},
+        }
+
+    result = _build_result(
+        [{"ts_code": "600001.SH"}],
+        [signal(1, 0.01, -0.02, "spring"),
+         signal(2, 0.02, -0.04, "lps"),
+         signal(3, 0.03, -0.06, "jac"),
+         signal(None, -0.01, -0.08, "jac")],
+        {"5": [0.01, 0.0, -0.01, 0.02]},
+        (5,),
+        {"lookback_days": 80, "sample_interval": 5,
+         "min_confidence": 0.3, "min_gap": 10, "sample_dates": 5},
+    )
+    test("WBT-16: exact buy-level buckets exist",
+         result["by_buy_level"]["5"]["level_1"]["count"] == 1
+         and result["by_buy_level"]["5"]["level_2"]["count"] == 1
+         and result["by_buy_level"]["5"]["level_3"]["count"] == 1
+         and result["by_buy_level"]["5"]["ungraded"]["count"] == 1)
+    test("WBT-17: level risk stats are aggregated",
+         result["risk_by_buy_level"]["5"]["level_2"]["avg_mae"] == -0.04)
+    test("WBT-18: small level samples stay evidence-insufficient",
+         result["evidence"]["status"] == "evidence_insufficient")
 
 
 # ── Integration tests ──────────────────────────────────
@@ -230,7 +295,9 @@ def test_renderers():
     md = _render_md(r)
     html = _generate_html(r, "20260101-000000")
     test("WBT-I09: MD renders", "维科夫买点回测" in md)
-    test("WBT-I10: HTML renders", "winChart" in html and "plotly" in html)
+    test("WBT-I10: MD exposes buy-level evidence", "按买点等级" in md and "证据状态" in md)
+    test("WBT-I11: HTML renders", "winChart" in html and "plotly" in html)
+    test("WBT-I12: HTML exposes buy-level evidence", "按买点等级" in html and "证据状态" in html)
 
 
 def test_render_zero_signals():
@@ -249,8 +316,8 @@ def test_render_zero_signals():
     }
     html = _generate_html(r, "ts")
     md = _render_md(r)
-    test("WBT-I11: zero-signal HTML renders", "winChart" in html)
-    test("WBT-I12: zero-signal MD renders", "维科夫买点回测" in md)
+    test("WBT-I13: zero-signal HTML renders", "winChart" in html)
+    test("WBT-I14: zero-signal MD renders", "维科夫买点回测" in md)
 
 
 # ── Runner ────────────────────────────────────────────
@@ -268,11 +335,14 @@ def run_wyckoff_backtest_tests():
     test_slice_kline()
     test_forward_return()
     test_forward_return_beyond()
+    test_classify_signal_keeps_strict_buy_level()
+    test_forward_excursion()
     test_forward_return_20_and_60_days()
     test_select_signals_dedup()
     test_stats_math()
     test_stats_empty()
     test_bands()
+    test_level_aggregation_and_evidence_status()
     test_run_backtest_synthetic()
     test_baseline_does_not_depend_on_phase_detection()
     test_run_backtest_error_path()
