@@ -21,12 +21,15 @@ from fetchers.sector_data import (  # noqa: E402
     get_last_trading_day,
     get_sector_rankings,
     load_candidate_sector_history,
+    rank_hot_sectors,
     save_rankings_cache,
     _verified_trading_date,
 )
 
 
 CLOSE_CONFIRMATION_MINUTES = 15 * 60 + 10
+DEFAULT_MIN_STOCKS = 10
+DEFAULT_MIN_UP_RATIO = 0.15
 MINIMUM_COVERAGE_DAYS = 2
 
 
@@ -155,10 +158,19 @@ def capture_snapshot(now=None, expected_date: str = "",
             "incomplete", data_date=data_date, errors=errors)
 
     meta = payload.setdefault("meta", {})
-    meta.setdefault("data_date", data_date)
+    meta["data_date"] = data_date
     meta.setdefault("source", "eastmoney")
 
     if dry_run:
+        ranked = rank_hot_sectors(
+            payload, top_n=None,
+            min_stocks=DEFAULT_MIN_STOCKS,
+            min_up_ratio=DEFAULT_MIN_UP_RATIO,
+        )
+        if not ranked:
+            return _status_result(
+                "incomplete", data_date=data_date,
+                errors=["candidate_ranking_empty"])
         return {
             "status": "validated",
             "written": False,

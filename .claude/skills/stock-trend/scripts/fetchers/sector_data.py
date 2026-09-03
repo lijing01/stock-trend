@@ -1075,14 +1075,17 @@ def commit_candidate_sector_snapshot(
     """Rank and persist one complete BK candidate-sector snapshot."""
     meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
     sectors = rankings.get("sectors", []) if isinstance(rankings, dict) else []
-    if meta.get("complete") is not True or not sectors:
+    if not isinstance(meta, dict) or not isinstance(sectors, list) \
+            or not sectors or meta.get("complete") is not True:
         return {"status": "incomplete", "ranked_count": 0}
     if meta.get("source", "eastmoney") not in ("eastmoney", "realtime"):
         return {"status": "unsupported_source", "ranked_count": 0}
-    if meta.get("sources") and not all(
-            meta["sources"].get(name) == "ok"
-            for name in ("industry", "concept")):
-        return {"status": "incomplete", "ranked_count": 0}
+    sources = meta.get("sources")
+    if sources is not None:
+        if not isinstance(sources, dict) or not all(
+                sources.get(name) == "ok"
+                for name in ("industry", "concept")):
+            return {"status": "incomplete", "ranked_count": 0}
 
     meta.setdefault("source", "eastmoney")
     ranked = rank_hot_sectors(

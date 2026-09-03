@@ -597,6 +597,32 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(result["status"], "incomplete")
         self.assertFalse(exists)
 
+    def test_commit_candidate_snapshot_rejects_malformed_schema_without_writing(self):
+        from fetchers import sector_data
+
+        malformed_payloads = [
+            {"meta": None, "sectors": []},
+            {"meta": {"complete": True}, "sectors": {}},
+            {
+                "meta": {"complete": True, "sources": []},
+                "sectors": [{"code": "BK1", "up_count": 1,
+                             "down_count": 1}],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+                sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                Path(tmpdir) / "candidate-history.json"):
+            results = [sector_data.commit_candidate_sector_snapshot(
+                payload, data_date="2026-09-03", min_stocks=1)
+                for payload in malformed_payloads]
+
+            exists = sector_data.CANDIDATE_SNAPSHOT_FILE.exists()
+
+        self.assertEqual([result["status"] for result in results], [
+            "incomplete", "incomplete", "incomplete",
+        ])
+        self.assertFalse(exists)
+
     def test_candidate_snapshot_prunes_to_recent_valid_trading_days(self):
         from fetchers import sector_data
 
