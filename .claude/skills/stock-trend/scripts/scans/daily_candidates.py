@@ -38,6 +38,7 @@ from scans.stock_scanner import (
     score_sector_membership,
     select_primary_sector_membership,
 )
+from analysis.wyckoff import classify_buy_point_level
 from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
 )
@@ -108,15 +109,38 @@ DATA_REASON_CODES = {
     "data_quality_ineligible",
 }
 
+def candidate_quality_score(item):
+    """Return the score used by hard eligibility gates."""
+    return float(
+        item.get("quality_adjusted_score", item.get("composite_score", 0))
+        or 0
+    )
+
+
+def apply_buy_point_priority(item):
+    """Materialize an auditable within-bucket execution priority score."""
+    level = classify_buy_point_level(item.get("wyckoff"))
+    bonus = float(level["priority_bonus"]) if level else 0.0
+    quality = candidate_quality_score(item)
+    item["buy_point_level"] = level["number"] if level else None
+    item["buy_point_level_name"] = level["name"] if level else ""
+    item["buy_point_priority_bonus"] = bonus
+    item["execution_priority_score"] = round(min(100.0, quality + bonus), 1)
+    return item
+
+
 def candidate_rank_score(item):
-    """Return the quality-adjusted rank score with legacy fallback."""
-    return item.get("quality_adjusted_score", item.get("composite_score", 0))
+    """Return within-bucket execution priority with legacy fallback."""
+    return float(
+        item.get("execution_priority_score", candidate_quality_score(item))
+        or 0
+    )
 
 
 def _is_final_valid_candidate(item, min_score):
     """Single eligibility predicate shared by scan stopping and final audit."""
     return bool(
-        candidate_rank_score(item) >= min_score
+        candidate_quality_score(item) >= min_score
         and item.get("data_quality", {}).get("eligible", False)
         and item.get("sector_actionable", True)
     )
@@ -1455,7 +1479,8 @@ def select_candidate_pool(scored, top, min_score):
         if item.get("composite_score", 0) >= min_score
     ]
     for item in candidates:
-        item["score_eligible"] = candidate_rank_score(item) >= min_score
+        apply_buy_point_priority(item)
+        item["score_eligible"] = candidate_quality_score(item) >= min_score
 
     def selection_key(item):
         promotable = (
@@ -1695,40 +1720,12 @@ def _minor_phase_html(wyckoff):
 
 def _wyckoff_buy_level(wyckoff):
     """Return the confirmed execution level used by the actionable HTML table."""
-    short_term = wyckoff.get("short_term", {})
-    signal_status = (
-        short_term.get("signal_status") or wyckoff.get("signal_status") or ""
-    )
-    if str(signal_status).lower() != "confirmed":
+    level = classify_buy_point_level(wyckoff)
+    if level is None:
         return None
-
-    sub_phase = str(
-        short_term.get("sub_phase") or wyckoff.get("sub_phase") or ""
-    ).strip().lower()
-    level_by_sub_phase = {
-        "spring": (1, "Spring/Test"),
-        "lps": (2, "SOS 后 LPS"),
-    }
-    display_aliases = {
-        "spring（弹簧效应/震仓）": "spring",
-        "最后支撑点（lps）": "lps",
-        "跃过小溪（jac）": "jac",
-    }
-    sub_phase = display_aliases.get(sub_phase, sub_phase)
-    level = (
-        (3, "JAC/BU 后再确认")
-        if (sub_phase == "jac"
-            and short_term.get("post_lps_reconfirmation") is True)
-        else level_by_sub_phase.get(sub_phase)
-    )
-    if not level:
-        return None
-    number, label = level
     return {
-        "number": number,
-        "name": {1: "一级", 2: "二级", 3: "三级"}[number],
-        "label": label,
-        "css_class": f"wyckoff-buy-level-{number}",
+        **level,
+        "css_class": f"wyckoff-buy-level-{level['number']}",
     }
 
 

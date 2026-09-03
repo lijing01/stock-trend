@@ -50,6 +50,11 @@ def candidate(code, eligible=True, adjusted_score=80.0,
         "score_eligible": score_eligible,
         "wyckoff": {
             "sub_phase": "LPS", "confidence": 0.6,
+            "short_term": {
+                "sub_phase": "lps", "signal_status": "confirmed",
+                "signal_age_bars": 0,
+                "post_lps_reconfirmation": False,
+            },
             "minor_phase": {
                 "code": "D",
                 "name": "阶段D：需求确认",
@@ -90,6 +95,16 @@ def candidate(code, eligible=True, adjusted_score=80.0,
         "trade_plan_status": "complete",
         "trade_plan_reasons": [],
     }
+
+
+def _set_buy_level(item, sub_phase, reconfirmed=False, status="confirmed"):
+    item["wyckoff"]["short_term"] = {
+        "sub_phase": sub_phase,
+        "signal_status": status,
+        "signal_age_bars": 0,
+        "post_lps_reconfirmation": reconfirmed,
+    }
+    return item
 
 
 def _complete_rankings_and_history():
@@ -1265,6 +1280,63 @@ class TestRecommendationPolicy(unittest.TestCase):
     def test_rank_score_prefers_quality_adjusted_score(self):
         self.assertEqual(
             candidate_rank_score(candidate("1", adjusted_score=63.5)), 63.5)
+
+    def test_buy_level_bonus_orders_only_nearby_eligible_candidates(self):
+        plain = candidate("plain", adjusted_score=80.0)
+        _set_buy_level(plain, "pre_markup")
+        level_two = _set_buy_level(
+            candidate("l2", adjusted_score=78.0), "lps")
+        level_three = _set_buy_level(
+            candidate("l3", adjusted_score=78.0), "jac", reconfirmed=True)
+        level_one = _set_buy_level(
+            candidate("l1", adjusted_score=78.0), "spring")
+
+        picked = dc.select_candidate_pool(
+            [plain, level_one, level_three, level_two], top=4, min_score=50)
+
+        self.assertEqual(
+            [row["code"] for row in picked], ["l2", "plain", "l3", "l1"])
+        self.assertEqual(level_two["execution_priority_score"], 81.0)
+        self.assertEqual(level_three["execution_priority_score"], 80.0)
+        self.assertEqual(level_one["execution_priority_score"], 79.0)
+
+    def test_buy_level_bonus_cannot_cross_quality_eligibility_gate(self):
+        item = _set_buy_level(
+            candidate("low", adjusted_score=49.0), "lps")
+        picked = dc.select_candidate_pool([item], top=1, min_score=50)
+
+        self.assertFalse(picked[0]["score_eligible"])
+        self.assertEqual(picked[0]["quality_adjusted_score"], 49.0)
+        self.assertEqual(picked[0]["execution_priority_score"], 52.0)
+
+    def test_unreconfirmed_jac_has_no_priority_bonus(self):
+        item = _set_buy_level(
+            candidate("jac", adjusted_score=78.0), "jac", reconfirmed=False)
+        picked = dc.select_candidate_pool([item], top=1, min_score=50)
+
+        self.assertIsNone(picked[0]["buy_point_level"])
+        self.assertEqual(picked[0]["buy_point_priority_bonus"], 0.0)
+        self.assertEqual(picked[0]["execution_priority_score"], 78.0)
+
+    def test_buy_level_priority_does_not_override_market_or_sector_gates(self):
+        level_two = _set_buy_level(
+            candidate("l2", adjusted_score=90.0), "lps")
+        weak_policy = {
+            "mode": "observation", "max_recommendations": 0,
+            "reasons": ["regime_weak"],
+        }
+        self.assertEqual(
+            classify_candidates([level_two], weak_policy)["actionable"], [])
+
+        unverified = _set_buy_level(
+            candidate("sector", adjusted_score=90.0,
+                      sector_actionable=False), "lps")
+        strong_policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "reasons": [],
+        }
+        self.assertEqual(
+            classify_candidates([unverified], strong_policy)["actionable"], [])
 
     def test_pick_hot_sectors_uses_absolute_threshold(self):
         rankings = {"meta": {"complete": True}, "sectors": [
