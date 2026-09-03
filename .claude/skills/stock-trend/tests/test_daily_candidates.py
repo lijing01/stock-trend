@@ -2705,19 +2705,57 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
 
         self.assertEqual(html.count('<table class="candidate-table">'), 5)
-        self.assertIn(".candidate-table{table-layout:fixed}", html)
         self.assertIn(
-            ".candidate-table th:nth-child(2),.candidate-table td:nth-child(2){width:8%}",
+            ".candidate-table{table-layout:fixed;min-width:1180px}",
             html,
         )
         self.assertIn(
-            ".candidate-table th:nth-child(3),.candidate-table td:nth-child(3){width:18%}",
+            ".candidate-table th:nth-child(2),.candidate-table td:nth-child(2){width:7%}",
             html,
         )
         self.assertIn(
-            ".candidate-table th:nth-child(4),.candidate-table td:nth-child(4){width:24%}",
+            ".candidate-table th:nth-child(3),.candidate-table td:nth-child(3){width:15%}",
             html,
         )
+        self.assertIn(
+            ".candidate-table th:nth-child(4),.candidate-table td:nth-child(4){width:20%}",
+            html,
+        )
+
+    def test_candidate_html_keeps_diagnostic_column_readable(self):
+        html = _generate_html(
+            [candidate("1")],
+            [("BK1", "测试板块", 80)],
+            1.0,
+            "20260806-160000",
+            {
+                "mode": "observation",
+                "max_recommendations": 0,
+                "reasons": ["regime_weak"],
+            },
+            {
+                "actionable": [],
+                "waiting_trigger": [],
+                "next_day_confirmation": [],
+                "observation": [candidate("1")],
+                "data_rejected": [],
+            },
+        )
+
+        self.assertIn(
+            ".candidate-table-wrap{overflow-x:auto;margin:12px 0}",
+            html,
+        )
+        self.assertIn(
+            ".candidate-table th:nth-child(11),.candidate-table td:nth-child(11){width:15%}",
+            html,
+        )
+        self.assertIn(
+            ".candidate-table td.candidate-diagnostic{min-width:180px;"
+            "vertical-align:top;overflow-wrap:break-word;word-break:normal}",
+            html,
+        )
+        self.assertIn("<td class='candidate-diagnostic'>", html)
 
     def test_wyckoff_buy_level_uses_canonical_short_term_fields(self):
         cases = (

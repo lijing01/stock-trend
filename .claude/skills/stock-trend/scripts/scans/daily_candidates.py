@@ -2111,7 +2111,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"<td><strong>{candidate_quality_score(item):.1f}</strong></td>"
             f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
-            f"<td>{escape(detail)}</td></tr>"
+            f"<td class='candidate-diagnostic'>{escape(detail)}</td></tr>"
         )
     return "".join(rows)
 
@@ -2203,19 +2203,22 @@ h1{{font-size:24px}}
 table{{width:100%;border-collapse:collapse;margin:12px 0;border-radius:8px;overflow:hidden}}
 th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:14px}}
 th{{background:#1d4ed8;color:#fff;font-size:13px}}
-.candidate-table{{table-layout:fixed}}
+.candidate-table-wrap{{overflow-x:auto;margin:12px 0}}
+.candidate-table-wrap .candidate-table{{margin:0}}
+.candidate-table{{table-layout:fixed;min-width:1180px}}
 .candidate-table th:nth-child(1),.candidate-table td:nth-child(1){{width:3%}}
-.candidate-table th:nth-child(2),.candidate-table td:nth-child(2){{width:8%}}
-.candidate-table th:nth-child(3),.candidate-table td:nth-child(3){{width:18%}}
-.candidate-table th:nth-child(4),.candidate-table td:nth-child(4){{width:24%}}
-.candidate-table th:nth-child(5),.candidate-table td:nth-child(5){{width:9%}}
+.candidate-table th:nth-child(2),.candidate-table td:nth-child(2){{width:7%}}
+.candidate-table th:nth-child(3),.candidate-table td:nth-child(3){{width:15%}}
+.candidate-table th:nth-child(4),.candidate-table td:nth-child(4){{width:20%}}
+.candidate-table th:nth-child(5),.candidate-table td:nth-child(5){{width:8%}}
 .candidate-table th:nth-child(6),.candidate-table td:nth-child(6){{width:7%}}
 .candidate-table th:nth-child(7),.candidate-table td:nth-child(7){{width:6%}}
 .candidate-table th:nth-child(8),.candidate-table td:nth-child(8){{width:6%}}
 .candidate-table th:nth-child(9),.candidate-table td:nth-child(9){{width:6%}}
-.candidate-table th:nth-child(10),.candidate-table td:nth-child(10){{width:8%}}
-.candidate-table th:nth-child(11),.candidate-table td:nth-child(11){{width:5%}}
+.candidate-table th:nth-child(10),.candidate-table td:nth-child(10){{width:7%}}
+.candidate-table th:nth-child(11),.candidate-table td:nth-child(11){{width:15%}}
 .candidate-table th,.candidate-table td{{overflow-wrap:anywhere}}
+.candidate-table td.candidate-diagnostic{{min-width:180px;vertical-align:top;overflow-wrap:break-word;word-break:normal}}
 .candidate-table .wyckoff-buy-level-badge{{white-space:normal}}
 .buy{{color:#dc2626;font-weight:600}}
 .wyckoff-buy-level-1>td{{background:#fff7d6}}
@@ -2252,11 +2255,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">二级 · SOS 后 LPS</span>
 <span class="level-3">三级 · JAC/BU 后再确认</span>
 </div>
-<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发{tier_suffix}</h2>
-<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
-<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <div class="observation-buy-level-note" role="note">
 <strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>
@@ -2268,9 +2271,9 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">潜在二级 · SOS 后 LPS</span>
 <span class="level-3">潜在三级 · JAC/BU 后再确认</span>
 </div>
-<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
-<table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table></div>
 {performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
