@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import threading
+import tempfile
 import time
 import urllib.request
 from datetime import date as datetime_date, datetime, timedelta
@@ -928,6 +929,9 @@ def load_rankings_cache_full() -> Optional[dict]:
 
 SNAPSHOT_FILE = CACHE_DIR / "sector_snapshot_history.json"
 SNAPSHOT_MAX_DAYS = 30  # auto-prune older snapshots
+CANDIDATE_SNAPSHOT_FILE = CACHE_DIR / "candidate_sector_history.json"
+CANDIDATE_SNAPSHOT_SCHEMA_VERSION = 1
+CANDIDATE_SNAPSHOT_MAX_DAYS = 30
 
 
 def _hot_ranked_sectors(rankings: dict, top_n: int = 30) -> list[dict]:
@@ -1021,6 +1025,187 @@ def append_daily_snapshot(rankings: dict, override_date: str = "") -> None:
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_FILE.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+
+
+def _candidate_snapshot_row(sector: dict, position: int) -> dict:
+    """Keep the compact fields needed by candidate persistence analysis."""
+    up = sector.get("up_count", 0) or 0
+    down = sector.get("down_count", 0) or 0
+    total = up + down
+    relative_hot = sector.get("relative_hot_score", sector.get("hot_score", 0))
+    return {
+        "code": sector.get("code", ""),
+        "name": sector.get("name", ""),
+        "rank": sector.get("rank", sector.get("ranking_position", position)),
+        "absolute_hot_score": sector.get("absolute_hot_score", 0),
+        "relative_hot_score": relative_hot,
+        # Keep hot_score as a compatibility alias for simple consumers.
+        "hot_score": relative_hot,
+        "change_pct": sector.get("change_pct"),
+        "net_flow": sector.get("net_flow", sector.get("main_force_net")),
+        "up_ratio": (
+            round(up / total, 3) if total > 0
+            else sector.get("up_ratio", 0)
+        ),
+    }
+
+
+def _atomic_json_write(path: Path, payload: dict) -> None:
+    """Write JSON through a same-directory temporary file and replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def append_candidate_sector_snapshot(
+        rankings: dict, ranked: Optional[list[dict]] = None,
+        override_date: str = "", filter_meta: Optional[dict] = None) -> None:
+    """Append a complete candidate-universe sector ranking snapshot.
+
+    This history intentionally has a different contract from
+    ``sector_snapshot_history.json``: it records the full ranked universe used
+    by ``/candidates`` so an absent sector can be distinguished from a hot
+    sector that was not in the market Top-30 archive.
+    """
+    meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
+    if not isinstance(meta, dict) or meta.get("complete") is not True:
+        return
+    sectors = rankings.get("sectors", [])
+    if not isinstance(sectors, list):
+        return
+    active = sum(
+        1 for sector in sectors
+        if (sector.get("up_count", 0) or 0) > 0
+        or (sector.get("down_count", 0) or 0) > 0
+    )
+    if active == 0:
+        return
+
+    date_key = _resolve_verified_data_date(rankings, override_date)
+    if not date_key:
+        return
+    if ranked is None:
+        ranked = rank_hot_sectors(
+            rankings, top_n=None, min_stocks=0, min_up_ratio=0)
+    if not isinstance(ranked, list):
+        return
+
+    rows = [
+        _candidate_snapshot_row(sector, position)
+        for position, sector in enumerate(ranked, start=1)
+        if isinstance(sector, dict) and sector.get("code")
+    ]
+    if not rows:
+        return
+
+    universe_count = meta.get("total_sectors")
+    try:
+        universe_count = int(universe_count)
+    except (TypeError, ValueError):
+        universe_count = len(sectors)
+    record = {
+        "data_date": date_key,
+        "saved_at": datetime.now().isoformat(),
+        "complete": True,
+        "quality": "good",
+        "source": meta.get("source", "realtime"),
+        "universe_count": max(0, universe_count),
+        "ranked_count": len(rows),
+        "filter": dict(filter_meta or {}),
+        "sectors": rows,
+    }
+
+    history = {}
+    if CANDIDATE_SNAPSHOT_FILE.exists():
+        try:
+            payload = json.loads(
+                CANDIDATE_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("invalid candidate snapshot history schema")
+            if "snapshots" in payload:
+                if not isinstance(payload["snapshots"], dict):
+                    raise ValueError(
+                        "invalid candidate snapshot history snapshots")
+                history = dict(payload["snapshots"])
+            else:
+                # Tolerate an early date-keyed version of this new file.
+                history = {
+                    key: value for key, value in payload.items()
+                    if key != "schema_version"
+                }
+        except OSError:
+            raise
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "invalid candidate snapshot history") from exc
+    history[date_key] = record
+    valid_dates = sorted(
+        key for key, value in history.items()
+        if _verified_trading_date(key)
+        and key <= datetime.now().strftime("%Y-%m-%d")
+        and isinstance(value, dict)
+    )
+    keep = valid_dates[-CANDIDATE_SNAPSHOT_MAX_DAYS:]
+    history = {key: history[key] for key in keep}
+    _atomic_json_write(CANDIDATE_SNAPSHOT_FILE, {
+        "schema_version": CANDIDATE_SNAPSHOT_SCHEMA_VERSION,
+        "snapshots": history,
+    })
+
+
+def load_candidate_sector_history(
+        days: int = 10, errors: Optional[list[str]] = None) -> dict[str, dict]:
+    """Load recent candidate-universe snapshots, including partial records."""
+    def record_error(reason):
+        if isinstance(errors, list):
+            errors.append(reason)
+
+    if not CANDIDATE_SNAPSHOT_FILE.exists() or days <= 0:
+        return {}
+    try:
+        payload = json.loads(
+            CANDIDATE_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+    except OSError:
+        record_error("read_error")
+        return {}
+    except json.JSONDecodeError:
+        record_error("invalid_json")
+        return {}
+    except TypeError:
+        record_error("invalid_json")
+        return {}
+    if not isinstance(payload, dict):
+        record_error("invalid_schema")
+        return {}
+    if "snapshots" in payload and not isinstance(payload["snapshots"], dict):
+        record_error("invalid_schema")
+        return {}
+    history = payload.get("snapshots", payload)
+    if not isinstance(history, dict):
+        record_error("invalid_schema")
+        return {}
+    reference_date = datetime.now().strftime("%Y-%m-%d")
+    valid = {
+        key: value for key, value in history.items()
+        if _verified_trading_date(key)
+        and key <= reference_date
+        and isinstance(value, dict)
+    }
+    dates = sorted(valid)
+    recent = dates[-days:] if len(dates) > days else dates
+    return {date_key: valid[date_key] for date_key in recent}
 
 
 def load_snapshot_history(days: int = 10) -> dict[str, list[dict]]:

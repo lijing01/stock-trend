@@ -151,6 +151,16 @@ def build_sector_membership(sector_code, sector_name="", context=None,
         "sector_score": context.get("sector_score"),
         "persistence_status": context.get("persistence_status", ""),
         "persistence_score": context.get("persistence_score"),
+        "persistence_3d": context.get("persistence_3d"),
+        "persistence_5d": context.get("persistence_5d"),
+        "persistence_10d": context.get("persistence_10d"),
+        "history_window_days": context.get("history_window_days"),
+        "history_coverage_days": context.get("history_coverage_days"),
+        "sector_observed_days": context.get("sector_observed_days"),
+        "hot_appearance_days": context.get("hot_appearance_days"),
+        "hot_streak": context.get("hot_streak"),
+        "persistence_days": context.get(
+            "persistence_days", context.get("hot_appearance_days")),
         "relative_strength": context.get("relative_strength"),
         "ranking_position": context.get("ranking_position"),
         "ranking_source": context.get("ranking_source", ""),
@@ -173,6 +183,36 @@ def build_sector_membership(sector_code, sector_name="", context=None,
             stock.get("membership_fetch_evidence", {})),
         "sector_type": context.get("sector_type", ""),
         "capital_evidence": context.get("capital_evidence", "unknown"),
+    }
+
+
+def _sector_membership_output_fields(membership):
+    """Expose sector persistence evidence on the scored candidate itself."""
+    return {
+        "sector_type": membership.get("sector_type", ""),
+        "sector_actionable": membership.get("sector_actionable", False),
+        "sector_persistence_status": membership.get(
+            "persistence_status", ""),
+        "sector_capital_evidence": membership.get(
+            "capital_evidence", "unknown"),
+        "sector_score": membership.get("sector_score"),
+        "sector_persistence": membership.get("persistence_score"),
+        "sector_persistence_3d": membership.get("persistence_3d"),
+        "sector_persistence_5d": membership.get("persistence_5d"),
+        "sector_persistence_10d": membership.get("persistence_10d"),
+        "history_window_days": membership.get("history_window_days"),
+        "history_coverage_days": membership.get("history_coverage_days"),
+        "sector_observed_days": membership.get("sector_observed_days"),
+        "hot_appearance_days": membership.get("hot_appearance_days"),
+        "hot_streak": membership.get("hot_streak"),
+        "persistence_days": membership.get("persistence_days"),
+        "sector_relative_strength": membership.get("relative_strength"),
+        "ranking_position": membership.get("ranking_position"),
+        "ranking_source": membership.get("ranking_source", ""),
+        "ranking_data_date": membership.get("ranking_data_date", ""),
+        "ranking_quality": membership.get("ranking_quality", ""),
+        "ranking_errors": copy.deepcopy(
+            membership.get("ranking_errors", [])),
     }
 
 
@@ -2110,6 +2150,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 "name", c.get("sector_name", sector_code)),
             "sector_hot_score": primary_membership.get(
                 "hot_score", c.get("sector_hot_score", 50)),
+            **_sector_membership_output_fields(primary_membership),
             "composite_score": raw_composite,
             "raw_composite_score": raw_composite,
             "quality_adjusted_score": quality_adjusted,
@@ -2677,6 +2718,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     "name", candidate.get("sector_name", sector_code)),
                 "sector_hot_score": primary_membership.get(
                     "hot_score", candidate.get("sector_hot_score", 50)),
+                **_sector_membership_output_fields(primary_membership),
                 "composite_score": raw_composite,
                 "raw_composite_score": raw_composite,
                 "quality_adjusted_score": quality_adjusted,

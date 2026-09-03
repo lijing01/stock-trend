@@ -566,6 +566,139 @@ def _window_average(values, size):
     return round(sum(selected) / len(selected), 1)
 
 
+PERSISTENCE_LOOKBACK_DAYS = 10
+MIN_PERSISTENCE_COVERAGE_DAYS = 2
+EMERGING_STREAK_DAYS = 2
+MAINLINE_STREAK_DAYS = 3
+
+
+def _valid_persistence_date(value, as_of_date=""):
+    """Accept only strict weekday dates at or before the analysis date."""
+    if not isinstance(value, str) or len(value) != 10:
+        return False
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    if parsed.strftime("%Y-%m-%d") != value or parsed.weekday() >= 5:
+        return False
+    reference = as_of_date or datetime.now().strftime("%Y-%m-%d")
+    return value <= reference
+
+
+def _persistence_float(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _normalise_persistence_history(history, as_of_date=""):
+    """Normalize legacy list snapshots and candidate snapshot records."""
+    if not isinstance(history, dict):
+        return []
+    raw_history = history.get("snapshots")
+    if not isinstance(raw_history, dict):
+        raw_history = history
+
+    records = []
+    for date_key, payload in raw_history.items():
+        if not _valid_persistence_date(date_key, as_of_date):
+            continue
+        if isinstance(payload, list):
+            records.append({
+                "date": date_key,
+                "rows": [row for row in payload if isinstance(row, dict)],
+                "complete": True,
+                "quality": "good",
+                "valid": True,
+                "legacy": True,
+                "coverage_eligible": False,
+            })
+            continue
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("sectors", payload.get("rows", []))
+        if not isinstance(rows, list):
+            rows = []
+        data_date = payload.get("data_date", date_key)
+        quality = payload.get("quality", payload.get("source_quality", "good"))
+        records.append({
+            "date": date_key,
+            "rows": [row for row in rows if isinstance(row, dict)],
+            "complete": payload.get("complete") is True,
+            "quality": quality,
+            "valid": data_date == date_key,
+            "legacy": False,
+            "coverage_eligible": True,
+        })
+    records.sort(key=lambda record: record["date"])
+    return records[-PERSISTENCE_LOOKBACK_DAYS:]
+
+
+def _normalise_current_snapshot(current_snapshot, as_of_date=""):
+    """Normalize the in-memory ranking used for the current recommendation."""
+    if current_snapshot is None:
+        return None
+    if isinstance(current_snapshot, list):
+        date_key = as_of_date
+        rows = current_snapshot
+        complete = True
+        quality = "good"
+    elif isinstance(current_snapshot, dict):
+        date_key = current_snapshot.get("data_date", "") or as_of_date
+        rows = current_snapshot.get(
+            "sectors", current_snapshot.get("rows", []))
+        complete = current_snapshot.get("complete") is True
+        quality = current_snapshot.get(
+            "quality", current_snapshot.get("source_quality", "good"))
+    else:
+        return None
+    if as_of_date and date_key != as_of_date:
+        return None
+    if not _valid_persistence_date(date_key, as_of_date):
+        return None
+    if not isinstance(rows, list):
+        rows = []
+    return {
+        "date": date_key,
+        "rows": [row for row in rows if isinstance(row, dict)],
+        "complete": complete,
+        "quality": quality,
+        "valid": True,
+        "legacy": False,
+        "coverage_eligible": True,
+    }
+
+
+def _persistence_observation(record, sector_code, min_hot):
+    """Return hot/cold evidence, or None when this date is unknown."""
+    if not record.get("valid") or record.get("complete") is not True \
+            or record.get("quality", "good") != "good":
+        return None
+    row = next((item for item in record.get("rows", [])
+                if item.get("code") == sector_code), None)
+    if row is None:
+        # The legacy Top-30 file only supplies positive evidence.  Absence is
+        # deliberately unknown, not a cold observation.
+        return None
+    relative = row.get("relative_hot_score", row.get("hot_score"))
+    relative = _persistence_float(relative)
+    absolute = _persistence_float(row.get("absolute_hot_score"))
+    if record.get("legacy"):
+        return {"state": "hot", "value": relative or 0.0, "row": row}
+    if absolute is None:
+        absolute = relative
+    if absolute is None:
+        return None
+    return {
+        "state": "hot" if absolute >= min_hot else "cold",
+        "value": relative if relative is not None else absolute,
+        "row": row,
+    }
+
+
 def merge_sector_resonance(ranked, resonance_sectors):
     """Merge same-day ths-theme ZT/LHB evidence into EM sector rows."""
     by_name = {
@@ -583,27 +716,33 @@ def merge_sector_resonance(ranked, resonance_sectors):
     return merged
 
 
-def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
-    """Attach absolute strength, persistence, relative strength and action gate."""
-    dates = sorted(history.keys())[-10:] if history else []
+def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
+                          current_snapshot=None, min_hot=45):
+    """Attach strength and persistence using separate coverage/hot evidence."""
+    records = _normalise_persistence_history(history, as_of_date=as_of_date)
+    current_record = _normalise_current_snapshot(
+        current_snapshot, as_of_date=as_of_date)
+    if current_record:
+        records_by_date = {
+            record["date"]: record for record in records
+        }
+        records_by_date[current_record["date"]] = current_record
+        records = [records_by_date[date_key]
+                   for date_key in sorted(records_by_date)[-PERSISTENCE_LOOKBACK_DAYS:]]
     enriched = []
     for position, source in enumerate(ranked, start=1):
         sector = dict(source)
         sector["ranking_position"] = (
             sector.get("ranking_position") or position)
         code = sector.get("code", "")
-        aligned_entries = []
-        for date_str in dates:
-            match = next(
-                (row for row in history.get(date_str, [])
-                 if row.get("code") == code),
-                None,
-            )
-            aligned_entries.append(match)
-        hot_values = [
-            float(row.get("hot_score", 0) or 0) if row else 0.0
-            for row in aligned_entries
+        observations = [
+            _persistence_observation(record, code, min_hot)
+            for record in records
         ]
+        known_observations = [
+            observation for observation in observations if observation
+        ]
+        hot_values = [observation["value"] for observation in known_observations]
         avg3 = _window_average(hot_values, 3)
         avg5 = _window_average(hot_values, 5)
         avg10 = _window_average(hot_values, 10)
@@ -617,15 +756,34 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
         if change is not None and hs300_change is not None:
             relative_strength = round(float(change) - float(hs300_change), 2)
 
-        days = sum(row is not None for row in aligned_entries)
-        recent_entries = aligned_entries[-3:]
-        history_current = bool(dates) and (
+        history_window_days = len(records)
+        history_coverage_days = sum(
+            record.get("valid")
+            and record.get("complete") is True
+            and record.get("quality", "good") == "good"
+            and record.get("coverage_eligible") is True
+            and bool(record.get("rows"))
+            for record in records
+        )
+        sector_observed_days = len(known_observations)
+        hot_appearance_days = sum(
+            observation["state"] == "hot"
+            for observation in known_observations
+        )
+        hot_streak = 0
+        for observation in reversed(observations):
+            if not observation or observation["state"] != "hot":
+                break
+            hot_streak += 1
+        dates = [record["date"] for record in records]
+        history_current = bool(records) and (
             not as_of_date or dates[-1] == as_of_date
         )
         latest_present = bool(
-            history_current and aligned_entries
-            and aligned_entries[-1] is not None
+            history_current and observations
+            and observations[-1] is not None
         )
+        latest_hot = bool(latest_present and observations[-1]["state"] == "hot")
         short_persistence = (
             round(sum(hot_values) / len(hot_values), 1)
             if len(hot_values) >= 2 else 0.0
@@ -633,14 +791,16 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
         if not persistence_values:
             persistence = short_persistence
         classification_persistence = avg3 if avg3 is not None else short_persistence
-        history_insufficient = len(dates) < 3 or days < 3
-        if latest_present and len(dates) >= 3 \
-                and all(row is not None for row in recent_entries) \
+        history_insufficient = (
+            history_coverage_days < MIN_PERSISTENCE_COVERAGE_DAYS
+        )
+        if latest_hot and history_coverage_days >= MAINLINE_STREAK_DAYS \
+                and hot_streak >= MAINLINE_STREAK_DAYS \
                 and classification_persistence >= 60 \
                 and (relative_strength is None or relative_strength >= 0):
             sector_type = "mainline"
-        elif latest_present and len(dates) >= 2 \
-                and all(row is not None for row in aligned_entries[-2:]) \
+        elif latest_hot and history_coverage_days >= EMERGING_STREAK_DAYS \
+                and hot_streak >= EMERGING_STREAK_DAYS \
                 and classification_persistence >= 45:
             sector_type = "emerging"
         else:
@@ -657,11 +817,14 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
             sum(resonance_values) / len(resonance_values)
             if resonance_values else 50.0
         )
-        recent_capital_entries = aligned_entries[-5:]
+        recent_capital_entries = known_observations[-5:]
         net_flows = [
-            float(row["net_flow"])
-            for row in recent_capital_entries
-            if row and row.get("net_flow") is not None
+            float(observation["row"].get(
+                "net_flow", observation["row"].get("main_force_net")))
+            for observation in recent_capital_entries
+            if observation["row"].get(
+                "net_flow", observation["row"].get("main_force_net"))
+            is not None
         ]
         capital_persistence = 50.0
         capital_positive_days = 0
@@ -669,9 +832,10 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
         if net_flows:
             capital_positive_days = sum(value > 0 for value in net_flows)
             denominator = max(1, len(recent_capital_entries))
-            for row in reversed(recent_capital_entries):
-                if not row or row.get("net_flow") is None \
-                        or float(row["net_flow"]) <= 0:
+            for observation in reversed(recent_capital_entries):
+                flow = observation["row"].get(
+                    "net_flow", observation["row"].get("main_force_net"))
+                if flow is None or float(flow) <= 0:
                     break
                 capital_streak += 1
             capital_persistence = (
@@ -703,7 +867,13 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date=""):
             "persistence_5d": avg5,
             "persistence_10d": avg10,
             "persistence_score": persistence,
-            "persistence_days": days,
+            "history_window_days": history_window_days,
+            "history_coverage_days": history_coverage_days,
+            "sector_observed_days": sector_observed_days,
+            "hot_appearance_days": hot_appearance_days,
+            "hot_streak": hot_streak,
+            # Compatibility alias: this now explicitly means hot appearances.
+            "persistence_days": hot_appearance_days,
             "relative_strength": relative_strength,
             "capital_persistence": round(capital_persistence, 1),
             "capital_positive_days": capital_positive_days,
@@ -740,6 +910,15 @@ def _candidate_memberships(candidate, sector_context=None):
             "persistence_status": candidate.get(
                 "sector_persistence_status", ""),
             "persistence_score": candidate.get("sector_persistence"),
+            "persistence_3d": candidate.get("sector_persistence_3d"),
+            "persistence_5d": candidate.get("sector_persistence_5d"),
+            "persistence_10d": candidate.get("sector_persistence_10d"),
+            "history_window_days": candidate.get("history_window_days"),
+            "history_coverage_days": candidate.get("history_coverage_days"),
+            "sector_observed_days": candidate.get("sector_observed_days"),
+            "hot_appearance_days": candidate.get("hot_appearance_days"),
+            "hot_streak": candidate.get("hot_streak"),
+            "persistence_days": candidate.get("persistence_days"),
             "relative_strength": candidate.get("sector_relative_strength"),
             "ranking_position": candidate.get("ranking_position"),
             "ranking_source": candidate.get("ranking_source", ""),
@@ -776,6 +955,15 @@ def _rebind_primary_sector(item, peer_cohorts=None, as_of_date=""):
             "capital_evidence", "unknown"),
         "sector_score": primary.get("sector_score"),
         "sector_persistence": primary.get("persistence_score"),
+        "sector_persistence_3d": primary.get("persistence_3d"),
+        "sector_persistence_5d": primary.get("persistence_5d"),
+        "sector_persistence_10d": primary.get("persistence_10d"),
+        "history_window_days": primary.get("history_window_days"),
+        "history_coverage_days": primary.get("history_coverage_days"),
+        "sector_observed_days": primary.get("sector_observed_days"),
+        "hot_appearance_days": primary.get("hot_appearance_days"),
+        "hot_streak": primary.get("hot_streak"),
+        "persistence_days": primary.get("persistence_days"),
         "sector_relative_strength": primary.get("relative_strength"),
         "ranking_position": primary.get("ranking_position"),
         "ranking_source": primary.get("ranking_source", ""),
@@ -852,7 +1040,9 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     metrics = metrics if metrics is not None else {}
     from fetchers.sector_data import (
         append_daily_snapshot,
+        append_candidate_sector_snapshot,
         get_sector_rankings,
+        load_candidate_sector_history,
         load_rankings_cache_full,
         load_snapshot_history,
         rank_hot_sectors,
@@ -967,14 +1157,35 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     except (TypeError, ValueError):
         universe_count = len(rankings.get("sectors", []))
     metrics["sector_universe_count"] = max(0, universe_count)
-    ranked = rank_hot_sectors(rankings, top_n=top_n, min_stocks=min_stocks)
-    for sector in ranked:
+    ranked_universe = rank_hot_sectors(
+        rankings, top_n=None, min_stocks=min_stocks)
+    for sector in ranked_universe:
         sector.update({
             "ranking_source": ranking_meta["source"],
             "ranking_data_date": ranking_meta["data_date"],
             "ranking_quality": ranking_meta["quality"],
             "ranking_errors": ranking_meta["errors"],
         })
+    if active and live_meta.get("complete", False) and as_of_date:
+        try:
+            append_candidate_sector_snapshot(
+                rankings,
+                ranked=ranked_universe,
+                override_date=as_of_date,
+                filter_meta={
+                    "min_stocks": min_stocks,
+                    "min_up_ratio": 0.15,
+                    "deduplicated": True,
+                },
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            _record_degradation(
+                metrics,
+                f"candidate_sector_snapshot_write_error:{type(exc).__name__}",
+            )
+    ranked = (
+        ranked_universe[:top_n] if top_n is not None else ranked_universe
+    )
     qualified = [
         sector for sector in ranked
         if sector.get("absolute_hot_score", 0) >= min_hot
@@ -1004,11 +1215,31 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         sector["resonance_quality"] = resonance_quality
         sector["resonance_reason"] = resonance_reason
     hs300_change = (regime or {}).get("hs300_change")
+    history_load_errors = []
+    candidate_history = load_candidate_sector_history(
+        days=PERSISTENCE_LOOKBACK_DAYS, errors=history_load_errors)
+    for reason in history_load_errors:
+        _record_degradation(
+            metrics, f"candidate_sector_history_load_error:{reason}")
+    legacy_history = load_snapshot_history(days=PERSISTENCE_LOOKBACK_DAYS)
+    persistence_history = dict(legacy_history or {})
+    persistence_history.update(candidate_history or {})
+    current_snapshot = None
+    if (ranking_meta.get("quality") == "good"
+            and ranking_meta.get("data_date") == expected_date):
+        current_snapshot = {
+            "data_date": ranking_meta["data_date"],
+            "complete": True,
+            "quality": "good",
+            "sectors": ranked_universe,
+        }
     enriched = enrich_sector_context(
         qualified,
-        load_snapshot_history(days=10),
+        persistence_history,
         hs300_change=hs300_change,
         as_of_date=expected_date,
+        current_snapshot=current_snapshot,
+        min_hot=min_hot,
     )
     for sector in enriched:
         if sector.get("ranking_source") == "cache" \
@@ -1384,8 +1615,47 @@ def _candidate_diagnostic_text(item):
     return "；".join(parts)
 
 
+def _sector_persistence_text(item):
+    """Explain history coverage separately from hot-sector appearances."""
+    values = (
+        item.get("history_window_days"),
+        item.get("history_coverage_days"),
+        item.get("hot_appearance_days"),
+        item.get("hot_streak"),
+    )
+    if all(value is None for value in values):
+        return ""
+    coverage = item.get("history_coverage_days")
+    window = item.get("history_window_days")
+    appearances = item.get("hot_appearance_days")
+    if appearances is None:
+        appearances = item.get("persistence_days", 0)
+    streak = item.get("hot_streak", 0)
+    if coverage is None:
+        coverage = 0
+    if window is None:
+        window = coverage
+    status = (
+        item.get("sector_persistence_status")
+        or item.get("persistence_status")
+        or item.get("sector_type", "")
+    )
+    status_label = {
+        "history_insufficient": "历史不足",
+        "single_day_pulse": "单日脉冲",
+        "verified": "已验证",
+        "mainline": "主线",
+        "emerging": "新兴",
+    }.get(status, status or "未标记")
+    return (
+        f"持续性：快照覆盖 {coverage}/{window}｜"
+        f"热点出现 {appearances}/{window}｜连续 {streak} 日｜{status_label}"
+    )
+
+
 def _sector_text(item):
     text = item.get("sector_name", "")
+    persistence = _sector_persistence_text(item)
     provenance = []
     for label, prefix in (("排行", "ranking"), ("成分", "membership")):
         source = item.get(f"{prefix}_source", "")
@@ -1396,8 +1666,9 @@ def _sector_text(item):
         provenance.append(
             f"{label} 来源 {source}｜日期 {data_date}｜质量 {quality}"
         )
-    if provenance:
-        return f"{text}（{'；'.join(provenance)}）"
+    details = ([persistence] if persistence else []) + provenance
+    if details:
+        return f"{text}（{'；'.join(details)}）"
     return text
 
 

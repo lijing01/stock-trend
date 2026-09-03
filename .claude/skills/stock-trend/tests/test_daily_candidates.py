@@ -9,7 +9,7 @@ import unittest
 import copy
 import numpy as np
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -107,6 +107,30 @@ def _complete_rankings_and_history():
         for date in ("2026-08-04", "2026-08-05", "2026-08-06")
     }
     return rankings, history
+
+
+def _full_candidate_history(code, scores, dates=None):
+    dates = dates or (
+        "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06",
+    )
+    return {
+        date: {
+            "data_date": date,
+            "complete": True,
+            "quality": "good",
+            "universe_count": 56,
+            "sectors": [{
+                "code": code,
+                "name": "测试板块",
+                "rank": 31,
+                "absolute_hot_score": score,
+                "relative_hot_score": score,
+                "hot_score": score,
+                "net_flow": 1e8,
+            }],
+        }
+        for date, score in zip(dates, scores)
+    }
 
 
 class TestRecommendationPolicy(unittest.TestCase):
@@ -445,6 +469,146 @@ class TestRecommendationPolicy(unittest.TestCase):
             history = sector_data.load_snapshot_history(days=10)
         self.assertEqual(list(history), ["2026-08-06"])
 
+    def test_candidate_snapshot_keeps_full_ranked_universe_after_top30(self):
+        from fetchers import sector_data
+
+        date = "2026-08-06"
+        rankings = {
+            "meta": {
+                "complete": True,
+                "data_date": date,
+                "total_sectors": 56,
+            },
+            "sectors": [{
+                "code": f"BK{i:04d}", "name": f"板块{i:04d}",
+                "up_count": 9, "down_count": 1,
+            } for i in range(56)],
+        }
+        ranked = [{
+            "code": f"BK{i:04d}", "name": f"板块{i:04d}",
+            "absolute_hot_score": 100 - i,
+            "hot_score": 100 - i,
+            "change_pct": 2.0,
+            "main_force_net": 1e8,
+            "up_count": 9, "down_count": 1,
+        } for i in range(56)]
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+             patch.object(
+                 sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                 Path(tmpdir) / "candidate-history.json"):
+            sector_data.append_candidate_sector_snapshot(
+                rankings, ranked=ranked, override_date=date,
+                filter_meta={"min_stocks": 10, "min_up_ratio": 0.15},
+            )
+            history = sector_data.load_candidate_sector_history(days=10)
+
+        snapshot = history[date]
+        self.assertTrue(snapshot["complete"])
+        self.assertEqual(snapshot["universe_count"], 56)
+        self.assertEqual(len(snapshot["sectors"]), 56)
+        self.assertEqual(snapshot["sectors"][30]["rank"], 31)
+        self.assertEqual(snapshot["sectors"][30]["code"], "BK0030")
+        self.assertEqual(snapshot["filter"]["min_stocks"], 10)
+
+    def test_candidate_snapshot_rejects_partial_and_mismatched_rankings(self):
+        from fetchers import sector_data
+
+        base = {
+            "meta": {"complete": True, "data_date": "2026-08-06"},
+            "sectors": [{
+                "code": "BK1", "name": "测试", "up_count": 4,
+                "down_count": 1, "change_pct": 1.0,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(
+                 sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                 Path(tmpdir) / "candidate-history.json"):
+            partial = copy.deepcopy(base)
+            partial["meta"]["complete"] = False
+            sector_data.append_candidate_sector_snapshot(
+                partial, ranked=partial["sectors"],
+                override_date="2026-08-06",
+            )
+            self.assertFalse(sector_data.CANDIDATE_SNAPSHOT_FILE.exists())
+            with self.assertRaises(ValueError):
+                sector_data.append_candidate_sector_snapshot(
+                    base, ranked=base["sectors"],
+                    override_date="2026-08-07",
+                )
+
+    def test_candidate_snapshot_prunes_to_recent_valid_trading_days(self):
+        from fetchers import sector_data
+
+        dates = []
+        cursor = datetime(2026, 7, 1)
+        while len(dates) < 31:
+            if cursor.weekday() < 5:
+                dates.append(cursor.strftime("%Y-%m-%d"))
+            cursor += timedelta(days=1)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(
+                 sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                 Path(tmpdir) / "candidate-history.json"):
+            for date in dates:
+                rankings = {
+                    "meta": {"complete": True, "data_date": date},
+                    "sectors": [{
+                        "code": "BK1", "name": "测试", "up_count": 4,
+                        "down_count": 1,
+                    }],
+                }
+                sector_data.append_candidate_sector_snapshot(
+                    rankings,
+                    ranked=[{
+                        "code": "BK1", "name": "测试",
+                        "absolute_hot_score": 70, "hot_score": 70,
+                        "up_count": 4, "down_count": 1,
+                    }],
+                    override_date=date,
+                )
+            history = sector_data.load_candidate_sector_history(days=40)
+
+        self.assertEqual(len(history), 30)
+        self.assertEqual(list(history), dates[-30:])
+        self.assertNotIn("2026-07-04", history)
+
+    def test_corrupt_candidate_history_is_preserved_and_reported(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {"complete": True, "data_date": "2026-08-06"},
+            "sectors": [{
+                "code": "BK1", "name": "测试", "up_count": 4,
+                "down_count": 1,
+            }],
+        }
+        corrupt = "{not-json"
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(
+                 sector_data, "CANDIDATE_SNAPSHOT_FILE",
+                 Path(tmpdir) / "candidate-history.json"):
+            path = sector_data.CANDIDATE_SNAPSHOT_FILE
+            path.write_text(corrupt, encoding="utf-8")
+            with self.assertRaises(ValueError):
+                sector_data.append_candidate_sector_snapshot(
+                    rankings,
+                    ranked=[{
+                        "code": "BK1", "name": "测试",
+                        "absolute_hot_score": 70, "hot_score": 70,
+                    }],
+                    override_date="2026-08-06",
+                )
+            self.assertEqual(path.read_text(encoding="utf-8"), corrupt)
+            errors = []
+            self.assertEqual(
+                sector_data.load_candidate_sector_history(
+                    days=10, errors=errors), {})
+
+        self.assertEqual(errors, ["invalid_json"])
+
     def test_partial_rankings_do_not_overwrite_complete_cache(self):
         from fetchers import sector_data
 
@@ -734,16 +898,13 @@ class TestRecommendationPolicy(unittest.TestCase):
             "absolute_hot_score": 70, "hot_score": 90,
             "change_pct": 2.0,
         }]
-        history = {
-            "2026-08-04": [{"code": "BK1", "hot_score": 65,
-                            "net_flow": 1e8}],
-            "2026-08-05": [{"code": "BK1", "hot_score": 70,
-                            "net_flow": 2e8}],
-            "2026-08-06": [{"code": "BK1", "hot_score": 75,
-                            "net_flow": 3e8}],
-        }
+        history = _full_candidate_history(
+            "BK1", [65, 70, 75],
+            dates=("2026-08-04", "2026-08-05", "2026-08-06"),
+        )
         sector = enrich_sector_context(
-            ranked, history, hs300_change=0.5)[0]
+            ranked, history, hs300_change=0.5,
+            as_of_date="2026-08-06")[0]
         self.assertEqual(sector["sector_type"], "mainline")
         self.assertTrue(sector["sector_actionable"])
         self.assertEqual(sector["persistence_days"], 3)
@@ -803,7 +964,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         sector = enrich_sector_context(ranked, history)[0]
         self.assertIsNone(sector["persistence_3d"])
 
-    def test_missing_sector_day_counts_as_zero_in_persistence_window(self):
+    def test_missing_sector_day_is_unknown_not_zero_in_persistence_window(self):
         ranked = [{
             "code": "BK1", "name": "间断热点",
             "absolute_hot_score": 70, "hot_score": 90,
@@ -814,8 +975,181 @@ class TestRecommendationPolicy(unittest.TestCase):
             "2026-08-06": [{"code": "BK1", "hot_score": 90}],
         }
         sector = enrich_sector_context(ranked, history)[0]
-        self.assertEqual(sector["persistence_3d"], 60.0)
+        self.assertIsNone(sector["persistence_3d"])
+        self.assertEqual(sector["history_coverage_days"], 0)
+        self.assertEqual(sector["sector_observed_days"], 2)
+        self.assertEqual(sector["hot_appearance_days"], 2)
         self.assertFalse(sector["sector_actionable"])
+
+    def test_legacy_top30_history_is_positive_evidence_not_full_coverage(self):
+        ranked = [{
+            "code": "BK1", "name": "旧榜热点",
+            "absolute_hot_score": 70, "hot_score": 90,
+            "change_pct": 2.0,
+        }]
+        history = {
+            date: [{"code": "BK1", "hot_score": 80, "net_flow": 1e8}]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+
+        sector = enrich_sector_context(
+            ranked, history, as_of_date="2026-08-06")[0]
+
+        self.assertEqual(sector["history_coverage_days"], 0)
+        self.assertEqual(sector["hot_appearance_days"], 3)
+        self.assertEqual(sector["persistence_status"], "history_insufficient")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_full_history_uses_coverage_not_hot_appearance_for_insufficient(self):
+        dates = (
+            "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30",
+            "2026-07-31", "2026-08-03", "2026-08-04", "2026-08-05",
+            "2026-08-06", "2026-08-07",
+        )
+        ranked = [{
+            "code": "BK1", "name": "新晋热点",
+            "absolute_hot_score": 70, "hot_score": 100,
+            "change_pct": 3.0,
+        }]
+        history = _full_candidate_history(
+            "BK1", [30] * 9 + [70], dates=dates)
+
+        sector = enrich_sector_context(
+            ranked, history, hs300_change=0.0, as_of_date=dates[-1])[0]
+
+        self.assertEqual(sector["history_window_days"], 10)
+        self.assertEqual(sector["history_coverage_days"], 10)
+        self.assertEqual(sector["sector_observed_days"], 10)
+        self.assertEqual(sector["hot_appearance_days"], 1)
+        self.assertEqual(sector["hot_streak"], 1)
+        self.assertEqual(sector["persistence_status"], "single_day_pulse")
+        self.assertEqual(sector["sector_type"], "single_day_pulse")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_one_complete_snapshot_remains_history_insufficient(self):
+        dates = ("2026-08-06",)
+        ranked = [{
+            "code": "BK1", "name": "单日热点",
+            "absolute_hot_score": 70, "hot_score": 100,
+            "change_pct": 3.0,
+        }]
+        sector = enrich_sector_context(
+            ranked,
+            _full_candidate_history("BK1", [70], dates=dates),
+            as_of_date=dates[-1],
+        )[0]
+
+        self.assertEqual(sector["history_coverage_days"], 1)
+        self.assertEqual(sector["hot_appearance_days"], 1)
+        self.assertEqual(sector["persistence_status"], "history_insufficient")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_two_day_hot_streak_is_emerging_after_coverage_is_available(self):
+        dates = ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06")
+        ranked = [{
+            "code": "BK1", "name": "两日新兴",
+            "absolute_hot_score": 75, "hot_score": 90,
+            "change_pct": 2.0,
+        }]
+        sector = enrich_sector_context(
+            ranked,
+            _full_candidate_history("BK1", [30, 30, 70, 80], dates=dates),
+            hs300_change=0.0,
+            as_of_date=dates[-1],
+        )[0]
+
+        self.assertEqual(sector["history_coverage_days"], 4)
+        self.assertEqual(sector["hot_appearance_days"], 2)
+        self.assertEqual(sector["hot_streak"], 2)
+        self.assertEqual(sector["sector_type"], "emerging")
+        self.assertEqual(sector["persistence_status"], "verified")
+        self.assertTrue(sector["sector_actionable"])
+
+    def test_three_day_hot_streak_is_mainline_after_coverage_is_available(self):
+        dates = ("2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06")
+        ranked = [{
+            "code": "BK1", "name": "三日主线",
+            "absolute_hot_score": 80, "hot_score": 95,
+            "change_pct": 2.0,
+        }]
+        sector = enrich_sector_context(
+            ranked,
+            _full_candidate_history("BK1", [30, 70, 80, 90], dates=dates),
+            hs300_change=0.0,
+            as_of_date=dates[-1],
+        )[0]
+
+        self.assertEqual(sector["hot_appearance_days"], 3)
+        self.assertEqual(sector["hot_streak"], 3)
+        self.assertEqual(sector["sector_type"], "mainline")
+        self.assertEqual(sector["persistence_status"], "verified")
+        self.assertTrue(sector["sector_actionable"])
+
+    def test_partial_snapshot_does_not_count_as_history_coverage(self):
+        dates = ("2026-08-04", "2026-08-05", "2026-08-06")
+        history = _full_candidate_history("BK1", [70, 70, 70], dates=dates)
+        history[dates[1]]["complete"] = False
+        ranked = [{
+            "code": "BK1", "name": "部分数据",
+            "absolute_hot_score": 70, "hot_score": 90,
+            "change_pct": 2.0,
+        }]
+
+        sector = enrich_sector_context(
+            ranked, history, as_of_date=dates[-1])[0]
+
+        self.assertEqual(sector["history_window_days"], 3)
+        self.assertEqual(sector["history_coverage_days"], 2)
+        self.assertEqual(sector["sector_observed_days"], 2)
+        self.assertEqual(sector["hot_appearance_days"], 2)
+        self.assertEqual(sector["hot_streak"], 1)
+        self.assertEqual(sector["persistence_status"], "single_day_pulse")
+        self.assertFalse(sector["sector_actionable"])
+
+    def test_empty_complete_snapshot_does_not_count_as_history_coverage(self):
+        history = _full_candidate_history(
+            "BK1", [70], dates=("2026-08-06",))
+        history["2026-08-07"] = {
+            "data_date": "2026-08-07",
+            "complete": True,
+            "quality": "good",
+            "sectors": [],
+        }
+        ranked = [{
+            "code": "BK1", "name": "空排行",
+            "absolute_hot_score": 70, "hot_score": 90,
+        }]
+
+        sector = enrich_sector_context(
+            ranked, history, as_of_date="2026-08-07")[0]
+
+        self.assertEqual(sector["history_window_days"], 2)
+        self.assertEqual(sector["history_coverage_days"], 1)
+
+    def test_future_history_is_ignored_without_explicit_analysis_date(self):
+        future = datetime.now().date() + timedelta(days=10)
+        while future.weekday() >= 5:
+            future += timedelta(days=1)
+        future_key = future.isoformat()
+        history = _full_candidate_history(
+            "BK1", [70], dates=("2026-08-06",))
+        history[future_key] = {
+            "data_date": future_key,
+            "complete": True,
+            "quality": "good",
+            "sectors": [{
+                "code": "BK1", "absolute_hot_score": 70,
+                "relative_hot_score": 70,
+            }],
+        }
+        ranked = [{
+            "code": "BK1", "name": "未来快照",
+            "absolute_hot_score": 70, "hot_score": 90,
+        }]
+
+        sector = enrich_sector_context(ranked, history)[0]
+
+        self.assertEqual(sector["history_coverage_days"], 1)
 
     def test_stale_sector_history_is_observation_only(self):
         ranked = [{
@@ -832,21 +1166,39 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(sector["sector_type"], "single_day_pulse")
         self.assertFalse(sector["sector_actionable"])
 
+    def test_sector_report_text_exposes_coverage_and_hot_streak(self):
+        item = candidate("coverage", sector_actionable=False)
+        item.update({
+            "sector_name": "测试板块",
+            "history_window_days": 10,
+            "history_coverage_days": 10,
+            "hot_appearance_days": 1,
+            "hot_streak": 1,
+            "sector_persistence_status": "single_day_pulse",
+        })
+
+        text = dc._sector_text(item)
+
+        self.assertIn(
+            "持续性：快照覆盖 10/10｜热点出现 1/10｜连续 1 日｜单日脉冲",
+            text,
+        )
+
     def test_capital_persistence_measures_positive_days_not_amount(self):
         ranked = [{
             "code": "BK1", "name": "资金不连续",
             "absolute_hot_score": 70, "hot_score": 80,
         }]
         history = {
-            "2026-08-02": [{"code": "BK1", "hot_score": 70,
-                            "net_flow": 100e8}],
             "2026-08-03": [{"code": "BK1", "hot_score": 70,
-                            "net_flow": -1e8}],
+                            "net_flow": 100e8}],
             "2026-08-04": [{"code": "BK1", "hot_score": 70,
                             "net_flow": -1e8}],
             "2026-08-05": [{"code": "BK1", "hot_score": 70,
                             "net_flow": -1e8}],
             "2026-08-06": [{"code": "BK1", "hot_score": 70,
+                            "net_flow": -1e8}],
+            "2026-08-07": [{"code": "BK1", "hot_score": 70,
                             "net_flow": -1e8}],
         }
         sector = enrich_sector_context(ranked, history)[0]
@@ -915,6 +1267,70 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(len(picked), 21)
         self.assertEqual(picked[-1]["code"], "BK20")
 
+    def test_pick_hot_sectors_writes_full_candidate_snapshot_and_uses_current_data(self):
+        rows = [{
+            "code": f"BK{i:02d}", "name": f"板块{i:02d}",
+            "change_pct": 2.0, "main_force_net": 1e8,
+            "up_count": 9, "down_count": 1,
+        } for i in range(56)]
+        rankings = {
+            "meta": {
+                "complete": True, "data_date": "2026-08-06",
+                "total_sectors": 56,
+            },
+            "sectors": rows,
+        }
+        prior_history = _full_candidate_history(
+            "BK00", [70], dates=("2026-08-05",))
+        metrics = {}
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache"), \
+             patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.append_candidate_sector_snapshot") as write_snapshot, \
+             patch("fetchers.sector_data.load_candidate_sector_history",
+                   return_value=prior_history), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value={}):
+            picked = dc.pick_hot_sectors(
+                top_n=1, min_stocks=1, as_of_date="2026-08-06",
+                metrics=metrics)
+
+        self.assertEqual(len(picked), 1)
+        write_snapshot.assert_called_once()
+        written_ranked = write_snapshot.call_args.kwargs["ranked"]
+        self.assertEqual(len(written_ranked), 56)
+        self.assertEqual(written_ranked[30]["code"], "BK30")
+        self.assertEqual(picked[0]["history_coverage_days"], 2)
+        self.assertEqual(picked[0]["hot_appearance_days"], 2)
+        self.assertEqual(picked[0]["hot_streak"], 2)
+        self.assertEqual(picked[0]["sector_type"], "emerging")
+
+    def test_candidate_snapshot_write_failure_keeps_current_persistence_evidence(self):
+        rankings, _ = _complete_rankings_and_history()
+        metrics = {}
+        prior_history = _full_candidate_history(
+            "BK1", [70], dates=("2026-08-05",))
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache"), \
+             patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.append_candidate_sector_snapshot",
+                   side_effect=OSError("disk full")), \
+             patch("fetchers.sector_data.load_candidate_sector_history",
+                   return_value=prior_history), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value={}):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
+
+        self.assertEqual(picked[0]["history_coverage_days"], 2)
+        self.assertEqual(picked[0]["sector_type"], "emerging")
+        self.assertIn(
+            "candidate_sector_snapshot_write_error:OSError",
+            metrics["degradation_reasons"],
+        )
+
     def test_pick_hot_sectors_survives_rankings_cache_write_failure(self):
         rankings, history = _complete_rankings_and_history()
         metrics = {}
@@ -952,12 +1368,18 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
 
     def test_pick_hot_sectors_marks_resonance_failure_without_blocking(self):
-        rankings, history = _complete_rankings_and_history()
+        rankings, _ = _complete_rankings_and_history()
+        history = _full_candidate_history(
+            "BK1", [70, 70, 70],
+            dates=("2026-08-04", "2026-08-05", "2026-08-06"),
+        )
         metrics = {}
         with patch("fetchers.sector_data.get_sector_rankings",
                    return_value=rankings), \
              patch("fetchers.sector_data.save_rankings_cache"), \
              patch("fetchers.sector_data.append_daily_snapshot"), \
+             patch("fetchers.sector_data.load_candidate_sector_history",
+                   return_value=history), \
              patch("fetchers.sector_data.load_snapshot_history",
                    return_value=history), \
              patch("bridge.sector_feeder.load_qualified_sectors",

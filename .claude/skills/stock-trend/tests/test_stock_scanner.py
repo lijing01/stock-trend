@@ -794,6 +794,38 @@ class TestSourceEvidenceAdapters(unittest.TestCase):
         self.assertEqual(
             item["source_evidence"]["capital"]["reason"], "timeout")
 
+    def test_run_phase2_exposes_sector_persistence_evidence(self):
+        candidate = _make_candidate("600001")
+        candidate["sector_memberships"] = [sc.build_sector_membership(
+            "BK0477", "测试板块", context={
+                "sector_type": "single_day_pulse",
+                "sector_actionable": False,
+                "persistence_status": "history_insufficient",
+                "persistence_score": 40.0,
+                "history_window_days": 10,
+                "history_coverage_days": 10,
+                "sector_observed_days": 1,
+                "hot_appearance_days": 1,
+                "hot_streak": 1,
+                "persistence_days": 1,
+                "ranking_position": 31,
+                "ranking_source": "realtime",
+                "ranking_data_date": "2026-08-06",
+                "ranking_quality": "good",
+            }, stock=candidate)]
+        with patch.object(sc, "_fetch_kline",
+                          return_value=_make_kline(60, candidate["ts_code"])), \
+             patch.object(sc, "_fetch_capital_flow", return_value=None), \
+             patch.object(sc, "_fetch_fundamental", return_value=None):
+            item = sc.run_phase2([candidate], max_workers=1)[0]
+
+        self.assertEqual(item["sector_persistence_status"],
+                         "history_insufficient")
+        self.assertEqual(item["history_coverage_days"], 10)
+        self.assertEqual(item["hot_appearance_days"], 1)
+        self.assertEqual(item["hot_streak"], 1)
+        self.assertEqual(item["ranking_position"], 31)
+
     def test_same_day_live_membership_pe_is_safe_fundamental_fallback(self):
         candidate = _make_candidate("600001")
         candidate.update({
