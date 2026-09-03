@@ -84,7 +84,6 @@ REASON_LABELS = {
     "regime_weak": "市场环境评分偏弱",
     "intraday_provisional": "盘中数据尚未收盘确认",
     "recommendation_limit": "超出当日推荐数量上限",
-    "wyckoff_countertrend": "维科夫长短周期逆势，降级为观察",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
     "trade_plan_target_source_not_executable": "目标来源非结构化阻力位，仅供观察",
@@ -1674,14 +1673,6 @@ def _sector_text(item):
     return text
 
 
-def _long_term_structure_text(wyckoff):
-    """Render the long-term phase together with a precise unavailable cause."""
-    long_term = wyckoff.get("long_term", {})
-    phase_name = long_term.get("phase_name", "未确认")
-    reason = long_term.get("reason", "")
-    return f"{phase_name}（{reason}）" if reason else phase_name
-
-
 def _minor_phase_text(wyckoff):
     """Render the short-term Wyckoff A–E phase with its Chinese meaning.
 
@@ -1743,22 +1734,6 @@ def _wyckoff_buy_level(wyckoff):
         "role": role,
         "css_class": f"wyckoff-buy-level-{number}",
     }
-
-
-def _long_term_confidence_text(wyckoff):
-    """Avoid presenting 0% as evidence when the long-term phase is unavailable."""
-    long_term = wyckoff.get("long_term", {})
-    if long_term.get("reason_code") or not long_term.get("eligible", False):
-        return "-"
-    confidence = long_term.get("confidence")
-    return f"{confidence:.0%}" if confidence is not None else "-"
-
-
-def _kline_depth_text(wyckoff):
-    long_term = wyckoff.get("long_term", {})
-    available = long_term.get("bars_available")
-    minimum = long_term.get("minimum_bars", 250)
-    return f"{available}/{minimum}" if available is not None else "未知"
 
 
 TARGET_SOURCE_LABELS = {
@@ -1866,8 +1841,8 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 短线买点 | 中线结构 | 周期结论 | 短线置信度 | 中线置信度 | K线根数/要求 | 原始分 | 质量分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 短线买点 | 短线置信度 | 原始分 | 质量分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -1878,11 +1853,7 @@ def _append_candidate_table(lines, title, items, empty_text):
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
             f"{wyckoff.get('sub_phase', '-')} | "
-            f"{_long_term_structure_text(wyckoff)} | "
-            f"{wyckoff.get('alignment', {}).get('label', '未确认')} | "
             f"{wyckoff.get('confidence', 0):.0%} | "
-            f"{_long_term_confidence_text(wyckoff)} | "
-            f"{_kline_depth_text(wyckoff)} | "
             f"{item['composite_score']:.1f} | "
             f"{candidate_rank_score(item):.1f} | "
             f"{quality.get('coverage', 0):.0%} | "
@@ -1979,6 +1950,15 @@ def _trade_plan_promotable(item):
     )
 
 
+def _short_term_observation_reason(item):
+    signal_status = item.get("wyckoff", {}).get("short_term", {}).get(
+        "signal_status")
+    return {
+        "retest_pending": "wyckoff_retest_pending",
+        "failed_breakout": "wyckoff_failed_breakout",
+    }.get(signal_status)
+
+
 def classify_candidates(candidates, policy):
     data_rejected = []
     eligible_candidates = []
@@ -2000,8 +1980,7 @@ def classify_candidates(candidates, policy):
         and item.get("score_eligible", True)
         and (not policy.get("requires_sector_capital_proof", False)
              or item.get("sector_capital_evidence") == "positive_verified")
-        and item.get("wyckoff", {}).get("alignment", {}).get(
-            "recommendation_gate", "short_term_only") != "observation"
+        and _short_term_observation_reason(item) is None
         and (_trade_plan_promotable(item)
              if policy.get("mode") in {"actionable", "waiting_trigger"}
              else True)
@@ -2016,6 +1995,7 @@ def classify_candidates(candidates, policy):
                          if item.get("data_quality", {}).get("eligible", False)
                          and item.get("score_eligible", True)
                          and item.get("wyckoff")
+                         and _short_term_observation_reason(item) is None
                          and _trade_plan_promotable(item)
                          and item.get("code") not in promoted][:2]
         confirmations = [
@@ -2039,16 +2019,9 @@ def classify_candidates(candidates, policy):
             reasons.append("breadth_capital_divergence")
         if not item.get("score_eligible", True):
             reasons.append("quality_adjusted_below_min_score")
-        if item.get("wyckoff", {}).get("alignment", {}).get(
-                "recommendation_gate") == "observation":
-            alignment_status = item.get("wyckoff", {}).get("alignment", {}).get("status")
-            signal_status = item.get("wyckoff", {}).get("short_term", {}).get("signal_status")
-            if signal_status == "retest_pending":
-                reasons.append("wyckoff_retest_pending")
-            elif signal_status == "failed_breakout":
-                reasons.append("wyckoff_failed_breakout")
-            elif alignment_status != "short_term_pending":
-                reasons.append("wyckoff_countertrend")
+        short_term_reason = _short_term_observation_reason(item)
+        if short_term_reason:
+            reasons.append(short_term_reason)
         if (policy.get("mode") in {"actionable", "waiting_trigger"}
                 and not _trade_plan_promotable(item)):
             reasons.extend(item.get("trade_plan_reasons") or [])
@@ -2228,7 +2201,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
         raise ValueError(
             f"unsupported buy level display: {buy_level_display}")
     if not items:
-        return '<tr><td colspan="14">无</td></tr>'
+        return '<tr><td colspan="10">无</td></tr>'
     rows = []
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -2267,11 +2240,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"<td>{_sector_text(item)}</td>"
             f"<td>{_minor_phase_html(wyckoff)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
-            f"<td>{_long_term_structure_text(wyckoff)}</td>"
-            f"<td>{wyckoff.get('alignment', {}).get('label', '未确认')}</td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
-            f"<td>{_long_term_confidence_text(wyckoff)}</td>"
-            f"<td>{_kline_depth_text(wyckoff)}</td>"
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
             f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
@@ -2401,11 +2370,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">二级 · SOS 后 LPS · 核心仓</span>
 <span class="level-3">三级 · JAC/BU 后再确认 · 趋势仓</span>
 </div>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发{tier_suffix}</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <div class="observation-buy-level-note" role="note">
 <strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>
@@ -2417,9 +2386,9 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">潜在二级 · SOS 后 LPS</span>
 <span class="level-3">潜在三级 · JAC/BU 后再确认</span>
 </div>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
-<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>中线结构</th><th>周期结论</th><th>短线置信度</th><th>中线置信度</th><th>K线根数/要求</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>
+<table><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table>
 {performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>

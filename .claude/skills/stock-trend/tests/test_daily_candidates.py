@@ -2496,34 +2496,103 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("## 观察池", report)
         self.assertIn("质量分", report)
         self.assertIn("短线置信度", report)
-        self.assertIn("中线置信度", report)
-        self.assertIn("K线根数/要求", report)
-        self.assertIn("251/250", report)
+        removed_labels = (
+            "中线结构", "周期结论", "中线置信度", "K线根数/要求",
+            "中线吸筹，短线买点确认", "251/250",
+        )
+        for label in removed_labels:
+            self.assertNotIn(label, report)
         self.assertIn("数据维度覆盖率", report)
         self.assertIn("数据问题/异常及原因", report)
         self.assertIn("数据覆盖率55%，低于70%门槛", report)
         self.assertIn("排行 来源 realtime", report)
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", report)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", report)
-        self.assertIn("中线吸筹，短线买点确认", report)
         self.assertIn("小级别维科夫阶段", report)
         self.assertIn("阶段D：需求确认", report)
         self.assertIn("需求占优，回踩缩量后等待向上确认", report)
         self.assertIn("股市有风险，投资需谨慎", report)
 
-    def test_countertrend_wyckoff_candidate_is_observation_only(self):
+    def test_long_term_countertrend_does_not_block_short_term_recommendation(self):
         item = candidate("countertrend")
         item["wyckoff"]["alignment"] = {
+            "status": "countertrend",
             "label": "中线偏空，短线买点属逆势反弹",
             "recommendation_gate": "observation",
         }
-        buckets = classify_candidates([item], {
+        policy = {
             "mode": "actionable", "max_recommendations": 5,
             "max_portfolio_pct": 60, "reasons": [],
-        })
+        }
 
-        self.assertEqual(buckets["actionable"], [])
-        self.assertIn("wyckoff_countertrend", buckets["observation"][0]["observation_reasons"])
+        buckets = classify_candidates([item], policy)
+
+        self.assertEqual([row["code"] for row in buckets["actionable"]],
+                         ["countertrend"])
+        self.assertEqual(buckets["observation"], [])
+        self.assertNotIn(
+            "wyckoff_countertrend",
+            buckets["actionable"][0].get("observation_reasons", []),
+        )
+
+    def test_short_term_pending_states_remain_observation_only(self):
+        cases = (
+            ("retest_pending", "wyckoff_retest_pending"),
+            ("failed_breakout", "wyckoff_failed_breakout"),
+        )
+        policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "max_portfolio_pct": 60, "reasons": [],
+        }
+
+        for signal_status, reason in cases:
+            with self.subTest(signal_status=signal_status):
+                item = candidate(signal_status)
+                item["wyckoff"]["short_term"] = {
+                    "sub_phase": "lps",
+                    "signal_status": signal_status,
+                }
+                buckets = classify_candidates([item], policy)
+
+                self.assertEqual(buckets["actionable"], [])
+                self.assertEqual(
+                    [row["code"] for row in buckets["observation"]],
+                    [signal_status],
+                )
+                self.assertIn(
+                    reason,
+                    buckets["observation"][0]["observation_reasons"],
+                )
+
+    def test_short_term_pending_states_do_not_enter_confirmation_list(self):
+        cases = (
+            ("retest_pending", "wyckoff_retest_pending"),
+            ("failed_breakout", "wyckoff_failed_breakout"),
+        )
+        policy = {
+            "mode": "waiting_trigger", "max_recommendations": 2,
+            "max_portfolio_pct": 30, "reasons": [],
+        }
+
+        for signal_status, reason in cases:
+            with self.subTest(signal_status=signal_status):
+                item = candidate(signal_status)
+                item["wyckoff"]["short_term"] = {
+                    "sub_phase": "lps",
+                    "signal_status": signal_status,
+                }
+                buckets = classify_candidates([item], policy)
+
+                self.assertEqual(buckets["waiting_trigger"], [])
+                self.assertEqual(buckets["next_day_confirmation"], [])
+                self.assertEqual(
+                    [row["code"] for row in buckets["observation"]],
+                    [signal_status],
+                )
+                self.assertIn(
+                    reason,
+                    buckets["observation"][0]["observation_reasons"],
+                )
 
     def test_html_renders_all_buckets_and_full_disclaimer(self):
         policy = {
@@ -2560,8 +2629,12 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("排行 来源 realtime｜日期 2026-08-06｜质量 good", html)
         self.assertIn("成分 来源 cache｜日期 2026-08-05｜质量 degraded", html)
         self.assertIn("短线置信度", html)
-        self.assertIn("中线置信度", html)
-        self.assertIn("251/250", html)
+        removed_labels = (
+            "中线结构", "周期结论", "中线置信度", "K线根数/要求",
+            "中线吸筹，短线买点确认", "251/250",
+        )
+        for label in removed_labels:
+            self.assertNotIn(label, html)
         self.assertIn("小级别维科夫阶段", html)
         self.assertIn("阶段D：需求确认", html)
         self.assertIn("需求占优，回踩缩量后等待向上确认", html)
@@ -2763,7 +2836,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertNotIn(
             "<tr class='wyckoff-observation-buy-level-2'>", html)
 
-    def test_report_explains_unavailable_long_term_structure(self):
+    def test_report_omits_long_term_structure_fields(self):
         item = candidate("1")
         item["wyckoff"]["long_term"] = {
             "eligible": True,
@@ -2784,9 +2857,13 @@ class TestRecommendationPolicy(unittest.TestCase):
             buckets,
         )
 
-        self.assertIn(
-            "无法判定（250日内未识别出符合要求的长期箱体）", report)
-        self.assertIn("| 60% | - | 251/250 |", report)
+        removed_labels = (
+            "中线结构", "周期结论", "中线置信度", "K线根数/要求",
+            "无法判定（250日内未识别出符合要求的长期箱体）", "251/250",
+        )
+        for label in removed_labels:
+            self.assertNotIn(label, report)
+        self.assertIn("短线置信度", report)
 
     def test_final_column_explains_data_problem_and_cause(self):
         item = candidate("1", eligible=False)
