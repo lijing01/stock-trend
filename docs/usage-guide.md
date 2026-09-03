@@ -13,6 +13,7 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 - [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
 - [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
 - [3. 市场主线 `/market-theme`](#3-市场主线-market-theme)
+- [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
 - [4. 涨停热力 `/ths-theme`](#4-涨停热力-ths-theme)
 - [5. 龙虎榜跟踪 `/lhb-tracker`](#5-龙虎榜跟踪-lhb-tracker)
 - [6. 周主线报告 `/weekly`](#6-周主线报告-weekly)
@@ -123,6 +124,36 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [
 | 新兴主题 | 40-50 | 新冒头方向 |
 | 脉冲热点 | — | 今日热但持续<50，追高警惕 |
 | 退潮板块 | <40 | 降温中 |
+
+---
+
+## 3.1 收盘板块快照（无 Tushare）
+
+没有 Tushare 权限时，持续性历史只接受东方财富 `push2` 的行业和概念
+两类完整排行。AKShare 同花顺行业摘要、东方财富 BK 历史 K 线和旧 Top-30
+记录只能作为旁证，不能补齐全量历史覆盖，也不能把当前成分反推成过去的排行。
+
+建议每个交易日收盘后单独运行一次快照任务，不需要先跑耗时的个股候选扫描：
+
+```bash
+# 检查已有完整覆盖：不联网、不写入
+python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --status --json
+
+# 15:10 后采集行业 + 概念完整截面
+python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --json
+
+# 只拉取并验证，不写缓存或历史
+python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --dry-run --json
+```
+
+`status=saved` 表示候选板块完整快照已写入；`status=validated` 表示
+dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
+均不会新增覆盖天数。`--date YYYY-MM-DD` 只能断言当天交易日，不能用于
+历史回填。重复运行同一天只更新该日期记录，不增加历史天数。
+
+首次启用通常需要连续积累 2–3 个有效交易日；在此之前报告继续显示
+“板块历史快照不足，尚不能验证持续性”是预期行为。失败日保留缺口，下一
+交易日继续采集；本流程不自动安装 cron 或 launchd。
 
 ---
 

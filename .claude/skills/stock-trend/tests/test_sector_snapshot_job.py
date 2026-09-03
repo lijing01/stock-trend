@@ -205,6 +205,27 @@ class TestSectorSnapshotJob(unittest.TestCase):
         payload = json.loads(rendered)
         self.assertEqual(payload["status"], "error")
 
+    def test_status_reports_coverage_and_next_requirement(self):
+        with patch.object(
+                job, "load_candidate_sector_history",
+                return_value={
+                    "2026-09-02": {
+                        "complete": True, "quality": "good",
+                        "sectors": [{}],
+                    },
+                }) as load_history:
+            result = job.snapshot_status(
+                as_of_date="2026-09-03", days=10)
+
+        self.assertEqual(result, {
+            "as_of_date": "2026-09-03",
+            "coverage_days": 1,
+            "minimum_days": 2,
+            "days_needed": 1,
+            "classification_ready": False,
+        })
+        load_history.assert_called_once_with(days=10)
+
 
 if __name__ == "__main__":
     unittest.main()
