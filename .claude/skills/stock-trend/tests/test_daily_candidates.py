@@ -1338,6 +1338,31 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(
             classify_candidates([unverified], strong_policy)["actionable"], [])
 
+    def test_outputs_keep_quality_score_and_expose_execution_priority(self):
+        item = _set_buy_level(
+            candidate("l2", adjusted_score=78.0), "lps")
+        dc.apply_buy_point_priority(item)
+        policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "reasons": [],
+        }
+        buckets = classify_candidates([item], policy)
+
+        payload = build_json_output([item], ["BK1"], 0.1, policy, buckets)
+        row = payload["candidates"][0]
+        self.assertEqual(row["quality_adjusted_score"], 78.0)
+        self.assertEqual(row["buy_point_level"], 2)
+        self.assertEqual(row["buy_point_priority_bonus"], 3.0)
+        self.assertEqual(row["execution_priority_score"], 81.0)
+
+        markdown = generate_report([item], ["BK1"], 0.1, policy, buckets)
+        html = dc._generate_html(
+            [item], ["BK1"], 0.1, "20260903-170000", policy, buckets)
+        self.assertIn("优先分", markdown)
+        self.assertIn("81.0", markdown)
+        self.assertIn("优先分", html)
+        self.assertIn("质量分 + 严格买点奖励", html)
+
     def test_pick_hot_sectors_uses_absolute_threshold(self):
         rankings = {"meta": {"complete": True}, "sectors": [
             {"code": "BK1", "name": "弱中最强", "change_pct": -1.0,
