@@ -51,7 +51,6 @@ from core.candidate_trade_plan import (
 from analysis.wyckoff import (
     analyze_kline_dict,
     BUY_PHASES, BUY_SUB_PHASES, build_period_alignment, is_buy_signal, normalize_score_100,
-    SUB_LPS, SUB_PRE_MARKUP, SUB_JAC,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -1696,20 +1695,11 @@ def wyckoff_gate_pass(analysis):
 
 
 def score_wyckoff(analysis):
-    """Wyckoff 100-分制 dimension from analysis dict.
-
-    Base from wyckoff_score [-3, +3] normalized to [0,100]; small bonus for
-    late-accumulation buy points (LPS/PRE_MARKUP/JAC) with high confidence.
-    """
+    """Return structural Wyckoff strength without execution-level bonuses."""
     if not analysis:
         return 50.0
     score = _safe_float(analysis.get("wyckoff_score"), 0.0)
-    s = normalize_wyckoff_score(score)
-    conf = _safe_float(analysis.get("phase", {}).get("confidence"))
-    sub = analysis.get("phase", {}).get("primary_sub_phase", "")
-    if sub in (SUB_LPS, SUB_PRE_MARKUP, SUB_JAC) and conf >= 0.5:
-        s = min(100.0, s + 5.0)
-    return s
+    return normalize_wyckoff_score(score)
 
 
 def rank_capital_enrichment_candidates(candidates, capital_data=None, top=30,

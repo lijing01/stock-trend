@@ -1089,13 +1089,23 @@ class TestGatePass(unittest.TestCase):
 
 
 class TestScoreWyckoff(unittest.TestCase):
-    def test_base_normalized(self):
-        self.assertAlmostEqual(sc.score_wyckoff(_wk(sub="lps", score=2.0, conf=0.6)),
-                               88.3333, places=3)  # 83.33 + 5 bonus
-        self.assertAlmostEqual(sc.score_wyckoff(_wk(sub="lps", score=2.0, conf=0.4)),
-                               83.3333, places=3)  # conf<0.5 → no bonus
-        self.assertAlmostEqual(sc.score_wyckoff(_wk(phase="distribution", sub="lpsy", score=-2.0, conf=0.7)),
-                               16.6667, places=3)
+    def test_base_normalized_does_not_embed_buy_level_bonus(self):
+        self.assertAlmostEqual(
+            sc.score_wyckoff(_wk(sub="lps", score=2.0, conf=0.6)),
+            83.3333,
+            places=3,
+        )
+        self.assertAlmostEqual(
+            sc.score_wyckoff(_wk(sub="jac", score=2.0, conf=0.9)),
+            83.3333,
+            places=3,
+        )
+        self.assertAlmostEqual(
+            sc.score_wyckoff(
+                _wk(phase="distribution", sub="lpsy", score=-2.0, conf=0.7)),
+            16.6667,
+            places=3,
+        )
 
     def test_none_neutral(self):
         self.assertEqual(sc.score_wyckoff(None), 50.0)
@@ -1355,7 +1365,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
         self.assertEqual([s["code"] for s in scored], ["600001"])
         item = scored[0]
-        self.assertAlmostEqual(item["dimensions"]["wyckoff"], 88.3, delta=0.1)
+        self.assertAlmostEqual(item["dimensions"]["wyckoff"], 83.3, delta=0.1)
         self.assertEqual(item["wyckoff"]["sub_phase"], "子阶段:lps")
         self.assertEqual(item["wyckoff"]["confidence"], 0.6)
         self.assertEqual(item["wyckoff"]["alignment"]["recommendation_gate"], "actionable")
