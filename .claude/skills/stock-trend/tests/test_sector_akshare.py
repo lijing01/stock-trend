@@ -171,21 +171,117 @@ def test_ths_constituent_adapter_uses_sector_name_and_isolated_cache():
     with tempfile.TemporaryDirectory() as tmpdir, \
             patch.object(sector_akshare, "CACHE_DIR", Path(tmpdir)), \
             patch.object(sector_akshare, "HAS_AKSHARE", True), \
-            patch.object(sector_akshare.ak,
-                         "stock_board_industry_cons_em",
-                         return_value=constituents) as fetch:
+            patch.object(sector_akshare, "_fetch_named_em_stocks",
+                         return_value=([
+                             sector_akshare._normalise_constituent_row(row)
+                             for _, row in constituents.iterrows()
+                         ], 2, "BK1259")) as fetch:
         wrapped = get_sector_stocks_akshare(
             "养殖业", "industry", top_n=1, as_of_date="2026-09-04",
             with_evidence=True)
         cached = get_sector_stocks_akshare_cached(
             "养殖业", "industry", top_n=1)
 
-    fetch.assert_called_once_with(symbol="养殖业")
+    fetch.assert_called_once_with("养殖业", "industry", 1, 15, 1, None)
     stock = wrapped["payload"][0]
     assert stock["code"] == "600001"
     assert stock["market_cap"] is None
-    assert stock["membership_provider"] == "akshare"
-    assert stock["membership_provider_code"] == "养殖业"
-    assert stock["membership_mapping"] == "ths_name_live"
+    assert stock["membership_provider"] == "eastmoney"
+    assert stock["membership_provider_code"] == "BK1259"
+    assert stock["membership_mapping"] == "em_name_live"
     assert stock["membership_data_date"] == "2026-09-04"
     assert cached[0]["membership_source"] == "cache"
+    assert cached[0]["membership_provider"] == "eastmoney"
+    assert cached[0]["membership_provider_code"] == "BK1259"
+
+
+def test_named_membership_uses_rotating_hosts_and_keyed_quote_fields():
+    from fetchers.sector_akshare import _fetch_named_em_stocks
+    from core.source_health import source_result, live_attempt
+
+    payloads = [
+        {"total": 101, "diff": [{"f12": "BK0001", "f14": "其他"}]},
+        {"total": 101, "diff": [{"f12": "BK1259", "f14": "养殖业"}]},
+        {"diff": [{"f14": "测试股份", "f20": 8e9, "f12": "600001",
+                   "f6": 2e8, "f3": 1.2, "f9": 18.5}]},
+    ]
+    responses = [source_result({"rc": 0, "data": data}, live_attempt(
+        attempted=True, provider_attempts=1)) for data in payloads]
+    with patch("fetchers.sector_data._fetch_json", side_effect=responses) as fetch:
+        stocks, attempts, code = _fetch_named_em_stocks(
+            "养殖业", "industry", 25, 3, 1, 123.0)
+    assert code == "BK1259" and attempts == 3
+    assert stocks[0]["amount"] == 2e8
+    assert stocks[0]["pe"] == 18.5
+    assert stocks[0]["market_cap"] == 8e9
+    assert "t:2" in fetch.call_args_list[0].args[0]
+    assert "pn=2" in fetch.call_args_list[1].args[0]
+    assert "fs=b:BK1259" in fetch.call_args_list[2].args[0]
+    for call in fetch.call_args_list:
+        assert call.kwargs == dict(timeout=3, retries=1, deadline=123.0,
+                                   with_evidence=True)
+
+
+def test_named_membership_missing_mapping_does_not_guess_bk_code():
+    from fetchers.sector_akshare import (
+        _fetch_named_em_stocks, SectorMembershipFetchError,
+    )
+    from core.source_health import source_result, live_attempt
+    response = source_result({"rc": 0, "data": {
+        "total": 1, "diff": [{"f12": "BK1259", "f14": "养殖"}],
+    }}, live_attempt(attempted=True, provider_attempts=1))
+    with patch("fetchers.sector_data._fetch_json", return_value=response) as fetch:
+        try:
+            _fetch_named_em_stocks("养殖业", "concept", 25, 3, 1, None)
+        except SectorMembershipFetchError as exc:
+            assert exc.reason == "sector_mapping_missing"
+            assert exc.provider_attempts == 1
+        else:
+            raise AssertionError("Must reject a non-exact mapping")
+    assert fetch.call_count == 1
+    assert "t:3" in fetch.call_args.args[0]
+
+
+def test_membership_network_failure_retains_old_cache_and_diagnostics():
+    from fetchers import sector_akshare
+    from core.source_health import classify_failure
+    error = "ProxyError: Unable to connect to proxy: RemoteDisconnected"
+    assert classify_failure(error) == "proxy_error"
+    assert classify_failure("Remote end closed connection without response") == "connection_error"
+    assert classify_failure("[Errno 1] Operation not permitted") == "permission_denied"
+    with tempfile.TemporaryDirectory() as tmpdir, \
+            patch.object(sector_akshare, "CACHE_DIR", Path(tmpdir)), \
+            patch.object(sector_akshare, "_fetch_named_em_stocks",
+                         side_effect=sector_akshare.SectorMembershipFetchError(
+                             error, 2, "proxy_error")):
+        sector_akshare._save_ths_stock_cache(
+            "养殖业", "industry", [{"code": "600001"}], "2026-08-19")
+        result = get_sector_stocks_akshare(
+            "养殖业", as_of_date="2026-09-04", with_evidence=True)
+    assert result["payload"][0]["membership_quality"] == "degraded"
+    assert result["payload"][0]["membership_data_date"] == "2026-08-19"
+    assert result["live_attempt"]["provider_attempts"] == 2
+    assert result["live_attempt"]["reason"] == "proxy_error"
+    assert result["live_attempt"]["failure_detail"] == error
+
+
+def test_unmapped_sector_does_not_circuit_break_other_sectors():
+    from core.source_health import RunSourceHealth, live_attempt
+
+    health = RunSourceHealth()
+    for _ in range(10):
+        permit = health.try_acquire_live_permit("sector_membership")
+        assert permit is not None
+        health.mark_started(permit)
+        health.complete_failure(permit, live_attempt(
+            attempted=True, provider_attempts=1, reason="sector_mapping_missing"))
+    state = health.snapshot()["sector_membership"]
+    assert state["failures"] == 10
+    assert state["circuit_breaks"] == 0
+    assert state["state"] == "healthy"
+    for _ in range(8):
+        permit = health.try_acquire_live_permit("sector_membership")
+        health.mark_started(permit)
+        health.complete_failure(permit, live_attempt(
+            attempted=True, provider_attempts=1, reason="proxy_error"))
+    assert health.unavailable("sector_membership")

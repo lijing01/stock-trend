@@ -368,7 +368,8 @@ def _tag_ths_stocks(stocks: list[dict], *, source: str, data_date: str,
 
 
 def _save_ths_stock_cache(sector_name: str, sector_type: str,
-                          stocks: list[dict], data_date: str) -> None:
+                          stocks: list[dict], data_date: str,
+                          membership_provider="akshare", provider_code="") -> None:
     path = _ths_stock_cache_path(sector_name, sector_type)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now().isoformat()
@@ -377,6 +378,8 @@ def _save_ths_stock_cache(sector_name: str, sector_type: str,
         "cached_at": now,
         "data_date": data_date or now[:10],
         "provider": "akshare",
+        "membership_provider": membership_provider,
+        "membership_provider_code": provider_code or sector_name,
         "sector_name": sector_name,
         "sector_type": sector_type,
         "stocks": stocks,
@@ -468,6 +471,74 @@ def _evidence(*, attempted: bool, provider_attempts: int = 0,
     }
 
 
+def _fetch_named_em_stocks(sector_name, sector_type, top_n, timeout,
+                           retries, deadline):
+    """Resolve names within their type using the bounded EM host rotation.
+
+    AKShare's name-based membership API uses fixed 17/29.push2 hosts. Both
+    can fail while the project's alternate hosts are healthy. Parse fields
+    by key here, preserving market cap and avoiding positional schema drift.
+    """
+    from fetchers.sector_data import _fetch_json, _check_result
+
+    attempts = 0
+
+    def fetch(query):
+        nonlocal attempts
+        try:
+            wrapped = _fetch_json(
+                "https://push2.eastmoney.com/api/qt/clist/get?" + query,
+                timeout=timeout, retries=retries, deadline=deadline,
+                with_evidence=True)
+            attempts += wrapped["live_attempt"]["provider_attempts"]
+            return _check_result(wrapped["payload"])
+        except Exception as exc:
+            attempts += getattr(exc, "provider_attempts", 0)
+            raise SectorMembershipFetchError(
+                str(exc), attempts,
+                getattr(exc, "reason", "") or classify_failure(exc)) from exc
+
+    kind = "3" if sector_type == "concept" else "2"
+    page = 1
+    code = ""
+    while not code:
+        data = fetch(
+            f"fs=m:90+t:{kind}&fields=f12,f14&pn={page}&pz=100"
+            "&po=0&np=1&fltt=2&fid=f12")
+        rows = data.get("diff") or []
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        matches = {str(row.get("f12", "")) for row in rows
+                   if row.get("f14") == sector_name}
+        matches = {value for value in matches
+                   if value.startswith("BK") and value[2:].isdigit()}
+        if len(matches) > 1:
+            raise SectorMembershipFetchError(
+                f"Ambiguous {sector_type} sector name: {sector_name}",
+                attempts, "sector_mapping_ambiguous")
+        if matches:
+            code = matches.pop()
+            break
+        if not rows or page * 100 >= int(data.get("total", len(rows))):
+            raise SectorMembershipFetchError(
+                f"No exact East Money {sector_type} name: {sector_name}",
+                attempts, "sector_mapping_missing")
+        page += 1
+
+    data = fetch(
+        f"fs=b:{code}+f:!50&fields=f12,f14,f3,f6,f20,f9"
+        f"&pn=1&pz={top_n}&po=1&np=1&fltt=2&fid=f3")
+    rows = data.get("diff") or []
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+    stocks = [_normalise_constituent_row({
+        "代码": row.get("f12"), "名称": row.get("f14"),
+        "涨跌幅": row.get("f3"), "成交额": row.get("f6"),
+        "总市值": row.get("f20"), "市盈率-动态": row.get("f9"),
+    }) for row in rows]
+    return [stock for stock in stocks if stock["code"]], attempts, code
+
+
 def get_sector_stocks_akshare(
         sector_name: str, sector_type: str = "industry", top_n: int = 50,
         timeout: int = 15, retries: int = 1, with_evidence: bool = False,
@@ -475,16 +546,17 @@ def get_sector_stocks_akshare(
         cache_only: bool = False, fallback_reason: str = "") -> list[dict]:
     """Fetch constituents by provider/name, never by THS display ordinal.
 
-    AKShare's ``*_cons_em`` endpoints accept a sector name and return the
-    constituent list.  This is intentionally separate from
-    ``sector_data.get_sector_stocks``: an ordinal such as ``"1"`` must never
-    reach East Money's ``fs=b:...`` API as if it were a BK code.
+    Retains the public adapter/cache contract, but uses the project's bounded
+    EM node rotation instead of AKShare's fixed membership hosts. An ordinal
+    such as ``"1"`` must never reach ``fs=b:...`` as if it were a BK code.
     """
-    del timeout, retries
     sector_name = str(sector_name or "").strip()
     sector_type = "concept" if sector_type == "concept" else "industry"
+    failure_detail = ""
 
     def finish(stocks, attempt):
+        if failure_detail:
+            attempt["failure_detail"] = failure_detail
         payload = stocks[:top_n] if stocks else []
         return source_result(payload, attempt) if with_evidence else payload
 
@@ -497,7 +569,9 @@ def get_sector_stocks_akshare(
                 data_date=str(payload.get("data_date", "")),
                 cached_at=str(payload.get("cached_at", "")),
                 fallback_reason=fallback_reason or "cache_only",
-                mapping="ths_name_cache", provider_code=sector_name)
+                membership_provider=payload.get("membership_provider", "akshare"),
+                provider_code=payload.get("membership_provider_code", sector_name),
+                mapping="ths_name_cache")
             return finish(tagged, _evidence(
                 attempted=False, cache_used=True, stale=True,
                 reason=fallback_reason or "cache_only"))
@@ -506,48 +580,35 @@ def get_sector_stocks_akshare(
 
     provider_attempts = 0
     failure_reason = ""
+    provider_code = ""
     stocks = []
     if deadline is not None and deadline <= time.monotonic():
         failure_reason = "timeout"
-    elif not HAS_AKSHARE:
-        failure_reason = "provider_unavailable"
     else:
-        function_name = (
-            "stock_board_concept_cons_em"
-            if sector_type == "concept" else "stock_board_industry_cons_em")
-        function = getattr(ak, function_name, None)
-        if function is None:
-            failure_reason = "provider_unavailable"
-        else:
-            try:
-                provider_attempts = 1
-                frame = function(symbol=sector_name)
-                rows = [] if frame is None else [
-                    _normalise_constituent_row(row)
-                    for _, row in frame.iterrows()
-                ]
-                stocks = [row for row in rows if row.get("code")]
-                if not stocks:
-                    failure_reason = "empty"
-            except Exception as exc:
-                failure_reason = (
-                    classify_failure(exc) if classify_failure is not None
-                    else "unknown")
-                print(
-                    f"  [AKShare] Warning: {sector_name}成分股失败: {exc}",
-                    file=sys.stderr)
+        try:
+            stocks, provider_attempts, provider_code = _fetch_named_em_stocks(
+                sector_name, sector_type, top_n, timeout, retries, deadline)
+            if not stocks:
+                failure_reason = "empty"
+        except Exception as exc:
+            provider_attempts = getattr(exc, "provider_attempts", 0)
+            failure_reason = getattr(exc, "reason", "") or classify_failure(exc)
+            failure_detail = str(exc)
+            print(f"  [EM] Warning: {sector_name}成分股失败: {exc}",
+                  file=sys.stderr)
 
     if stocks:
         data_date = as_of_date or datetime.now().strftime("%Y-%m-%d")
         try:
             _save_ths_stock_cache(
-                sector_name, sector_type, stocks[:top_n], data_date)
+                sector_name, sector_type, stocks[:top_n], data_date,
+                membership_provider="eastmoney", provider_code=provider_code)
         except OSError as exc:
             print(f"  Warning: 同花顺板块缓存保存失败: {exc}", file=sys.stderr)
         tagged = _tag_ths_stocks(
             stocks[:top_n], source="realtime", data_date=data_date,
-            provider_attempts=provider_attempts, mapping="ths_name_live",
-            provider_code=sector_name)
+            provider_attempts=provider_attempts, mapping="em_name_live",
+            membership_provider="eastmoney", provider_code=provider_code)
         return finish(tagged, _evidence(
             attempted=True, provider_attempts=provider_attempts))
 
@@ -560,7 +621,9 @@ def get_sector_stocks_akshare(
             cached_at=str(payload.get("cached_at", "")),
             fallback_reason=failure_reason or "cache_fallback",
             provider_attempts=provider_attempts,
-            mapping="ths_name_cache", provider_code=sector_name)
+            membership_provider=payload.get("membership_provider", "akshare"),
+            provider_code=payload.get("membership_provider_code", sector_name),
+            mapping="ths_name_cache")
         return finish(tagged, _evidence(
             attempted=provider_attempts > 0,
             provider_attempts=provider_attempts,
@@ -579,7 +642,7 @@ def get_sector_stocks_akshare(
 
     reason = failure_reason or "empty"
     raise SectorMembershipFetchError(
-        f"获取板块{sector_name}成分股失败: {reason}; "
+        f"获取板块{sector_name}成分股失败: {reason}; {failure_detail}; "
         "无有效成分股且无可用同名或历史快照",
         provider_attempts=provider_attempts, reason=reason)
 
@@ -596,7 +659,9 @@ def get_sector_stocks_akshare_cached(
             data_date=str(payload.get("data_date", "")),
             cached_at=str(payload.get("cached_at", "")),
             fallback_reason=fallback_reason,
-            mapping="ths_name_cache", provider_code=str(sector_name or ""))
+            membership_provider=payload.get("membership_provider", "akshare"),
+            provider_code=payload.get("membership_provider_code", str(sector_name or "")),
+            mapping="ths_name_cache")
     return _historical_em_cache(
         str(sector_name or "").strip(), sector_type, top_n,
         fallback_reason, 0)

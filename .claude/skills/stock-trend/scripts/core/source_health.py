@@ -63,6 +63,16 @@ def classify_failure(error: BaseException | str | None) -> str:
         return "timeout"
     message = str(error or "").lower()
     if any(text in message for text in (
+            "operation not permitted", "permission denied")):
+        return "permission_denied"
+    if any(text in message for text in (
+            "proxyerror", "unable to connect to proxy", "proxy connection")):
+        return "proxy_error"
+    if any(text in message for text in (
+            "remotedisconnected", "remote end closed connection",
+            "connection aborted", "connection reset", "connection refused")):
+        return "connection_error"
+    if any(text in message for text in (
             "name or service not known", "temporary failure in name",
             "nodename nor servname", "getaddrinfo", "dns")):
         return "dns"
@@ -258,7 +268,13 @@ class RunSourceHealth:
                 crossed_threshold = (
                     state["consecutive_live_failures"]
                     == self.failure_threshold)
-                if state["consecutive_live_failures"] >= self.hard_failure_threshold:
+                if (token.source == "sector_membership" and reason in {
+                        "sector_mapping_missing", "sector_mapping_ambiguous"}):
+                    # A successful directory lookup without an exact match is
+                    # an item-level taxonomy issue, not a provider outage.
+                    state["consecutive_live_failures"] = 0
+                    state["state"] = "healthy"
+                elif state["consecutive_live_failures"] >= self.hard_failure_threshold:
                     if state["state"] != "unavailable":
                         state["circuit_breaks"] += 1
                         self._events.append({
