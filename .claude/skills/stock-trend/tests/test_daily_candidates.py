@@ -857,6 +857,15 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         self.assertEqual(result, "2026-08-07")
 
+    def test_weekend_prefers_newer_market_review_close_over_stale_snapshot(self):
+        result = resolve_recommendation_date(
+            now=datetime(2026, 9, 5, 10, 0),
+            regime_date="2026-09-04",
+            last_trading_date="2026-09-03",
+            is_trading_day=False,
+        )
+        self.assertEqual(result, "2026-09-04")
+
     def test_calendar_fallback_handles_first_day_of_month(self):
         from fetchers import sector_data
 

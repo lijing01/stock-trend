@@ -605,8 +605,22 @@ def resolve_recommendation_date(now=None, regime_date="", last_trading_date="",
     """Resolve the closing-data date that a recommendation may rely on."""
     now = now or datetime.now()
     today = now.strftime("%Y-%m-%d")
-    if is_trading_day is False and last_trading_date:
-        return last_trading_date
+    if is_trading_day is False:
+        # On a closed day the sector snapshot can lag the just-finished
+        # market review.  Use the newest locally verified closing date from
+        # either source, but never allow a future date to become evidence.
+        # This keeps weekend/holiday reports anchored to the latest session
+        # instead of incorrectly downgrading them as ``regime_stale``.
+        closing_dates = []
+        for value in (last_trading_date, regime_date):
+            try:
+                parsed = datetime.strptime(value, "%Y-%m-%d")
+            except (TypeError, ValueError):
+                continue
+            if parsed.strftime("%Y-%m-%d") <= today:
+                closing_dates.append(parsed.strftime("%Y-%m-%d"))
+        if closing_dates:
+            return max(closing_dates)
     # Without a trading calendar, only the immediately preceding weekday is
     # safe to treat as the last close. Holiday uncertainty therefore degrades
     # to observation through the later K-line/regime date checks.
