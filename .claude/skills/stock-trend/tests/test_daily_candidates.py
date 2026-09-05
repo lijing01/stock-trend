@@ -399,6 +399,55 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         self.assertEqual(payload["data_date"], "2026-08-06")
 
+    def test_akshare_rankings_cache_is_isolated_from_em_cache(self):
+        from fetchers import sector_data
+
+        rankings = {
+            "meta": {
+                "complete": True, "source": "akshare", "provider": "ths",
+            },
+            "sectors": [{"code": "1", "name": "养殖业",
+                         "up_count": 1, "down_count": 0}],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+                patch.object(sector_data, "CACHE_FILE",
+                             Path(tmpdir) / "rankings.json"):
+            sector_data.save_rankings_cache(
+                rankings, data_date="2026-08-06")
+            isolated = Path(tmpdir) / "sector_rankings_akshare_cache.json"
+
+            self.assertTrue(isolated.exists())
+            self.assertFalse(sector_data.CACHE_FILE.exists())
+
+    def test_legacy_akshare_cache_is_read_only_as_akshare_fallback(self):
+        from fetchers import sector_data
+
+        payload = {
+            "cached_at": datetime.now().isoformat(),
+            "data_date": "2026-08-06",
+            "rankings": {
+                "meta": {"complete": True, "source": "akshare"},
+                "sectors": [{"code": str(index), "name": f"行业{index}",
+                             "up_count": 1, "down_count": 0}
+                            for index in range(5)],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sector_data, "CACHE_DIR", Path(tmpdir)), \
+                patch.object(sector_data, "CACHE_FILE",
+                             Path(tmpdir) / "rankings.json"):
+            sector_data.CACHE_FILE.write_text(
+                json.dumps(payload), encoding="utf-8")
+
+            self.assertIsNone(
+                sector_data.load_rankings_cache_full(provider="eastmoney"))
+            recovered = sector_data.load_rankings_cache_full(
+                provider="akshare")
+
+        self.assertEqual(
+            recovered["rankings"]["meta"]["source"], "akshare")
+
     def test_rankings_cache_rejects_unverified_date(self):
         from fetchers import sector_data
 

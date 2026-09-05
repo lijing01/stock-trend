@@ -1,13 +1,19 @@
 """Test sector_akshare.py — AKShare 备选数据源."""
 
 import sys
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from fetchers.sector_akshare import (
     get_sector_rankings_akshare,
     get_sector_list_akshare,
+    get_sector_stocks_akshare,
+    get_sector_stocks_akshare_cached,
     HAS_AKSHARE,
 )
 
@@ -117,3 +123,69 @@ def test_real_time_data_freshness():
         or (s.get("down_count", 0) or 0) > 0
     ]
     assert len(active) >= 5, f"Expected >=5 active sectors, got {len(active)}"
+
+
+def test_ths_ranking_keeps_display_ordinal_out_of_provider_identity():
+    """THS industry 序号 must not be treated as an EM BK code."""
+    from fetchers import sector_akshare
+
+    industries = pd.DataFrame([{
+        "序号": 1,
+        "板块": "养殖业",
+        "涨跌幅": 1.0,
+        "总成交额": 2.0,
+        "净流入": 0.5,
+        "上涨家数": 4,
+        "下跌家数": 1,
+    }])
+    concepts = pd.DataFrame([{"name": "农业", "code": "885001"}])
+    with patch.object(sector_akshare, "HAS_AKSHARE", True), \
+            patch.object(sector_akshare.ak,
+                         "stock_board_industry_summary_ths",
+                         return_value=industries), \
+            patch.object(sector_akshare.ak,
+                         "stock_board_concept_name_ths",
+                         return_value=concepts):
+        result = sector_akshare.get_sector_rankings_akshare()
+
+    industry = next(s for s in result["sectors"] if s["type"] == "industry")
+    assert industry["code"] == "ths:industry:养殖业"
+    assert industry["provider"] == "ths"
+    assert industry["provider_code"] == "1"
+    assert industry["expand_symbol"] == "养殖业"
+    assert industry["sector_id"] == "ths:industry:养殖业"
+    assert result["meta"]["provider"] == "ths"
+
+
+def test_ths_constituent_adapter_uses_sector_name_and_isolated_cache():
+    """Constituents are fetched by name and written to the THS cache only."""
+    from fetchers import sector_akshare
+
+    constituents = pd.DataFrame([{
+        "代码": "600001",
+        "名称": "测试股份",
+        "涨跌幅": 2.5,
+        "成交额": 123000000,
+        "市盈率-动态": 18.0,
+    }])
+    with tempfile.TemporaryDirectory() as tmpdir, \
+            patch.object(sector_akshare, "CACHE_DIR", Path(tmpdir)), \
+            patch.object(sector_akshare, "HAS_AKSHARE", True), \
+            patch.object(sector_akshare.ak,
+                         "stock_board_industry_cons_em",
+                         return_value=constituents) as fetch:
+        wrapped = get_sector_stocks_akshare(
+            "养殖业", "industry", top_n=1, as_of_date="2026-09-04",
+            with_evidence=True)
+        cached = get_sector_stocks_akshare_cached(
+            "养殖业", "industry", top_n=1)
+
+    fetch.assert_called_once_with(symbol="养殖业")
+    stock = wrapped["payload"][0]
+    assert stock["code"] == "600001"
+    assert stock["market_cap"] is None
+    assert stock["membership_provider"] == "akshare"
+    assert stock["membership_provider_code"] == "养殖业"
+    assert stock["membership_mapping"] == "ths_name_live"
+    assert stock["membership_data_date"] == "2026-09-04"
+    assert cached[0]["membership_source"] == "cache"

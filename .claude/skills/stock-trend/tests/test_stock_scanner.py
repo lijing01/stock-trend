@@ -541,6 +541,39 @@ class TestMetadata(unittest.TestCase):
 
 
 class TestGatherPerformance(unittest.TestCase):
+    def test_ths_sector_context_dispatches_by_name_not_ordinal(self):
+        stocks = [{
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+        }]
+        calls = []
+
+        def fake_ths(name, sector_type, **kwargs):
+            calls.append((name, sector_type, kwargs))
+            return [{**stock, "membership_provider": "akshare",
+                     "membership_provider_code": name,
+                     "membership_mapping": "ths_name_live"}
+                    for stock in stocks]
+
+        context = {
+            "1": {
+                "name": "养殖业", "provider": "ths",
+                "provider_code": "养殖业", "expand_symbol": "养殖业",
+                "type": "industry", "hot_score": 88,
+            }
+        }
+        with patch.object(sd, "get_sector_stocks") as em, \
+                patch("fetchers.sector_akshare.get_sector_stocks_akshare",
+                      side_effect=fake_ths):
+            result = sc.gather_candidates(
+                ["1"], sector_context=context, max_workers=1)
+
+        em.assert_not_called()
+        self.assertEqual(calls[0][0:2], ("养殖业", "industry"))
+        self.assertEqual(result["candidates"][0]["sector_code"], "1")
+        self.assertEqual(
+            result["candidates"][0]["membership_provider"], "akshare")
+
     def test_supplied_sector_context_skips_ranking_request(self):
         stocks = [{
             "code": "600001", "name": "测试股份", "market_cap": 1e10,

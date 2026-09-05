@@ -163,6 +163,12 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_enrichment_population", "capital_initial_priority_count",
     "capital_topup_selected_count", "capital_topup_live_started",
     "capital_topup_valid_count", "capital_topup_skipped_deadline",
+    "sector_membership_queued_count", "sector_membership_attempted_count",
+    "sector_membership_success_count", "sector_membership_failure_count",
+    "sector_membership_cache_count", "sector_membership_live_success_count",
+    "sector_membership_name_provider_count",
+    "sector_membership_mapping_count", "market_cap_enriched_count",
+    "market_cap_missing_count",
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
@@ -399,6 +405,17 @@ def _performance_markdown(performance):
             if performance.get('sector_expansion_truncated') else ""
         ),
         "",
+        "**板块成分展开审计**: "
+        f"队列 {performance.get('sector_membership_queued_count', 0)} → "
+        f"调用 {performance.get('sector_membership_attempted_count', 0)} → "
+        f"成功 {performance.get('sector_membership_success_count', 0)} → "
+        f"失败 {performance.get('sector_membership_failure_count', 0)} | "
+        f"缓存成功 {performance.get('sector_membership_cache_count', 0)} | "
+        f"按名称提供方 {performance.get('sector_membership_name_provider_count', 0)} | "
+        f"历史映射 {performance.get('sector_membership_mapping_count', 0)} | "
+        f"市值补全 {performance.get('market_cap_enriched_count', 0)} | "
+        f"市值仍缺失 {performance.get('market_cap_missing_count', 0)}",
+        "",
         "**股票漏斗**: "
         f"批次 {performance.get('batch_count', 0)} → "
         f"原始 {performance.get('raw_candidate_count', 0)} → "
@@ -486,6 +503,17 @@ def _performance_html(performance):
         f"rejected={performance.get('data_rejected_count', 0)}→"
         f"actionable={performance.get('actionable_count', 0)}"
     )
+    membership_text = (
+        f"membership_queue={performance.get('sector_membership_queued_count', 0)} "
+        f"attempted={performance.get('sector_membership_attempted_count', 0)} "
+        f"success={performance.get('sector_membership_success_count', 0)} "
+        f"failed={performance.get('sector_membership_failure_count', 0)} "
+        f"cache={performance.get('sector_membership_cache_count', 0)} "
+        f"name_provider={performance.get('sector_membership_name_provider_count', 0)} "
+        f"mapping={performance.get('sector_membership_mapping_count', 0)} "
+        f"market_cap_enriched={performance.get('market_cap_enriched_count', 0)} "
+        f"market_cap_missing={performance.get('market_cap_missing_count', 0)}"
+    )
     capital_text = (
         f"capital_priority={performance.get('capital_priority_count', 0)} "
         f"capital_initial_priority={performance.get('capital_initial_priority_count', 0)} "
@@ -518,6 +546,7 @@ def _performance_html(performance):
         "<section><h2 style='font-size:18px;margin:18px 0 8px'>"
         "性能与数据源审计</h2>"
         f"<p class='dt'>{phase_text}</p><p class='dt'>{funnel_text}</p>"
+        f"<p class='dt'>{escape(membership_text)}</p>"
         f"<p class='dt'>{escape(coverage_text)}</p>"
         f"<p class='dt'>{escape(capital_text)}</p>"
         f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
@@ -1175,6 +1204,10 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             source_health.release_unstarted(ranking_token, "live_deadline")
     ranking_meta = {
         "source": live_meta.get("source", "realtime"),
+        "provider": live_meta.get("provider") or (
+            "eastmoney" if live_meta.get("source", "realtime")
+            in ("eastmoney", "realtime") else live_meta.get(
+                "source", "realtime")),
         # Prefer a date supplied by the upstream ranking payload.  ``as_of``
         # is an explicit caller contract; never invent a date from the local
         # wall clock at this boundary.
@@ -1190,13 +1223,25 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             except (OSError, TypeError, ValueError) as exc:
                 _record_degradation(
                     metrics, f"ranking_cache_write_error:{type(exc).__name__}")
-            try:
-                append_daily_snapshot(rankings, override_date=as_of_date)
-            except (OSError, TypeError, ValueError) as exc:
-                _record_degradation(
-                    metrics, f"sector_snapshot_write_error:{type(exc).__name__}")
+            # Snapshot history is keyed by stable EM BK codes.  THS fallback
+            # rows may carry display ordinals, so persist them only in their
+            # provider-isolated ranking cache.
+            if ranking_meta["provider"] == "eastmoney":
+                try:
+                    append_daily_snapshot(rankings, override_date=as_of_date)
+                except (OSError, TypeError, ValueError) as exc:
+                    _record_degradation(
+                        metrics,
+                        f"sector_snapshot_write_error:{type(exc).__name__}")
     else:
         cached = load_rankings_cache_full()
+        if not cached:
+            try:
+                cached = load_rankings_cache_full(provider="akshare")
+            except TypeError:
+                # Compatibility with older test doubles/adapters that expose
+                # the historical no-argument loader.
+                cached = None
         cached_rankings = (cached or {}).get("rankings", {})
         cache_usable = (
             bool(cached_rankings.get("sectors"))
@@ -1209,6 +1254,9 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                     "sector_ranking", stale=True, reason="cache_only")
             ranking_meta = {
                 "source": "cache",
+                "provider": cached_rankings.get("meta", {}).get("provider")
+                or ("ths" if cached_rankings.get("meta", {}).get(
+                    "source") == "akshare" else "eastmoney"),
                 "data_date": cached.get("data_date", ""),
                 "quality": "degraded",
                 "errors": live_meta.get("errors", [])
@@ -1217,16 +1265,23 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         elif active:
             ranking_meta = {
                 "source": "realtime_partial",
+                "provider": live_meta.get("provider", ""),
                 "data_date": as_of_date,
                 "quality": "partial",
                 "errors": live_meta.get("errors", []),
             }
         else:
             ranking_meta = {
-                "source": "error", "data_date": "", "quality": "error",
+                "source": "error", "provider": live_meta.get("provider", ""),
+                "data_date": "", "quality": "error",
                 "errors": live_meta.get("errors", []),
             }
-    universe_count = live_meta.get("total_sectors")
+    # If the live request failed and a verified cache was selected, the
+    # report's universe must describe the selected snapshot, not the failed
+    # live payload (which is usually zero sectors).
+    universe_count = rankings.get("meta", {}).get("total_sectors")
+    if universe_count is None:
+        universe_count = live_meta.get("total_sectors")
     try:
         universe_count = int(universe_count)
     except (TypeError, ValueError):
@@ -1235,8 +1290,18 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     ranked_universe = rank_hot_sectors(
         rankings, top_n=None, min_stocks=min_stocks)
     for sector in ranked_universe:
+        provider = ranking_meta.get("provider", "")
+        if provider == "ths":
+            # Backfill provider identity for pre-isolation AKShare caches that
+            # contain only the old numeric THS display ordinal in ``code``.
+            sector.setdefault("provider", "ths")
+            sector.setdefault("provider_code", sector.get("code", ""))
+            sector.setdefault("expand_symbol", sector.get("name", ""))
+            sector.setdefault("sector_id", f"ths:{sector.get('type', 'industry')}:{sector.get('name', '')}")
+            sector.setdefault("expandable", bool(sector.get("name")))
         sector.update({
             "ranking_source": ranking_meta["source"],
+            "ranking_provider": ranking_meta.get("provider", ""),
             "ranking_data_date": ranking_meta["data_date"],
             "ranking_quality": ranking_meta["quality"],
             "ranking_errors": ranking_meta["errors"],
@@ -1297,6 +1362,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     persistence_history.update(candidate_history or {})
     current_snapshot = None
     if (ranking_meta.get("quality") == "good"
+            and ranking_meta.get("provider") == "eastmoney"
             and ranking_meta.get("data_date") == expected_date):
         current_snapshot = {
             "data_date": ranking_meta["data_date"],

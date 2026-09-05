@@ -179,6 +179,10 @@ def build_sector_membership(sector_code, sector_name="", context=None,
             "membership_fallback_reason", ""),
         "membership_provider_attempts": stock.get(
             "membership_provider_attempts", 0),
+        "membership_provider": stock.get("membership_provider", ""),
+        "membership_provider_code": stock.get(
+            "membership_provider_code", ""),
+        "membership_mapping": stock.get("membership_mapping", ""),
         "membership_fetch_evidence": copy.deepcopy(
             stock.get("membership_fetch_evidence", {})),
         "sector_type": context.get("sector_type", ""),
@@ -213,6 +217,10 @@ def _sector_membership_output_fields(membership):
         "ranking_quality": membership.get("ranking_quality", ""),
         "ranking_errors": copy.deepcopy(
             membership.get("ranking_errors", [])),
+        "membership_provider": membership.get("membership_provider", ""),
+        "membership_provider_code": membership.get(
+            "membership_provider_code", ""),
+        "membership_mapping": membership.get("membership_mapping", ""),
     }
 
 
@@ -453,10 +461,49 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         get_sector_rankings, get_sector_stocks, get_sector_stocks_cached,
         rank_hot_sectors,
     )
+    from fetchers import sector_akshare
 
     # Get sector rankings to enrich with hot scores
     sector_scores = {}
     hot_sectors = []
+
+    def _sector_context(code):
+        context = (sector_context or {}).get(code, {})
+        return context if isinstance(context, dict) else {}
+
+    def _sector_name(code):
+        context = _sector_context(code)
+        return str(
+            context.get("expand_symbol") or context.get("name")
+            or context.get("provider_code") or code)
+
+    def _sector_type(code):
+        return "concept" if _sector_context(code).get(
+            "type", _sector_context(code).get("sector_type")) == "concept" \
+            else "industry"
+
+    def _uses_name_provider(code):
+        context = _sector_context(code)
+        provider = str(
+            context.get("provider") or context.get("ranking_provider")
+            or "").lower()
+        return provider in {"ths", "akshare", "eastmoney_via_akshare"}
+
+    def _fetch_sector_live(code, **kwargs):
+        """Dispatch membership using the ranking provider identity."""
+        if _uses_name_provider(code):
+            context = _sector_context(code)
+            kwargs.setdefault("as_of_date", context.get(
+                "ranking_data_date", context.get("data_date", "")))
+            return sector_akshare.get_sector_stocks_akshare(
+                _sector_name(code), _sector_type(code), **kwargs)
+        return get_sector_stocks(code, **kwargs)
+
+    def _fetch_sector_cache(code, **kwargs):
+        if _uses_name_provider(code):
+            return sector_akshare.get_sector_stocks_akshare_cached(
+                _sector_name(code), _sector_type(code), **kwargs)
+        return get_sector_stocks_cached(code, **kwargs)
     if sector_context is not None:
         for code, context in sector_context.items():
             sector_scores[code] = context.get(
@@ -482,6 +529,10 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     # Parallel fetch constituent stocks per sector
     sector_map = {}
     all_stocks = []  # list of (stock_dict, sector_info)
+    if metrics is not None:
+        metrics["sector_membership_queued_count"] = (
+            metrics.get("sector_membership_queued_count", 0)
+            + len(sector_codes))
 
     def _fetch_one_sector(code):
         def _with_evidence(stocks, attempt):
@@ -493,19 +544,19 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         try:
             cache_only = _source_unavailable(source_health, "sector_membership")
             if cache_only:
-                stocks = get_sector_stocks_cached(
+                stocks = _fetch_sector_cache(
                     code, top_n=top_n_per_sector)
                 attempt = live_attempt(
                     attempted=False, cache_used=bool(stocks),
                     stale=bool(stocks), reason="cache_only" if stocks else "")
             else:
                 try:
-                    fetched = get_sector_stocks(
+                    fetched = _fetch_sector_live(
                         code, top_n=top_n_per_sector, with_evidence=True)
                 except TypeError as exc:
                     if "with_evidence" not in str(exc):
                         raise
-                    fetched = get_sector_stocks(
+                    fetched = _fetch_sector_live(
                         code, top_n=top_n_per_sector)
                 if isinstance(fetched, dict) and set(
                         ("payload", "live_attempt")) <= set(fetched):
@@ -531,7 +582,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                 _source_succeeded(source_health, "sector_membership")
             hot_score = sector_scores.get(code, 50)
             # Try to get sector name from the first stock or rankings
-            name = code  # fallback
+            name = _sector_name(code)  # fallback
             for s in hot_sectors if 'hot_sectors' in dir() else []:
                 if s.get("code") == code:
                     name = s.get("name", code)
@@ -543,11 +594,11 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             if metrics is not None:
                 metrics["sector_membership_failures"] = (
                     metrics.get("sector_membership_failures", 0) + 1)
-            return {"code": code, "name": code, "hot_score": 50,
+            return {"code": code, "name": _sector_name(code), "hot_score": 50,
                     "stocks": [], "error": str(e)}
 
     def _membership_payload(code, stocks, error=None):
-        name = code
+        name = _sector_name(code)
         for sector in hot_sectors:
             if sector.get("code") == code:
                 name = sector.get("name", code)
@@ -560,7 +611,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
 
     def _fetch_membership_live(code):
         try:
-            wrapped = get_sector_stocks(
+            wrapped = _fetch_sector_live(
                 code, top_n=top_n_per_sector,
                 timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_membership"],
                 retries=MAX_PROVIDER_ATTEMPTS["sector_membership"] - 1,
@@ -593,7 +644,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         fallback_reason = (
             "cache_only" if scheduler_reason in ("", "cache_only")
             else f"cache_only_{scheduler_reason}")
-        stocks = get_sector_stocks_cached(
+        stocks = _fetch_sector_cache(
             code, top_n=top_n_per_sector,
             fallback_reason=fallback_reason)
         attempt = live_attempt(
@@ -623,14 +674,68 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
 
     for result in results:
         sector_code = result["code"]
-        context = (sector_context or {}).get(sector_code, {})
+        context = _sector_context(sector_code)
+        stocks = result["stocks"]
+        if metrics is not None:
+            metrics["sector_membership_attempted_count"] = (
+                metrics.get("sector_membership_attempted_count", 0)
+                + bool(
+                    (stocks and stocks[0].get(
+                        "membership_fetch_evidence", {}).get("attempted"))
+                    or result.get("error")))
+            if stocks:
+                metrics["sector_membership_success_count"] = (
+                    metrics.get("sector_membership_success_count", 0) + 1)
+                if stocks[0].get("membership_source") == "cache":
+                    metrics["sector_membership_cache_count"] = (
+                        metrics.get("sector_membership_cache_count", 0) + 1)
+                else:
+                    metrics["sector_membership_live_success_count"] = (
+                        metrics.get("sector_membership_live_success_count", 0)
+                        + 1)
+            else:
+                metrics["sector_membership_failure_count"] = (
+                    metrics.get("sector_membership_failure_count", 0) + 1)
+            if _uses_name_provider(sector_code):
+                metrics["sector_membership_name_provider_count"] = (
+                    metrics.get("sector_membership_name_provider_count", 0)
+                    + 1)
+                if any(stock.get("membership_mapping") for stock in stocks):
+                    metrics["sector_membership_mapping_count"] = (
+                        metrics.get("sector_membership_mapping_count", 0) + 1)
         sector_map[sector_code] = {
             "name": result["name"],
             "hot_score": result["hot_score"],
             **context,
         }
-        for s in result["stocks"]:
+        for s in stocks:
             all_stocks.append((s, sector_code))
+
+    # AKShare constituent endpoints do not consistently include total market
+    # cap.  Enrich all missing values in one bulk request before applying the
+    # hard 50-2000亿 filter; otherwise every valid constituent is classified
+    # as "市值过小" merely because the optional field was absent.
+    if all_stocks and any(
+            stock.get("market_cap") in (None, "")
+            for stock, _ in all_stocks):
+        before_missing = sum(
+            stock.get("market_cap") in (None, "")
+            for stock, _ in all_stocks)
+        enriched_stocks = sector_akshare.enrich_stock_market_data(
+            [stock for stock, _ in all_stocks])
+        all_stocks = [
+            (stock, sector_code)
+            for stock, (_, sector_code) in zip(enriched_stocks, all_stocks)
+        ]
+        after_missing = sum(
+            stock.get("market_cap") in (None, "")
+            for stock, _ in all_stocks)
+        if metrics is not None:
+            metrics["market_cap_enriched_count"] = (
+                metrics.get("market_cap_enriched_count", 0)
+                + max(0, before_missing - after_missing))
+            metrics["market_cap_missing_count"] = (
+                metrics.get("market_cap_missing_count", 0) + after_missing)
 
     # Dedup + filter
     stocks_by_code = {}
@@ -640,7 +745,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     for s, sector_code in all_stocks:
         code = s.get("code", "")
         name = s.get("name", "")
-        context = (sector_context or {}).get(sector_code, {})
+        context = _sector_context(sector_code)
         membership = build_sector_membership(
             sector_code,
             sector_name=sector_map.get(sector_code, {}).get(
@@ -671,6 +776,10 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             continue
 
         # Market cap filter: 50-2000亿
+        if s.get("market_cap") in (None, ""):
+            excluded.append({"code": code, "name": name,
+                             "reason": "市值数据缺失"})
+            continue
         mcap = _safe_float(s.get("market_cap"))
         if mcap < 5e9:
             excluded.append({"code": code, "name": name, "reason": "市值过小(<50亿)"})
@@ -706,6 +815,11 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                 "membership_fallback_reason", ""),
             "membership_provider_attempts": primary.get(
                 "membership_provider_attempts", 0),
+            "membership_provider": primary.get(
+                "membership_provider", ""),
+            "membership_provider_code": primary.get(
+                "membership_provider_code", ""),
+            "membership_mapping": primary.get("membership_mapping", ""),
             "membership_fetch_evidence": copy.deepcopy(
                 primary.get("membership_fetch_evidence", {})),
             "sector_memberships": memberships,

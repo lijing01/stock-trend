@@ -166,6 +166,7 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
             "sources": {},
             "errors": [],
             "complete": False,
+            "provider": "eastmoney",
         },
         "sectors": [],
     }
@@ -216,6 +217,11 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                 total = (item.get("f104", 0) or 0) + (item.get("f105", 0) or 0)
                 sector = {
                     "code": item.get("f12", ""),
+                    "provider": "eastmoney",
+                    "provider_code": item.get("f12", ""),
+                    "sector_id": f"eastmoney:{sname}:{item.get('f12', '')}",
+                    "expand_symbol": item.get("f12", ""),
+                    "expandable": bool(item.get("f12")),
                     "name": item.get("f14", ""),
                     "type": sname,
                     "change_pct": item.get("f3"),       # 涨跌幅%
@@ -245,8 +251,9 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
         result["meta"]["sources"].get(source) == "ok"
         for source in ("industry", "concept")
     )
-    if not with_evidence and not result["meta"]["complete"] \
-            or active == 0 or result["meta"]["total_sectors"] < 5:
+    if (not result["meta"]["complete"]
+            or active == 0
+            or result["meta"]["total_sectors"] < 5):
         try:
             from fetchers.sector_akshare import get_sector_rankings_akshare
             akshare_result = get_sector_rankings_akshare()
@@ -265,6 +272,7 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                     akshare_result["meta"]["upstream_errors"] = list(
                         result["meta"]["errors"])
                     result = akshare_result
+                    active = akshare_active
         except Exception as e:
             print(f"  [AKShare] 备选数据源失败: {e}", file=sys.stderr)
 
@@ -811,6 +819,7 @@ def rescore_leaders_with_ddx(leaders: list[dict],
 # ──────────────────────── Rankings Cache ────────────────────────
 
 CACHE_FILE = CACHE_DIR / "sector_rankings_cache.json"
+AKSHARE_CACHE_NAME = "sector_rankings_akshare_cache.json"
 MAX_CACHE_AGE_HOURS = 96  # 4 days, covers long weekends
 
 # A-share market hours: 9:30-11:30, 13:00-15:00 CST
@@ -827,6 +836,25 @@ def _is_outside_market_hours(dt: datetime) -> bool:
     return t < _MARKET_OPEN_MINUTES[0] or t >= _MARKET_OPEN_MINUTES[1]
 
 
+def _rankings_cache_file(provider: str = "eastmoney") -> Path:
+    """Return a provider-isolated ranking cache path."""
+    if provider in ("eastmoney", "realtime", ""):
+        return CACHE_FILE
+    return CACHE_DIR / AKSHARE_CACHE_NAME
+
+
+def _rankings_cache_candidates(provider: str = "eastmoney") -> list[Path]:
+    """Return isolated cache first, with a read-only legacy AKShare fallback."""
+    primary = _rankings_cache_file(provider)
+    candidates = [primary]
+    if provider not in ("eastmoney", "realtime", "") and primary != CACHE_FILE:
+        # Before provider isolation existed, a successful AKShare fallback was
+        # written into CACHE_FILE.  Read that legacy payload only after it is
+        # proven to be an AKShare/THS payload; never treat it as EM data.
+        candidates.append(CACHE_FILE)
+    return candidates
+
+
 def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
                         data_date: str = "") -> None:
     """Save sector rankings snapshot for non-trading-day fallback.
@@ -838,8 +866,17 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
     Does NOT overwrite existing cache if today's data has no real sector
     activity (non-trading day). This preserves the last trading day's cache.
     """
-    if rankings.get("meta", {}).get("complete") is False:
+    meta = rankings.get("meta", {})
+    if meta.get("complete") is False:
         return
+    provider = meta.get("provider", "")
+    source = meta.get("source", "")
+    # A THS/AKShare ranking has name/ordinal identity and must never replace
+    # the EM BK ranking cache.  It is still useful as an isolated fallback.
+    if not provider:
+        provider = "eastmoney" if source in ("", "eastmoney", "realtime") \
+            else "akshare"
+    cache_file = _rankings_cache_file(provider)
     date_key = _resolve_verified_data_date(rankings, data_date)
     # A cache without an upstream/explicit trading date is not safe to use as
     # a historical baseline.  Keep the live result in memory only.
@@ -855,7 +892,7 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
     # that drowns the last trading day's data.
     if active == 0:
         return
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "cached_at": datetime.now().isoformat(),
         "data_date": date_key,
@@ -863,10 +900,11 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
     }
     if hot_sectors:
         payload["hot_sectors"] = hot_sectors
-    CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    cache_file.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def load_rankings_cache() -> Optional[dict]:
+def load_rankings_cache(provider: str = "eastmoney") -> Optional[dict]:
     """Load cached sector rankings if fresh and has any sector data.
 
     Returns the rankings dict or None if expired / corrupted.
@@ -874,51 +912,77 @@ def load_rankings_cache() -> Optional[dict]:
     Even a sparse intraday cache is more useful than multi-week stale
     BK K-line fallback.
     """
-    if not CACHE_FILE.exists():
-        return None
-    try:
-        payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        cached_at = datetime.fromisoformat(payload["cached_at"])
-        age = datetime.now() - cached_at
-        if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
-            return None
-        data_date = _verified_trading_date(payload.get("data_date", ""))
-        if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
-            return None
-        # Must have at least some sectors (not an empty cache)
-        rankings = payload.get("rankings", {})
-        if rankings.get("meta", {}).get("complete") is False:
-            return None
-        sectors = rankings.get("sectors", [])
-        if len(sectors) < 5:
-            return None
-        return rankings
-    except Exception:
-        return None
+    for cache_file in _rankings_cache_candidates(provider):
+        if not cache_file.exists():
+            continue
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            cached_at = datetime.fromisoformat(payload["cached_at"])
+            age = datetime.now() - cached_at
+            if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+                continue
+            data_date = _verified_trading_date(payload.get("data_date", ""))
+            if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
+                continue
+            # Must have at least some sectors (not an empty cache)
+            rankings = payload.get("rankings", {})
+            if rankings.get("meta", {}).get("complete") is False:
+                continue
+            cached_meta = rankings.get("meta", {})
+            cached_provider = cached_meta.get("provider", "")
+            cached_source = cached_meta.get("source", "")
+            if provider == "eastmoney" and (
+                    cached_provider not in ("", "eastmoney")
+                    or cached_source == "akshare"):
+                continue
+            if provider not in ("eastmoney", "realtime", "") and \
+                    cached_provider not in ("", "ths", "akshare") \
+                    and cached_source != "akshare":
+                continue
+            sectors = rankings.get("sectors", [])
+            if len(sectors) < 5:
+                continue
+            return rankings
+        except Exception:
+            continue
+    return None
 
 
-def load_rankings_cache_full() -> Optional[dict]:
+def load_rankings_cache_full(provider: str = "eastmoney") -> Optional[dict]:
     """Load full cached payload including hot_sectors if present.
 
     Returns the raw payload dict, or None if expired / corrupted.
     """
-    if not CACHE_FILE.exists():
-        return None
-    try:
-        payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        cached_at = datetime.fromisoformat(payload["cached_at"])
-        age = datetime.now() - cached_at
-        if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
-            return None
-        data_date = _verified_trading_date(payload.get("data_date", ""))
-        if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
-            return None
-        rankings = payload.get("rankings", {})
-        if rankings.get("meta", {}).get("complete") is False:
-            return None
-        return payload
-    except Exception:
-        return None
+    for cache_file in _rankings_cache_candidates(provider):
+        if not cache_file.exists():
+            continue
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            cached_at = datetime.fromisoformat(payload["cached_at"])
+            age = datetime.now() - cached_at
+            if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+                continue
+            data_date = _verified_trading_date(payload.get("data_date", ""))
+            if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
+                continue
+            rankings = payload.get("rankings", {})
+            if rankings.get("meta", {}).get("complete") is False:
+                continue
+            cached_meta = rankings.get("meta", {})
+            cached_provider = cached_meta.get("provider", "")
+            cached_source = cached_meta.get("source", "")
+            if provider == "eastmoney" and (
+                    cached_provider not in ("", "eastmoney")
+                    or cached_source == "akshare"):
+                continue
+            if provider not in ("eastmoney", "realtime", "") and \
+                    cached_provider not in ("", "ths", "akshare") \
+                    and cached_source != "akshare":
+                continue
+            return payload
+        except Exception:
+            continue
+    return None
 
 
 # ──────────────────────── Snapshot History ────────────────────────
