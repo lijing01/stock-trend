@@ -1926,6 +1926,36 @@ def _sector_text(item):
     return text
 
 
+def _sector_html(item):
+    """Render the sector name as a high-contrast heat-level badge."""
+    text = _sector_text(item)
+    if not text:
+        return ""
+
+    sector_name = str(item.get("sector_name", "")).strip()
+    safe_text = escape(text)
+    safe_name = escape(sector_name)
+    if not safe_name or safe_name not in safe_text:
+        return safe_text
+
+    try:
+        heat_score = float(item.get("sector_hot_score") or
+                           item.get("sector_score") or 0)
+    except (TypeError, ValueError):
+        heat_score = 0
+    if heat_score >= 80:
+        heat_class = "sector-hot"
+    elif heat_score >= 60:
+        heat_class = "sector-warm"
+    elif heat_score >= 40:
+        heat_class = "sector-neutral"
+    else:
+        heat_class = "sector-cool"
+
+    badge = f"<span class='sector-tag {heat_class}'>{safe_name}</span>"
+    return safe_text.replace(safe_name, badge, 1)
+
+
 def _minor_phase_text(wyckoff):
     """Render the short-term Wyckoff A–E phase with its Chinese meaning.
 
@@ -2384,7 +2414,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"<tr{row_class}><td>{index}</td><td><strong>{item['name']}</strong><br>"
             f"<span style='color:#86868b;font-size:12px'>{item['code']}</span>"
             f"{buy_level_badge}</td>"
-            f"<td>{_sector_text(item)}</td>"
+            f"<td>{_sector_html(item)}</td>"
             f"<td>{_minor_phase_html(wyckoff)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
@@ -2501,6 +2531,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .candidate-table th,.candidate-table td{{overflow-wrap:anywhere}}
 .candidate-table td.candidate-diagnostic{{min-width:180px;vertical-align:top;overflow-wrap:break-word;word-break:normal}}
 .candidate-table .wyckoff-buy-level-badge{{white-space:normal}}
+.sector-tag{{display:inline-block;padding:3px 8px;border-radius:6px;color:#fff;font-size:13px;font-weight:800;line-height:1.35;white-space:nowrap;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 1px 2px rgba(15,23,42,.16)}}
+.sector-hot{{background:#b91c1c;border-color:#991b1b}}
+.sector-warm{{background:#c2410c;border-color:#9a3412}}
+.sector-neutral{{background:#0369a1;border-color:#075985}}
+.sector-cool{{background:#475569;border-color:#334155}}
 .buy{{color:#dc2626;font-weight:600}}
 .wyckoff-buy-level-1>td{{background:#fff7d6}}
 .wyckoff-buy-level-2>td{{background:#dcfce7}}

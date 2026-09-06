@@ -2770,8 +2770,10 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("股市有风险，投资需谨慎", html)
 
     def test_candidate_html_prioritizes_sector_and_minor_phase_columns(self):
+        item = candidate("1")
+        item["sector_hot_score"] = 50
         html = _generate_html(
-            [candidate("1")],
+            [item],
             [("BK1", "测试板块", 80)],
             1.0,
             "20260806-160000",
@@ -2781,7 +2783,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                 "reasons": [],
             },
             {
-                "actionable": [candidate("1")],
+                "actionable": [item],
                 "waiting_trigger": [],
                 "next_day_confirmation": [],
                 "observation": [],
@@ -2806,6 +2808,8 @@ class TestRecommendationPolicy(unittest.TestCase):
             ".candidate-table th:nth-child(4),.candidate-table td:nth-child(4){width:20%}",
             html,
         )
+        self.assertIn("<span class='sector-tag sector-neutral'>测试板块</span>", html)
+        self.assertIn(".sector-hot{background:#b91c1c", html)
 
     def test_candidate_html_keeps_diagnostic_column_readable(self):
         html = _generate_html(
