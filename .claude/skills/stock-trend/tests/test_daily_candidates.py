@@ -1423,6 +1423,72 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(
             classify_candidates([unverified], strong_policy)["actionable"], [])
 
+    def test_capital_blocked_high_score_cannot_displace_promotable_candidate(self):
+        blocked = candidate("blocked", adjusted_score=90.0)
+        blocked["sector_capital_evidence"] = "unverified"
+        promotable = candidate("promotable", adjusted_score=80.0)
+        promotable["sector_capital_evidence"] = "positive_verified"
+        policy = {
+            "mode": "actionable", "max_recommendations": 5,
+            "reasons": [], "requires_sector_capital_proof": True,
+        }
+
+        picked = dc.select_candidate_pool(
+            [blocked, promotable], top=1, min_score=50, policy=policy)
+        buckets = classify_candidates(picked, policy)
+
+        self.assertEqual([row["code"] for row in picked], ["promotable"])
+        self.assertEqual([row["code"] for row in buckets["actionable"]],
+                         ["promotable"])
+
+    def test_pending_high_score_cannot_displace_promotable_candidate(self):
+        pending = _set_buy_level(
+            candidate("pending", adjusted_score=90.0), "lps",
+            status="retest_pending")
+        promotable = candidate("promotable", adjusted_score=80.0)
+        policy = {"mode": "actionable", "max_recommendations": 5,
+                  "reasons": []}
+
+        picked = dc.select_candidate_pool(
+            [pending, promotable], top=1, min_score=50, policy=policy)
+
+        self.assertEqual([row["code"] for row in picked], ["promotable"])
+
+    def test_renderers_and_snapshot_use_supplied_market_regime(self):
+        item = candidate("frozen")
+        policy = {"mode": "actionable", "max_recommendations": 5,
+                  "reasons": []}
+        buckets = classify_candidates([item], policy)
+        regime = {
+            "score": 88, "label": "强势", "data_date": "2026-08-06",
+            "data_quality": "good", "missing_components": [],
+        }
+        captured = {}
+
+        def fake_save(source):
+            captured.update(source)
+            return types.SimpleNamespace(status="saved", path=None)
+
+        with patch.object(dc, "load_regime_context",
+                          side_effect=AssertionError("unexpected cache read")), \
+             patch.object(dc, "save_snapshot_if_official", side_effect=fake_save):
+            markdown = generate_report(
+                [item], [], 0.1, policy, buckets, market_regime=regime)
+            html = _generate_html(
+                [item], [], 0.1, "20260906-120000", policy, buckets,
+                market_regime=regime)
+            output = dc.build_json_output(
+                [item], [], 0.1, policy, buckets, market_regime=regime)
+            tracking = dc._save_recommendation_snapshot(
+                [item], [], policy, buckets, "2026-08-06",
+                market_regime=regime)
+
+        self.assertIn("市场环境**: 88 强势", markdown)
+        self.assertIn("市场环境 88 强势", html)
+        self.assertEqual(output["market_regime"], regime)
+        self.assertEqual(captured["market_regime"], regime)
+        self.assertEqual(tracking["status"], "saved")
+
     def test_outputs_keep_quality_score_and_expose_execution_priority(self):
         item = _set_buy_level(
             candidate("l2", adjusted_score=78.0), "lps")
@@ -1828,6 +1894,41 @@ class TestRecommendationPolicy(unittest.TestCase):
         cached_item = next(item for item in scored if item["code"] == "1")
         self.assertEqual(cached_item["ranking_source"], "cache")
         self.assertEqual(cached_item["ranking_data_date"], "2026-08-05")
+
+    def test_scan_expands_when_first_batch_lacks_required_capital_proof(self):
+        calls = []
+
+        def fake_gather(batch, top_n_per_sector):
+            calls.append(list(batch))
+            return {"candidates": [{"code": batch[0]}]}
+
+        results = {
+            "BK1": [{"code": "1", "composite_score": 90,
+                      "sector_code": "BK1", "quality_adjusted_score": 90,
+                      "sector_capital_evidence": "unverified",
+                      "data_quality": {"eligible": True}}],
+            "BK2": [{"code": "2", "composite_score": 80,
+                      "sector_code": "BK2", "quality_adjusted_score": 80,
+                      "sector_capital_evidence": "positive_verified",
+                      "data_quality": {"eligible": True}}],
+        }
+
+        def fake_phase2(candidates, enable_wyckoff, as_of_date):
+            return results[candidates[0]["code"]]
+
+        policy = {"requires_sector_capital_proof": True}
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            scored = dc.scan_sectors(
+                ["BK1", "BK2"], batch_size=1, min_candidates=1,
+                min_score=50, as_of_date="2026-08-06", policy=policy,
+                sector_context={
+                    "BK1": {"sector_actionable": True},
+                    "BK2": {"sector_actionable": True},
+                })
+
+        self.assertEqual(calls, [["BK1"], ["BK2"]])
+        self.assertEqual({item["code"] for item in scored}, {"1", "2"})
 
     def test_scan_reuses_context_and_only_analyzes_new_stock_codes(self):
         gather_calls = []

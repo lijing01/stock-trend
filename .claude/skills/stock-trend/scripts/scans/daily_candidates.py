@@ -203,13 +203,23 @@ def candidate_concentration(candidates, top_n=10):
     }
 
 
-def _is_final_valid_candidate(item, min_score):
+def _candidate_gate_pass(item, min_score, policy=None):
+    """Return whether a candidate can occupy a promotable recommendation slot."""
+    if candidate_quality_score(item) < min_score:
+        return False
+    if not item.get("data_quality", {}).get("eligible", False):
+        return False
+    if not item.get("sector_actionable", True):
+        return False
+    if policy and policy.get("requires_sector_capital_proof") \
+            and item.get("sector_capital_evidence") != "positive_verified":
+        return False
+    return _short_term_observation_reason(item) is None
+
+
+def _is_final_valid_candidate(item, min_score, policy=None):
     """Single eligibility predicate shared by scan stopping and final audit."""
-    return bool(
-        candidate_quality_score(item) >= min_score
-        and item.get("data_quality", {}).get("eligible", False)
-        and item.get("sector_actionable", True)
-    )
+    return _candidate_gate_pass(item, min_score, policy)
 
 
 _PERFORMANCE_PHASE_FIELDS = (
@@ -1500,7 +1510,8 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  capital_top=30,
                  initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
-                 max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION):
+                 max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
+                 policy=None):
     """Expand until enough score-qualified, data-eligible candidates exist."""
     metrics = metrics if metrics is not None else {}
     if sector_context is None:
@@ -1682,7 +1693,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                 scored_item, peer_cohorts=peer_cohorts,
                 as_of_date=as_of_date)
         eligible_count = sum(
-            _is_final_valid_candidate(item, min_score)
+            _is_final_valid_candidate(item, min_score, policy)
             for item in all_scored.values())
         print(
             f"  批次完成,候选 {len(all_scored)} 只,有效 {eligible_count} 只",
@@ -1693,7 +1704,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
     return [all_scored[code] for code in sorted(all_scored)]
 
 
-def select_candidate_pool(scored, top, min_score):
+def select_candidate_pool(scored, top, min_score, policy=None):
     """Keep promotable candidates ahead of observation-only high scorers."""
     # Retain the raw-score shortlist so quality-ineligible rows remain visible
     # in the observation pool; score_eligible below is the hard quality gate.
@@ -1706,12 +1717,8 @@ def select_candidate_pool(scored, top, min_score):
         item["score_eligible"] = candidate_quality_score(item) >= min_score
 
     def selection_key(item):
-        promotable = (
-            item["score_eligible"]
-            and item.get("data_quality", {}).get("eligible", False)
-            and item.get("sector_actionable", True)
-        )
-        return promotable, candidate_rank_score(item)
+        promotable = _candidate_gate_pass(item, min_score, policy)
+        return promotable, candidate_rank_score(item), str(item.get("code", ""))
 
     candidates.sort(key=selection_key, reverse=True)
     return candidates[:top]
@@ -2205,15 +2212,16 @@ def classify_candidates(candidates, policy):
 
 
 def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
-                                  recommendation_date, performance=None):
+                                  recommendation_date, performance=None,
+                                  market_regime=None):
     """Persist one official snapshot while keeping report generation resilient."""
     source = {
         "recommendation_date": recommendation_date,
         "generated_at": datetime.now().astimezone().isoformat(),
         "snapshot_type": "provisional" if policy.get("provisional") else "formal",
-        "model_version": "daily-candidates/v2",
+        "model_version": "daily-candidates/v3",
         "policy": copy.deepcopy(policy),
-        "market_regime": load_regime_context() or {},
+        "market_regime": copy.deepcopy(market_regime or {}),
         "sectors": copy.deepcopy(sector_codes),
         "candidates": copy.deepcopy(candidates),
         "buckets": copy.deepcopy(buckets),
@@ -2271,7 +2279,7 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
 
 
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
-                    performance=None, tracking=None):
+                    performance=None, tracking=None, market_regime=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -2302,7 +2310,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "",
         f"**筛选漏斗**: {funnel}",
     ]
-    regime = load_regime_context()
+    regime = market_regime
     if regime and regime.get("score") is not None:
         lines.extend([
             "",
@@ -2428,10 +2436,10 @@ def _html_candidate_rows(items, buy_level_display="none"):
 
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
-                   performance=None, tracking=None):
+                   performance=None, tracking=None, market_regime=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
-    regime = load_regime_context()
+    regime = market_regime
     weak = bool(regime and regime["score"] is not None and regime["score"] < 60)
     actionable_rows = _html_candidate_rows(
         buckets["actionable"], buy_level_display="actionable")
@@ -2597,7 +2605,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
-                      performance=None, tracking=None):
+                      performance=None, tracking=None, market_regime=None):
     return {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -2609,6 +2617,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
             "candidate_concentration": (performance or {}).get("candidate_concentration", {}),
         },
         "policy": policy,
+        "market_regime": copy.deepcopy(market_regime or {}),
         "sectors": sector_codes,
         "candidates": candidates,
         "recommendations": buckets["actionable"],
@@ -2701,12 +2710,14 @@ def main():
         source_health=source_health,
         metrics=performance,
         capital_top=args.top,
+        policy=policy,
         max_sector_expansion=getattr(
             args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION),
     )
 
     # 过滤 + 排序 + 归一化到 top
-    candidates = select_candidate_pool(scored, args.top, args.min_score)
+    candidates = select_candidate_pool(
+        scored, args.top, args.min_score, policy=policy)
     buckets = classify_candidates(candidates, policy)
     performance["candidate_concentration"] = candidate_concentration(candidates)
 
@@ -2715,17 +2726,18 @@ def main():
         performance, source_health, candidates, buckets, args.min_score,
         time.monotonic() - monotonic_start)
     tracking = _save_recommendation_snapshot(
-        candidates, sector_codes, policy, buckets, expected_date, performance)
+        candidates, sector_codes, policy, buckets, expected_date, performance,
+        market_regime=regime)
 
     if args.json:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         builders = [("json", lambda: build_json_output(
             candidates, sector_codes, elapsed, policy, buckets,
-            tracking=tracking))]
+            tracking=tracking, market_regime=regime))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
                 candidates, sector_codes, elapsed, ts, policy, buckets,
-                tracking=tracking)))
+                tracking=tracking, market_regime=regime)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -2749,12 +2761,12 @@ def main():
     # performance envelope.  Serialization and file writes are outside it.
     builders = [("markdown", lambda: generate_report(
         candidates, sector_codes, elapsed, policy, buckets,
-        tracking=tracking))]
+        tracking=tracking, market_regime=regime))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
             candidates, sector_codes, elapsed, ts, policy, buckets,
-            tracking=tracking)))
+            tracking=tracking, market_regime=regime)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(
