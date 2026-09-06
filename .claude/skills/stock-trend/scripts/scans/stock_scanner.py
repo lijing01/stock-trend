@@ -489,12 +489,53 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             or "").lower()
         return provider in {"ths", "akshare", "eastmoney_via_akshare"}
 
+    # AKShare supplies the THS ranking, but this environment has no THS
+    # constituent endpoint.  A typed EM directory is therefore a cross-source
+    # fallback, shared for the whole scan rather than re-paged per sector.
+    # The fetcher labels successful exact-name mappings as unverified so they
+    # cannot promote a candidate without same-source evidence.
+    em_directories = {}
+    name_provider_types = {
+        _sector_type(code) for code in sector_codes
+        if _uses_name_provider(code)
+    }
+    for sector_type in sorted(name_provider_types):
+        try:
+            directory = sector_akshare.get_em_sector_directory(
+                sector_type,
+                timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_membership"],
+                retries=MAX_PROVIDER_ATTEMPTS["sector_membership"] - 1,
+                deadline=(source_health.live_deadline
+                          if isinstance(source_health, RunSourceHealth)
+                          else None))
+            em_directories[sector_type] = directory
+            if metrics is not None:
+                metrics["sector_membership_directory_requests"] = (
+                    metrics.get("sector_membership_directory_requests", 0) + 1)
+                metrics["sector_membership_directory_provider_attempts"] = (
+                    metrics.get("sector_membership_directory_provider_attempts", 0)
+                    + int(directory.get("provider_attempts", 0) or 0))
+        except Exception as exc:
+            reason = getattr(exc, "reason", "") or classify_failure(exc)
+            em_directories[sector_type] = {
+                "provider": "eastmoney", "sector_type": sector_type,
+                "codes_by_name": {}, "error_reason": reason,
+            }
+            if metrics is not None:
+                metrics["sector_membership_directory_failures"] = (
+                    metrics.get("sector_membership_directory_failures", 0) + 1)
+                metrics.setdefault("sector_membership_directory_errors", []).append(
+                    f"{sector_type}:{reason}")
+
     def _fetch_sector_live(code, **kwargs):
         """Dispatch membership using the ranking provider identity."""
         if _uses_name_provider(code):
             context = _sector_context(code)
             kwargs.setdefault("as_of_date", context.get(
                 "ranking_data_date", context.get("data_date", "")))
+            directory = em_directories.get(_sector_type(code))
+            if directory is not None:
+                kwargs.setdefault("em_directory", directory)
             return sector_akshare.get_sector_stocks_akshare(
                 _sector_name(code), _sector_type(code), **kwargs)
         return get_sector_stocks(code, **kwargs)
@@ -1778,6 +1819,8 @@ def apply_membership_quality(base_quality, membership, as_of_date=""):
         quality["eligible"] = False
         if cache_error:
             reason = "sector_membership_cache_write_failed"
+        elif membership_quality == "cross_source_unverified":
+            reason = "sector_membership_cross_source_unverified"
         elif membership_quality == "degraded" or date_mismatch:
             reason = "sector_membership_stale"
         else:

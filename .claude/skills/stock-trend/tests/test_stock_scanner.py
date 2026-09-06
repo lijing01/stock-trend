@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans import stock_scanner as sc
 from fetchers import sector_data as sd
+from fetchers import sector_akshare as sa
 from fetchers import fundamental as fd
 
 
@@ -541,6 +542,56 @@ class TestMetadata(unittest.TestCase):
 
 
 class TestGatherPerformance(unittest.TestCase):
+    def test_ths_context_shares_typed_em_directory_and_marks_cross_source(self):
+        stocks = [{
+            "code": "600001", "name": "测试股份", "market_cap": 1e10,
+            "change_pct": 1.0, "amount": 1e8, "pe": 20,
+        }]
+        directory = {
+            "provider": "eastmoney", "sector_type": "industry",
+            "codes_by_name": {"板块甲": ["BK0001"], "板块乙": ["BK0002"]},
+            "provider_attempts": 2,
+        }
+        calls = []
+
+        def fake_ths(name, sector_type, **kwargs):
+            calls.append(kwargs.get("em_directory"))
+            return [{**stock, "membership_source": "realtime",
+                     "membership_data_date": "2026-08-06",
+                     "membership_quality": "cross_source_unverified",
+                     "membership_provider": "eastmoney",
+                     "membership_provider_code": "BK0001",
+                     "membership_mapping": "cross_source_exact_name_unverified"}
+                    for stock in stocks]
+
+        context = {
+            code: {"name": name, "provider": "ths", "type": "industry",
+                   "hot_score": 88, "sector_actionable": True}
+            for code, name in (("ths:industry:甲", "板块甲"),
+                               ("ths:industry:乙", "板块乙"))
+        }
+        metrics = {}
+        with patch.object(sa, "get_em_sector_directory", return_value=directory) as build, \
+             patch.object(sa, "get_sector_stocks_akshare", side_effect=fake_ths):
+            result = sc.gather_candidates(
+                list(context), sector_context=context, max_workers=1,
+                metrics=metrics)
+
+        build.assert_called_once_with("industry", timeout=3, retries=1,
+                                      deadline=None)
+        self.assertEqual(calls, [directory, directory])
+        self.assertEqual(metrics["sector_membership_directory_requests"], 1)
+        self.assertEqual(metrics["sector_membership_directory_provider_attempts"], 2)
+        membership = sc.build_sector_membership(
+            "ths:industry:甲", context=context["ths:industry:甲"],
+            stock=result["candidates"][0])
+        quality = sc.apply_membership_quality(
+            {"eligible": True, "reasons": []}, membership,
+            as_of_date="2026-08-06")
+        self.assertFalse(quality["eligible"])
+        self.assertIn("sector_membership_cross_source_unverified",
+                      quality["reasons"])
+
     def test_ths_sector_context_dispatches_by_name_not_ordinal(self):
         stocks = [{
             "code": "600001", "name": "测试股份", "market_cap": 1e10,
@@ -562,7 +613,10 @@ class TestGatherPerformance(unittest.TestCase):
                 "type": "industry", "hot_score": 88,
             }
         }
-        with patch.object(sd, "get_sector_stocks") as em, \
+        with patch.object(sa, "get_em_sector_directory", return_value={
+                    "provider": "eastmoney", "sector_type": "industry",
+                    "codes_by_name": {}, "provider_attempts": 1}), \
+                patch.object(sd, "get_sector_stocks") as em, \
                 patch("fetchers.sector_akshare.get_sector_stocks_akshare",
                       side_effect=fake_ths):
             result = sc.gather_candidates(

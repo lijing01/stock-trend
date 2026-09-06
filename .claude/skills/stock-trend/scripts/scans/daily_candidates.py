@@ -95,6 +95,7 @@ REASON_LABELS = {
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
     "data_quality_ineligible": "关键数据质量不合格",
+    "sector_membership_cross_source_unverified": "跨源板块成分未验证，不能继承排行资格",
 }
 
 DATA_REASON_CODES = {
@@ -114,6 +115,7 @@ DATA_REASON_CODES = {
     "regime_stale",
     "intraday_provisional",
     "data_quality_ineligible",
+    "sector_membership_cross_source_unverified",
 }
 
 def candidate_quality_score(item):
@@ -252,6 +254,9 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "sector_membership_name_provider_count",
     "sector_membership_mapping_count", "market_cap_enriched_count",
     "market_cap_missing_count",
+    "sector_membership_directory_requests",
+    "sector_membership_directory_provider_attempts",
+    "sector_membership_directory_failures",
     "sector_membership_attempted_unique_count",
     "sector_membership_available_unique_count",
     "sector_membership_queued_unique_count",
@@ -550,7 +555,10 @@ def _performance_markdown(performance):
         f"失败 {performance.get('sector_membership_failure_count', 0)} | "
         f"缓存成功 {performance.get('sector_membership_cache_count', 0)} | "
         f"按名称提供方 {performance.get('sector_membership_name_provider_count', 0)} | "
-        f"历史映射 {performance.get('sector_membership_mapping_count', 0)} | "
+        f"跨源映射 {performance.get('sector_membership_mapping_count', 0)} | "
+        f"共享目录 {performance.get('sector_membership_directory_requests', 0)}"
+        f"（尝试 {performance.get('sector_membership_directory_provider_attempts', 0)}，"
+        f"失败 {performance.get('sector_membership_directory_failures', 0)}） | "
         f"市值补全 {performance.get('market_cap_enriched_count', 0)} | "
         f"市值仍缺失 {performance.get('market_cap_missing_count', 0)}",
         "",
@@ -2632,7 +2640,7 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
         "recommendation_date": recommendation_date,
         "generated_at": datetime.now().astimezone().isoformat(),
         "snapshot_type": "provisional" if policy.get("provisional") else "formal",
-        "model_version": "daily-candidates/v3",
+        "model_version": "daily-candidates/v4",
         "policy": copy.deepcopy(policy),
         "market_regime": _legacy_market_regime(market_regime),
         "sectors": copy.deepcopy(sector_codes),
