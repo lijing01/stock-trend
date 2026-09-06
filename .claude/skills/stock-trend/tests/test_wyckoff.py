@@ -712,6 +712,10 @@ class TestLongTermWyckoffContext(unittest.TestCase):
         self.assertIsNone(
             classify(payload("jac", age=9, reconfirmed=True)))
 
+        unknown = payload("lps")
+        del unknown["short_term"]["signal_age_bars"]
+        self.assertIsNone(classify(unknown))
+
     def test_short_term_payload_marks_post_lps_sos_reconfirmation(self):
         context = {
             "id": "context_1", "level": "context", "support": 90.0,

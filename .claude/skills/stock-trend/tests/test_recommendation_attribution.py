@@ -49,6 +49,15 @@ class T(unittest.TestCase):
   self.assertEqual(item['execution']['status'],'data_error')
   self.assertEqual(item['execution']['reason'],'wrong_adjustment')
 
+ def test_candidate_signal_performance_does_not_need_trade_plan(self):
+  days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
+  rows=[{'date':d,'close':10+i,'vol':1} for i,d in enumerate(days)]
+  result=evaluate_candidate_signal({'recommendation_date':'2026-08-20','code':'X'},
+   '2026-08-27',days,rows,stock_meta={'adj':'qfq'},windows=(5,))
+  self.assertEqual(result['measurement']['trade_plan_required'],False)
+  self.assertEqual(result['windows']['5']['status'],'complete')
+  self.assertAlmostEqual(result['windows']['5']['signal_return'],4/11)
+
  def test_stop_path_uses_one_gross_return(self):
   days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
   rows=self._production_rows(days)

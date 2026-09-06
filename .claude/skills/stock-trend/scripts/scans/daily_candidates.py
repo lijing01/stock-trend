@@ -129,12 +129,78 @@ def apply_buy_point_priority(item):
     return item
 
 
+def buy_point_evidence(wyckoff):
+    """Expose the exact structural evidence behind a buy-level bonus.
+
+    Confidence is a pattern-classification confidence, not a calibrated win
+    probability.  Missing age/date fields remain explicitly unknown.
+    """
+    short = (wyckoff or {}).get("short_term", {}) if isinstance(wyckoff, dict) else {}
+    level = classify_buy_point_level(wyckoff)
+    age = short.get("signal_age_bars")
+    try:
+        age = int(age) if age is not None else None
+    except (TypeError, ValueError):
+        age = None
+    status = short.get("signal_status") or "unknown"
+    return {
+        "strict_level": level["number"] if level else None,
+        "strict_level_name": level["name"] if level else "",
+        "priority_bonus": float(level["priority_bonus"]) if level else 0.0,
+        "reward_reason": level["label"] if level else "不满足严格等级或证据未知",
+        "event_date": short.get("event_date") or "unknown",
+        "confirmation_date": short.get("confirmation_date") or "unknown",
+        "signal_age_bars": age,
+        "age_status": "known" if age is not None else "unknown",
+        "current_status": status,
+        "confidence": short.get("confidence"),
+        "confidence_meaning": "形态识别置信度，非交易胜率",
+        "post_lps_reconfirmation": short.get("post_lps_reconfirmation") is True,
+    }
+
+
 def candidate_rank_score(item):
     """Return within-bucket execution priority with legacy fallback."""
     return float(
         item.get("execution_priority_score", candidate_quality_score(item))
         or 0
     )
+
+
+def candidate_concentration(candidates, top_n=10):
+    """Describe sector exposure without changing selection or ranking."""
+    unique = []
+    seen = set()
+    for item in candidates:
+        code = str(item.get("code") or "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        unique.append(item)
+        if len(unique) >= top_n:
+            break
+    counts = {}
+    cross_exposure = 0
+    for item in unique:
+        primary = item.get("sector_name") or item.get("sector_code") or "未知板块"
+        counts[primary] = counts.get(primary, 0) + 1
+        memberships = item.get("sector_memberships") or []
+        if len(memberships) > 1:
+            cross_exposure += 1
+    total = len(unique)
+    distribution = [
+        {"sector": sector, "count": count, "share": round(count / total, 4)}
+        for sector, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    ] if total else []
+    return {
+        "sample_size": total,
+        "top_n": top_n,
+        "by_primary_sector": distribution,
+        "max_primary_sector_share": distribution[0]["share"] if distribution else None,
+        "cross_sector_exposure_count": cross_exposure,
+        "theme_correlation": "unknown_no_reliable_same_period_return_mapping",
+        "note": "按代码去重并仅计主归属；多板块归属单列交叉暴露，不改变候选排序或资格。",
+    }
 
 
 def _is_final_valid_candidate(item, min_score):
@@ -1905,18 +1971,23 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 短线买点 | 短线置信度 | 原始分 | 质量分 | 优先分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 买点证据（事件/确认/年龄/状态） | 短线置信度 | 原始分 | 质量分 | 优先分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
         detail = _markdown_cell(_candidate_diagnostic_text(item))
+        evidence = buy_point_evidence(wyckoff)
+        buy_text = (f"{wyckoff.get('sub_phase', '-')}；{evidence['reward_reason']}；"
+                    f"事件 {evidence['event_date']}；确认 {evidence['confirmation_date']}；"
+                    f"年龄 {evidence['signal_age_bars'] if evidence['age_status'] == 'known' else '未知'}；"
+                    f"{evidence['current_status']}")
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
-            f"{wyckoff.get('sub_phase', '-')} | "
-            f"{wyckoff.get('confidence', 0):.0%} | "
+            f"{buy_text} | "
+            f"{wyckoff.get('confidence', 0):.0%}（形态识别，非胜率） | "
             f"{item['composite_score']:.1f} | "
             f"{candidate_quality_score(item):.1f} | "
             f"{candidate_rank_score(item):.1f} | "
@@ -2031,6 +2102,14 @@ def classify_candidates(candidates, policy):
         reasons = list(quality.get("reasons", []))
         if not reasons:
             reasons.append("data_quality_ineligible")
+        # Data rejection does not erase independent market/sector blockers.
+        if not item.get("sector_actionable", True):
+            reasons.append(item.get("sector_persistence_status")
+                           or item.get("sector_type") or "sector_unverified")
+        reasons.extend(policy.get("reasons", []))
+        short_term_reason = _short_term_observation_reason(item)
+        if short_term_reason:
+            reasons.append(short_term_reason)
         rejected["observation_reasons"] = list(dict.fromkeys(reasons))
         data_rejected.append(rejected)
 
@@ -2102,7 +2181,7 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
         "recommendation_date": recommendation_date,
         "generated_at": datetime.now().astimezone().isoformat(),
         "snapshot_type": "provisional" if policy.get("provisional") else "formal",
-        "model_version": "daily-candidates/v1",
+        "model_version": "daily-candidates/v2",
         "policy": copy.deepcopy(policy),
         "market_regime": load_regime_context() or {},
         "sectors": copy.deepcopy(sector_codes),
@@ -2242,6 +2321,16 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     _append_candidate_table(
         lines, "数据失效/待修复", buckets.get("data_rejected", []),
         "无数据失效候选。")
+    concentration = (performance or {}).get("candidate_concentration", {})
+    if concentration:
+        distribution = "、".join(
+            f"{row['sector']} {row['count']}/{concentration['sample_size']} ({row['share']:.0%})"
+            for row in concentration.get("by_primary_sector", [])) or "无"
+        lines.extend(["", "## 候选集中度提示（仅观察）", "",
+                      f"前 {concentration.get('sample_size', 0)} 只主板块分布：{distribution}。",
+                      f"最大主板块占比：{concentration.get('max_primary_sector_share', 0) or 0:.0%}；"
+                      f"多板块交叉暴露：{concentration.get('cross_sector_exposure_count', 0)} 只。",
+                      "> 主题相关性：未知（缺少可靠的同期收益映射）；本提示不改变候选资格或排序。"])
     lines.extend(_performance_markdown(performance))
     lines.extend([
         "", "---", "",
@@ -2482,6 +2571,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
             "elapsed_seconds": round(elapsed, 1),
             "performance": performance or {},
             "tracking": tracking or {},
+            "candidate_concentration": (performance or {}).get("candidate_concentration", {}),
         },
         "policy": policy,
         "sectors": sector_codes,
@@ -2583,6 +2673,7 @@ def main():
     # 过滤 + 排序 + 归一化到 top
     candidates = select_candidate_pool(scored, args.top, args.min_score)
     buckets = classify_candidates(candidates, policy)
+    performance["candidate_concentration"] = candidate_concentration(candidates)
 
     elapsed = time.time() - start
     performance = _complete_performance(

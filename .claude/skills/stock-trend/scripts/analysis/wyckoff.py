@@ -180,8 +180,12 @@ def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
     short = wyckoff.get("short_term") or {}
     sub_phase = str(short.get("sub_phase") or "").strip().lower()
     status = str(short.get("signal_status") or "").strip().lower()
+    # An omitted age is not evidence that the event happened today.  Older
+    # snapshots remain readable, but cannot receive a new execution bonus.
+    if short.get("signal_age_bars") is None or "signal_age_bars" not in short:
+        return None
     try:
-        age = int(short.get("signal_age_bars", 0) or 0)
+        age = int(short.get("signal_age_bars"))
     except (TypeError, ValueError):
         return None
     level = BUY_POINT_LEVELS.get(sub_phase)
@@ -1623,6 +1627,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "confidence": round(confidence, 2),
         "signal_status": signal.get("status", "none"),
         "signal_age_bars": signal.get("age_bars", 0),
+        "event_date": signal.get("event_date", ""),
+        "confirmation_date": signal.get("detected_date", ""),
+        "event": signal.get("event", ""),
         "post_lps_reconfirmation": _is_post_lps_reconfirmation(
             active_event, event_history),
         "range_level": (trading_range or {}).get("level", ""),

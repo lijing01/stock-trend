@@ -1354,6 +1354,18 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(
             candidate_rank_score(candidate("1", adjusted_score=63.5)), 63.5)
 
+    def test_candidate_concentration_deduplicates_codes_and_marks_cross_exposure(self):
+        first = candidate("A")
+        first["sector_name"] = "养殖业"
+        first["sector_memberships"] = [{"code": "BK1"}, {"code": "BK2"}]
+        duplicate = copy.deepcopy(first)
+        second = candidate("B")
+        second["sector_name"] = "半导体"
+        summary = dc.candidate_concentration([first, duplicate, second])
+        self.assertEqual(summary["sample_size"], 2)
+        self.assertEqual(summary["cross_sector_exposure_count"], 1)
+        self.assertEqual(summary["max_primary_sector_share"], 0.5)
+
     def test_buy_level_bonus_orders_only_nearby_eligible_candidates(self):
         plain = candidate("plain", adjusted_score=80.0)
         _set_buy_level(plain, "pre_markup")
@@ -2844,6 +2856,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                     "short_term": {
                         "sub_phase": sub_phase,
                         "signal_status": "confirmed",
+                        "signal_age_bars": 0,
                         "post_lps_reconfirmation": post_lps_reconfirmation,
                     },
                 })
@@ -2889,6 +2902,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         item["wyckoff"]["sub_phase"] = "lps"
         item["wyckoff"]["short_term"] = {
             "sub_phase": "lps", "signal_status": "confirmed",
+            "signal_age_bars": 0,
         }
         html = dc._html_candidate_rows(
             [item], buy_level_display="actionable")
@@ -2905,6 +2919,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         item["wyckoff"]["short_term"] = {
             "sub_phase": "lps",
             "signal_status": "confirmed",
+            "signal_age_bars": 0,
         }
 
         html = dc._html_candidate_rows(
@@ -2921,6 +2936,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         first_jac["wyckoff"]["short_term"] = {
             "sub_phase": "jac",
             "signal_status": "confirmed",
+            "signal_age_bars": 0,
             "post_lps_reconfirmation": False,
         }
         reconfirmed_jac = copy.deepcopy(first_jac)
@@ -2957,6 +2973,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         actionable = candidate("actionable")
         actionable["wyckoff"]["short_term"] = {
             "sub_phase": "lps", "signal_status": "confirmed",
+            "signal_age_bars": 0,
         }
         observation = copy.deepcopy(actionable)
         observation["code"] = "observation"

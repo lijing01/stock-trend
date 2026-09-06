@@ -32,7 +32,8 @@ from core.recommendation_snapshot import iter_official_snapshots
 
 
 WINDOWS = (5, 10, 20, 60)
-EVALUATOR_VERSION = "recommendation-attribution/v1"
+EVALUATOR_VERSION = "recommendation-attribution/v2"
+CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v1"
 
 
 class AttributionDataError(ValueError):
@@ -193,6 +194,60 @@ def _benchmark_return(series, entry, exit_date):
     start_close = _number(start or {}, "close")
     end_close = _number(end or {}, "close")
     return _ret(start_close, end_close)
+
+
+def evaluate_candidate_signal(recommendation, evaluation_as_of, market_sessions,
+                              stock_rows, hs300_rows=None, sector_rows=None,
+                              windows=WINDOWS, stock_meta=None):
+    """Evaluate a fixed candidate sample without requiring a trade plan.
+
+    The measurement starts at the next market session close, so it is signal
+    performance rather than a claim that an entry was executable or traded.
+    """
+    content = recommendation.get("content", recommendation)
+    recommendation_date = normalize_trade_date(content.get("recommendation_date"))
+    candidate = recommendation.get("candidate") or recommendation
+    code = candidate.get("code", "")
+    evaluation_as_of = normalize_trade_date(evaluation_as_of)
+    try:
+        validate_series_metadata(stock_meta)
+        sessions = _normalized_sessions(market_sessions)
+    except AttributionDataError as exc:
+        return _error_result(recommendation_date, code, evaluation_as_of, CostModel(), windows, str(exc))
+    future = [session for session in sessions if recommendation_date < session <= evaluation_as_of]
+    result = {"evaluator_version": CANDIDATE_EVALUATOR_VERSION,
+              "recommendation_date": recommendation_date, "code": code,
+              "evaluation_as_of": evaluation_as_of,
+              "measurement": {"status": "signal_close_to_close", "entry_rule": "next_market_session_close", "trade_plan_required": False},
+              "windows": {}}
+    rows = _rows_by_date(stock_rows)
+    if not future:
+        for window in windows:
+            result["windows"][str(window)] = {"status": "pending", "required_session": window}
+        return result
+    entry = future[0]
+    entry_close = _number(rows.get(entry, {}), "close")
+    if entry_close is None:
+        for window in windows:
+            result["windows"][str(window)] = {"status": "data_error", "reason": "t1_data_missing"}
+        return result
+    for window in windows:
+        if len(future) < window:
+            result["windows"][str(window)] = {"status": "pending", "required_session": window}
+            continue
+        exit_date = future[window - 1]
+        ret = _ret(entry_close, _number(rows.get(exit_date, {}), "close"))
+        if ret is None:
+            result["windows"][str(window)] = {"status": "data_error", "reason": "historical_data_missing"}
+            continue
+        item = {"status": "complete", "signal_return": ret,
+                "entry_date": entry, "exit_date": exit_date}
+        for label, series in (("hs300", hs300_rows), ("sector", sector_rows)):
+            benchmark = _benchmark_return(series, entry, exit_date) if series else None
+            item[label + "_return"] = benchmark
+            item[label + "_alpha"] = ret - benchmark if benchmark is not None else None
+        result["windows"][str(window)] = item
+    return result
 
 
 def evaluate_recommendation(
@@ -422,6 +477,14 @@ def merge_attribution(existing, incoming):
             else copy.deepcopy(item)
         )
     out["items"] = [old_items[key] for key in sorted(old_items)]
+    old_signals = {str(item.get("code")): item for item in out.setdefault("candidate_signal_items", [])}
+    for item in incoming.get("candidate_signal_items", []):
+        code = str(item.get("code"))
+        old_signals[code] = (_merge_record(old_signals[code], item)
+                             if code in old_signals else copy.deepcopy(item))
+    out["candidate_signal_items"] = [old_signals[key] for key in sorted(old_signals)]
+    if "candidate_signal_evaluator_version" in incoming:
+        out["candidate_signal_evaluator_version"] = incoming["candidate_signal_evaluator_version"]
     return out
 
 
@@ -524,6 +587,35 @@ def summarize_attribution(items, minimum_dates=20, minimum_mature=100):
     }
 
 
+def summarize_candidate_performance(items, minimum_dates=20, minimum_mature=100):
+    """Keep candidate-signal statistics distinct from simulated trade P&L."""
+    summary = summarize_attribution(items, minimum_dates, minimum_mature)
+    for label, stats in summary["by_window"].items():
+        completed = [window for item in items for key, window in (item.get("windows") or {}).items()
+                     if key == label and window.get("status") == "complete"]
+        values = [row.get("signal_return") for row in completed if row.get("signal_return") is not None]
+        alphas = [row.get("hs300_alpha") for row in completed if row.get("hs300_alpha") is not None]
+        stats["mean_signal_return"] = sum(values) / len(values) if values else None
+        stats["mean_hs300_alpha"] = sum(alphas) / len(alphas) if alphas else None
+        stats.pop("mean_net_return", None)
+    summary["measurement"] = "候选信号表现（次一交易日收盘至窗口收盘），非交易模拟、非实际成交收益"
+    return summary
+
+
+def calibration_readiness(candidate_summary, trade_summary):
+    """State the evidence gate; never tune scores automatically here."""
+    signal_ready = candidate_summary.get("status") == "ready"
+    trade_ready = trade_summary.get("status") == "ready"
+    return {
+        "status": "eligible_for_walk_forward_review" if signal_ready and trade_ready else "evidence_insufficient",
+        "minimum_official_dates": 20,
+        "minimum_mature_observations": 100,
+        "candidate_signal_ready": signal_ready,
+        "trade_simulation_ready": trade_ready,
+        "policy": "仅允许人工逐项、时间切分的 walk-forward 评估；不自动调整买点奖励、市场门槛或仓位。",
+    }
+
+
 def _call_series_loader(loader, code, candidate, recommendation_date, evaluation_as_of):
     try:
         signature = inspect.signature(loader)
@@ -543,7 +635,9 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None, cost
     evaluation_as_of = normalize_trade_date(evaluation_as_of)
     buckets = content.get("buckets") or {}
     candidates = list(buckets.get("actionable", []))
+    signal_candidates = list(content.get("candidates") or [])
     results = []
+    signal_results = []
     for candidate in candidates:
         try:
             series = _call_series_loader(
@@ -568,6 +662,18 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None, cost
                 evaluation_as_of, cost_model or CostModel(), windows, reason,
             )
         results.append(result)
+    for candidate in signal_candidates:
+        try:
+            series = _call_series_loader(series_loader, candidate.get("code"), candidate,
+                                         recommendation_date, evaluation_as_of) or {}
+            signal_results.append(evaluate_candidate_signal(
+                {"recommendation_date": recommendation_date, "candidate": candidate},
+                evaluation_as_of, series.get("market_sessions", []), series.get("stock_rows", []),
+                series.get("hs300_rows"), series.get("sector_rows"), windows,
+                series.get("stock_meta")))
+        except (AttributionDataError, OSError, RuntimeError, ValueError) as exc:
+            signal_results.append(_error_result(recommendation_date, candidate.get("code", ""), evaluation_as_of,
+                                                CostModel(), windows, str(exc)))
     payload = {
         "evaluator_version": EVALUATOR_VERSION,
         "recommendation_date": recommendation_date,
@@ -575,6 +681,8 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None, cost
         "snapshot_sha256": snapshot.get("content_sha256"),
         "cost_model": dataclasses.asdict(cost_model or CostModel()),
         "items": results,
+        "candidate_signal_items": signal_results,
+        "candidate_signal_evaluator_version": CANDIDATE_EVALUATOR_VERSION,
     }
     if root is not None:
         path = sidecar_path(root, recommendation_date)
@@ -642,10 +750,17 @@ def track_official_history(
         for snapshot in snapshots
     ]
     items = [item for payload in payloads for item in payload.get("items", [])]
+    signal_items = [item for payload in payloads
+                    for item in payload.get("candidate_signal_items", [])]
     summary = summarize_attribution(items, minimum_dates=len(snapshots))
     summary["snapshots"] = len(snapshots)
     summary["rejected_snapshots"] = rejected
-    return {"summary": summary, "items": items}
+    candidate_summary = summarize_candidate_performance(
+        signal_items, minimum_dates=len(snapshots))
+    return {"summary": summary, "items": items,
+            "candidate_signal_summary": candidate_summary,
+            "candidate_signal_items": signal_items,
+            "strategy_calibration": calibration_readiness(candidate_summary, summary)}
 
 
 def main(argv=None):
