@@ -1,6 +1,6 @@
 # 今日推荐：数据证据与交易判断修复计划
 
-日期：2026-09-05。状态：计划已制定，尚未实施。
+日期：2026-09-05。状态：第一阶段已实施，待持续性历史积累和正式运行验证。
 
 ## 目标与边界
 
@@ -25,6 +25,8 @@
 
 ### T1 — 统一扫描覆盖及降级口径（P0）
 
+状态：已实施。新增唯一板块层面的尝试覆盖率、成分可用覆盖率，并在可用覆盖不足时标记扫描降级；报告保留旧字段兼容。
+
 涉及：`scripts/scans/daily_candidates.py`、`scripts/scans/stock_scanner.py`；对应 `tests/test_daily_recommendation_performance.py`、`tests/test_daily_candidates.py`。
 
 - [ ] 按唯一板块标识区分合格、已尝试、成分可用、失败、未尝试数量；Provider 重试不重复计数。
@@ -36,6 +38,8 @@
 验收：40 合格、40 尝试、20 可用的固定样例显示尝试 100%、可用 50%、degraded；覆盖重试成功、有效缓存、超时、未尝试、零板块。原候选分数及分桶不变。
 
 ### T2 — 市场评分的数据可信度（P0）
+
+状态：已实施。评分组件新增 good/partial/missing、缺失组件、评分区间；候选策略在市场数据缺失或部分缺失时仅观察。
 
 涉及：`scripts/analysis/market_regime.py`、`scripts/scans/daily_candidates.py`；对应市场环境及候选测试。
 
@@ -49,6 +53,8 @@
 
 ### T3 — 板块持续性采集的可诊断性（P0）
 
+状态：已实施。`--status --json` 可选输出逐日完整/部分/缺失状态和证据说明；原兼容调用仍返回旧字段集合。
+
 涉及：`scripts/analysis/sector_snapshot_job.py`、候选持续性展示及对应测试。
 
 - [ ] 复用现有采集命令和 `--status --json`，输出最近有效采集日、逐日完整/失败/缺失状态、当前有效天数、距离现有最低门槛还差几天。
@@ -59,6 +65,8 @@
 验收：非交易日、未收盘、完整截面、部分来源、重复运行、采集缺口均有明确状态；覆盖不足不能晋级。代码完成与真实历史积累完成分开标记。
 
 ### T4 — 正式快照冲突的解释及复跑留痕（P0）
+
+状态：已实施。正式快照仍不可覆盖；冲突复跑保存到 `recommendation_history/conflicts/`，记录决策差异、双方摘要和完整复跑快照，并在报告追踪字段中展示路径。
 
 涉及：`scripts/core/recommendation_snapshot.py`、`scripts/scans/daily_candidates.py`；快照、归因和生命周期测试。
 

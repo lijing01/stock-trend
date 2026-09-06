@@ -50,7 +50,7 @@ from core.source_health import (
     classify_failure,
     live_attempt,
 )
-from core.recommendation_snapshot import save_snapshot_if_official
+from core.recommendation_snapshot import save_snapshot_if_official, record_conflict_run
 from core.recommendation_snapshot import SnapshotConflict, SnapshotValidationError
 from core.recommendation_snapshot import _normalize_for_json
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
@@ -169,6 +169,10 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "sector_membership_name_provider_count",
     "sector_membership_mapping_count", "market_cap_enriched_count",
     "market_cap_missing_count",
+    "sector_membership_attempted_unique_count",
+    "sector_membership_available_unique_count",
+    "sector_membership_coverage",
+    "sector_membership_attempt_coverage",
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
@@ -229,6 +233,30 @@ def _complete_performance(performance, source_health, candidates, buckets,
     else:
         completed.setdefault("sector_expanded_count", 0)
     completed.pop("sector_expanded_codes", None)
+    # Membership counters are reported per unique sector.  The historical
+    # success/failure fields count provider outcomes and may include retries;
+    # these derived fields are the user-facing completeness contract.
+    attempted = int(completed.get("sector_membership_attempted_count", 0) or 0)
+    available = int(completed.get("sector_membership_success_count", 0) or 0)
+    queued = int(completed.get("sector_membership_queued_count", 0) or 0)
+    qualified = int(completed.get("sector_qualified_count", 0) or 0)
+    completed["sector_membership_attempted_unique_count"] = min(
+        max(attempted, 0), max(queued, 0)) if queued else max(attempted, 0)
+    completed["sector_membership_available_unique_count"] = min(
+        max(available, 0), max(queued, 0)) if queued else max(available, 0)
+    membership_denominator = max(queued, qualified, 0)
+    completed["sector_membership_attempt_coverage"] = round(
+        completed["sector_membership_attempted_unique_count"] /
+        membership_denominator, 4) if membership_denominator else None
+    completed["sector_membership_coverage"] = round(
+        completed["sector_membership_available_unique_count"] /
+        membership_denominator, 4) if membership_denominator else None
+    completed.setdefault("degradation_reasons", [])
+    if (completed["sector_membership_coverage"] is not None
+            and completed["sector_membership_coverage"] < 1.0):
+        reason = "sector_membership_incomplete"
+        if reason not in completed["degradation_reasons"]:
+            completed["degradation_reasons"].append(reason)
     completed["actionable_count"] = len(buckets.get("actionable", []))
     # Keep a useful audit even for compatibility callers that do not pass the
     # scanner's shared metrics dictionary.  Production runs populate these
@@ -303,7 +331,6 @@ def _complete_performance(performance, source_health, candidates, buckets,
                 dict(value) if field == "capital_failure_reasons"
                 else int(value))
     completed["total_seconds"] = max(0.0, float(total_seconds))
-    completed.setdefault("degradation_reasons", [])
     completed.setdefault("advisory_reasons", [])
     completed.setdefault("failed_batches", [])
     attempted_batches = int(completed.get("batch_count", 0))
@@ -395,8 +422,10 @@ def _performance_markdown(performance):
         f"热度合格 {performance.get('sector_qualified_count', 0)} → "
         f"实际展开 {performance.get('sector_expanded_count', 0)}",
         "",
-        f"**板块覆盖率**: "
+        f"**板块覆盖率（展开）**: "
         f"{float(performance.get('sector_scan_coverage', 1.0)):.1%} | "
+        f"成分尝试覆盖 {performance.get('sector_membership_attempt_coverage') if performance.get('sector_membership_attempt_coverage') is not None else '—'} | "
+        f"成分可用覆盖 {performance.get('sector_membership_coverage') if performance.get('sector_membership_coverage') is not None else '—'} | "
         f"是否截断: "
         f"{'是' if performance.get('sector_expansion_truncated') else '否'}"
         + (
@@ -415,6 +444,12 @@ def _performance_markdown(performance):
         f"历史映射 {performance.get('sector_membership_mapping_count', 0)} | "
         f"市值补全 {performance.get('market_cap_enriched_count', 0)} | "
         f"市值仍缺失 {performance.get('market_cap_missing_count', 0)}",
+        "",
+        f"**板块成分覆盖**: 尝试覆盖 "
+        f"{performance.get('sector_membership_attempt_coverage', '—')} | "
+        f"可用覆盖 {performance.get('sector_membership_coverage', '—')} "
+        f"（唯一板块 {performance.get('sector_membership_available_unique_count', 0)}/"
+        f"{max(performance.get('sector_membership_queued_count', 0), performance.get('sector_qualified_count', 0))}）",
         "",
         "**股票漏斗**: "
         f"批次 {performance.get('batch_count', 0)} → "
@@ -1904,6 +1939,11 @@ def load_regime_context():
             "label": r.get("label", ""),
             "data_date": d.get("data_date", ""),
             "advice": r.get("advice", ""),
+            "data_quality": r.get("data_quality", "unknown"),
+            "missing_components": r.get("missing_components", []),
+            "partial_components": r.get("partial_components", []),
+            "score_lower": r.get("score_lower"),
+            "score_upper": r.get("score_upper"),
             "hs300_change": (
                 d.get("indices", {}).get("000300.SH", {}).get("pct_chg")
             ),
@@ -1923,6 +1963,20 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
         policy = {
             "mode": "observation", "max_recommendations": 0,
             "reasons": ["regime_stale"],
+        }
+    elif regime.get("data_quality") in ("missing", "unknown") \
+            and "data_quality" in regime:
+        policy = {
+            "mode": "observation", "max_recommendations": 0,
+            "reasons": ["regime_data_missing" if regime.get("data_quality") == "missing" else "regime_data_quality_unknown"],
+            "missing_components": list(regime.get("missing_components") or []),
+        }
+    elif regime.get("data_quality") == "partial":
+        policy = {
+            "mode": "observation", "max_recommendations": 0,
+            "reasons": ["regime_data_partial"],
+            "missing_components": list(regime.get("missing_components") or []),
+            "partial_components": list(regime.get("partial_components") or []),
         }
     else:
         score = float(regime["score"])
@@ -2067,12 +2121,19 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
                 result, "normalization_warnings", []),
         }
     except SnapshotConflict as exc:
+        conflict_path = None
+        try:
+            from core.recommendation_snapshot import build_snapshot
+            conflict_path = record_conflict_run(build_snapshot(source))
+        except Exception:
+            pass
         return {
             "status": "conflict",
-            "path": None,
+            "path": str(conflict_path) if conflict_path else None,
             "content_sha256": None,
             "error_type": type(exc).__name__,
             "reason": str(exc),
+            "conflict_path": str(conflict_path) if conflict_path else None,
         }
     except SnapshotValidationError as exc:
         return {
@@ -2137,7 +2198,10 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         lines.extend([
             "",
             f"**市场环境**: {regime['score']} {regime['label']} "
-            f"(数据 {regime['data_date']})",
+            f"(数据 {regime['data_date']}；质量 {regime.get('data_quality', 'unknown')}"
+            + (f"；缺失 {','.join(regime.get('missing_components', []))}" if regime.get('missing_components') else "")
+            + (f"；评分区间 {regime.get('score_lower')}-{regime.get('score_upper')}" if regime.get('score_lower') is not None else "")
+            + ")",
         ])
     downgrade_reasons = [
         reason for reason in policy.get("reasons", [])

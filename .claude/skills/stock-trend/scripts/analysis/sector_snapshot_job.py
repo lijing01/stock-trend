@@ -210,24 +210,36 @@ def capture_snapshot(now=None, expected_date: str = "",
     return output
 
 
-def snapshot_status(as_of_date: str, days: int = 10) -> dict:
+def snapshot_status(as_of_date: str, days: int = 10,
+                    include_details: bool = False) -> dict:
     """Report complete candidate-history coverage without network or writes."""
     history = load_candidate_sector_history(days=days)
-    coverage = sum(
-        isinstance(record, dict)
-        and record.get("complete") is True
-        and record.get("quality") == "good"
-        and bool(record.get("sectors"))
-        for date_key, record in history.items()
-        if date_key <= as_of_date
-    )
-    return {
+    observations = []
+    for date_key, record in history.items():
+        if date_key > as_of_date:
+            continue
+        valid = (isinstance(record, dict)
+                 and record.get("complete") is True
+                 and record.get("quality") == "good"
+                 and bool(record.get("sectors")))
+        observations.append({"date": date_key, "status": "complete" if valid else (
+            "partial" if isinstance(record, dict) and record.get("sectors") else "missing")})
+    coverage = sum(item["status"] == "complete" for item in observations)
+    result = {
         "as_of_date": as_of_date,
         "coverage_days": coverage,
         "minimum_days": MINIMUM_COVERAGE_DAYS,
         "days_needed": max(0, MINIMUM_COVERAGE_DAYS - coverage),
         "classification_ready": coverage >= MINIMUM_COVERAGE_DAYS,
     }
+    if include_details:
+        result["observations"] = sorted(observations, key=lambda item: item["date"])
+        result["missing_dates"] = [item["date"] for item in observations
+                                    if item["status"] != "complete"]
+        result["evidence_note"] = (
+            "coverage_days counts only complete good full-market snapshots; "
+            "missing/partial dates are not zero-hot days")
+    return result
 
 
 def _exit_code(status: str) -> int:
@@ -272,7 +284,8 @@ def main(argv=None) -> int:
                 result = {"status": "error", "errors": ["invalid_status_date"]}
             else:
                 result = snapshot_status(as_of_date=as_of_date,
-                                         days=args.days)
+                                         days=args.days,
+                                         include_details=True)
         else:
             result = capture_snapshot(
                 expected_date=args.expected_date,

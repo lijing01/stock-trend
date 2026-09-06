@@ -26,6 +26,71 @@ class SnapshotResult:
         self.normalization_warnings = list(normalization_warnings or [])
 
 
+def _decision_diff(old, incoming):
+    """Summarize decision changes without exposing runtime-only noise."""
+    old_content = (old or {}).get("content", {})
+    new_content = (incoming or {}).get("content", {})
+    old_candidates = {str(x.get("code")): x for x in old_content.get("candidates", [])
+                      if isinstance(x, dict) and x.get("code")}
+    new_candidates = {str(x.get("code")): x for x in new_content.get("candidates", [])
+                      if isinstance(x, dict) and x.get("code")}
+    changed = []
+    for code in sorted(set(old_candidates) & set(new_candidates)):
+        if _content_digest({"candidate": old_candidates[code]}) != _content_digest({"candidate": new_candidates[code]}):
+            changed.append(code)
+    old_buckets = old_content.get("buckets", {})
+    new_buckets = new_content.get("buckets", {})
+    bucket_changes = {}
+    for name in set(old_buckets) | set(new_buckets):
+        before = {str(x.get("code")) for x in old_buckets.get(name, []) if isinstance(x, dict)}
+        after = {str(x.get("code")) for x in new_buckets.get(name, []) if isinstance(x, dict)}
+        if before != after:
+            bucket_changes[name] = {"added": sorted(after - before), "removed": sorted(before - after)}
+    return {
+        "candidate_added": sorted(set(new_candidates) - set(old_candidates)),
+        "candidate_removed": sorted(set(old_candidates) - set(new_candidates)),
+        "candidate_changed": changed,
+        "bucket_changes": bucket_changes,
+        "model_changed": old_content.get("model_version") != new_content.get("model_version"),
+        "policy_changed": old_content.get("policy") != new_content.get("policy"),
+    }
+
+
+def record_conflict_run(snapshot, root=DEFAULT_ROOT):
+    """Persist a rejected rerun for audit; never alters the official snapshot."""
+    snapshot = _normalize_for_json(copy.deepcopy(snapshot))
+    _validate_snapshot_envelope(snapshot)
+    root = Path(root)
+    official_path = root / (snapshot["content"]["recommendation_date"] + ".json")
+    old = load_official_snapshot(official_path)
+    digest = snapshot.get("content_sha256", "")
+    conflict_dir = root / "conflicts"
+    conflict_dir.mkdir(parents=True, exist_ok=True)
+    target = conflict_dir / f"{snapshot['content']['recommendation_date']}-{digest[:12]}.json"
+    payload = {
+        "schema_version": "recommendation-snapshot-conflict/v1",
+        "recorded_at": datetime.now().astimezone().isoformat(),
+        "official_path": str(official_path),
+        "official_content_sha256": old.get("content_sha256"),
+        "conflict_content_sha256": digest,
+        "decision_diff": _decision_diff(old, snapshot),
+        "snapshot": snapshot,
+    }
+    if target.exists():
+        return target
+    fd, tmp = tempfile.mkstemp(dir=conflict_dir, prefix=".tmp-")
+    os.close(fd)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(canonical_json(payload) + b"\n")
+            f.flush(); os.fsync(f.fileno())
+        os.link(tmp, target)
+    finally:
+        try: os.unlink(tmp)
+        except OSError: pass
+    return target
+
+
 def _is_date_field(path):
     """Return whether a JSON path names a field carrying a calendar date."""
     field = path.rsplit('.', 1)[-1].lower()

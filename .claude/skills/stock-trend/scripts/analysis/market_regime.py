@@ -307,20 +307,22 @@ def score_index_trend(index_metrics: dict[str, dict]) -> dict:
         scores.append(s)
         detail.append(f"{code} 收盘{'上' if m['above_ma20'] else '下'}MA20{'↑' if m['ma20_rising'] else '↓'}")
     if not scores:
-        return {"score": 50.0, "detail": "指数数据不可用"}
-    return {"score": round(sum(scores) / len(scores), 1), "detail": "; ".join(detail)}
+        return {"score": 50.0, "detail": "指数数据不可用", "data_status": "missing"}
+    return {"score": round(sum(scores) / len(scores), 1), "detail": "; ".join(detail),
+            "data_status": "good"}
 
 
 def score_volume(today_amount_yi: float | None, amount_history_yi: list[float]) -> dict:
     """成交额分: 两市成交额 vs 近20日均额."""
     if not today_amount_yi or today_amount_yi <= 0:
-        return {"score": 50.0, "detail": "成交额不可用"}
+        return {"score": 50.0, "detail": "成交额不可用", "data_status": "missing"}
     hist = [a for a in amount_history_yi if a > 0][-20:]
     if len(hist) < MIN_AMOUNT_HISTORY_DAYS:
         return {
             "score": 50.0,
             "detail": f"两市 {today_amount_yi:.0f}亿,成交额历史不足 "
                       f"{len(hist)}/{MIN_AMOUNT_HISTORY_DAYS}",
+            "data_status": "partial",
         }
     base = sum(hist) / len(hist)
     ratio = today_amount_yi / base
@@ -329,13 +331,15 @@ def score_volume(today_amount_yi: float | None, amount_history_yi: list[float]) 
     return {
         "score": round(score, 1),
         "detail": f"两市 {today_amount_yi:.0f}亿,较20日均额 {pct:+.0f}%",
+        "data_status": "good",
     }
 
 
 def score_breadth(breadth: dict | None, industry_sectors: list[dict]) -> dict:
     """赚钱效应分: 全市场涨跌家数比(地域板块加总) + 行业板块上涨占比."""
     if not breadth or breadth.get("up", 0) + breadth.get("down", 0) <= 0:
-        return {"score": 50.0, "detail": "涨跌家数不可用", "up": 0, "down": 0}
+        return {"score": 50.0, "detail": "涨跌家数不可用", "up": None, "down": None,
+                "data_status": "missing"}
     up = breadth["up"]
     down = breadth["down"]
     up_ratio = up / (up + down)
@@ -348,6 +352,7 @@ def score_breadth(breadth: dict | None, industry_sectors: list[dict]) -> dict:
         "up": int(up),
         "down": int(down),
         "up_ratio": round(up_ratio, 3),
+        "data_status": "good",
     }
 
 
@@ -375,6 +380,7 @@ def score_zt_emotion(zt: dict, history_counts: list[int]) -> dict:
     return {
         "score": round(score, 1),
         "detail": f"涨停 {count}家(连板{streak_count},最高{max_streak}板;{vs})+连板加成{bonus}",
+        "data_status": "good" if len(hist) >= 5 else "partial",
     }
 
 
@@ -382,13 +388,14 @@ def score_capital(northbound_yi: float | None, market_activity: dict | None) -> 
     """资金分: 北向净买入;不可用降级用全市场主力净流入(地域板块加总,精确)."""
     if northbound_yi is not None:
         score = _clamp(50 + northbound_yi * 8)
-        return {"score": round(score, 1), "detail": f"北向净买入 {northbound_yi:+.1f}亿"}
+        return {"score": round(score, 1), "detail": f"北向净买入 {northbound_yi:+.1f}亿", "data_status": "good"}
     main_force_yi = market_activity.get("main_force_yi") if market_activity else None
     if main_force_yi is not None:
         score = _clamp(50 + main_force_yi * 0.06)
         return {"score": round(score, 1),
-                "detail": f"全市场主力净流入 {main_force_yi:+.1f}亿(北向不可用降级)"}
-    return {"score": 50.0, "detail": "资金数据不可用"}
+                "detail": f"全市场主力净流入 {main_force_yi:+.1f}亿(北向不可用降级)",
+                "data_status": "partial"}
+    return {"score": 50.0, "detail": "资金数据不可用", "data_status": "missing"}
 
 
 def _regime_gate(score: float) -> tuple[str, str]:
@@ -411,18 +418,34 @@ def compute_regime(components: dict) -> dict:
     }
     total = 0.0
     used_weight = 0.0
+    missing = []
+    partial = []
     for key, w in weights.items():
         comp = components.get(key) or {}
         s = comp.get("score")
         if s is None:
+            missing.append(key)
             continue
+        status = comp.get("data_status", "good")
+        if status == "missing":
+            missing.append(key)
+        elif status == "partial":
+            partial.append(key)
         total += _safe_float(s) * w
         used_weight += w
     if used_weight <= 0:
         return {"score": 50.0, "label": "中性", "advice": "数据不可用"}
     score = round(_clamp(total / used_weight), 1)
     label, advice = _regime_gate(score)
-    return {"score": score, "label": label, "advice": advice}
+    missing_weight = sum(weights.get(key, 0) for key in missing)
+    score_lower = _clamp(total)
+    score_upper = _clamp(total + missing_weight * 100)
+    result = {"score": score, "label": label, "advice": advice,
+              "data_quality": "missing" if missing else ("partial" if partial else "good"),
+              "missing_components": missing, "partial_components": partial,
+              "score_lower": round(score_lower, 1),
+              "score_upper": round(score_upper, 1)}
+    return result
 
 
 # ──────────────── 持久化 ────────────────
@@ -809,7 +832,7 @@ def generate_report(ctx: dict) -> str:
         lines.append(f"| {name} | **{comp.get('score', '—')}** | {comp.get('detail', '—')} |")
     lines.append("")
     breadth = (ctx.get("components") or {}).get("breadth") or {}
-    lines.append(f"▸ 涨跌家数: 涨 {breadth.get('up', '—')} / 跌 {breadth.get('down', '—')} | "
+    lines.append(f"▸ 涨跌家数: 涨 {breadth.get('up') if breadth.get('up') is not None else '—'} / 跌 {breadth.get('down') if breadth.get('down') is not None else '—'} | "
                  f"两市成交 {ctx.get('amount_yi', 0):.0f}亿 | "
                  f"涨停 {ctx.get('zt', {}).get('count', 0)}家(连板{ctx.get('zt', {}).get('streak_count', 0)})")
     lines.append("")
