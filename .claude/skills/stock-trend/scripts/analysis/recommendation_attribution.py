@@ -32,7 +32,7 @@ from core.recommendation_snapshot import iter_official_snapshots
 
 
 WINDOWS = (5, 10, 20, 60)
-EVALUATOR_VERSION = "recommendation-attribution/v2"
+EVALUATOR_VERSION = "recommendation-attribution/v3"
 CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v1"
 
 
@@ -111,13 +111,66 @@ def _number(row, key, default=None):
         return default
 
 
-def _oneup(row):
-    try:
-        prices = {float(row.get(key, 0) or 0) for key in ("open", "high", "low", "close")}
-        pct_change = float(row.get("pct_chg", 0) or 0)
-    except (TypeError, ValueError):
+def _limit_pct(code, row, security_meta=None):
+    """Return the applicable A-share daily limit, or None when it is unknown.
+
+    This is deliberately a narrow, date-aware rule table.  It is only used to
+    reject a one-price board; it does not turn an OHLC bar into proof of an
+    executable fill.  Explicit provider metadata wins over an inferred code.
+    """
+    meta = security_meta or {}
+    explicit = _number(meta, "price_limit_pct", _number(row, "price_limit_pct"))
+    if explicit is not None and explicit > 0:
+        return explicit / 100 if explicit > 1 else explicit
+    name = str(meta.get("name") or row.get("name") or "").upper()
+    if "ST" in name:
+        return 0.05
+    text = str(code or meta.get("code") or "")
+    trade_date = _row_date(row)
+    if text.startswith(("300", "301")):
+        return 0.20 if trade_date >= "2020-08-24" else 0.10
+    if text.startswith("688"):
+        return 0.20
+    if text.startswith(("8", "4")):
+        return 0.30 if trade_date >= "2021-11-15" else None
+    if text.startswith(("0", "002", "003", "6")):
+        return 0.10
+    return None
+
+
+def _one_price_limit(row, previous_close, code="", security_meta=None, direction="up"):
+    """Return True/False/None for a one-price limit board.
+
+    ``None`` means an otherwise one-price bar cannot be classified because
+    neither the rule nor a prior close is available.  The caller must not
+    silently treat that as executable.
+    """
+    prices = [_number(row, key) for key in ("open", "high", "low", "close")]
+    if any(value is None for value in prices) or len(set(prices)) != 1:
         return False
-    return pct_change >= 9.5 and len(prices) == 1
+    meta = security_meta or {}
+    explicit_price = _number(
+        row, "limit_up_price" if direction == "up" else "limit_down_price",
+        _number(meta, "limit_up_price" if direction == "up" else "limit_down_price"),
+    )
+    previous = _number({}, "", previous_close)
+    if previous is None or previous <= 0:
+        return None
+    price = prices[0]
+    if explicit_price is not None and explicit_price > 0:
+        return abs(price - explicit_price) <= max(0.01, explicit_price * 0.001)
+    change = price / previous - 1
+    # A flat or opposite-direction one-price bar is not the limit board that
+    # blocks this action, even if its security rule is unavailable.
+    if direction == "up" and change <= 0:
+        return False
+    if direction == "down" and change >= 0:
+        return False
+    limit = _limit_pct(code, row, security_meta)
+    if limit is None:
+        return None
+    tolerance = 0.003
+    return change >= limit - tolerance if direction == "up" else change <= -limit + tolerance
 
 
 def _ret(start, end):
@@ -146,7 +199,7 @@ def validate_series_metadata(meta):
         raise AttributionDataError("wrong_adjustment")
 
 
-def resolve_entry(plan, recommendation_date, market_sessions, stock_rows):
+def resolve_entry(plan, recommendation_date, market_sessions, stock_rows, code="", security_meta=None):
     recommendation_date = normalize_trade_date(recommendation_date)
     sessions = [
         d for d in _normalized_sessions(market_sessions)
@@ -164,7 +217,12 @@ def resolve_entry(plan, recommendation_date, market_sessions, stock_rows):
         return {"status": "data_error", "reason": "t1_volume_missing", "date": entry_date}
     if volume <= 0:
         return {"status": "unexecutable", "reason": "t1_suspended", "date": entry_date}
-    if _oneup(row):
+    previous_sessions = [d for d in _normalized_sessions(market_sessions) if d < entry_date]
+    previous_row = rows.get(previous_sessions[-1]) if previous_sessions else None
+    limit_up = _one_price_limit(row, _number(previous_row or {}, "close"), code, security_meta, "up")
+    if limit_up is None:
+        return {"status": "data_error", "reason": "t1_limit_rule_unknown", "date": entry_date}
+    if limit_up:
         return {"status": "unexecutable", "reason": "t1_one_price_limit_up", "date": entry_date}
     entry = plan.get("entry", {})
     low = _number(entry, "low", _number(entry, "price"))
@@ -184,6 +242,7 @@ def resolve_entry(plan, recommendation_date, market_sessions, stock_rows):
         "status": "executable",
         "date": entry_date,
         "price": min(high, max(low, _number(row, "open", low))),
+        "fill_assumption": "entry_zone_touched_on_daily_bar",
     }
 
 
@@ -305,7 +364,7 @@ def evaluate_recommendation(
             },
         }
     execution = (
-        resolve_entry(plan, recommendation_date, sessions, stock_rows)
+        resolve_entry(plan, recommendation_date, sessions, stock_rows, code, stock_meta)
         if plan
         else {"status": "unexecutable", "reason": "trade_plan_missing"}
     )
@@ -370,14 +429,29 @@ def evaluate_recommendation(
             close = _number(row, "close", previous_close)
             mfe = max(mfe, _ret(entry_price, high) or 0)
             mae = min(mae, _ret(entry_price, low) or 0)
+            # A-share stock bought today cannot be sold today.  We retain its
+            # MFE/MAE but begin executable exits on the next market session.
+            if session == entry:
+                previous_close = close
+                continue
+            prior = rows.get(sessions[sessions.index(session) - 1])
+            limit_down = _one_price_limit(row, _number(prior or {}, "close"), code, stock_meta, "down")
+            if limit_down is None:
+                missing_data = True
+                continue
+            if limit_down:
+                carried_suspension = True
+                previous_close = close
+                continue
             if exit_reason is None and low <= stop:
                 exit_reason = "stop"
                 exit_date = session
-                exit_price = stop
+                # A gap below the stop cannot be filled at the stop price.
+                exit_price = min(stop, _number(row, "open", stop))
             elif exit_reason is None and high >= target:
                 exit_reason = "target"
                 exit_date = session
-                exit_price = target
+                exit_price = max(target, _number(row, "open", target))
             previous_close = close
         if missing_data or mark is None:
             result["windows"][str(window)] = {
@@ -406,6 +480,14 @@ def evaluate_recommendation(
             "exit_reason": exit_reason,
             "exit_date": exit_date,
             "carried_suspension": carried_suspension,
+            "execution_assumptions": {
+                "t_plus_one_sale": True,
+                "gap_stop_fill": "open_or_stop_whichever_is_lower",
+                "gap_target_fill": "open_or_target_whichever_is_higher",
+                "same_bar_stop_target": "stop_precedes_target",
+                "one_price_limit_down": "carry_position_until_a_tradable_session",
+                "cost_mode": costs.mode,
+            },
         }
         for label, series in (("hs300", hs300_rows), ("sector", sector_rows)):
             benchmark = _benchmark_return(series, entry, path[-1]) if series else None

@@ -21,7 +21,7 @@ class T(unittest.TestCase):
   return {'entry':{'low':10,'high':12},'stop_loss':{'price':9},'target':{'price':20}}
 
  def _production_rows(self, days):
-  return [{'trade_date':d,'open':11,'high':12,'low':8 if i == 1 else 10,
+  return [{'trade_date':d,'open':11,'high':12,'low':8 if i == 2 else 10,
            'close':11+(i%2),'vol':1} for i,d in enumerate(days)]
 
  def test_production_trade_dates_mature_and_match_benchmarks(self):
@@ -69,6 +69,37 @@ class T(unittest.TestCase):
   self.assertEqual(window['exit_reason'],'stop')
   self.assertEqual(window['gross_return'],window['plan_path_return'])
   self.assertAlmostEqual(window['net_return'],window['gross_return']-.001)
+
+ def test_limit_rule_uses_security_board_not_fixed_95_percent(self):
+  days=['2026-08-20','2026-08-21']
+  rows=[{'date':days[0],'open':10,'high':10,'low':10,'close':10,'vol':1},
+        {'date':days[1],'open':11,'high':11,'low':11,'close':11,'vol':1}]
+  plan=self._plan()
+  main=resolve_entry(plan, days[0], days, rows, code='600000')
+  growth=resolve_entry(plan, days[0], days, rows, code='300001')
+  self.assertEqual(main['reason'],'t1_one_price_limit_up')
+  self.assertEqual(growth['status'],'executable')
+
+ def test_unknown_one_price_rule_is_not_assumed_executable(self):
+  days=['2026-08-20','2026-08-21']
+  rows=[{'date':days[0],'open':10,'high':10,'low':10,'close':10,'vol':1},
+        {'date':days[1],'open':11,'high':11,'low':11,'close':11,'vol':1}]
+  result=resolve_entry(self._plan(), days[0], days, rows, code='X')
+  self.assertEqual(result['reason'],'t1_limit_rule_unknown')
+
+ def test_t_plus_one_and_gap_stop_are_conservative(self):
+  days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
+  rows=[{'date':days[0],'open':11,'high':12,'low':8,'close':9,'vol':1},
+        {'date':days[1],'open':11,'high':12,'low':10,'close':11,'vol':1},
+        {'date':days[2],'open':8,'high':9,'low':7,'close':8,'vol':1},
+        *[{'date':d,'open':8,'high':9,'low':7,'close':8,'vol':1} for d in days[3:]]]
+  result=evaluate_recommendation({'recommendation_date':days[0],'code':'600000','trade_plan':self._plan()},
+   days[-1],days,rows,stock_meta={'adj':'qfq'},windows=(5,))
+  window=result['windows']['5']
+  self.assertEqual(window['exit_date'],days[2])
+  self.assertEqual(window['exit_reason'],'stop')
+  self.assertEqual(window['plan_path_return'],8/11-1)
+  self.assertTrue(window['execution_assumptions']['t_plus_one_sale'])
 
  def test_sidecar_merge_updates_run_metadata(self):
   old={'evaluator_version':'recommendation-attribution/v1','evaluation_as_of':'2026-08-25',
