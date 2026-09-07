@@ -121,4 +121,6 @@ python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 
 完成定义：闭环可运行且所有质量门禁通过；数据不足时正确停止在“继续积累”。策略晋级是独立结果，允许没有任何实验胜出。
 
+完成记录（2026-09-07）：已按独立、可审查提交完成交付：P0（`7862dbe`）→ P1（`81d0909`）→ P2（`2c8d5ea`）→ P3（`9234a60`）→ P4（`7bb0cdb`）→ 存储与兼容（`a1cdd34`）。针对性测试已纳入 `test_stock_trend.py` 主入口，覆盖评价契约与去重、研究样本时间隔离、诊断和提案引用、冻结实验重放、影子比较、注册表状态机/回滚以及旧存储只读兼容。最终门禁：`test_stock_trend.py` 为 557 passed、0 failed、0 skipped；`test_golden.py --diff` 为 21 passed、0 failed（2 条既有数据警告）；`git diff --check` 通过。没有更新 golden 快照。发布仍要求实验处于 `eligible`、人工显式审核，并由当前数据成熟度决定是否继续积累；门禁通过不等于策略自动晋级。
+
 本计划仅供学习参考，不构成投资建议。
