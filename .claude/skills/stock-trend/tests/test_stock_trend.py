@@ -1578,6 +1578,7 @@ def run_daily_recommendation_tests():
         from test_recommendation_attribution import run_recommendation_attribution_tests
         from test_recommendation_diagnostics import run_recommendation_diagnostics_tests
         from test_recommendation_experiments import run_recommendation_experiment_tests
+        from test_evolution_job import run_evolution_job_tests
         from test_recommendation_lifecycle import run_recommendation_lifecycle_tests
         from test_recommendation_quality import run_recommendation_quality_tests
         from test_stock_scanner import run_stock_scanner_tests
@@ -1595,6 +1596,7 @@ def run_daily_recommendation_tests():
             run_recommendation_attribution_tests,
             run_recommendation_diagnostics_tests,
             run_recommendation_experiment_tests,
+            run_evolution_job_tests,
             run_recommendation_lifecycle_tests,
         ):
             p, f = runner()

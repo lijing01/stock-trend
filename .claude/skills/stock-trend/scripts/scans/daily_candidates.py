@@ -61,7 +61,7 @@ from core.candidate_research_snapshot import (
     build_research_snapshot, save_research_snapshot_safely,
 )
 from core.market_shadow_snapshot import save_shadow_run
-from core.evolution_registry import validate_experiment_definition
+from core.evolution_registry import validate_experiment_definition, load_active_policy
 from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
@@ -3347,6 +3347,11 @@ def main():
     )
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
+    # P4: only an explicitly published, atomically pointed version can alter
+    # formal same-bucket ranking.  Missing/corrupt pointers fail closed here.
+    active_policy = load_active_policy()
+    policy["evolution_version"] = active_policy["experiment_id"]
+    policy["evolution_policy_status"] = active_policy["status"]
     strategy_shadow_state = _load_strategy_shadow(args.strategy_shadow)
 
     # 板块来源
@@ -3415,7 +3420,8 @@ def main():
 
     # 过滤 + 排序 + 归一化到 top
     candidates = select_candidate_pool(
-        scored, args.top, args.min_score, policy=policy)
+        scored, args.top, args.min_score, policy=policy,
+        priority_bonuses=active_policy["priority_bonuses"])
     buckets = classify_candidates(candidates, policy)
     strategy_shadow = _run_strategy_shadow(
         scored, args.top, args.min_score, policy, expected_date,
@@ -3444,6 +3450,8 @@ def main():
             "min_score": args.min_score,
             "max_sector_expansion": args.max_sector_expansion,
             "wyckoff_required": True,
+            "evolution_version": active_policy["experiment_id"],
+            "buy_point_priority_bonus": active_policy["priority_bonuses"],
         },
     )
     research_tracking = save_research_snapshot_safely(research_snapshot)

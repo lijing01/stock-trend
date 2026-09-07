@@ -290,6 +290,7 @@ open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。候选报告只呈现候选发现、维科夫分层、市场/板块资格和数据质量；不展示入场、止损、目标、R:R、仓位或有效期等交易计划字段，也不以交易计划完整性进行升降级。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy`、三层推荐、`meta.tracking`。
    可选 `--style-shadow <FILE>` 加载五风格独立观察（沪深300/中证500/中证1000/创业板指/科创50）；必须通过 schema、模型、参数、基准日期和旧市场上下文指纹校验，失败时仅显示降级诊断。配合 `--memberships <FILE>` 提供含 `known_at`、生效区间和 `source` 的历史成分证据；没有成分证据的候选标为 unknown。该段固定标注“实验观察，不参与推荐”，只写报告副本，不写入正式推荐快照。影子运行另存于 `.cache/stock-trend/market_shadow_history/candidate_runs/`，样本范围为本次扫描候选，不代表全市场覆盖。
    可选 `--strategy-shadow <FILE>` 仅接受 P3 已冻结的买点奖励对照定义（严格等级 `+1/+3/+2` 对 `0/0/0`）；以同一次扫描输入独立重排并存入 `market_shadow_history/strategy_runs/`，不改变正式排序、分桶、快照或报告结论。
+   P4 发布后的正式版本只从 `.cache/stock-trend/evolution/releases/active_policy.json` 原子指针读取；快照的 `policy.evolution_version` 与研究参数会记录实际版本。没有显式发布或指针异常时，自动使用原始 `+1/+3/+2` 基线。
 8. 复核：候选仍需人工确认基本面和事件公告后再入场；弱市、盘中或证据不足时允许“今日无推荐”。单次运行在入口固定市场上下文，策略、快照、MD、HTML 和 JSON 必须使用同一市场依据；正式收盘结果按交易日写入 `.cache/stock-trend/recommendation_history/YYYY-MM-DD.json`，同内容重复运行幂等、不同内容冲突且不覆盖；保存失败只降低追踪状态，不抑制报告输出。P0 不代表完整生产链收益已经验证。
 9. 无 Tushare 权限时，可用独立收盘采集命令积累板块完整历史，不依赖候选扫描：`python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --json`（15:10 后运行）；用 `--status --json` 检查本地覆盖，用 `--dry-run --json` 只验证不写入。首次上线通常需要 2–3 个交易日积累；失败日保留缺口，不用当前成分或 BK K 线伪造历史。
 
@@ -302,6 +303,17 @@ python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py \
   --memberships <historical-memberships.json>
 ```
 五个风格固定为沪深300(`000300.SH`)、中证500(`000905.SH`)、中证1000(`000852.SH`)、创业板指(`399006.SZ`)和科创50(`000688.SH`)。影子模型只记录 MA20 上下方/斜率观察，运行结果、旧上下文指纹和原始输入独立留痕；不替代正式市场环境评分，也不改变候选推荐门槛。成分匹配必须使用当时已知(`known_at`)且覆盖基准日的历史区间，并带来源；缺证据显示 unknown。
+
+推荐演进的调度入口（默认只写研究缓存和任务日志，不生成报告）：
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py close --as-of YYYY-MM-DD --json
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py weekly --as-of YYYY-MM-DD --dry-run --json
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py monitor --json
+# 仅人工审核且实验已处于 eligible 状态后：
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py publish --experiment-id <ID> --evidence '审核摘要' --json
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py rollback --evidence '回滚原因' --json
+```
+`close` 发现缺少正式上下文、板块快照或候选记录时保留缺口，下次可重试；`weekly` 即使未配置模型也会完成统计。统计退化只要求人工复核，接口/契约异常应先执行显式回滚到已验证版本。
 
 ---
 
