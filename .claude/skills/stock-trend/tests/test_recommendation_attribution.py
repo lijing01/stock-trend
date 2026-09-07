@@ -58,6 +58,41 @@ class T(unittest.TestCase):
   self.assertEqual(result['windows']['5']['status'],'complete')
   self.assertAlmostEqual(result['windows']['5']['signal_return'],4/11)
 
+ def test_primary_window_deduplicates_overlapping_same_code_events(self):
+  def event(day, entry, exit):
+   return {'recommendation_date':day,'code':'X','windows':{
+    '5':{'status':'complete','net_return':.01},
+    '10':{'status':'complete','net_return':.02},
+    '20':{'status':'complete','net_return':.03,'entry_date':entry,'exit_date':exit}}}
+  summary=summarize_attribution([
+   event('2026-08-20','2026-08-21','2026-09-17'),
+   event('2026-08-28','2026-08-31','2026-09-25'),
+  ],minimum_dates=20,minimum_mature=1)
+  self.assertEqual(summary['primary_window'],20)
+  self.assertEqual(summary['raw_mature_records'],2)
+  self.assertEqual(summary['deduplicated_mature_events'],1)
+  self.assertEqual(summary['duplicate_primary_records'],1)
+  self.assertEqual(summary['mature_observations'],1)
+  self.assertAlmostEqual(summary['mean_net_return'],.03)
+  self.assertEqual(summary['by_window']['5']['mature_observations'],2)
+
+ def test_candidate_research_readiness_is_not_blocked_by_trade_plan(self):
+  candidate={'status':'ready'}
+  trade={'status':'evidence_insufficient'}
+  readiness=calibration_readiness(candidate,trade)
+  self.assertEqual(readiness['status'],'eligible_for_walk_forward_review')
+  self.assertTrue(readiness['candidate_signal_ready'])
+  self.assertFalse(readiness['trade_simulation_ready'])
+
+ def test_contract_change_writes_a_separate_sidecar_directory(self):
+  snapshot={'content':{'recommendation_date':'2026-08-20','buckets':{'actionable':[]},'candidates':[]}}
+  with tempfile.TemporaryDirectory() as root:
+   track_attribution(snapshot,lambda code,candidate: {},'2026-08-27',root=root,windows=(5,10,20,60))
+   track_attribution(snapshot,lambda code,candidate: {},'2026-08-27',root=root,
+                     cost_model=CostModel(sell_tax_bps=10),windows=(5,10,20,60))
+   directories=[path for path in Path(root).iterdir() if path.is_dir()]
+   self.assertEqual(len(directories),2)
+
  def test_stop_path_uses_one_gross_return(self):
   days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
   rows=self._production_rows(days)

@@ -28,12 +28,15 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from core.cache_utils import CACHE_DIR
+from core.evolution_contract import (
+    PRIMARY_WINDOW, build_evaluation_contract,
+)
 from core.recommendation_snapshot import iter_official_snapshots
 
 
 WINDOWS = (5, 10, 20, 60)
-EVALUATOR_VERSION = "recommendation-attribution/v3"
-CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v1"
+EVALUATOR_VERSION = "recommendation-attribution/v4"
+CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v2"
 
 
 class AttributionDataError(ValueError):
@@ -471,6 +474,8 @@ def evaluate_recommendation(
         net = gross - cost_bps / 10000
         item = {
             "status": "complete",
+            "entry_date": entry,
+            "mark_date": path[-1],
             "mark_to_market_return": mark_to_market,
             "plan_path_return": plan_path_return,
             "gross_return": gross,
@@ -497,7 +502,7 @@ def evaluate_recommendation(
     return result
 
 
-_IDENTITY_FIELDS = ("snapshot_sha256", "evaluator_version", "recommendation_date", "code", "cost_model")
+_IDENTITY_FIELDS = ("snapshot_sha256", "evaluator_version", "recommendation_date", "code", "cost_model", "evaluation_contract")
 
 
 def _assert_compatible(existing, incoming):
@@ -522,7 +527,7 @@ def _merge_record(existing, incoming):
     can_update_metadata = _is_newer_or_equal(existing, incoming)
     for field in (
         "snapshot_sha256", "evaluator_version", "recommendation_date", "code",
-        "evaluation_as_of", "cost_model", "execution",
+        "evaluation_as_of", "cost_model", "evaluation_contract", "execution",
     ):
         if field in incoming and (can_update_metadata or field in _IDENTITY_FIELDS):
             out[field] = copy.deepcopy(incoming[field])
@@ -546,7 +551,7 @@ def merge_attribution(existing, incoming):
     can_update_metadata = _is_newer_or_equal(existing, incoming)
     for field in (
         "snapshot_sha256", "evaluator_version", "recommendation_date",
-        "evaluation_as_of", "cost_model", "execution",
+        "evaluation_as_of", "cost_model", "evaluation_contract", "execution",
     ):
         if field in incoming and (can_update_metadata or field in _IDENTITY_FIELDS):
             out[field] = copy.deepcopy(incoming[field])
@@ -627,9 +632,42 @@ def sidecar_path(root, recommendation_date):
     return Path(root) / (normalize_trade_date(recommendation_date) + ".json")
 
 
-def summarize_attribution(items, minimum_dates=20, minimum_mature=100):
+def _completed_primary_events(items, primary_window=PRIMARY_WINDOW):
+    """Return de-duplicated mature events for a rolling primary window.
+
+    A later same-code recommendation whose primary holding window starts before
+    the earlier one ends is an audit record, not a second independent event.
+    The evaluator has the actual session endpoints, so this avoids guessing
+    from calendar days.
+    """
+    label = str(primary_window)
+    candidates = []
+    for item in items:
+        window = (item.get("windows") or {}).get(label, {})
+        if window.get("status") != "complete":
+            continue
+        entry_date = window.get("entry_date") or (item.get("execution") or {}).get("date")
+        exit_date = window.get("exit_date") or window.get("mark_date")
+        if not entry_date or not exit_date:
+            # Complete records from an old evaluator without endpoints remain
+            # observable but cannot be treated as independently de-duplicated.
+            continue
+        candidates.append((str(item.get("code", "")), normalize_trade_date(entry_date),
+                           normalize_trade_date(exit_date), item, window))
+    kept, duplicates, last_exit = [], [], {}
+    for code, entry_date, exit_date, item, window in sorted(candidates, key=lambda row: (row[0], row[1], row[2])):
+        if code and code in last_exit and entry_date <= last_exit[code]:
+            duplicates.append((item, window))
+            continue
+        kept.append((item, window))
+        if code:
+            last_exit[code] = exit_date
+    return kept, duplicates
+
+
+def summarize_attribution(items, minimum_dates=20, minimum_mature=100,
+                          primary_window=PRIMARY_WINDOW):
     by_window = {}
-    pending = unexecutable = errors = 0
     for item in items:
         for label, window in (item.get("windows") or {}).items():
             stats = by_window.setdefault(label, {"completed": [], "pending": 0, "unexecutable": 0, "errors": 0})
@@ -638,43 +676,64 @@ def summarize_attribution(items, minimum_dates=20, minimum_mature=100):
                 stats["completed"].append(window)
             elif status == "pending":
                 stats["pending"] += 1
-                pending += 1
             elif status == "unexecutable":
                 stats["unexecutable"] += 1
-                unexecutable += 1
             elif status == "data_error":
                 stats["errors"] += 1
-                errors += 1
-    mature = sum(len(stats["completed"]) for stats in by_window.values())
     summarized = {}
     for label, stats in by_window.items():
         values = [window.get("net_return") for window in stats["completed"] if window.get("net_return") is not None]
         summarized[label] = {
+            "raw_records": (len(stats["completed"]) + stats["pending"]
+                            + stats["unexecutable"] + stats["errors"]),
             "mature_observations": len(stats["completed"]),
             "pending": stats["pending"],
             "unexecutable": stats["unexecutable"],
             "errors": stats["errors"],
             "mean_net_return": sum(values) / len(values) if values else None,
         }
-    primary = summarized.get("5", {})
+    primary_label = str(primary_window)
+    primary = summarized.get(primary_label, {})
+    primary_available = primary_label in summarized
+    deduped, duplicates = _completed_primary_events(items, primary_window)
+    mature_dates = len({item.get("recommendation_date") for item, _ in deduped
+                        if item.get("recommendation_date")})
+    raw_primary = primary.get("mature_observations", 0)
+    evaluated_primary = raw_primary + primary.get("pending", 0) + primary.get("unexecutable", 0) + primary.get("errors", 0)
+    deduped_mature = len(deduped)
+    deduped_primary_values = [window.get("net_return") for _, window in deduped
+                              if window.get("net_return") is not None]
     return {
         "official_dates": minimum_dates,
-        "mature_observations": mature,
-        "pending": pending,
-        "unexecutable": unexecutable,
-        "errors": errors,
-        "status": "evidence_insufficient" if minimum_dates < 20 or mature < minimum_mature else "ready",
-        "mean_net_return": primary.get("mean_net_return"),
+        "primary_window": primary_window,
+        "mature_dates": mature_dates,
+        "mature_observations": deduped_mature,
+        "raw_mature_records": raw_primary,
+        "deduplicated_mature_events": deduped_mature,
+        "duplicate_primary_records": len(duplicates),
+        "pending": primary.get("pending", 0),
+        "unexecutable": primary.get("unexecutable", 0),
+        "errors": primary.get("errors", 0),
+        "data_evaluable_coverage": raw_primary / evaluated_primary if evaluated_primary else 0.0,
+        "date_coverage": mature_dates / minimum_dates if minimum_dates else 0.0,
+        "status": "evidence_insufficient" if not primary_available or mature_dates < 20 or deduped_mature < minimum_mature else "ready",
+        "mean_net_return": (sum(deduped_primary_values) / len(deduped_primary_values)
+                            if deduped_primary_values else None),
         "by_window": summarized,
     }
 
 
-def summarize_candidate_performance(items, minimum_dates=20, minimum_mature=100):
+def summarize_candidate_performance(items, minimum_dates=20, minimum_mature=100,
+                                    primary_window=PRIMARY_WINDOW):
     """Keep candidate-signal statistics distinct from simulated trade P&L."""
-    summary = summarize_attribution(items, minimum_dates, minimum_mature)
+    summary = summarize_attribution(items, minimum_dates, minimum_mature, primary_window)
     for label, stats in summary["by_window"].items():
-        completed = [window for item in items for key, window in (item.get("windows") or {}).items()
-                     if key == label and window.get("status") == "complete"]
+        if label == str(primary_window):
+            completed = [window for _, window in _completed_primary_events(items, primary_window)[0]]
+            stats["deduplicated_mature_events"] = len(completed)
+        else:
+            completed = [window for item in items for key, window in (item.get("windows") or {}).items()
+                         if key == label and window.get("status") == "complete"]
         values = [row.get("signal_return") for row in completed if row.get("signal_return") is not None]
         alphas = [row.get("hs300_alpha") for row in completed if row.get("hs300_alpha") is not None]
         stats["mean_signal_return"] = sum(values) / len(values) if values else None
@@ -684,17 +743,44 @@ def summarize_candidate_performance(items, minimum_dates=20, minimum_mature=100)
     return summary
 
 
-def calibration_readiness(candidate_summary, trade_summary):
-    """State the evidence gate; never tune scores automatically here."""
-    signal_ready = candidate_summary.get("status") == "ready"
-    trade_ready = trade_summary.get("status") == "ready"
+def candidate_research_readiness(candidate_summary):
+    """Candidate research is valid without a trade plan or trade simulation."""
+    ready = candidate_summary.get("status") == "ready"
     return {
-        "status": "eligible_for_walk_forward_review" if signal_ready and trade_ready else "evidence_insufficient",
+        "status": "eligible_for_walk_forward_review" if ready else "evidence_insufficient",
+        "minimum_mature_dates": 20,
+        "minimum_deduplicated_mature_events": 100,
+        "primary_window": PRIMARY_WINDOW,
+        "candidate_signal_ready": ready,
+        "policy": "候选信号研究不依赖交易计划或交易模拟；仅允许人工逐项、时间切分的 walk-forward 评估。",
+    }
+
+
+def trade_research_readiness(trade_summary):
+    ready = trade_summary.get("status") == "ready"
+    return {
+        "status": "eligible_for_walk_forward_review" if ready else "evidence_insufficient",
+        "minimum_mature_dates": 20,
+        "minimum_deduplicated_mature_events": 100,
+        "primary_window": PRIMARY_WINDOW,
+        "trade_simulation_ready": ready,
+        "policy": "交易模拟研究必须在固定成本与成交假设下单独审阅，不自动调整仓位。",
+    }
+
+
+def calibration_readiness(candidate_summary, trade_summary):
+    """Compatibility status plus independent P0 research gates."""
+    candidate_gate = candidate_research_readiness(candidate_summary)
+    trade_gate = trade_research_readiness(trade_summary)
+    return {
+        "status": "eligible_for_walk_forward_review" if candidate_gate["candidate_signal_ready"] else "evidence_insufficient",
         "minimum_official_dates": 20,
         "minimum_mature_observations": 100,
-        "candidate_signal_ready": signal_ready,
-        "trade_simulation_ready": trade_ready,
-        "policy": "仅允许人工逐项、时间切分的 walk-forward 评估；不自动调整买点奖励、市场门槛或仓位。",
+        "candidate_signal_ready": candidate_gate["candidate_signal_ready"],
+        "trade_simulation_ready": trade_gate["trade_simulation_ready"],
+        "candidate_research": candidate_gate,
+        "trade_research": trade_gate,
+        "policy": "候选研究与交易模拟资格分开；不自动调整买点奖励、市场门槛或仓位。",
     }
 
 
@@ -756,18 +842,20 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None, cost
         except (AttributionDataError, OSError, RuntimeError, ValueError) as exc:
             signal_results.append(_error_result(recommendation_date, candidate.get("code", ""), evaluation_as_of,
                                                 CostModel(), windows, str(exc)))
+    contract = build_evaluation_contract(windows, dataclasses.asdict(cost_model or CostModel()))
     payload = {
         "evaluator_version": EVALUATOR_VERSION,
         "recommendation_date": recommendation_date,
         "evaluation_as_of": evaluation_as_of,
         "snapshot_sha256": snapshot.get("content_sha256"),
         "cost_model": dataclasses.asdict(cost_model or CostModel()),
+        "evaluation_contract": contract,
         "items": results,
         "candidate_signal_items": signal_results,
         "candidate_signal_evaluator_version": CANDIDATE_EVALUATOR_VERSION,
     }
     if root is not None:
-        path = sidecar_path(root, recommendation_date)
+        path = sidecar_path(Path(root) / contract["contract_id"], recommendation_date)
         with _sidecar_lock(path):
             prior = read_sidecar(path)
             payload = merge_attribution(prior, payload) if prior else payload
@@ -782,11 +870,15 @@ def default_series_loader(code, candidate, recommendation_date=None, evaluation_
     from fetchers.sector_kline import fetch_single_kline
 
     trade_plan = candidate.get("trade_plan") or {}
+    # Decision inputs belong to the snapshot date, but result series must
+    # cover the requested evaluation cutoff.  Never silently score a shorter
+    # current cache merely because it covers the original recommendation.
     basis_date = trade_plan.get("basis_date") or candidate.get("basis_date") or recommendation_date
+    result_cutoff = evaluation_as_of or basis_date
     ts_code = candidate.get("ts_code") or (
         str(code) + ".SH" if str(code).startswith(("0", "3", "6")) else str(code)
     )
-    stock = _fetch_kline(ts_code, as_of_date=basis_date or "") or {}
+    stock = _fetch_kline(ts_code, as_of_date=result_cutoff or "") or {}
     stock_rows = stock.get("data", []) if isinstance(stock, dict) else []
     if not stock_rows:
         raise AttributionDataError("historical_data_missing")
@@ -818,7 +910,7 @@ def track_official_history(
 ):
     """Process the most recent valid official snapshots."""
     history_root = Path(history_root or (Path(CACHE_DIR) / "recommendation_history"))
-    attribution_root = Path(attribution_root or (Path(CACHE_DIR) / "recommendation_attribution"))
+    attribution_root = Path(attribution_root or (Path(CACHE_DIR) / "evolution" / "evaluations"))
     normalized_through = normalize_trade_date(through_date) if through_date else None
     snapshots, rejected = iter_official_snapshots(history_root, normalized_through)
     if history > 0:
