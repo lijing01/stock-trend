@@ -39,6 +39,8 @@ from scans.stock_scanner import (
     select_primary_sector_membership,
 )
 from analysis.wyckoff import classify_buy_point_level
+from analysis.market_explanation import build_market_explanation
+from analysis.market_style import annotate_candidates_for_shadow
 from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
 )
@@ -50,9 +52,13 @@ from core.source_health import (
     classify_failure,
     live_attempt,
 )
-from core.recommendation_snapshot import save_snapshot_if_official, record_conflict_run
+from core.recommendation_snapshot import (
+    content_sha256, save_snapshot_if_official, record_conflict_run,
+)
 from core.recommendation_snapshot import SnapshotConflict, SnapshotValidationError
 from core.recommendation_snapshot import _normalize_for_json
+from core.market_shadow_snapshot import save_shadow_run
+from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
 DEFAULT_MAX_SECTOR_EXPANSION = 120
@@ -1873,6 +1879,18 @@ def _candidate_diagnostic_text(item):
         parts.append("维科夫状态：突破后回踩待确认")
     elif signal_status == "failed_breakout":
         parts.append("维科夫状态：突破失败")
+    style_shadow = item.get("style_shadow")
+    if isinstance(style_shadow, dict):
+        style_state = style_shadow.get("matched_style_state", "unknown")
+        legacy_bucket = style_shadow.get("legacy_bucket") or "未知"
+        style_reasons = style_shadow.get("reasons") or []
+        detail = (
+            f"风格影子观察：{style_state}；正式分桶仍为{legacy_bucket}；"
+            "实验观察，不参与推荐"
+        )
+        if style_reasons:
+            detail += f"；原因{','.join(map(str, style_reasons))}"
+        parts.append(detail)
     return "；".join(parts)
 
 
@@ -2042,10 +2060,19 @@ def load_regime_context():
         with open(p, "r", encoding="utf-8") as f:
             d = json.load(f)
         r = d.get("regime", {})
+        explanation = d.get("market_explanation")
+        if not isinstance(explanation, dict):
+            try:
+                basis_date = d.get("data_date")
+                explanation = build_market_explanation(
+                    d, basis_date or datetime.now().date().isoformat())
+            except (TypeError, ValueError):
+                explanation = None
         return {
             "score": r.get("score"),
             "label": r.get("label", ""),
             "data_date": d.get("data_date", ""),
+            "context_sha256": content_sha256(d),
             "advice": r.get("advice", ""),
             "data_quality": r.get("data_quality", "unknown"),
             "missing_components": r.get("missing_components", []),
@@ -2056,9 +2083,282 @@ def load_regime_context():
                 d.get("indices", {}).get("000300.SH", {}).get("pct_chg")
             ),
             "capital_score": d.get("components", {}).get("capital", {}).get("score"),
+            "market_explanation": copy.deepcopy(explanation),
         }
     except Exception:
         return None
+
+
+def _load_style_shadow(path, regime):
+    """Load and validate an opt-in style shadow without changing policy."""
+    result = {
+        "status": "disabled" if not path else "missing",
+        "path": str(path) if path else None,
+        "content_sha256": None,
+        "basis_date": None,
+        "reasons": [],
+        "formal_policy_affected": False,
+        "styles": {},
+    }
+    if not path:
+        return result
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            shadow = json.load(handle)
+    except FileNotFoundError:
+        result["reasons"].append("style_shadow_file_missing")
+        return result
+    except (OSError, ValueError, TypeError) as exc:
+        result["status"] = "invalid"
+        result["reasons"].append(f"style_shadow_load_{type(exc).__name__}")
+        return result
+    if not isinstance(shadow, dict):
+        result["status"] = "invalid"
+        result["reasons"].append("style_shadow_not_object")
+        return result
+
+    expected_digest = shadow.get("content_sha256")
+    content = copy.deepcopy(shadow)
+    content.pop("content_sha256", None)
+    content.pop("input_digest", None)
+    actual_digest = content_sha256(content)
+    if expected_digest and expected_digest != actual_digest:
+        result["reasons"].append("style_shadow_digest_mismatch")
+    expected_date = (regime or {}).get("data_date")
+    checks = {
+        "schema_version": ("market-style-shadow/v1", "schema_version_mismatch"),
+        "model_version": ("style-ma20/v1", "model_version_mismatch"),
+        "parameter_version": ("style-observer/v1", "parameter_version_mismatch"),
+    }
+    for key, (expected, reason) in checks.items():
+        if shadow.get(key) != expected:
+            result["reasons"].append(reason)
+    if shadow.get("basis_date") != expected_date:
+        result["reasons"].append("basis_date_mismatch")
+    if shadow.get("formal_policy_affected") is not False:
+        result["reasons"].append("formal_policy_affected")
+    context_digest = (regime or {}).get("context_sha256")
+    legacy_digest = shadow.get("legacy_context_sha256")
+    if not context_digest:
+        result["reasons"].append("legacy_context_unavailable")
+    elif not legacy_digest:
+        result["reasons"].append("legacy_context_sha256_missing")
+    elif legacy_digest != context_digest:
+        result["reasons"].append("legacy_context_sha256_mismatch")
+    result["reasons"] = list(dict.fromkeys(result["reasons"]))
+    result.update({
+        "status": "ready" if not result["reasons"] else "mismatch",
+        "content_sha256": expected_digest or actual_digest,
+        "basis_date": shadow.get("basis_date"),
+        "schema_version": shadow.get("schema_version"),
+        "model_version": shadow.get("model_version"),
+        "parameter_version": shadow.get("parameter_version"),
+        "snapshot_type": shadow.get("snapshot_type"),
+        "styles": copy.deepcopy(shadow.get("styles") or {}),
+        "shadow": copy.deepcopy(shadow),
+    })
+    return result
+
+
+def _load_style_memberships(path):
+    result = {
+        "status": "missing" if not path else "invalid",
+        "path": str(path) if path else None,
+        "records": [],
+        "reasons": ["membership_input_missing"] if not path else [],
+    }
+    if not path:
+        return result
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        result["reasons"].append("membership_file_missing")
+        return result
+    except (OSError, ValueError, TypeError) as exc:
+        result["reasons"].append(f"membership_load_{type(exc).__name__}")
+        return result
+    records = value.get("records") if isinstance(value, dict) else value
+    if not isinstance(records, list):
+        result["reasons"].append("membership_records_not_list")
+        return result
+    result.update({"status": "ready", "records": copy.deepcopy(records)})
+    return result
+
+
+def _style_shadow_markdown(style_shadow):
+    if not style_shadow:
+        return ""
+    status = style_shadow.get("status", "unknown")
+    lines = [
+        "## 市场风格影子观察（实验）",
+        "",
+        "> 实验观察，不参与推荐；不改变正式评分、候选排序、推荐门槛或交易动作。",
+        "",
+        f"状态：{status}；基准日期：{style_shadow.get('basis_date') or '未知'}；"
+        f"正式策略影响：否。",
+    ]
+    reasons = style_shadow.get("reasons") or []
+    if reasons:
+        lines.append(f"校验/降级原因：{', '.join(map(str, reasons))}。")
+    styles = style_shadow.get("styles") or {}
+    if styles:
+        lines.extend([
+            "",
+            "| 风格 | 指数 | 观察分 | 状态 | 5日收益 | 20日收益 | 证据状态 |",
+            "|---|---|---:|---|---:|---:|---|",
+        ])
+        for code, item in styles.items():
+            metrics = item.get("metrics") or {}
+            lines.append(
+                f"| {item.get('name', '-')} | {code} | "
+                f"{item.get('score', '-')} | {item.get('status', 'unknown')} | "
+                f"{metrics.get('return_5d', '-')} | "
+                f"{metrics.get('return_20d', '-')} | "
+                f"{(item.get('evidence') or {}).get('usage', 'unknown')} |"
+            )
+    membership = style_shadow.get("membership") or {}
+    lines.append(
+        f"成分匹配：{membership.get('status', 'missing')}；"
+        f"样本范围：scanned_population（仅本次扫描候选，非全市场覆盖）。"
+    )
+    if style_shadow.get("candidate_run"):
+        run = style_shadow["candidate_run"]
+        lines.append(f"影子运行留痕：{run.get('status', 'unknown')}。")
+    return "\n".join(lines)
+
+
+def _style_shadow_html(style_shadow):
+    if not style_shadow:
+        return ""
+    status = escape(str(style_shadow.get("status", "unknown")))
+    basis_date = escape(str(style_shadow.get("basis_date") or "未知"))
+    reasons = style_shadow.get("reasons") or []
+    reason_html = (
+        f"<p>校验/降级原因：{escape(', '.join(map(str, reasons)))}</p>"
+        if reasons else ""
+    )
+    rows = []
+    for code, item in (style_shadow.get("styles") or {}).items():
+        metrics = item.get("metrics") or {}
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(item.get('name', '-')))}</td>"
+            f"<td>{escape(str(code))}</td>"
+            f"<td>{escape(str(item.get('score', '-')))}</td>"
+            f"<td>{escape(str(item.get('status', 'unknown')))}</td>"
+            f"<td>{escape(str(metrics.get('return_5d', '-')))}</td>"
+            f"<td>{escape(str(metrics.get('return_20d', '-')))}</td>"
+            "</tr>"
+        )
+    table = (
+        "<table><tr><th>风格</th><th>指数</th><th>观察分</th>"
+        "<th>状态</th><th>5日收益</th><th>20日收益</th></tr>"
+        + "".join(rows) + "</table>"
+        if rows else ""
+    )
+    return (
+        "<section class='style-shadow'><h2>市场风格影子观察（实验）</h2>"
+        "<p><strong>实验观察，不参与推荐</strong>；不改变正式评分、候选排序、"
+        f"推荐门槛或交易动作。状态：{status}；基准日期：{basis_date}；"
+        "正式策略影响：否。</p>"
+        f"{reason_html}{table}"
+        "<p>样本范围：scanned_population（仅本次扫描候选，非全市场覆盖）。</p>"
+        "</section>"
+    )
+
+
+def _build_candidate_shadow_payload(basis_date, snapshot_type, candidates,
+                                    buckets, style_shadow, tracking,
+                                    performance, scanned_candidates=None,
+                                    membership_records=None):
+    scanned = (scanned_candidates if scanned_candidates is not None
+               else candidates) or []
+    bucket_codes = {
+        name: [item.get("code") for item in rows or []
+               if isinstance(item, dict) and item.get("code")]
+        for name, rows in (buckets or {}).items()
+    }
+    selected_by_code = {
+        item.get("code"): name
+        for name, rows in (buckets or {}).items()
+        for item in rows or []
+        if isinstance(item, dict) and item.get("code")
+    }
+    candidate_records = []
+    for item in scanned:
+        if not isinstance(item, dict) or not item.get("code"):
+            continue
+        code = item["code"]
+        candidate_records.append({
+            "code": code,
+            "composite_score": item.get("composite_score"),
+            "raw_composite_score": item.get("raw_composite_score"),
+            "quality_adjusted_score": item.get("quality_adjusted_score"),
+            "data_quality_eligible": (item.get("data_quality") or {}).get(
+                "eligible"),
+            "score_eligible": item.get("score_eligible"),
+            "sector_actionable": item.get("sector_actionable"),
+            "formal_bucket": selected_by_code.get(code, "not_selected"),
+            "selection_status": "selected" if code in selected_by_code
+            else "not_selected",
+        })
+    candidate_set_sha256 = content_sha256({
+        "candidates": candidate_records,
+        "buckets": bucket_codes,
+    })
+    styles = (style_shadow or {}).get("styles") or {}
+    style_states = {
+        str(item.get("code")): item.get("style_shadow", {}).get(
+            "matched_style_state", "unknown")
+        for item in scanned if isinstance(item, dict)
+        and item.get("code")
+    }
+    return {
+        "schema_version": "market-shadow-candidate-run/v1",
+        "model_version": "daily-candidates/v3",
+        "parameter_version": "candidate-style-shadow/v1",
+        "basis_date": basis_date,
+        "snapshot_type": snapshot_type,
+        "sample_scope": "scanned_population",
+        "sample_note": "仅记录本次扫描候选，不代表全市场覆盖",
+        "candidate_count": len(candidate_records),
+        "selected_candidate_count": len(candidates or []),
+        "scanned_candidate_count": len(candidate_records),
+        "scan_truncated": len(candidate_records) > len(candidates or []),
+        "candidate_records": candidate_records,
+        "candidate_set_sha256": candidate_set_sha256,
+        "formal_buckets": bucket_codes,
+        "style_shadow_status": (style_shadow or {}).get("status", "disabled"),
+        "style_shadow_path": (style_shadow or {}).get("path"),
+        "style_shadow_content_sha256": (style_shadow or {}).get("content_sha256"),
+        "membership_input_sha256": content_sha256(
+            membership_records or []),
+        "membership_record_count": len(membership_records or []),
+        "style_states": style_states,
+        "style_index_count": len(styles),
+        "data_quality": copy.deepcopy(performance or {}),
+        "formal_snapshot_tracking": copy.deepcopy(tracking or {}),
+        "formal_policy_affected": False,
+    }
+
+
+def _save_candidate_shadow_run(payload):
+    try:
+        result = save_shadow_run(payload, namespace="candidate_runs")
+        return {
+            "status": result.status,
+            "path": result.path,
+            "content_sha256": result.content_sha256,
+            "reason": result.reason,
+        }
+    except Exception as exc:
+        return {
+            "status": "write_failed",
+            "path": None,
+            "content_sha256": None,
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def build_recommendation_policy(regime, expected_date, market_open=False):
@@ -2211,6 +2511,24 @@ def classify_candidates(candidates, policy):
     }
 
 
+_LEGACY_MARKET_REGIME_KEYS = (
+    "score", "label", "data_date", "advice", "data_quality",
+    "missing_components", "partial_components", "score_lower", "score_upper",
+    "hs300_change", "capital_score",
+)
+
+
+def _legacy_market_regime(regime):
+    """Keep the formal snapshot content on the pre-explanation contract."""
+    if not isinstance(regime, dict):
+        return {}
+    return {
+        key: copy.deepcopy(regime[key])
+        for key in _LEGACY_MARKET_REGIME_KEYS
+        if key in regime
+    }
+
+
 def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
                                   recommendation_date, performance=None,
                                   market_regime=None):
@@ -2221,7 +2539,7 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
         "snapshot_type": "provisional" if policy.get("provisional") else "formal",
         "model_version": "daily-candidates/v3",
         "policy": copy.deepcopy(policy),
-        "market_regime": copy.deepcopy(market_regime or {}),
+        "market_regime": _legacy_market_regime(market_regime),
         "sectors": copy.deepcopy(sector_codes),
         "candidates": copy.deepcopy(candidates),
         "buckets": copy.deepcopy(buckets),
@@ -2279,7 +2597,8 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
 
 
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
-                    performance=None, tracking=None, market_regime=None):
+                    performance=None, tracking=None, market_regime=None,
+                    style_shadow=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -2320,6 +2639,11 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
             + (f"；评分区间 {regime.get('score_lower')}-{regime.get('score_upper')}" if regime.get('score_lower') is not None else "")
             + ")",
         ])
+        if regime.get("market_explanation"):
+            lines.extend(["", render_market_explanation(
+                regime["market_explanation"], "markdown")])
+    if style_shadow:
+        lines.extend(["", _style_shadow_markdown(style_shadow)])
     downgrade_reasons = [
         reason for reason in policy.get("reasons", [])
         if reason != "intraday_provisional"
@@ -2436,7 +2760,8 @@ def _html_candidate_rows(items, buy_level_display="none"):
 
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
-                   performance=None, tracking=None, market_regime=None):
+                   performance=None, tracking=None, market_regime=None,
+                   style_shadow=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
     regime = market_regime
@@ -2479,6 +2804,11 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
             f"<span style='font-size:14px;color:#86868b'> (数据 {regime['data_date']})</span></div>"
             f"{weak_note}"
         )
+    explanation_html = ""
+    if regime and regime.get("market_explanation"):
+        explanation_html = render_market_explanation(
+            regime["market_explanation"], "html")
+    style_shadow_html = _style_shadow_html(style_shadow)
 
     performance_html = _performance_html(performance)
     tracking_error = ""
@@ -2567,6 +2897,8 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <h1>📋 每日候选股 {datetime.now().strftime('%Y-%m-%d')}</h1>
 <p class="dt">生成 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 实际展开板块 {sector_expanded} 个 | 候选 {len(candidates)} 只 | 耗时 {elapsed:.0f}s</p>
 {regime_html}
+{explanation_html}
+{style_shadow_html}
 
 <p class="dt">{policy_note}</p>
 <p class="dt">{priority_note}</p>
@@ -2605,8 +2937,9 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
-                      performance=None, tracking=None, market_regime=None):
-    return {
+                      performance=None, tracking=None, market_regime=None,
+                      style_shadow=None):
+    output = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "sector_count": len(sector_codes),
@@ -2626,6 +2959,9 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         "observation": buckets["observation"],
         "data_rejected": buckets.get("data_rejected", []),
     }
+    if style_shadow is not None:
+        output["style_shadow"] = copy.deepcopy(style_shadow)
+    return output
 
 
 def main():
@@ -2640,6 +2976,12 @@ def main():
     parser.add_argument("--min-score", type=float, default=50, help="最低综合分(默认50)")
     parser.add_argument("--sectors", type=str,
                         help="手动指定板块,逗号分隔(覆盖自动选板块)")
+    parser.add_argument(
+        "--style-shadow", type=str, default=None,
+        help="可选市场风格影子 JSON；仅用于报告观察，不参与推荐")
+    parser.add_argument(
+        "--memberships", type=str, default=None,
+        help="可选带 known_at/effective window/source 的指数成分 JSON")
     parser.add_argument("--json", action="store_true", help="stdout 输出 JSON")
     parser.add_argument("--html", dest="html", action="store_true", default=True,
                         help="(默认) 生成 HTML 报告")
@@ -2652,6 +2994,8 @@ def main():
     performance = {}
     source_health = RunSourceHealth()
     regime = load_regime_context()
+    style_shadow_state = _load_style_shadow(args.style_shadow, regime)
+    style_memberships = _load_style_memberships(args.memberships)
     from fetchers.sector_data import get_last_trading_day
     current_time = datetime.now()
     last_trading_date, trading_date_source = get_last_trading_day(
@@ -2729,15 +3073,54 @@ def main():
         candidates, sector_codes, policy, buckets, expected_date, performance,
         market_regime=regime)
 
+    report_candidates = copy.deepcopy(candidates)
+    report_buckets = copy.deepcopy(buckets)
+    shadow_scanned_candidates = copy.deepcopy(scored)
+    style_shadow_report = None
+    if args.style_shadow:
+        style_shadow_report = copy.deepcopy(style_shadow_state)
+        style_shadow_report.pop("shadow", None)
+        style_shadow_report["membership"] = {
+            key: copy.deepcopy(value)
+            for key, value in style_memberships.items()
+            if key != "records"
+        }
+        if style_shadow_state.get("status") == "ready":
+            report_candidates, report_buckets = annotate_candidates_for_shadow(
+                report_candidates, report_buckets,
+                style_shadow_state.get("shadow") or style_shadow_state,
+                style_memberships,
+            )
+            shadow_scanned_candidates, _ = annotate_candidates_for_shadow(
+                shadow_scanned_candidates, {},
+                style_shadow_state.get("shadow") or style_shadow_state,
+                style_memberships,
+            )
+        shadow_payload = _build_candidate_shadow_payload(
+            expected_date,
+            "provisional" if policy.get("provisional") else "formal",
+            report_candidates,
+            report_buckets,
+            style_shadow_report,
+            tracking,
+            performance,
+            scanned_candidates=shadow_scanned_candidates,
+            membership_records=style_memberships.get("records", []),
+        )
+        style_shadow_report["candidate_run"] = _save_candidate_shadow_run(
+            shadow_payload)
+
     if args.json:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         builders = [("json", lambda: build_json_output(
-            candidates, sector_codes, elapsed, policy, buckets,
-            tracking=tracking, market_regime=regime))]
+            report_candidates, sector_codes, elapsed, policy, report_buckets,
+            tracking=tracking, market_regime=regime,
+            style_shadow=style_shadow_report))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
-                candidates, sector_codes, elapsed, ts, policy, buckets,
-                tracking=tracking, market_regime=regime)))
+                report_candidates, sector_codes, elapsed, ts, policy,
+                report_buckets, tracking=tracking, market_regime=regime,
+                style_shadow=style_shadow_report)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -2760,13 +3143,15 @@ def main():
     # Assemble every requested format exactly once before freezing one shared
     # performance envelope.  Serialization and file writes are outside it.
     builders = [("markdown", lambda: generate_report(
-        candidates, sector_codes, elapsed, policy, buckets,
-        tracking=tracking, market_regime=regime))]
+        report_candidates, sector_codes, elapsed, policy, report_buckets,
+        tracking=tracking, market_regime=regime,
+        style_shadow=style_shadow_report))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
-            candidates, sector_codes, elapsed, ts, policy, buckets,
-            tracking=tracking, market_regime=regime)))
+            report_candidates, sector_codes, elapsed, ts, policy,
+            report_buckets, tracking=tracking, market_regime=regime,
+            style_shadow=style_shadow_report)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(

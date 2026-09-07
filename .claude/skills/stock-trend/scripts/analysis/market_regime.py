@@ -104,6 +104,16 @@ def _blend_weight(fraction: float, floor: float = FLOOR_FRACTION) -> float:
 TREND_INDEX_CODES = ["000001.SH", "000300.SH", "399001.SZ"]
 # 成交额: 上证(沪市) + 深证综指(全深市);深成只含成分股会低估深市
 AMOUNT_INDEX_CODES = ["000001.SH", "399106.SZ"]
+REGIME_COMPONENT_ORDER = [
+    "index_trend", "volume", "breadth", "zt_emotion", "capital",
+]
+REGIME_WEIGHTS = {
+    "index_trend": 0.25,
+    "volume": 0.20,
+    "breadth": 0.25,
+    "zt_emotion": 0.20,
+    "capital": 0.10,
+}
 
 
 def _sort_kline(records: list[dict]) -> list[dict]:
@@ -409,18 +419,12 @@ def _regime_gate(score: float) -> tuple[str, str]:
 
 def compute_regime(components: dict) -> dict:
     """综合市场环境分(0-100) + gate 标签."""
-    weights = {
-        "index_trend": 0.25,
-        "volume": 0.20,
-        "breadth": 0.25,
-        "zt_emotion": 0.20,
-        "capital": 0.10,
-    }
     total = 0.0
     used_weight = 0.0
     missing = []
     partial = []
-    for key, w in weights.items():
+    for key in REGIME_COMPONENT_ORDER:
+        w = REGIME_WEIGHTS[key]
         comp = components.get(key) or {}
         s = comp.get("score")
         if s is None:
@@ -437,14 +441,16 @@ def compute_regime(components: dict) -> dict:
         return {"score": 50.0, "label": "中性", "advice": "数据不可用"}
     score = round(_clamp(total / used_weight), 1)
     label, advice = _regime_gate(score)
-    missing_weight = sum(weights.get(key, 0) for key in missing)
+    missing_weight = sum(REGIME_WEIGHTS.get(key, 0) for key in missing)
     score_lower = _clamp(total)
     score_upper = _clamp(total + missing_weight * 100)
     result = {"score": score, "label": label, "advice": advice,
               "data_quality": "missing" if missing else ("partial" if partial else "good"),
               "missing_components": missing, "partial_components": partial,
               "score_lower": round(score_lower, 1),
-              "score_upper": round(score_upper, 1)}
+              "score_upper": round(score_upper, 1),
+              "normalization_denominator": round(used_weight, 3),
+              "raw_weighted_total": round(total, 3)}
     return result
 
 
@@ -805,6 +811,18 @@ def analyze_holding(holding: dict) -> dict:
 DISCLAIMER = "本报告仅供学习参考,不构成任何投资建议。股市有风险,投资需谨慎。"
 
 
+def _market_explanation_for_report(ctx: dict) -> dict | None:
+    explanation = ctx.get("market_explanation")
+    if isinstance(explanation, dict):
+        return explanation
+    try:
+        from analysis.market_explanation import build_market_explanation
+        return build_market_explanation(
+            ctx, ctx.get("data_date") or date.today().isoformat())
+    except (TypeError, ValueError):
+        return None
+
+
 def generate_report(ctx: dict) -> str:
     lines = []
     lines.append(f"## 📅 今日复盘 ({ctx.get('data_date', '')})")
@@ -836,6 +854,11 @@ def generate_report(ctx: dict) -> str:
                  f"两市成交 {ctx.get('amount_yi', 0):.0f}亿 | "
                  f"涨停 {ctx.get('zt', {}).get('count', 0)}家(连板{ctx.get('zt', {}).get('streak_count', 0)})")
     lines.append("")
+    explanation = _market_explanation_for_report(ctx)
+    if explanation:
+        from reporting.market_explanation import render_market_explanation
+        lines.append(render_market_explanation(explanation, "markdown"))
+        lines.append("")
 
     # ② 板块
     lines.append("### ② 板块")
@@ -996,6 +1019,7 @@ def collect_context(now=None) -> dict:
     fraction = _session_elapsed_fraction(now)
     is_intraday = fraction > 0 and data_date == now.date().isoformat()
     intraday_note = ""
+    intraday_evidence = None
     amount_yi_display = round(today_amount_yi, 0) if today_amount_yi else None
     zt_display = zt
     if is_intraday:
@@ -1031,11 +1055,21 @@ def collect_context(now=None) -> dict:
                 {k: {"score": v} for k, v in stored.items() if v is not None}
                 if stored else components)
             ext_regime = compute_regime(ext_components)
-        anchor_score = (last_close or {}).get("score") if last_close else 50.0
-        blended = round((1 - w) * _safe_float(anchor_score) + w * ext_regime["score"], 1)
+        anchor_score = (last_close or {}).get("score") if last_close else None
+        calculation_anchor_score = anchor_score if anchor_score is not None else 50.0
+        blended = round((1 - w) * _safe_float(calculation_anchor_score) + w * ext_regime["score"], 1)
         label, advice = _regime_gate(blended)
         regime = {"score": blended, "label": label, "advice": advice, "intraday": True}
         components = ext_components
+        intraday_evidence = {
+            "anchor_score": anchor_score,
+            "blend_weight": round(w, 6),
+            "projected_score": ext_regime["score"],
+            "blended_score": blended,
+            "anchor_date": (last_close or {}).get("date"),
+            "fraction": round(fraction, 6),
+            "session_elapsed_fraction": round(fraction, 6),
+        }
         anchor_label = f"昨收 {_safe_float(anchor_score):.1f}" if last_close else "中性 50(无前收基准)"
         intraday_note = (
             f"盘中快照 {fraction:.0%} 时段: 评分为 {anchor_label} 与按 "
@@ -1063,16 +1097,37 @@ def collect_context(now=None) -> dict:
         ),
         "regime": regime,
         "components": components,
+        "intraday_evidence": intraday_evidence,
+        "capital_context": {
+            "metric": (
+                "northbound_net_buy" if northbound is not None
+                else "market_main_force_net_inflow"
+                if activity and activity.get("main_force_yi") is not None
+                else "capital_flow"
+            ),
+            "source_kind": (
+                "primary" if northbound is not None
+                else "alternative"
+                if activity and activity.get("main_force_yi") is not None
+                else "unknown"
+            ),
+            "provider": "unknown",
+            "data_date": None,
+            "fetched_at": None,
+        },
         "amount_yi": amount_yi_display,
         "zt": zt_display,
         "intraday": is_intraday,
         "intraday_note": intraday_note,
         "indices": {
             code: {
+                "ok": m.get("ok", False),
                 "close": m.get("close"),
                 "pct_chg": m.get("pct_chg"),
                 "above_ma20": m.get("above_ma20"),
                 "ma20_rising": m.get("ma20_rising"),
+                "data_date": index_diagnostics.get(code, {}).get("data_date"),
+                "source": index_diagnostics.get(code, {}).get("source"),
             }
             for code, m in index_metrics.items()
         },
@@ -1084,6 +1139,9 @@ def collect_context(now=None) -> dict:
         "holdings_refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "plan": build_plan(regime, holdings),
     }
+    from analysis.market_explanation import build_market_explanation
+    ctx["market_explanation"] = build_market_explanation(
+        ctx, data_date or date.today().isoformat())
     return ctx
 
 
@@ -1094,6 +1152,10 @@ def build_agent_output(ctx: dict) -> dict:
                  "data_date": ctx["data_date"]},
         "regime": ctx["regime"],
         "components": ctx["components"],
+        "market_explanation": ctx.get("market_explanation"),
+        "indices": ctx.get("indices", {}),
+        "capital_context": ctx.get("capital_context", {}),
+        "intraday_evidence": ctx.get("intraday_evidence"),
         "amount_yi": ctx["amount_yi"],
         "intraday": ctx.get("intraday", False),
         "intraday_note": ctx.get("intraday_note", ""),
@@ -1182,6 +1244,11 @@ def _generate_html(ctx: dict, now_ts: str) -> str:
     regime = ctx.get("regime", {})
     label_color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime.get("label", ""), "#86868b")
     comps = ctx.get("components", {})
+    explanation = _market_explanation_for_report(ctx)
+    explanation_html = ""
+    if explanation:
+        from reporting.market_explanation import render_market_explanation
+        explanation_html = render_market_explanation(explanation, "html")
 
     def comp_row(key, name):
         c = comps.get(key) or {}
@@ -1233,6 +1300,7 @@ ul{{padding-left:20px;line-height:1.8}}
 <table><thead><tr><th>组件</th><th>得分</th><th>说明</th></tr></thead><tbody>
 {comp_row('index_trend','大盘趋势')}{comp_row('volume','成交额')}{comp_row('breadth','赚钱效应')}{comp_row('zt_emotion','涨停情绪')}{comp_row('capital','资金')}
 </tbody></table>
+{explanation_html}
 
 <h2>② 板块</h2>
 <p><strong>最强前3:</strong></p><ul>{top or '<li>—</li>'}</ul>

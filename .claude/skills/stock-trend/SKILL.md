@@ -268,7 +268,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ---
 
-## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html]
+## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html] [--style-shadow FILE] [--memberships FILE]
 
 每日候选股 — 以热点板块绝对热度门槛筛选板块 → 维科夫漏斗扫成分股(每板块 25 只,吸筹/拉升买点子阶段)→ 按“综合分 + 数据资格”扩池 → 分为今日可执行、等待触发、观察池。
 
@@ -288,8 +288,19 @@ open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。候选资格继续使用 `quality_adjusted_score`；同一推荐层级内先检查数据质量、板块持续性、资金背离和短线状态，再使用 `execution_priority_score = min(100, quality_adjusted_score + buy_point_priority_bonus)` 排序并截取。严格一级/二级/三级奖励分别为 `+1/+3/+2`；普通 JAC、未确认或过期信号不奖励。买点优先分不能越过市场环境、数据质量、板块持续性、资金背离、`retest_pending`、`failed_breakout` 或最低质量分门槛。`evidence.status != ready` 时奖励属于保守先验，只允许通过后续回测缩小、归零或调整，不允许自动放大。
 6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。正式持续性快照只接受收盘后的东方财富 `push2` 行业+概念完整截面；AKShare 行业数据、BK 历史 K 线和旧 Top-30 记录只能作旁证，不能提升完整覆盖天数。
 7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。候选报告只呈现候选发现、维科夫分层、市场/板块资格和数据质量；不展示入场、止损、目标、R:R、仓位或有效期等交易计划字段，也不以交易计划完整性进行升降级。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy`、三层推荐、`meta.tracking`。
+   可选 `--style-shadow <FILE>` 加载五风格独立观察（沪深300/中证500/中证1000/创业板指/科创50）；必须通过 schema、模型、参数、基准日期和旧市场上下文指纹校验，失败时仅显示降级诊断。配合 `--memberships <FILE>` 提供含 `known_at`、生效区间和 `source` 的历史成分证据；没有成分证据的候选标为 unknown。该段固定标注“实验观察，不参与推荐”，只写报告副本，不写入正式推荐快照。影子运行另存于 `.cache/stock-trend/market_shadow_history/candidate_runs/`，样本范围为本次扫描候选，不代表全市场覆盖。
 8. 复核：候选仍需人工确认基本面和事件公告后再入场；弱市、盘中或证据不足时允许“今日无推荐”。单次运行在入口固定市场上下文，策略、快照、MD、HTML 和 JSON 必须使用同一市场依据；正式收盘结果按交易日写入 `.cache/stock-trend/recommendation_history/YYYY-MM-DD.json`，同内容重复运行幂等、不同内容冲突且不覆盖；保存失败只降低追踪状态，不抑制报告输出。P0 不代表完整生产链收益已经验证。
 9. 无 Tushare 权限时，可用独立收盘采集命令积累板块完整历史，不依赖候选扫描：`python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --json`（15:10 后运行）；用 `--status --json` 检查本地覆盖，用 `--dry-run --json` 只验证不写入。首次上线通常需要 2–3 个交易日积累；失败日保留缺口，不用当前成分或 BK K 线伪造历史。
+
+市场风格影子观察可独立运行：
+```bash
+python3 .claude/skills/stock-trend/scripts/analysis/market_style.py \
+  --context .cache/stock-trend/market_regime.json --json --save
+python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py \
+  --style-shadow .cache/stock-trend/market_shadow_history/formal/<YYYY-MM-DD>/<digest>.json \
+  --memberships <historical-memberships.json>
+```
+五个风格固定为沪深300(`000300.SH`)、中证500(`000905.SH`)、中证1000(`000852.SH`)、创业板指(`399006.SZ`)和科创50(`000688.SH`)。影子模型只记录 MA20 上下方/斜率观察，运行结果、旧上下文指纹和原始输入独立留痕；不替代正式市场环境评分，也不改变候选推荐门槛。成分匹配必须使用当时已知(`known_at`)且覆盖基准日的历史区间，并带来源；缺证据显示 unknown。
 
 ---
 
@@ -298,6 +309,10 @@ open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 今日复盘 + 市场环境评分 — 整合全市场上下文(大盘/成交额/涨跌家数/涨停/资金/板块排行),输出 0-100 市场环境评分 + 每日复盘报告,并持久化 `market_regime.json` 上下文供 `/stock-trend` 做大盘/板块对比。
 
 **评分公式**: 大盘趋势(25%) + 成交额(20%) + 赚钱效应(25%) + 涨停情绪(20%) + 资金(10%)。≥80 强势(可建仓)/ 60-79 中性(轻仓观察) / <60 弱势(降仓/空仓,不找牛股)。
+
+**评分解释与数据资格**: 正式大盘趋势组件当前使用上证(`000001.SH`)、沪深300(`000300.SH`)和深成指(`399001.SZ`)的 MA20 状态平均；中证500、 中证1000、创业板指和科创50不自动计入该正式分，除非后续版本明确变更模型。成交额组件另用上证与深证综指(`399106.SZ`)拼接两市成交额。每次上下文同时保存 `market_explanation/v1`：五项分数、权重、归一化分母、贡献、指数名单及证据资格。`data_quality=partial` 是正式推荐硬门控，不能因为分数可计算就放行。
+
+证据资格与分数状态分开记录：完整/部分/缺失、fresh/stale/unknown、primary/alternative/estimate/unknown、scorable/reference_only/unavailable。北向净买入(`northbound_net_buy`)与全市场主力净流入(`market_main_force_net_inflow`)必须分别标识；北向不可用时主力净流入可作为旧公式的替代计分输入，但仍显示 `alternative`/`reference_only`，并保留 `regime_data_partial` 限制。缺少来源时间戳不得标记为 fresh。盘中解释额外保存锚分、外推分和混合权重；无法取得锚证据时只显示已存正式分，不声称组件合计解释了盘中混合分。
 
 **盘中混合口径**: 交易时间内跑，评分为「上一收盘锚 + 盘中按已过 240 交易分钟占比外推」的混合 —— 半日成交额/涨停/涨跌家数按已过时间占比放大估全天值再打分，早盘(开盘约 40 分钟内)不外推、直接用上一收盘。越早越依赖昨收，因此**不会因半日数据误报弱势**。报告标 `盘中临时`，输出含 `intraday: true` + `intraday_note`；盘中快照**不写** `market_regime_history.json`(避免 partial 数据污染后续基线)。
 

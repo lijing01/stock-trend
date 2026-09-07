@@ -326,6 +326,18 @@ def test_regime():
     r = mr.compute_regime({})
     test("全空=50", r["score"] == 50.0, f"got {r['score']}")
 
+    fixture = {
+        "index_trend": {"score": 13.3},
+        "volume": {"score": 37.7},
+        "breadth": {"score": 62.5},
+        "zt_emotion": {"score": 100.0},
+        "capital": {"score": 69.4, "data_status": "partial"},
+    }
+    r = mr.compute_regime(fixture)
+    test("正式权重常量保持53.4基线", r["score"] == 53.4, str(r))
+    test("正式权重归一化分母保持1", r["normalization_denominator"] == 1.0, str(r))
+    test("正式加权贡献保持53.43", r["raw_weighted_total"] == 53.43, str(r))
+
 
 # ──────────────── build_plan ────────────────
 
@@ -635,6 +647,22 @@ def test_collect_context_intraday_blend_not_weak():
     test("10:15 成交额外推为全天额", (ctx["amount_yi"] or 0) > 20000,
          f"amount {ctx['amount_yi']}")
     test("10:15 含盘中说明", "盘中" in ctx.get("intraday_note", ""), ctx.get("intraday_note", ""))
+    intraday_evidence = ctx.get("intraday_evidence") or {}
+    test("10:15 保存盘中锚分", intraday_evidence.get("anchor_score") == 83.8,
+         str(intraday_evidence))
+    test("10:15 保存混合权重", isinstance(intraday_evidence.get("blend_weight"), float),
+         str(intraday_evidence))
+    test("10:15 保存外推分", isinstance(intraday_evidence.get("projected_score"), float),
+         str(intraday_evidence))
+    test("10:15 保存会话进度", intraday_evidence.get("session_elapsed_fraction") == 0.1875,
+         str(intraday_evidence))
+    agent_output = mr.build_agent_output(ctx)
+    test("10:15 JSON携带市场解释", bool(agent_output.get("market_explanation")))
+    test("10:15 JSON携带指数解释上下文", agent_output.get("indices") == ctx["indices"])
+    test("10:15 JSON携带资金解释上下文",
+         agent_output.get("capital_context") == ctx["capital_context"])
+    test("10:15 JSON携带盘中混合上下文",
+         agent_output.get("intraday_evidence") == ctx["intraday_evidence"])
 
     # 9:40 — fraction<FLOOR: 纯昨收锚(≈83.8)
     ctx_early = run(datetime(2026, 8, 18, 9, 40))
@@ -646,6 +674,17 @@ def test_collect_context_intraday_blend_not_weak():
     ctx_close = run(datetime(2026, 8, 18, 15, 30))
     test("收盘后非盘中", ctx_close["intraday"] is False)
     test("收盘后无盘中说明", ctx_close.get("intraday_note", "") == "")
+
+    saved_history = dict(history)
+    history.clear()
+    ctx_no_anchor = run(datetime(2026, 8, 18, 9, 40))
+    history.update(saved_history)
+    test("无前收时不伪造盘中锚证据",
+         ctx_no_anchor["intraday_evidence"].get("anchor_score") is None,
+         str(ctx_no_anchor["intraday_evidence"]))
+    test("无前收时解释不可复算混合分",
+         ctx_no_anchor["market_explanation"]["reconciliation"] == "unavailable",
+         str(ctx_no_anchor["market_explanation"]))
 
 
 # ──────────────── live loaders (guarded) ────────────────
