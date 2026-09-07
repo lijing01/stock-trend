@@ -430,6 +430,13 @@ def _normalize_source_evidence(source, payload, attempt, *, cache_probe=False,
     elif status == "cache_valid":
         evidence["cache_used"] = True
         evidence["stale"] = False
+    # A fetcher's file name describes its preferred route, not necessarily
+    # the provider that supplied this series after fallbacks.  Preserve the
+    # actual source for cache auditing and report diagnostics.
+    if source == "kline" and isinstance(payload, dict):
+        meta = payload.get("meta", {})
+        if isinstance(meta, dict) and meta.get("data_source"):
+            evidence["data_source"] = str(meta["data_source"])
     return evidence
 
 
@@ -734,6 +741,13 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                     metrics.get("sector_membership_success_count", 0) + 1)
                 metrics.setdefault("sector_membership_available_codes", []).append(
                     result["code"])
+                if (stocks[0].get("membership_source") == "realtime"
+                        and stocks[0].get("membership_quality", "good")
+                        == "good"):
+                    metrics["sector_membership_same_source_success_count"] = (
+                        metrics.get(
+                            "sector_membership_same_source_success_count", 0)
+                        + 1)
                 if stocks[0].get("membership_source") == "cache":
                     metrics["sector_membership_cache_count"] = (
                         metrics.get("sector_membership_cache_count", 0) + 1)

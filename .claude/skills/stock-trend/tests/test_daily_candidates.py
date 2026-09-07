@@ -2654,6 +2654,23 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertNotIn(
             "推荐降级: intraday_provisional", report)
 
+    def test_report_localizes_policy_reason_codes(self):
+        policy = {
+            "mode": "observation",
+            "max_recommendations": 0,
+            "reasons": ["regime_data_missing"],
+        }
+        buckets = {
+            "actionable": [], "waiting_trigger": [],
+            "next_day_confirmation": [], "observation": [],
+            "data_rejected": [],
+        }
+
+        report = generate_report([], [], 0.1, policy, buckets)
+
+        self.assertIn("推荐降级: 市场环境数据缺失", report)
+        self.assertNotIn("推荐降级: regime_data_missing", report)
+
     def test_neutral_regime_limits_waiting_list_to_two(self):
         regime = {"score": 70, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(regime, "2026-08-06")
@@ -3311,6 +3328,47 @@ class TestRecommendationPolicy(unittest.TestCase):
     def test_final_column_marks_no_data_problem(self):
         detail = _candidate_diagnostic_text(candidate("1"))
         self.assertIn("数据问题/异常：无", detail)
+
+    def test_cross_source_sector_diagnostic_is_collapsed(self):
+        item = candidate("cross-source", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": [
+                "sector_membership_cross_source_unverified",
+                "history_insufficient",
+                "regime_data_missing",
+            ],
+        }
+        item.update({
+            "ranking_quality": "cross_source_observation",
+            "ranking_source": "cache",
+            "ranking_errors": [
+                "industry: 东方财富API请求失败(尝试2次): permission_denied",
+                "concept: 东方财富API请求失败(尝试2次): permission_denied",
+            ],
+            "membership_quality": "cross_source_unverified",
+            "membership_source": "cache",
+            "membership_cache_age_hours": 0.1,
+            "source_evidence": {
+                "membership": {"reason": "permission_denied"},
+            },
+        })
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertEqual(
+            detail.split("；", 1)[0],
+            "数据问题/异常：板块跨源观察（排行缓存、成分缓存），"
+            "实时不可用（permission_denied），成分未验证，不能继承排行资格，"
+            "缓存0.1小时",
+        )
+        self.assertNotIn("东方财富API请求失败", detail)
+        self.assertNotIn("cross_source_observation", detail)
+        self.assertNotIn("cross_source_unverified", detail)
+        self.assertIn("板块历史快照不足，尚不能验证持续性", detail)
+        self.assertIn("市场环境数据缺失", detail)
+        self.assertNotIn("regime_data_missing", detail)
 
     def test_diagnostic_shows_provider_reason_for_fundamental_error(self):
         item = candidate("1", eligible=False)

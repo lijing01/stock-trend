@@ -88,6 +88,9 @@ REASON_LABELS = {
     "stale_cache": "板块排行使用过期缓存",
     "partial_realtime": "板块实时排行数据不完整",
     "regime_missing": "市场环境数据缺失",
+    "regime_data_missing": "市场环境数据缺失",
+    "regime_data_quality_unknown": "市场环境数据质量未知",
+    "regime_data_partial": "市场环境数据不完整",
     "regime_stale": "市场环境数据过期",
     "regime_weak": "市场环境评分偏弱",
     "intraday_provisional": "盘中数据尚未收盘确认",
@@ -361,6 +364,14 @@ def _complete_performance(performance, source_health, candidates, buckets,
     expanded = int(completed.get("sector_expanded_count", 0) or 0)
     completed["sector_expanded_attempt_coverage"] = round(
         expanded / qualified, 4) if qualified else None
+    # Endpoint success does not prove that ranking and membership describe
+    # the same board.  This counter is collected before stock filtering, so
+    # it remains correct even when no stock survives the funnel.
+    same_source = int(completed.get(
+        "sector_membership_same_source_success_count", 0) or 0)
+    completed["sector_membership_same_source_unique_count"] = same_source
+    completed["sector_membership_same_source_coverage"] = round(
+        same_source / membership_denominator, 4) if membership_denominator else None
     for field in (
             "sector_membership_queued_codes",
             "sector_membership_attempted_codes",
@@ -571,6 +582,11 @@ def _performance_markdown(performance):
         f"（唯一板块 {performance.get('sector_membership_available_unique_count', 0)}/"
         f"{performance.get('sector_membership_queued_unique_count', 0)}）",
         "",
+        f"**同源成分资格覆盖**: "
+        f"{_coverage_text(performance.get('sector_membership_same_source_coverage'))} "
+        f"（唯一板块 {performance.get('sector_membership_same_source_unique_count', 0)}/"
+        f"{performance.get('sector_membership_queued_unique_count', 0)}）",
+        "",
         "**股票漏斗**: "
         f"批次 {performance.get('batch_count', 0)} → "
         f"原始 {performance.get('raw_candidate_count', 0)} → "
@@ -743,6 +759,7 @@ def _performance_html(performance):
         f"成分不可用={performance.get('sector_membership_unavailable_unique_count', 0)} | "
         f"成分尝试覆盖率={_coverage_text(performance.get('sector_membership_attempt_coverage'))} | "
         f"成分可用覆盖率={_coverage_text(performance.get('sector_membership_coverage'))} | "
+        f"同源资格率={_coverage_text(performance.get('sector_membership_same_source_coverage'))} | "
         f"是否截断={'是' if performance.get('sector_expansion_truncated') else '否'}"
         + (
             f" | 完整展开可复跑 --max-sector-expansion "
@@ -1365,6 +1382,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         load_snapshot_history,
         rank_hot_sectors,
         save_rankings_cache,
+        _verified_trading_date,
     )
     ranking_token = None
     if isinstance(source_health, RunSourceHealth) \
@@ -1379,12 +1397,15 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 retries=max(
                     0, MAX_PROVIDER_ATTEMPTS["sector_ranking"] // 2 - 1),
                 with_evidence=True,
-                deadline=source_health.live_deadline)
+                deadline=source_health.live_deadline,
+                # Formal candidate eligibility uses the same provider for
+                # ranking, constituent membership and sector history.
+                allow_cross_source_fallback=False)
             rankings = wrapped["payload"]
             ranking_attempt = wrapped["live_attempt"]
         elif source_health is None or not isinstance(
                 source_health, RunSourceHealth):
-            rankings = get_sector_rankings()
+            rankings = get_sector_rankings(allow_cross_source_fallback=False)
         else:
             rankings = {"meta": {}, "sectors": []}
     except Exception as exc:
@@ -1430,7 +1451,13 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         "errors": live_meta.get("errors", [])
         or live_meta.get("upstream_errors", []),
     }
-    metrics["ranking_provenance"] = copy.deepcopy(ranking_meta)
+    # A closed session may reuse a verified close older than the normal live
+    # cache TTL (for example, a multi-day holiday).  Keep that extension
+    # scoped to closed-day fallback only; never loosen live-session freshness.
+    closed_cache_age_hours = None
+    today = datetime.now().strftime("%Y-%m-%d")
+    if as_of_date and as_of_date < today:
+        closed_cache_age_hours = 24 * 14
     if active and live_meta.get("complete", False):
         if as_of_date:
             try:
@@ -1449,14 +1476,16 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                         metrics,
                         f"sector_snapshot_write_error:{type(exc).__name__}")
     else:
-        cached = load_rankings_cache_full()
-        if not cached:
-            try:
-                cached = load_rankings_cache_full(provider="akshare")
-            except TypeError:
-                # Compatibility with older test doubles/adapters that expose
-                # the historical no-argument loader.
-                cached = None
+        # First try the provider-isolated East Money cache.  On a closed day
+        # it is valid to continue from the latest close, but only when the
+        # cache identifies that session explicitly.
+        try:
+            cached = load_rankings_cache_full(
+                provider="eastmoney", max_age_hours=closed_cache_age_hours)
+        except TypeError:
+            # Compatibility with older adapters that do not expose the
+            # optional closed-session age argument.
+            cached = load_rankings_cache_full(provider="eastmoney")
         cached_rankings = (cached or {}).get("rankings", {})
         cache_usable = (
             bool(cached_rankings.get("sectors"))
@@ -1486,11 +1515,56 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 "errors": live_meta.get("errors", []),
             }
         else:
-            ranking_meta = {
-                "source": "error", "provider": live_meta.get("provider", ""),
-                "data_date": "", "quality": "error",
-                "errors": live_meta.get("errors", []),
-            }
+            # Controlled weekend backup: use the provider-isolated THS
+            # snapshot for discovery only.  Constituents are still fetched
+            # through the typed name adapter and are marked cross-source, so
+            # no formal recommendation or history can be promoted.
+            try:
+                observation_cache = load_rankings_cache_full(
+                    provider="akshare", max_age_hours=closed_cache_age_hours)
+            except TypeError:
+                observation_cache = load_rankings_cache_full(provider="akshare")
+            observation_rankings = (observation_cache or {}).get(
+                "rankings", {})
+            observation_meta = observation_rankings.get("meta", {})
+            observation_sectors = observation_rankings.get("sectors", [])
+            observation_date = (observation_cache or {}).get("data_date", "")
+            observation_valid = (
+                bool(observation_sectors)
+                and observation_meta.get("complete") is True
+                and observation_meta.get("provider") in ("", "ths", "akshare")
+                and bool(_verified_trading_date(observation_date))
+            )
+            if observation_valid:
+                rankings = observation_rankings
+                ranking_meta = {
+                    "source": "cache",
+                    "provider": "ths",
+                    "data_date": observation_date,
+                    "quality": "cross_source_observation",
+                    "errors": live_meta.get("errors", [])
+                    or live_meta.get("upstream_errors", []),
+                    "fallback_reason": "eastmoney_unavailable",
+                }
+                if isinstance(source_health, RunSourceHealth):
+                    source_health.record_cache_hit(
+                        "sector_ranking", stale=True,
+                        reason="cross_source_observation")
+            else:
+                ranking_meta = {
+                    "source": "error",
+                    "provider": live_meta.get("provider", ""),
+                    "data_date": "",
+                    "quality": "error",
+                    "errors": live_meta.get("errors", [])
+                    or live_meta.get("upstream_errors", []),
+                }
+    metrics["sector_ranking_selected_source"] = ranking_meta.get("source", "")
+    metrics["sector_ranking_selected_provider"] = ranking_meta.get("provider", "")
+    metrics["sector_ranking_selected_data_date"] = ranking_meta.get("data_date", "")
+    metrics["sector_ranking_selected_quality"] = ranking_meta.get("quality", "")
+    metrics["sector_ranking_fallback_reason"] = ranking_meta.get(
+        "fallback_reason", "")
     metrics["ranking_provenance"] = copy.deepcopy(ranking_meta)
     # If the live request failed and a verified cache was selected, the
     # report's universe must describe the selected snapshot, not the failed
@@ -1600,7 +1674,8 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 and sector.get("ranking_data_date") != expected_date:
             sector["sector_type"] = "stale_cache"
             sector["sector_actionable"] = False
-        elif sector.get("ranking_quality") in ("partial", "error"):
+        elif sector.get("ranking_quality") in (
+                "partial", "error", "cross_source_observation"):
             sector["sector_type"] = "partial_realtime"
             sector["sector_actionable"] = False
     # This is the qualified sector list handed to the stock-expansion stage;
@@ -1925,18 +2000,104 @@ def _candidate_diagnostic_text(item):
     data_reasons = []
     other_reasons = []
     transient_reasons = []
+    ranking_quality = item.get("ranking_quality", "")
+    membership_quality = item.get("membership_quality", "")
+    cross_source_observation = (
+        ranking_quality == "cross_source_observation"
+        or membership_quality == "cross_source_unverified"
+    )
     for code in reasons:
         if code == "intraday_provisional":
             transient_reasons.append(_reason_detail(code, item))
             continue
+        # The structured sector fields below provide one concise explanation
+        # for this condition.  Keep the machine-readable reason in JSON, but
+        # avoid repeating the same warning in the table cell.
+        if code == "sector_membership_cross_source_unverified" \
+                and cross_source_observation:
+            continue
         target = data_reasons if code in DATA_REASON_CODES else other_reasons
         target.append(_reason_detail(code, item))
+
+    sector_cross_source_detail = None
+    if cross_source_observation:
+        source_labels = {
+            "realtime": "实时",
+            "realtime_partial": "实时部分",
+            "cache": "缓存",
+            "error": "不可用",
+        }
+
+        def _sector_source(prefix):
+            source = item.get(f"{prefix}_source", "")
+            return source_labels.get(source, source or "未知")
+
+        evidence_by_source = item.get("source_evidence", {})
+        if not isinstance(evidence_by_source, dict):
+            evidence_by_source = {}
+
+        def _sector_reason(prefix):
+            evidence = evidence_by_source.get(prefix, {})
+            if not isinstance(evidence, dict):
+                evidence = {}
+            reason = evidence.get("reason") or item.get(
+                f"{prefix}_fallback_reason", "")
+            if reason and reason != "cache_only":
+                return str(reason)
+            # Ranking diagnostics are stored as a list of provider errors;
+            # expose only a stable reason code here, never the full exception.
+            errors = item.get(f"{prefix}_errors", []) or []
+            for candidate_reason in (
+                    "permission_denied", "dns", "timeout", "empty"):
+                if any(candidate_reason in str(error)
+                       for error in errors):
+                    return candidate_reason
+            return ""
+
+        sources = []
+        if ranking_quality == "cross_source_observation":
+            sources.append(f"排行{_sector_source('ranking')}")
+        if membership_quality == "cross_source_unverified":
+            sources.append(f"成分{_sector_source('membership')}")
+        source_detail = f"（{'、'.join(sources)}）" if sources else ""
+        reason = (_sector_reason("membership")
+                  or _sector_reason("ranking"))
+        reason_detail = f"，实时不可用（{reason}）" if reason else ""
+        ages = [
+            item.get("membership_cache_age_hours"),
+            item.get("ranking_cache_age_hours"),
+        ]
+        age = next((value for value in ages
+                    if isinstance(value, (int, float))), None)
+        age_detail = f"，缓存{age:.1f}小时" if age is not None else ""
+        if ranking_quality == "cross_source_observation" \
+                and membership_quality == "cross_source_unverified":
+            sector_cross_source_detail = (
+                f"板块跨源观察{source_detail}{reason_detail}，"
+                f"成分未验证，不能继承排行资格{age_detail}"
+            )
+        elif membership_quality == "cross_source_unverified":
+            sector_cross_source_detail = (
+                f"板块成分未验证，不能继承排行资格{source_detail}"
+                f"{reason_detail}{age_detail}"
+            )
+        else:
+            sector_cross_source_detail = (
+                f"板块排行跨源观察{source_detail}{reason_detail}"
+                f"{age_detail}"
+            )
 
     for label, prefix in (("板块排行", "ranking"), ("板块成分", "membership")):
         quality_value = item.get(f"{prefix}_quality", "")
         source = item.get(f"{prefix}_source", "")
         errors = item.get(f"{prefix}_errors", []) or []
         if quality_value and quality_value != "good":
+            if cross_source_observation and (
+                    (prefix == "ranking"
+                     and ranking_quality == "cross_source_observation")
+                    or (prefix == "membership"
+                        and membership_quality == "cross_source_unverified")):
+                continue
             cause = "、".join(str(error) for error in errors if error)
             detail = f"{label}数据质量{quality_value}"
             if source:
@@ -1955,6 +2116,8 @@ def _candidate_diagnostic_text(item):
             if source == "cache" and isinstance(age_hours, (int, float)):
                 detail += f"，缓存年龄{age_hours:.1f}小时"
             data_reasons.append(detail)
+    if sector_cross_source_detail:
+        data_reasons.insert(0, sector_cross_source_detail)
 
     parts = []
     if data_reasons:
@@ -2749,7 +2912,8 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     if style_shadow:
         lines.extend(["", _style_shadow_markdown(style_shadow)])
     downgrade_reasons = [
-        reason for reason in policy.get("reasons", [])
+        REASON_LABELS.get(reason, reason)
+        for reason in policy.get("reasons", [])
         if reason != "intraday_provisional"
     ]
     if downgrade_reasons:
@@ -3143,15 +3307,20 @@ def main():
             time.monotonic() - ranking_start, 3)
         performance["sector_ranking_requests"] = 1
         if not sector_codes:
-            print("⚠️ 无热点板块,候选为空", file=sys.stderr)
-            sys.exit(1)
-        sector_preview = [
-            f"{sector['name']}({sector['sector_score']:.0f})"
-            for sector in sector_codes[:5]
-        ]
-        print(f"  热点板块 {len(sector_codes)} 个: "
-              f"{sector_preview}...",
-              file=sys.stderr)
+            # An unavailable same-source ranking is a valid observation
+            # outcome.  Continue through the normal serializers so scheduled
+            # runs leave an auditable "no recommendation" report.
+            performance.setdefault("degradation_reasons", []).append(
+                "sector_ranking_unavailable")
+            print("⚠️ 无可用同源板块排行,生成空候选报告", file=sys.stderr)
+        else:
+            sector_preview = [
+                f"{sector['name']}({sector['sector_score']:.0f})"
+                for sector in sector_codes[:5]
+            ]
+            print(f"  热点板块 {len(sector_codes)} 个: "
+                  f"{sector_preview}...",
+                  file=sys.stderr)
 
     # 漏斗扫描
     print("[2/3] 维科夫漏斗扫描成分股...", file=sys.stderr)
@@ -3224,12 +3393,14 @@ def main():
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         builders = [("json", lambda: build_json_output(
             report_candidates, sector_codes, elapsed, policy, report_buckets,
+            performance=performance,
             tracking=tracking, market_regime=regime,
             style_shadow=style_shadow_report))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
                 report_candidates, sector_codes, elapsed, ts, policy,
-                report_buckets, tracking=tracking, market_regime=regime,
+                report_buckets, performance=performance,
+                tracking=tracking, market_regime=regime,
                 style_shadow=style_shadow_report)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
@@ -3254,13 +3425,15 @@ def main():
     # performance envelope.  Serialization and file writes are outside it.
     builders = [("markdown", lambda: generate_report(
         report_candidates, sector_codes, elapsed, policy, report_buckets,
+        performance=performance,
         tracking=tracking, market_regime=regime,
         style_shadow=style_shadow_report))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
             report_candidates, sector_codes, elapsed, ts, policy,
-            report_buckets, tracking=tracking, market_regime=regime,
+            report_buckets, performance=performance,
+            tracking=tracking, market_regime=regime,
             style_shadow=style_shadow_report)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)

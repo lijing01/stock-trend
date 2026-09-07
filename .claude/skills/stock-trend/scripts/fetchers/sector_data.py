@@ -153,7 +153,8 @@ MIN_RANKING_ROWS_PER_SOURCE = 5
 
 def get_sector_rankings(timeout: int = 15, retries: int = 3,
                         with_evidence: bool = False,
-                        deadline: float | None = None) -> dict:
+                        deadline: float | None = None,
+                        allow_cross_source_fallback: bool = True) -> dict:
     """Fetch sector rankings with composite scoring data.
 
     Returns:
@@ -167,6 +168,7 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
             "errors": [],
             "complete": False,
             "provider": "eastmoney",
+            "ranking_diagnostics": {},
         },
         "sectors": [],
     }
@@ -201,8 +203,23 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
             data, attempt = _unpack_fetch_result(fetched)
             if attempt:
                 provider_attempts += attempt.get("provider_attempts", 0)
-            items = _check_result(data).get("diff", [])
+            payload = _check_result(data)
+            items = payload.get("diff", [])
+            if isinstance(items, dict):
+                items = list(items.values())
             valid_items = [item for item in items if item.get("f12")]
+            active_items = sum(
+                1 for item in valid_items
+                if (item.get("f104", 0) or 0) > 0
+                or (item.get("f105", 0) or 0) > 0)
+            result["meta"]["ranking_diagnostics"][sname] = {
+                "status": "ok" if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE
+                else ("sparse" if valid_items else "empty"),
+                "returned_rows": len(items),
+                "valid_rows": len(valid_items),
+                "active_rows": active_items,
+                "reported_total": payload.get("total"),
+            }
             if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE:
                 result["meta"]["sources"][sname] = "ok"
             elif valid_items:
@@ -239,6 +256,10 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                 or classify_failure(e)
             result["meta"]["sources"][sname] = "error"
             result["meta"]["errors"].append(f"{sname}: {e}")
+            result["meta"]["ranking_diagnostics"][sname] = {
+                "status": "error", "reason": failure_reason,
+                "detail": str(e),
+            }
             print(f"  Warning: 无法获取{sname}板块排行: {e}", file=sys.stderr)
 
     # If EM API returned zero active sectors, try AKShare fallback
@@ -251,9 +272,9 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
         result["meta"]["sources"].get(source) == "ok"
         for source in ("industry", "concept")
     )
-    if (not result["meta"]["complete"]
+    if (allow_cross_source_fallback and (not result["meta"]["complete"]
             or active == 0
-            or result["meta"]["total_sectors"] < 5):
+            or result["meta"]["total_sectors"] < 5)):
         try:
             from fetchers.sector_akshare import get_sector_rankings_akshare
             akshare_result = get_sector_rankings_akshare()
@@ -271,6 +292,11 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                     )
                     akshare_result["meta"]["upstream_errors"] = list(
                         result["meta"]["errors"])
+                    akshare_result["meta"]["upstream_diagnostics"] = dict(
+                        result["meta"]["ranking_diagnostics"])
+                    akshare_result["meta"]["fallback_reason"] = (
+                        "eastmoney_incomplete" if result["meta"]["errors"]
+                        else "eastmoney_zero_active")
                     result = akshare_result
                     active = akshare_active
         except Exception as e:
@@ -904,7 +930,8 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
         json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def load_rankings_cache(provider: str = "eastmoney") -> Optional[dict]:
+def load_rankings_cache(provider: str = "eastmoney",
+                        max_age_hours: float | None = None) -> Optional[dict]:
     """Load cached sector rankings if fresh and has any sector data.
 
     Returns the rankings dict or None if expired / corrupted.
@@ -919,7 +946,9 @@ def load_rankings_cache(provider: str = "eastmoney") -> Optional[dict]:
             payload = json.loads(cache_file.read_text(encoding="utf-8"))
             cached_at = datetime.fromisoformat(payload["cached_at"])
             age = datetime.now() - cached_at
-            if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            age_limit = (MAX_CACHE_AGE_HOURS if max_age_hours is None
+                         else max(0.0, float(max_age_hours)))
+            if age.total_seconds() > age_limit * 3600:
                 continue
             data_date = _verified_trading_date(payload.get("data_date", ""))
             if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
@@ -948,7 +977,8 @@ def load_rankings_cache(provider: str = "eastmoney") -> Optional[dict]:
     return None
 
 
-def load_rankings_cache_full(provider: str = "eastmoney") -> Optional[dict]:
+def load_rankings_cache_full(provider: str = "eastmoney",
+                             max_age_hours: float | None = None) -> Optional[dict]:
     """Load full cached payload including hot_sectors if present.
 
     Returns the raw payload dict, or None if expired / corrupted.
@@ -960,7 +990,9 @@ def load_rankings_cache_full(provider: str = "eastmoney") -> Optional[dict]:
             payload = json.loads(cache_file.read_text(encoding="utf-8"))
             cached_at = datetime.fromisoformat(payload["cached_at"])
             age = datetime.now() - cached_at
-            if age.total_seconds() > MAX_CACHE_AGE_HOURS * 3600:
+            age_limit = (MAX_CACHE_AGE_HOURS if max_age_hours is None
+                         else max(0.0, float(max_age_hours)))
+            if age.total_seconds() > age_limit * 3600:
                 continue
             data_date = _verified_trading_date(payload.get("data_date", ""))
             if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
