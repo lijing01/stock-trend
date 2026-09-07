@@ -10,12 +10,12 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .cache_utils import CACHE_DIR
 from .recommendation_snapshot import canonical_json, content_sha256, _normalize_for_json
+from .evolution_storage import input_manifest, storage_root
 
 
 SCHEMA_VERSION = "candidate-research-snapshot/v1"
-DEFAULT_ROOT = Path(CACHE_DIR) / "candidate_research_history"
+DEFAULT_ROOT = storage_root("research")
 
 
 def _bucket_by_code(buckets):
@@ -110,6 +110,18 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
         "market_regime": copy.deepcopy(market_regime or {}),
         "sectors": copy.deepcopy(sector_codes or []),
         "parameter_summary": copy.deepcopy(parameter_summary or {}),
+        "input_manifest": input_manifest(
+            candidate_records=records,
+            market_regime=market_regime or {},
+            policy=policy or {},
+            sectors=sector_codes or [],
+            model_version=model_version,
+            parameter_summary=parameter_summary or {},
+            official_snapshot={
+                "content_sha256": (official_tracking or {}).get("content_sha256"),
+                "link_status": "linked" if (official_tracking or {}).get("status") in ("created", "unchanged") else "unlinked",
+            },
+        ),
         # ``created`` and ``unchanged`` describe the same formal decision on
         # a rerun.  Persist the stable linkage rather than write telemetry
         # into the run identity.

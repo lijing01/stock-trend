@@ -12,12 +12,12 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 if str(SCRIPT_ROOT) not in sys.path: sys.path.insert(0, str(SCRIPT_ROOT))
 
 from analysis.recommendation_diagnostics import load_candidate_signal_items, load_primary_research_snapshots
-from core.cache_utils import CACHE_DIR
 from core.recommendation_snapshot import canonical_json, content_sha256
 from core.evolution_registry import validate_experiment_definition
+from core.evolution_storage import input_manifest, storage_root
 
 SCHEMA_VERSION = "recommendation-experiment/v1"
-DEFAULT_ROOT = Path(CACHE_DIR) / "evolution" / "experiments"
+DEFAULT_ROOT = storage_root("experiments")
 PRIMARY_WINDOW = 20
 FROZEN_BASELINE = {"strict_level_1": 1, "strict_level_2": 3, "strict_level_3": 2}
 ZERO_TREATMENT = {"strict_level_1": 0, "strict_level_2": 0, "strict_level_3": 0}
@@ -110,7 +110,14 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
     blocks = _split_dates(dates)
     content = {"schema_version": SCHEMA_VERSION, "definition": definition,
                "primary_window": PRIMARY_WINDOW, "purge_sessions": PRIMARY_WINDOW,
-               "input_dates": dates, "skipped_reasons": sorted(set(skipped))}
+               "input_dates": dates, "skipped_reasons": sorted(set(skipped)),
+               "input_manifest": input_manifest(
+                   research_run_ids=sorted(str((item or {}).get("run_id") or "") for item in research_snapshots or []),
+                   research_content_sha256=sorted(str((item or {}).get("content_sha256") or "") for item in research_snapshots or []),
+                   candidate_signal_items=candidate_signal_items or [],
+                   definition=definition,
+                   primary_window=PRIMARY_WINDOW,
+               )}
     if not blocks:
         content.update({"status": "continue_accumulating", "reason": "insufficient_time_span_for_three_purged_oos_blocks"})
         return _package(content)
@@ -175,7 +182,7 @@ def save_experiment(result, root=DEFAULT_ROOT):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run frozen recommendation walk-forward experiment")
-    parser.add_argument("--research-root", default=str(Path(CACHE_DIR) / "candidate_research_history")); parser.add_argument("--attribution-root", default=str(Path(CACHE_DIR) / "evolution" / "evaluations")); parser.add_argument("--contract-id"); parser.add_argument("--save", action="store_true"); parser.add_argument("--json", action="store_true")
+    parser.add_argument("--research-root", default=str(storage_root("research"))); parser.add_argument("--attribution-root", default=str(storage_root("evaluations"))); parser.add_argument("--contract-id"); parser.add_argument("--save", action="store_true"); parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv); result = run_walk_forward(load_primary_research_snapshots(args.research_root), load_candidate_signal_items(args.attribution_root, args.contract_id))
     if args.save: result["persistence"] = save_experiment(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))

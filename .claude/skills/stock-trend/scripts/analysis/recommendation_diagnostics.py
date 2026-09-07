@@ -20,12 +20,13 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from core.cache_utils import CACHE_DIR
 from core.evolution_contract import PRIMARY_WINDOW
+from core.evolution_storage import LEGACY_RESEARCH_ROOT, input_manifest, load_research_snapshot, storage_root
 from core.recommendation_snapshot import canonical_json, content_sha256
 
 
 SCHEMA_VERSION = "recommendation-diagnostics/v1"
-DEFAULT_RESEARCH_ROOT = Path(CACHE_DIR) / "candidate_research_history"
-DEFAULT_ROOT = Path(CACHE_DIR) / "evolution" / "diagnostics"
+DEFAULT_RESEARCH_ROOT = storage_root("research")
+DEFAULT_ROOT = storage_root("diagnostics")
 MIN_GROUP_EVENTS = 30
 
 
@@ -165,20 +166,37 @@ def build_diagnostics(research_snapshots, candidate_signal_items, primary_window
                   "candidate_signal_items": len(candidate_signal_items or []),
                   "skipped_ineligible_records": skipped},
     }
+    content["input_manifest"] = input_manifest(
+        research_run_ids=sorted(str((item or {}).get("run_id") or "") for item in research_snapshots or []),
+        research_content_sha256=sorted(str((item or {}).get("content_sha256") or "") for item in research_snapshots or []),
+        evaluation_window=primary_window,
+        candidate_signal_items=candidate_signal_items or [],
+    )
     return {"schema_version": SCHEMA_VERSION, "diagnostic_id": content_sha256(content)[:16],
             "content_sha256": content_sha256(content), "content": content}
 
 
 def load_primary_research_snapshots(root=DEFAULT_RESEARCH_ROOT):
     root = Path(root)
+    roots = [root]
+    # P1 originally persisted under candidate_research_history.  Retain it as
+    # a read-only source while all new writes use evolution/research.
+    if root == DEFAULT_RESEARCH_ROOT and LEGACY_RESEARCH_ROOT != root:
+        roots.append(LEGACY_RESEARCH_ROOT)
     snapshots = []
-    for index in sorted(root.glob("*/formal/primary.json")):
-        run_id = index.read_text(encoding="utf-8").strip()
-        path = index.parent / (run_id + ".json")
-        try:
-            snapshots.append(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
-            continue
+    seen_dates = set()
+    for candidate_root in roots:
+        for index in sorted(candidate_root.glob("*/formal/primary.json")):
+            day = index.parent.parent.name
+            if day in seen_dates:
+                continue
+            run_id = index.read_text(encoding="utf-8").strip()
+            path = index.parent / (run_id + ".json")
+            try:
+                snapshots.append(load_research_snapshot(path))
+                seen_dates.add(day)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
     return snapshots
 
 

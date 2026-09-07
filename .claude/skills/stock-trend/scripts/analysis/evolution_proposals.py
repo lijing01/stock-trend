@@ -13,10 +13,11 @@ if str(SCRIPT_ROOT) not in sys.path:
 
 from core.cache_utils import CACHE_DIR
 from core.recommendation_snapshot import canonical_json, content_sha256
+from core.evolution_storage import input_manifest, storage_root
 
 
 SCHEMA_VERSION = "recommendation-evolution-proposal/v1"
-DEFAULT_ROOT = Path(CACHE_DIR) / "evolution" / "proposals"
+DEFAULT_ROOT = storage_root("proposals")
 MAX_WEEKLY_PROPOSALS = 3
 ALLOWED_VARIABLE = "buy_point_priority_bonus"
 ALLOWED_LEVELS = {"strict_level_1", "strict_level_2", "strict_level_3"}
@@ -95,6 +96,12 @@ def build_proposal_run(diagnostics, response=None, week=None, adapter_status="mo
                    "adapter_status": adapter_status, "usage": copy.deepcopy(usage or {"generation_calls": 0, "repair_calls": 0}),
                    "proposals": valid, "rejected": errors,
                    "policy": "每周最多3条；只生成假设，不修改参数、不自动发布。"}
+    run_content["input_manifest"] = input_manifest(
+        diagnostics_id=diagnostics.get("diagnostic_id"),
+        diagnostics_sha256=diagnostics.get("content_sha256"),
+        diagnostics_schema_version=content.get("schema_version"),
+        week=list(_week_key(week)),
+    )
     return {"schema_version": SCHEMA_VERSION, "proposal_id": content_sha256(run_content)[:16],
             "content_sha256": content_sha256(run_content), "content": run_content}
 
