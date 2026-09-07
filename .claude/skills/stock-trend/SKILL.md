@@ -268,7 +268,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ---
 
-## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html] [--style-shadow FILE] [--memberships FILE]
+## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html] [--style-shadow FILE] [--strategy-shadow FILE] [--memberships FILE]
 
 每日候选股 — 以热点板块绝对热度门槛筛选板块 → 维科夫漏斗扫成分股(每板块 25 只,吸筹/拉升买点子阶段)→ 按“综合分 + 数据资格”扩池 → 分为今日可执行、等待触发、观察池。
 
@@ -289,6 +289,7 @@ open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。正式持续性快照只接受收盘后的东方财富 `push2` 行业+概念完整截面；AKShare 行业数据、BK 历史 K 线和旧 Top-30 记录只能作旁证，不能提升完整覆盖天数。同花顺排行如需使用东方财富成分，只能作为标注为“跨源未验证”的观察回退，不得继承排行资格；同类目录在一次扫描内共享加载，报告分别展示接口状态、映射失败和成分可用覆盖率。
 7. 输出：今日结论 + 今日可执行/等待触发/观察池三层结果 → `reports/lists/candidates-<时间>.md` + `.html`。候选报告只呈现候选发现、维科夫分层、市场/板块资格和数据质量；不展示入场、止损、目标、R:R、仓位或有效期等交易计划字段，也不以交易计划完整性进行升降级。`--json` 保留原 `candidates` 字段供兼容消费，并新增 `policy`、三层推荐、`meta.tracking`。
    可选 `--style-shadow <FILE>` 加载五风格独立观察（沪深300/中证500/中证1000/创业板指/科创50）；必须通过 schema、模型、参数、基准日期和旧市场上下文指纹校验，失败时仅显示降级诊断。配合 `--memberships <FILE>` 提供含 `known_at`、生效区间和 `source` 的历史成分证据；没有成分证据的候选标为 unknown。该段固定标注“实验观察，不参与推荐”，只写报告副本，不写入正式推荐快照。影子运行另存于 `.cache/stock-trend/market_shadow_history/candidate_runs/`，样本范围为本次扫描候选，不代表全市场覆盖。
+   可选 `--strategy-shadow <FILE>` 仅接受 P3 已冻结的买点奖励对照定义（严格等级 `+1/+3/+2` 对 `0/0/0`）；以同一次扫描输入独立重排并存入 `market_shadow_history/strategy_runs/`，不改变正式排序、分桶、快照或报告结论。
 8. 复核：候选仍需人工确认基本面和事件公告后再入场；弱市、盘中或证据不足时允许“今日无推荐”。单次运行在入口固定市场上下文，策略、快照、MD、HTML 和 JSON 必须使用同一市场依据；正式收盘结果按交易日写入 `.cache/stock-trend/recommendation_history/YYYY-MM-DD.json`，同内容重复运行幂等、不同内容冲突且不覆盖；保存失败只降低追踪状态，不抑制报告输出。P0 不代表完整生产链收益已经验证。
 9. 无 Tushare 权限时，可用独立收盘采集命令积累板块完整历史，不依赖候选扫描：`python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --json`（15:10 后运行）；用 `--status --json` 检查本地覆盖，用 `--dry-run --json` 只验证不写入。首次上线通常需要 2–3 个交易日积累；失败日保留缺口，不用当前成分或 BK K 线伪造历史。
 

@@ -61,6 +61,7 @@ from core.candidate_research_snapshot import (
     build_research_snapshot, save_research_snapshot_safely,
 )
 from core.market_shadow_snapshot import save_shadow_run
+from core.evolution_registry import validate_experiment_definition
 from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
@@ -132,10 +133,12 @@ def candidate_quality_score(item):
     )
 
 
-def apply_buy_point_priority(item):
+def apply_buy_point_priority(item, priority_bonuses=None):
     """Materialize an auditable within-bucket execution priority score."""
     level = classify_buy_point_level(item.get("wyckoff"))
-    bonus = float(level["priority_bonus"]) if level else 0.0
+    default_bonus = float(level["priority_bonus"]) if level else 0.0
+    bonus = float((priority_bonuses or {}).get(
+        f"strict_level_{level['number']}" if level else "", default_bonus))
     quality = candidate_quality_score(item)
     item["buy_point_level"] = level["number"] if level else None
     item["buy_point_level_name"] = level["name"] if level else ""
@@ -1901,7 +1904,8 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
     return selected, research_population
 
 
-def select_candidate_pool(scored, top, min_score, policy=None):
+def select_candidate_pool(scored, top, min_score, policy=None,
+                          priority_bonuses=None):
     """Keep promotable candidates ahead of observation-only high scorers."""
     # Retain the raw-score shortlist so quality-ineligible rows remain visible
     # in the observation pool; score_eligible below is the hard quality gate.
@@ -1910,7 +1914,7 @@ def select_candidate_pool(scored, top, min_score, policy=None):
         if item.get("composite_score", 0) >= min_score
     ]
     for item in candidates:
-        apply_buy_point_priority(item)
+        apply_buy_point_priority(item, priority_bonuses=priority_bonuses)
         item["score_eligible"] = candidate_quality_score(item) >= min_score
 
     def selection_key(item):
@@ -2644,6 +2648,49 @@ def _save_candidate_shadow_run(payload):
         }
 
 
+def _load_strategy_shadow(path):
+    """Load P3's opt-in frozen experiment definition, never a live policy."""
+    if not path:
+        return {"status": "disabled"}
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        definition = validate_experiment_definition(value.get("definition", value))
+        return {"status": "ready", "definition": definition}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "invalid", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _run_strategy_shadow(scored, top, min_score, policy, basis_date, state):
+    """Persist a paired, non-promoting treatment ranking for this same run."""
+    if state.get("status") != "ready":
+        return dict(state, formal_policy_affected=False)
+    trial_scored = copy.deepcopy(scored)
+    trial = select_candidate_pool(
+        trial_scored, top, min_score, policy=policy,
+        priority_bonuses=state["definition"]["treatment"])
+    trial_buckets = classify_candidates(trial, copy.deepcopy(policy))
+    payload = {
+        "schema_version": "recommendation-strategy-shadow/v1",
+        "basis_date": basis_date,
+        "snapshot_type": "provisional" if policy.get("provisional") else "formal",
+        "sample_scope": "same_scanned_population",
+        "definition": state["definition"],
+        "formal_input_codes": sorted(str(item.get("code")) for item in scored),
+        "treatment_buckets": {name: [str(item.get("code")) for item in rows]
+                              for name, rows in trial_buckets.items()},
+        "formal_policy_affected": False,
+    }
+    try:
+        saved = save_shadow_run(payload, namespace="strategy_runs")
+        return {"status": saved.status, "path": saved.path,
+                "content_sha256": saved.content_sha256,
+                "formal_policy_affected": False,
+                "treatment_buckets": payload["treatment_buckets"]}
+    except Exception as exc:
+        return {"status": "write_failed", "reason": f"{type(exc).__name__}: {exc}",
+                "formal_policy_affected": False}
+
+
 def build_recommendation_policy(regime, expected_date, market_open=False):
     if not regime or regime.get("score") is None:
         policy = {
@@ -3269,6 +3316,9 @@ def main():
     parser.add_argument(
         "--memberships", type=str, default=None,
         help="可选带 known_at/effective window/source 的指数成分 JSON")
+    parser.add_argument(
+        "--strategy-shadow", type=str, default=None,
+        help="P3 冻结实验 JSON；仅独立保存影子排序，不参与正式推荐")
     parser.add_argument("--json", action="store_true", help="stdout 输出 JSON")
     parser.add_argument("--html", dest="html", action="store_true", default=True,
                         help="(默认) 生成 HTML 报告")
@@ -3297,6 +3347,7 @@ def main():
     )
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
+    strategy_shadow_state = _load_strategy_shadow(args.strategy_shadow)
 
     # 板块来源
     if args.sectors:
@@ -3366,6 +3417,9 @@ def main():
     candidates = select_candidate_pool(
         scored, args.top, args.min_score, policy=policy)
     buckets = classify_candidates(candidates, policy)
+    strategy_shadow = _run_strategy_shadow(
+        scored, args.top, args.min_score, policy, expected_date,
+        strategy_shadow_state)
     performance["candidate_concentration"] = candidate_concentration(candidates)
 
     elapsed = time.time() - start
@@ -3394,6 +3448,7 @@ def main():
     )
     research_tracking = save_research_snapshot_safely(research_snapshot)
     tracking["research_snapshot"] = research_tracking
+    tracking["strategy_shadow"] = strategy_shadow
 
     report_candidates = copy.deepcopy(candidates)
     report_buckets = copy.deepcopy(buckets)
