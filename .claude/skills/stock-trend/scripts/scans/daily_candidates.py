@@ -80,6 +80,7 @@ REASON_LABELS = {
     "source_unavailable": "资金增强源不可用，本轮未调用",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
     "history_insufficient": "板块历史快照不足，尚不能验证持续性",
+    "history_unknown": "本板块历史未匹配，持续性未知",
     "breadth_capital_divergence": "普涨但市场资金背离，需板块资金或共振确认",
     "quality_adjusted_below_min_score": "质量调整分低于最低门槛",
     "sector_unverified": "板块持续性未验证",
@@ -253,8 +254,11 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "market_cap_missing_count",
     "sector_membership_attempted_unique_count",
     "sector_membership_available_unique_count",
+    "sector_membership_queued_unique_count",
+    "sector_membership_unavailable_unique_count",
     "sector_membership_coverage",
     "sector_membership_attempt_coverage",
+    "sector_expanded_attempt_coverage",
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
@@ -315,24 +319,48 @@ def _complete_performance(performance, source_health, candidates, buckets,
     else:
         completed.setdefault("sector_expanded_count", 0)
     completed.pop("sector_expanded_codes", None)
-    # Membership counters are reported per unique sector.  The historical
-    # success/failure fields count provider outcomes and may include retries;
-    # these derived fields are the user-facing completeness contract.
+    # Membership counters are reported per unique sector.  The raw counters
+    # remain backward-compatible audit fields; code lists provide the stable
+    # unique-sector completeness contract used by reports.
     attempted = int(completed.get("sector_membership_attempted_count", 0) or 0)
     available = int(completed.get("sector_membership_success_count", 0) or 0)
     queued = int(completed.get("sector_membership_queued_count", 0) or 0)
     qualified = int(completed.get("sector_qualified_count", 0) or 0)
-    completed["sector_membership_attempted_unique_count"] = min(
-        max(attempted, 0), max(queued, 0)) if queued else max(attempted, 0)
-    completed["sector_membership_available_unique_count"] = min(
-        max(available, 0), max(queued, 0)) if queued else max(available, 0)
-    membership_denominator = max(queued, qualified, 0)
+    queued_codes = set(completed.get("sector_membership_queued_codes") or [])
+    attempted_codes = set(
+        completed.get("sector_membership_attempted_codes") or [])
+    available_codes = set(
+        completed.get("sector_membership_available_codes") or [])
+    if queued_codes:
+        queued_unique = len(queued_codes)
+        attempted_unique = len(attempted_codes & queued_codes)
+        available_unique = len(available_codes & queued_codes)
+    else:
+        queued_unique = max(queued, qualified, 0)
+        attempted_unique = (min(max(attempted, 0), queued_unique)
+                            if queued_unique else max(attempted, 0))
+        available_unique = (min(max(available, 0), queued_unique)
+                            if queued_unique else max(available, 0))
+    membership_denominator = max(queued_unique, qualified, 0)
+    completed["sector_membership_queued_unique_count"] = membership_denominator
+    completed["sector_membership_attempted_unique_count"] = attempted_unique
+    completed["sector_membership_available_unique_count"] = available_unique
+    completed["sector_membership_unavailable_unique_count"] = max(
+        0, membership_denominator - available_unique)
     completed["sector_membership_attempt_coverage"] = round(
         completed["sector_membership_attempted_unique_count"] /
         membership_denominator, 4) if membership_denominator else None
     completed["sector_membership_coverage"] = round(
         completed["sector_membership_available_unique_count"] /
         membership_denominator, 4) if membership_denominator else None
+    expanded = int(completed.get("sector_expanded_count", 0) or 0)
+    completed["sector_expanded_attempt_coverage"] = round(
+        expanded / qualified, 4) if qualified else None
+    for field in (
+            "sector_membership_queued_codes",
+            "sector_membership_attempted_codes",
+            "sector_membership_available_codes"):
+        completed.pop(field, None)
     completed.setdefault("degradation_reasons", [])
     if (completed["sector_membership_coverage"] is not None
             and completed["sector_membership_coverage"] < 1.0):
@@ -504,10 +532,9 @@ def _performance_markdown(performance):
         f"热度合格 {performance.get('sector_qualified_count', 0)} → "
         f"实际展开 {performance.get('sector_expanded_count', 0)}",
         "",
-        f"**板块覆盖率（展开）**: "
-        f"{float(performance.get('sector_scan_coverage', 1.0)):.1%} | "
-        f"成分尝试覆盖 {performance.get('sector_membership_attempt_coverage') if performance.get('sector_membership_attempt_coverage') is not None else '—'} | "
-        f"成分可用覆盖 {performance.get('sector_membership_coverage') if performance.get('sector_membership_coverage') is not None else '—'} | "
+        f"**板块覆盖率（计划展开）**: "
+        f"{_coverage_text(performance.get('sector_scan_coverage', 1.0))} | "
+        f"实际尝试覆盖 {_coverage_text(performance.get('sector_expanded_attempt_coverage'))} | "
         f"是否截断: "
         f"{'是' if performance.get('sector_expansion_truncated') else '否'}"
         + (
@@ -527,11 +554,14 @@ def _performance_markdown(performance):
         f"市值补全 {performance.get('market_cap_enriched_count', 0)} | "
         f"市值仍缺失 {performance.get('market_cap_missing_count', 0)}",
         "",
-        f"**板块成分覆盖**: 尝试覆盖 "
-        f"{performance.get('sector_membership_attempt_coverage', '—')} | "
-        f"可用覆盖 {performance.get('sector_membership_coverage', '—')} "
+        f"**板块成分覆盖**: 合格板块 {performance.get('sector_qualified_count', 0)} | "
+        f"实际尝试 {performance.get('sector_membership_attempted_unique_count', 0)} | "
+        f"成分可用 {performance.get('sector_membership_available_unique_count', 0)} | "
+        f"成分不可用 {performance.get('sector_membership_unavailable_unique_count', 0)} | "
+        f"尝试覆盖 {_coverage_text(performance.get('sector_membership_attempt_coverage'))} | "
+        f"可用覆盖 {_coverage_text(performance.get('sector_membership_coverage'))} "
         f"（唯一板块 {performance.get('sector_membership_available_unique_count', 0)}/"
-        f"{max(performance.get('sector_membership_queued_count', 0), performance.get('sector_qualified_count', 0))}）",
+        f"{performance.get('sector_membership_queued_unique_count', 0)}）",
         "",
         "**股票漏斗**: "
         f"批次 {performance.get('batch_count', 0)} → "
@@ -578,6 +608,52 @@ def _performance_markdown(performance):
             f"{state.get('circuit_breaks', 0)} | "
             f"{state.get('state', 'healthy')} | {reasons} |")
     return lines
+
+
+def _ranking_provenance_markdown(performance):
+    provenance = performance.get("ranking_provenance", {})
+    if not isinstance(provenance, dict):
+        provenance = {}
+    source = provenance.get("source") or "unknown"
+    provider = provenance.get("provider") or "unknown"
+    data_date = provenance.get("data_date") or "未知"
+    quality = provenance.get("quality") or "unknown"
+    errors = "、".join(str(error) for error in provenance.get("errors", []) if error)
+    suffix = f" | 错误 {errors}" if errors else ""
+    return [
+        f"**排行供应商**: {provider} | **获取方式**: {source} | "
+        f"**数据日期**: {data_date} | **质量**: {quality}{suffix}",
+        "> ⚠️ 不同供应商的板块范围可能不同，不能直接按生成时间判断准确性。",
+    ]
+
+
+def _coverage_text(value):
+    if value is None or value == "":
+        return "—"
+    try:
+        return f"{float(value):.1%}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _ranking_provenance_html(performance):
+    provenance = performance.get("ranking_provenance", {})
+    if not isinstance(provenance, dict):
+        provenance = {}
+    source = escape(str(provenance.get("source") or "unknown"))
+    provider = escape(str(provenance.get("provider") or "unknown"))
+    data_date = escape(str(provenance.get("data_date") or "未知"))
+    quality = escape(str(provenance.get("quality") or "unknown"))
+    errors = "、".join(str(error) for error in provenance.get("errors", []) if error)
+    error_html = f" | 错误 {escape(errors)}" if errors else ""
+    return (
+        f"<p class='dt'><strong>排行供应商</strong>：{provider} | "
+        f"<strong>获取方式</strong>：{source} | "
+        f"<strong>数据日期</strong>：{data_date} | "
+        f"<strong>质量</strong>：{quality}{error_html}</p>"
+        "<p class='dt' style='color:#b45309'>⚠️ 不同供应商的板块范围可能不同，"
+        "不能直接按生成时间判断准确性。</p>"
+    )
 
 
 def _performance_html(performance):
@@ -651,7 +727,14 @@ def _performance_html(performance):
     advisory_reasons = escape(
         "、".join(performance.get("advisory_reasons", [])) or "无")
     coverage_text = (
-        f"板块覆盖率={float(performance.get('sector_scan_coverage', 1.0)):.1%} | "
+        f"板块覆盖率（计划展开）={_coverage_text(performance.get('sector_scan_coverage', 1.0))} | "
+        f"实际尝试覆盖率={_coverage_text(performance.get('sector_expanded_attempt_coverage'))} | "
+        f"成分合格板块={performance.get('sector_qualified_count', 0)} | "
+        f"成分实际尝试={performance.get('sector_membership_attempted_unique_count', 0)} | "
+        f"成分可用={performance.get('sector_membership_available_unique_count', 0)} | "
+        f"成分不可用={performance.get('sector_membership_unavailable_unique_count', 0)} | "
+        f"成分尝试覆盖率={_coverage_text(performance.get('sector_membership_attempt_coverage'))} | "
+        f"成分可用覆盖率={_coverage_text(performance.get('sector_membership_coverage'))} | "
         f"是否截断={'是' if performance.get('sector_expansion_truncated') else '否'}"
         + (
             f" | 完整展开可复跑 --max-sector-expansion "
@@ -1015,7 +1098,12 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
         history_insufficient = (
             history_coverage_days < MIN_PERSISTENCE_COVERAGE_DAYS
         )
-        if latest_hot and history_coverage_days >= MAINLINE_STREAK_DAYS \
+        history_unknown = (
+            not history_insufficient and sector_observed_days == 0
+        )
+        if history_unknown:
+            sector_type = "history_unknown"
+        elif latest_hot and history_coverage_days >= MAINLINE_STREAK_DAYS \
                 and hot_streak >= MAINLINE_STREAK_DAYS \
                 and classification_persistence >= 60 \
                 and (relative_strength is None or relative_strength >= 0):
@@ -1101,9 +1189,10 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
             "capital_streak": capital_streak,
             "capital_evidence": capital_evidence,
             "persistence_status": (
-                "history_insufficient" if history_insufficient
-                else ("verified" if sector_type in ("mainline", "emerging")
-                      else "single_day_pulse")
+                "history_unknown" if history_unknown
+                else ("history_insufficient" if history_insufficient
+                      else ("verified" if sector_type in ("mainline", "emerging")
+                            else "single_day_pulse"))
             ),
             "resonance_score": round(resonance, 1),
             "sector_score": sector_score,
@@ -1333,6 +1422,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         "errors": live_meta.get("errors", [])
         or live_meta.get("upstream_errors", []),
     }
+    metrics["ranking_provenance"] = copy.deepcopy(ranking_meta)
     if active and live_meta.get("complete", False):
         if as_of_date:
             try:
@@ -1393,6 +1483,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 "data_date": "", "quality": "error",
                 "errors": live_meta.get("errors", []),
             }
+    metrics["ranking_provenance"] = copy.deepcopy(ranking_meta)
     # If the live request failed and a verified cache was selected, the
     # report's universe must describe the selected snapshot, not the failed
     # live payload (which is usually zero sectors).
@@ -1919,16 +2010,20 @@ def _sector_persistence_text(item):
         or item.get("persistence_status")
         or item.get("sector_type", "")
     )
+    history_unknown = status == "history_unknown"
     status_label = {
         "history_insufficient": "历史不足",
+        "history_unknown": "本板块历史未匹配，持续性未知",
         "single_day_pulse": "单日脉冲",
         "verified": "已验证",
         "mainline": "主线",
         "emerging": "新兴",
     }.get(status, status or "未标记")
+    appearance_text = "—" if history_unknown else f"{appearances}/{window}"
+    streak_text = "—" if history_unknown else f"{streak}"
     return (
         f"持续性：快照覆盖 {coverage}/{window}｜"
-        f"热点出现 {appearances}/{window}｜连续 {streak} 日｜{status_label}"
+        f"热点出现 {appearance_text}｜连续 {streak_text} 日｜{status_label}"
     )
 
 
@@ -2629,6 +2724,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "",
         f"**筛选漏斗**: {funnel}",
     ]
+    lines.extend(["", *_ranking_provenance_markdown(performance)])
     regime = market_regime
     if regime and regime.get("score") is not None:
         lines.extend([
@@ -2794,6 +2890,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         f"数据合格 {sum(1 for item in candidates if item.get('data_quality', {}).get('eligible'))} → "
         f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
     )
+    ranking_provenance_html = _ranking_provenance_html(performance)
     regime_html = ""
     if regime and regime["score"] is not None:
         color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime["label"], "#86868b")
@@ -2903,6 +3000,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <p class="dt">{policy_note}</p>
 <p class="dt">{priority_note}</p>
 <p class="dt">{funnel_note}</p>
+{ranking_provenance_html}
 {tracking_html}
 {provisional_banner}
 <h2 style="font-size:18px;margin:18px 0 8px">今日可执行{tier_suffix}</h2>
@@ -3013,6 +3111,10 @@ def main():
 
     # 板块来源
     if args.sectors:
+        performance["ranking_provenance"] = {
+            "source": "manual", "provider": "unknown", "data_date": "",
+            "quality": "unknown", "errors": [],
+        }
         sector_codes = [{
             "code": c.strip(),
             "name": c.strip(),

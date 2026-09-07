@@ -249,6 +249,59 @@ class TestRecommendationPolicy(unittest.TestCase):
             min_score=50, total_seconds=1.0)
         self.assertEqual(completed["scan_status"], "error")
 
+    def test_complete_performance_uses_unique_membership_coverage(self):
+        performance = {
+            "sector_qualified_count": 3,
+            "sector_membership_queued_count": 3,
+            "sector_membership_queued_codes": ["BK1", "BK2", "BK3"],
+            "sector_membership_attempted_codes": ["BK1", "BK1", "BK2"],
+            "sector_membership_available_codes": ["BK1", "BK1", "BK2"],
+        }
+        completed = _complete_performance(
+            performance, None, [],
+            {"actionable": [], "waiting_trigger": [], "observation": []},
+            min_score=50, total_seconds=1.0)
+
+        self.assertEqual(completed["sector_membership_attempted_unique_count"], 2)
+        self.assertEqual(completed["sector_membership_available_unique_count"], 2)
+        self.assertEqual(completed["sector_membership_attempt_coverage"], round(2 / 3, 4))
+        self.assertEqual(completed["sector_membership_coverage"], round(2 / 3, 4))
+        self.assertEqual(completed["scan_status"], "degraded")
+
+    def test_complete_performance_uses_dash_for_zero_membership_denominator(self):
+        completed = _complete_performance(
+            {"sector_qualified_count": 0, "sector_membership_queued_count": 0},
+            None, [],
+            {"actionable": [], "waiting_trigger": [], "observation": []},
+            min_score=50, total_seconds=1.0)
+
+        self.assertIsNone(completed["sector_membership_attempt_coverage"])
+        self.assertIsNone(completed["sector_membership_coverage"])
+        audit = "\n".join(dc._performance_markdown(completed))
+        self.assertIn("尝试覆盖 —", audit)
+        self.assertIn("可用覆盖 —", audit)
+
+    def test_complete_performance_reports_57_sector_acceptance_fixture(self):
+        queued = [f"BK{i:04d}" for i in range(57)]
+        performance = {
+            "sector_qualified_count": 57,
+            "sector_membership_queued_count": 57,
+            "sector_membership_queued_codes": queued,
+            "sector_membership_attempted_codes": queued + [queued[0]],
+            "sector_membership_available_codes": queued[:36] + [queued[0]],
+        }
+        completed = _complete_performance(
+            performance, None, [],
+            {"actionable": [], "waiting_trigger": [], "observation": []},
+            min_score=50, total_seconds=1.0)
+
+        self.assertEqual(completed["sector_membership_attempted_unique_count"], 57)
+        self.assertEqual(completed["sector_membership_available_unique_count"], 36)
+        self.assertEqual(completed["sector_membership_unavailable_unique_count"], 21)
+        self.assertEqual(completed["sector_membership_attempt_coverage"], 1.0)
+        self.assertEqual(completed["sector_membership_coverage"], 0.6316)
+        self.assertEqual(completed["scan_status"], "degraded")
+
     def test_performance_audit_renders_in_markdown_html_and_stderr(self):
         policy = {
             "mode": "actionable", "max_recommendations": 5,
@@ -327,6 +380,29 @@ class TestRecommendationPolicy(unittest.TestCase):
                 "sector_ranking", "sector_membership", "kline", "wyckoff",
                 "capital", "fundamental", "report", "total"):
             self.assertIn(f"{field}=", stderr.getvalue())
+
+    def test_performance_audit_renders_ranking_provenance_without_candidates(self):
+        policy = {"mode": "observation", "max_recommendations": 0, "reasons": []}
+        buckets = {"actionable": [], "waiting_trigger": [], "observation": []}
+        performance = {
+            "ranking_provenance": {
+                "source": "cache", "provider": "ths",
+                "data_date": "2026-09-07", "quality": "degraded",
+                "errors": ["timeout"],
+            },
+        }
+        report = generate_report([], [], 1.0, policy, buckets, performance=performance)
+        html = _generate_html([], [], 1.0, "20260907-170000", policy, buckets,
+                              performance=performance)
+
+        for output in (report, html):
+            self.assertIn("排行供应商", output)
+            self.assertIn("ths", output)
+            self.assertIn("获取方式", output)
+            self.assertIn("cache", output)
+            self.assertIn("2026-09-07", output)
+            self.assertIn("degraded", output)
+            self.assertIn("不同供应商的板块范围可能不同", output)
 
     def test_stderr_sorts_failure_reasons(self):
         performance = {
@@ -1056,6 +1132,36 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertFalse(sector["sector_actionable"])
         self.assertEqual(sector["persistence_status"], "history_insufficient")
         self.assertEqual(sector["capital_evidence"], "unknown")
+
+    def test_sector_with_complete_history_but_unmatched_id_is_unknown(self):
+        ranked = [{
+            "code": "ths:industry:BK1", "name": "同名但不同来源",
+            "absolute_hot_score": 70, "hot_score": 90,
+            "change_pct": 2.0,
+        }]
+        history = _full_candidate_history(
+            "em:industry:BK1", [65, 70, 75],
+            dates=("2026-08-04", "2026-08-05", "2026-08-06"),
+        )
+
+        sector = enrich_sector_context(
+            ranked, history, hs300_change=0.5, as_of_date="2026-08-06")[0]
+
+        self.assertEqual(sector["history_coverage_days"], 3)
+        self.assertEqual(sector["sector_observed_days"], 0)
+        self.assertEqual(sector["persistence_status"], "history_unknown")
+        self.assertEqual(sector["sector_type"], "history_unknown")
+        self.assertFalse(sector["sector_actionable"])
+        persistence_text = dc._sector_persistence_text({
+            "history_window_days": 3,
+            "history_coverage_days": 3,
+            "hot_appearance_days": 0,
+            "hot_streak": 0,
+            "sector_persistence_status": "history_unknown",
+        })
+        self.assertIn("本板块历史未匹配，持续性未知", persistence_text)
+        self.assertIn("热点出现 —", persistence_text)
+        self.assertIn("连续 — 日", persistence_text)
 
     def test_sector_missing_latest_days_is_not_a_mainline(self):
         ranked = [{

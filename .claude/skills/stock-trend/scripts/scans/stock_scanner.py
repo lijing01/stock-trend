@@ -533,6 +533,8 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         metrics["sector_membership_queued_count"] = (
             metrics.get("sector_membership_queued_count", 0)
             + len(sector_codes))
+        metrics.setdefault("sector_membership_queued_codes", []).extend(
+            sector_codes)
 
     def _fetch_one_sector(code):
         def _with_evidence(stocks, attempt):
@@ -683,9 +685,14 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                     (stocks and stocks[0].get(
                         "membership_fetch_evidence", {}).get("attempted"))
                     or result.get("error")))
+            if result.get("code"):
+                metrics.setdefault("sector_membership_attempted_codes", []).append(
+                    result["code"])
             if stocks:
                 metrics["sector_membership_success_count"] = (
                     metrics.get("sector_membership_success_count", 0) + 1)
+                metrics.setdefault("sector_membership_available_codes", []).append(
+                    result["code"])
                 if stocks[0].get("membership_source") == "cache":
                     metrics["sector_membership_cache_count"] = (
                         metrics.get("sector_membership_cache_count", 0) + 1)
