@@ -57,6 +57,7 @@ class T(unittest.TestCase):
   self.assertEqual(result['measurement']['trade_plan_required'],False)
   self.assertEqual(result['windows']['5']['status'],'complete')
   self.assertAlmostEqual(result['windows']['5']['signal_return'],4/11)
+  self.assertAlmostEqual(result['windows']['5']['mae'],0)
 
  def test_primary_window_deduplicates_overlapping_same_code_events(self):
   def event(day, entry, exit):

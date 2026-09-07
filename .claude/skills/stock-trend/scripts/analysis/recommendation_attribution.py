@@ -302,7 +302,13 @@ def evaluate_candidate_signal(recommendation, evaluation_as_of, market_sessions,
         if ret is None:
             result["windows"][str(window)] = {"status": "data_error", "reason": "historical_data_missing"}
             continue
-        item = {"status": "complete", "signal_return": ret,
+        path = [rows.get(session, {}) for session in future[:window]]
+        lows = [_number(row, "low", _number(row, "close")) for row in path]
+        valid_lows = [value for value in lows if value is not None]
+        # This is a signal-path excursion, not an executable trade MAE: the
+        # candidate measurement has no assumed entry fill or stop execution.
+        mae = min((_ret(entry_close, value) for value in valid_lows), default=None)
+        item = {"status": "complete", "signal_return": ret, "mae": mae,
                 "entry_date": entry, "exit_date": exit_date}
         for label, series in (("hs300", hs300_rows), ("sector", sector_rows)):
             benchmark = _benchmark_return(series, entry, exit_date) if series else None
