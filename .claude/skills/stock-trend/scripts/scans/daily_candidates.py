@@ -3025,7 +3025,6 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                       f"最大主板块占比：{concentration.get('max_primary_sector_share', 0) or 0:.0%}；"
                       f"多板块交叉暴露：{concentration.get('cross_sector_exposure_count', 0)} 只。",
                       "> 主题相关性：未知（缺少可靠的同期收益映射）；本提示不改变候选资格或排序。"])
-    lines.extend(_performance_markdown(performance))
     lines.extend([
         "", "---", "",
         "*候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。*",
@@ -3143,7 +3142,6 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
             regime["market_explanation"], "html")
     style_shadow_html = _style_shadow_html(style_shadow)
 
-    performance_html = _performance_html(performance)
     tracking_error = ""
     tracking_warnings = ""
     if tracking:
@@ -3264,7 +3262,6 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
 <div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table></div>
-{performance_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""

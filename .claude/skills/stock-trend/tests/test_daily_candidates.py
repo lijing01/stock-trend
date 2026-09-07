@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from scans.daily_candidates import (
     _candidate_diagnostic_text,
     _append_candidate_table,
+    _attach_performance_audit,
     _complete_performance,
     _emit_performance_summary,
     _generate_html,
@@ -350,20 +351,25 @@ class TestRecommendationPolicy(unittest.TestCase):
             },
         }
 
-        report = generate_report(
+        raw_report = generate_report(
             items, [{"code": "BK1"}], 1.1, policy, buckets,
             performance=performance)
-        html = _generate_html(
+        raw_html = _generate_html(
             items, [{"code": "BK1"}], 1.1, "20260806-160000",
             policy, buckets, performance=performance)
+        report = _attach_performance_audit(
+            raw_report, performance, "markdown")
+        html = _attach_performance_audit(raw_html, performance, "html")
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             _emit_performance_summary(performance)
 
         self.assertIn("## 性能与数据源审计", report)
+        self.assertEqual(report.count("## 性能与数据源审计"), 1)
         self.assertIn("板块成分", report)
         self.assertIn("sector_membership", report)
         self.assertIn("性能与数据源审计", html)
+        self.assertEqual(html.count("性能与数据源审计"), 1)
         self.assertIn("sector_membership", html)
         self.assertIn("板块覆盖率", report)
         self.assertIn("板块覆盖率", html)
