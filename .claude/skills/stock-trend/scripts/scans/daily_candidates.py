@@ -57,6 +57,9 @@ from core.recommendation_snapshot import (
 )
 from core.recommendation_snapshot import SnapshotConflict, SnapshotValidationError
 from core.recommendation_snapshot import _normalize_for_json
+from core.candidate_research_snapshot import (
+    build_research_snapshot, save_research_snapshot_safely,
+)
 from core.market_shadow_snapshot import save_shadow_run
 from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
@@ -1691,7 +1694,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
-                 policy=None):
+                 policy=None, return_research_population=False):
     """Expand until enough score-qualified, data-eligible candidates exist."""
     metrics = metrics if metrics is not None else {}
     if sector_context is None:
@@ -1881,7 +1884,21 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         )
         if eligible_count >= min_candidates:
             break
-    return [all_scored[code] for code in sorted(all_scored)]
+    selected = [all_scored[code] for code in sorted(all_scored)]
+    if not return_research_population:
+        return selected
+    # ``run_phase2`` deliberately returns only buy-point passes. Preserve its
+    # omitted phase-1 rows for research, never for formal ranking or gates.
+    research_population = list(selected)
+    for code, item in sorted(phase1_candidates.items()):
+        if code in all_scored:
+            continue
+        filtered = copy.deepcopy(item)
+        filtered["research_terminal_status"] = "phase2_filtered"
+        filtered["research_terminal_reason"] = (
+            "phase2_no_eligible_buy_point_or_data_error")
+        research_population.append(filtered)
+    return selected, research_population
 
 
 def select_candidate_pool(scored, top, min_score, policy=None):
@@ -3324,7 +3341,7 @@ def main():
 
     # 漏斗扫描
     print("[2/3] 维科夫漏斗扫描成分股...", file=sys.stderr)
-    scored = scan_sectors(
+    scan_result = scan_sectors(
         [c["code"] for c in sector_codes],
         min_candidates=args.min_candidates,
         min_score=args.min_score,
@@ -3336,7 +3353,14 @@ def main():
         policy=policy,
         max_sector_expansion=getattr(
             args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION),
+        return_research_population=True,
     )
+    # Compatibility for injected legacy scanner stubs in downstream callers.
+    if isinstance(scan_result, tuple):
+        scored, research_population = scan_result
+    else:
+        scored = scan_result
+        research_population = scan_result
 
     # 过滤 + 排序 + 归一化到 top
     candidates = select_candidate_pool(
@@ -3351,6 +3375,25 @@ def main():
     tracking = _save_recommendation_snapshot(
         candidates, sector_codes, policy, buckets, expected_date, performance,
         market_regime=regime)
+    # P1: persist the entire phase-2 population before report-only annotation
+    # or Top-N presentation can obscure rejected/truncated research evidence.
+    research_snapshot = build_research_snapshot(
+        research_population, buckets, expected_date, policy, regime, sector_codes,
+        args.min_score, official_tracking=tracking,
+        # A formal candidate decision is only knowable after that trading
+        # day's close.  Keep it deterministic so identical reruns share one
+        # research identity rather than creating pseudo-independent samples.
+        known_at=f"{expected_date}T15:00:00+08:00",
+        parameter_summary={
+            "top": args.top,
+            "min_candidates": args.min_candidates,
+            "min_score": args.min_score,
+            "max_sector_expansion": args.max_sector_expansion,
+            "wyckoff_required": True,
+        },
+    )
+    research_tracking = save_research_snapshot_safely(research_snapshot)
+    tracking["research_snapshot"] = research_tracking
 
     report_candidates = copy.deepcopy(candidates)
     report_buckets = copy.deepcopy(buckets)
