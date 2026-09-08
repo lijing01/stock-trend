@@ -98,6 +98,8 @@
 
 完成记录（2026-09-07）：新增 `evolution_job.py`，提供 `close`、`weekly`、`monitor`、`publish` 和 `rollback` 子命令，以及 `--dry-run`、`--as-of`。收盘任务只消费已存在的正式快照；缺失/无效上游记录明确留为 gap，不伪造推荐。周任务离线完成诊断和无模型提案，实验只能按已登记的冻结定义回放。注册表保留不可变登记文件，状态迁移以带证据的追加事件保存；发布要求显式 `publish`，并原子切换版本指针，候选快照记录实际 `evolution_version`。损坏或缺失的指针回退原始基线。监控保留预注册的数据失败率、推荐覆盖和成熟 alpha 阈值，统计退化仅标记复核。回滚只移动当前版本指针，不修改既有正式推荐记录。
 
+完成记录（2026-09-08，C 批次）：监控新增 `--trading-sessions` 日历注入并严格使用 `--as-of`，按业务日期及独立 `completed_at` 归并重试；区分上游失败、成熟度与覆盖分母，数据不足输出 `insufficient_data`。版本化监控契约为 `recommendation-evolution-monitor/v1`。仅白名单接口/契约故障触发 incident-idempotent 安全恢复，恢复前验证历史版本，失败版本不会重新进入回滚链；无可验证前版本时回到内置基线。新增离线冷启动、重复恢复及正式快照不变测试；全量门禁 624 passed、1 skipped，golden 21 passed、2 warnings。真实研究成熟度和策略发布资格仍未知，未执行 publish。
+
 ## 存储与兼容
 
 新增数据统一放 `.cache/stock-trend/evolution/` 下的 research、evaluations、diagnostics、proposals、experiments、shadow、registry 子目录。所有派生材料关联输入摘要与版本，schema 升级提供旧记录读取路径。正式 recommendation_history 保持原位置和不可变语义。

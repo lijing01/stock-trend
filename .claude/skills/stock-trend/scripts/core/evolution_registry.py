@@ -1929,3 +1929,53 @@ def rollback_active_policy(evidence, release_root=DEFAULT_RELEASE_ROOT):
     payload["evidence"] = {"rollback": copy.deepcopy(evidence)}; payload["release_id"] = content_sha256(payload)[:16]
     _atomic_write(current_path, payload)
     return {"status": "rolled_back", "experiment_id": previous, "path": str(current_path)}
+
+
+def recover_policy_incident(incident, release_root=DEFAULT_RELEASE_ROOT):
+    """Fail closed once for a structured incident without reintroducing its policy.
+
+    This is intentionally separate from operator-requested rollback: recovery
+    does not leave a pointer back to the failing version and records a stable
+    incident receipt so retries cannot keep moving the pointer.
+    """
+    if not isinstance(incident, dict) or incident.get("failure_class") not in {
+            "contract", "interface", "schema", "digest", "active_pointer"}:
+        raise ValueError("recovery_incident_class_invalid")
+    active = load_active_policy(release_root)
+    if active.get("experiment_id") == "baseline":
+        return {"status": "already_baseline", "experiment_id": "baseline"}
+    pointer_path = _pointer_path(release_root)
+    pointer = _read(pointer_path)
+    broken = pointer.get("experiment_id")
+    incident_id = content_sha256({"broken_experiment_id": broken, **incident})[:32]
+    incident_path = Path(release_root) / "incidents" / f"{incident_id}.json"
+    if incident_path.exists():
+        return {"status": "unchanged", "incident_id": incident_id,
+                "experiment_id": load_active_policy(release_root).get("experiment_id")}
+    baseline = {"strict_level_1": 1, "strict_level_2": 3, "strict_level_3": 2}
+    previous = pointer.get("previous_experiment_id")
+    if previous in (None, "baseline", broken):
+        pointer_path.unlink()
+        restored = "baseline"
+    else:
+        history = Path(release_root) / "history"
+        candidates = [] if not history.exists() else [_read(path) for path in history.glob("*.json")]
+        prior = next((item for item in candidates if item.get("experiment_id") == previous
+                      and isinstance(item.get("verification"), dict)), None)
+        if prior is None:
+            pointer_path.unlink(); restored = "baseline"
+        else:
+            validate_experiment_definition(prior.get("definition"))
+            replacement = copy.deepcopy(prior)
+            replacement.update({"previous_experiment_id": "baseline",
+                                "previous_definition": baseline,
+                                "recovery": {"incident_id": incident_id,
+                                             "replaced_experiment_id": broken}})
+            replacement["release_id"] = content_sha256(replacement)[:16]
+            _atomic_write(pointer_path, replacement); restored = previous
+    receipt = {"schema_version": "evolution-recovery-incident/v1", "incident_id": incident_id,
+               "broken_experiment_id": broken, "restored_experiment_id": restored,
+               "incident": copy.deepcopy(incident)}
+    _atomic_write(incident_path, receipt)
+    return {"status": "recovered", "incident_id": incident_id,
+            "experiment_id": restored}

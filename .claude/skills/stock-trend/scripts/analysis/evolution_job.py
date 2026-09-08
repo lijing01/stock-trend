@@ -11,7 +11,7 @@ import json
 import math
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +26,8 @@ from analysis.evolution_proposals import build_proposal_run, save_proposal_run
 from backtesting.recommendation_experiments import default_experiment, run_walk_forward, save_experiment
 from core.cache_utils import CACHE_DIR
 from core.evolution_registry import (DEFAULT_RELEASE_ROOT, load_active_policy, publish_experiment,
-                                     resolve_experiment, rollback_active_policy, transition_experiment)
+                                     resolve_experiment, rollback_active_policy, transition_experiment,
+                                     recover_policy_incident)
 from core.recommendation_snapshot import canonical_json, content_sha256, load_official_snapshot
 from core.research_events import summarize_daily_alpha
 
@@ -36,6 +37,11 @@ DEFAULT_HISTORY_ROOT = Path(CACHE_DIR) / "recommendation_history"
 DEFAULT_EVALUATION_ROOT = Path(CACHE_DIR) / "evolution" / "evaluations"
 PRE_REGISTERED_DEGRADATION = {"data_failure_rate": .20, "minimum_coverage": .90,
                                "mean_alpha_floor": -.03}
+MONITORING_CONTRACT = {"schema_version": "recommendation-evolution-monitor/v1",
+                       "thresholds": PRE_REGISTERED_DEGRADATION,
+                       "primary_window": 20, "recent_close_sessions": 5,
+                       "outcome_cohort_sessions": 60}
+_FAILURE_CLASSES = ("contract", "interface", "schema", "digest", "active_pointer")
 
 
 def _day(value):
@@ -43,11 +49,24 @@ def _day(value):
     except (TypeError, ValueError) as exc: raise ValueError("invalid_as_of_date") from exc
 
 
+def _classify_failure(exc):
+    """Expose only an allowlisted, credential-free operational failure class."""
+    message = str(exc).lower()
+    for failure_class in _FAILURE_CLASSES:
+        if failure_class in message:
+            return failure_class, failure_class
+    return "upstream", type(exc).__name__
+
+
 def _save(run, root=DEFAULT_ROOT):
     path = Path(root) / run["content"]["kind"] / (run["job_id"] + ".json")
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists(): return {"status": "unchanged", "path": str(path), "job_id": run["job_id"]}
-    tmp = path.with_suffix(".tmp"); tmp.write_bytes(canonical_json(run) + b"\n")
+    # Completion time is persistence metadata, not part of the immutable job
+    # content or its id.  Monitoring must never infer chronology from a hash.
+    payload = {**copy.deepcopy(run), "completed_at": datetime.now(
+        timezone(timedelta(hours=8))).isoformat()}
+    tmp = path.with_suffix(".tmp"); tmp.write_bytes(canonical_json(payload) + b"\n")
     try: os.link(tmp, path); status = "created"
     except FileExistsError: status = "unchanged"
     finally: tmp.unlink(missing_ok=True)
@@ -154,8 +173,9 @@ def run_close(as_of, history_root=DEFAULT_HISTORY_ROOT, attribution_root=DEFAULT
                                   "trade_simulation_status": summary.get("status", "evidence_insufficient"),
                                   "stages": stages})
     except Exception as exc:
+        failure_class, reason = _classify_failure(exc)
         return _package("close", {**base, "status": "failed", "stage": "attribution",
-                                  "reason": type(exc).__name__})
+                                  "failure_class": failure_class, "reason": reason})
 
 
 def run_weekly(as_of, research_root=DEFAULT_RESEARCH_ROOT,
@@ -192,15 +212,83 @@ def run_weekly(as_of, research_root=DEFAULT_RESEARCH_ROOT,
     return _package("weekly", content)
 
 
-def monitoring_snapshot(job_root=DEFAULT_ROOT, attribution_root=DEFAULT_EVALUATION_ROOT, contract_id=None):
+def _close_run_days(job_root):
+    """Return the last completed attempt per business day, never filename order."""
+    attempts = []
+    for path in (Path(job_root) / "close").glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            content = payload.get("content", {})
+            as_of = _day(content.get("as_of"))
+            completed_at = payload.get("completed_at") or content.get("completed_at")
+            if not isinstance(completed_at, str) or not completed_at:
+                completed_at = ""
+            attempts.append((as_of, completed_at, content))
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            continue
+    latest = {}
+    for as_of, completed_at, content in sorted(attempts, key=lambda row: (row[0], row[1])):
+        latest[as_of] = content
+    return latest
+
+
+def _monitoring_coverage(items, expected_days, as_of):
+    """Calculate monitor denominators from real frozen evaluation rows."""
+    required = ("record_id", "recommendation_date", "market", "code")
+    complete, due, intact = 0, 0, 0
+    recommendation_days = set()
+    for item in items:
+        if not isinstance(item.get("recommendation_date"), str) \
+                or item["recommendation_date"] > as_of:
+            continue
+        if all(item.get(key) for key in required):
+            intact += 1
+        day = item.get("recommendation_date")
+        if isinstance(day, str): recommendation_days.add(day)
+        window = (item.get("windows") or {}).get("20") or {}
+        status = window.get("status")
+        label_end = window.get("exit_date")
+        if isinstance(label_end, str) and label_end <= as_of and status != "pending":
+            due += 1
+        value = window.get("hs300_alpha")
+        if status == "complete" and isinstance(value, (int, float)) \
+                and not isinstance(value, bool) and math.isfinite(value):
+            complete += 1
+    expected = set(expected_days or [])
+    return {
+        "recommendation_date_coverage": (len(recommendation_days & expected) / len(expected)
+                                         if expected else None),
+        "research_record_integrity": intact / len(items) if items else None,
+        "mature_outcome_coverage": complete / due if due else None,
+        "due_outcomes": due, "complete_outcomes": complete,
+    }
+
+
+def _is_contract_failure(run):
+    return run.get("failure_class") in {"contract", "interface", "schema", "digest", "active_pointer"}
+
+
+def monitoring_snapshot(job_root=DEFAULT_ROOT, attribution_root=DEFAULT_EVALUATION_ROOT,
+                        contract_id=None, expected_trading_days=None,
+                        release_root=DEFAULT_RELEASE_ROOT, as_of=None):
     """Pre-registered degradation checks; statistical drift requests review, not auto tuning."""
-    close_runs = []
-    for path in sorted((Path(job_root) / "close").glob("*.json")):
-        try: close_runs.append(json.loads(path.read_text(encoding="utf-8")).get("content", {}))
-        except (OSError, json.JSONDecodeError): continue
-    recent = close_runs[-5:]; failed = sum(x.get("status") in ("failed", "upstream_gap") for x in recent)
+    close_by_day = _close_run_days(job_root)
+    expected = sorted(set(_day(day) for day in (expected_trading_days or [])))
+    as_of = _day(as_of) if as_of else (expected[-1] if expected else None)
+    if as_of:
+        expected = [day for day in expected if day <= as_of]
+    recent = [close_by_day.get(day) for day in expected[-5:]]
+    observed = [run for run in recent if run is not None]
+    # A missing expected close task is a data failure, not an omitted sample.
+    failed = sum(run is None or run.get("status") in ("failed", "upstream_gap") for run in recent)
     items = load_candidate_signal_items(attribution_root, contract_id)
-    complete = [((x.get("windows") or {}).get("20") or {}) for x in items]
+    cohort_days = set(expected[-60:])
+    cohort_start = min(cohort_days) if cohort_days else None
+    monitor_items = [item for item in items
+                     if as_of and isinstance(item.get("recommendation_date"), str)
+                     and item["recommendation_date"] <= as_of
+                     and (cohort_start is None or item["recommendation_date"] >= cohort_start)]
+    complete = [((x.get("windows") or {}).get("20") or {}) for x in monitor_items]
     mature = [x for x in complete if x.get("status") == "complete"
               and isinstance(x.get("hs300_alpha"), (int, float))
               and not isinstance(x.get("hs300_alpha"), bool)
@@ -209,20 +297,59 @@ def monitoring_snapshot(job_root=DEFAULT_ROOT, attribution_root=DEFAULT_EVALUATI
         {"recommendation_date": item.get("recommendation_date"),
          "hs300_alpha": (item.get("windows") or {}).get("20", {}).get("hs300_alpha"),
          "evaluation_status": (item.get("windows") or {}).get("20", {}).get("status")}
-        for item in items
+        for item in monitor_items
     ])
     alpha = alpha_summary["mean_alpha"]
     failure_rate = failed / len(recent) if recent else None
+    coverage = _monitoring_coverage(monitor_items, expected[-60:], as_of or "")
+    insufficient = []
+    if not as_of: insufficient.append("monitoring_as_of_required")
+    if not expected: insufficient.append("trading_calendar_required")
+    if not recent: insufficient.append("close_runs_missing")
+    if len(recent) < 5: insufficient.append("expected_trading_days_insufficient")
+    if not mature: insufficient.append("mature_outcomes_missing")
+    if coverage["mature_outcome_coverage"] is None: insufficient.append("mature_outcome_denominator_missing")
     reasons = []
+    contract_failures = [run for run in observed if _is_contract_failure(run)]
+    upstream_failure_days = [run.get("as_of") for run in observed
+                             if run.get("status") in ("failed", "upstream_gap")]
+    maturity_status_counts = {}
+    for window in complete:
+        key = str(window.get("status") or "unknown")
+        maturity_status_counts[key] = maturity_status_counts.get(key, 0) + 1
     if failure_rate is not None and failure_rate > PRE_REGISTERED_DEGRADATION["data_failure_rate"]: reasons.append("data_failure_rate")
     if alpha is not None and alpha < PRE_REGISTERED_DEGRADATION["mean_alpha_floor"]: reasons.append("mature_alpha_review")
-    return _package("monitor", {"status": "review_required" if reasons else "healthy",
-             "active_policy": load_active_policy(), "thresholds": PRE_REGISTERED_DEGRADATION,
+    if coverage["recommendation_date_coverage"] is not None \
+            and coverage["recommendation_date_coverage"] < PRE_REGISTERED_DEGRADATION["minimum_coverage"]:
+        reasons.append("recommendation_date_coverage")
+    if coverage["research_record_integrity"] is not None \
+            and coverage["research_record_integrity"] < PRE_REGISTERED_DEGRADATION["minimum_coverage"]:
+        reasons.append("research_record_integrity")
+    if coverage["mature_outcome_coverage"] is not None \
+            and coverage["mature_outcome_coverage"] < PRE_REGISTERED_DEGRADATION["minimum_coverage"]:
+        reasons.append("mature_outcome_coverage")
+    fallback = None
+    if contract_failures:
+        fallback = recover_policy_incident({
+            "failure_class": contract_failures[-1]["failure_class"],
+            "trigger": "monitor_contract_failure",
+            "business_dates": [run.get("as_of") for run in contract_failures],
+        }, release_root)
+    status = ("fallback_required" if contract_failures else
+              "insufficient_data" if insufficient else ("review_required" if reasons else "healthy"))
+    return _package("monitor", {"status": status,
+             "active_policy": load_active_policy(release_root), "monitoring_contract": MONITORING_CONTRACT,
+             "thresholds": PRE_REGISTERED_DEGRADATION,
              "data_failure_rate": failure_rate, "mature_mean_hs300_alpha": alpha,
              "mature_events": len(mature),
              "mature_dates": alpha_summary["mature_dates"],
              "alpha_missing_records": alpha_summary["missing_records"],
-             "reasons": reasons})
+             "close_run_days": len(close_by_day), "expected_trading_days": expected[-5:],
+             "upstream_failure_days": upstream_failure_days,
+             "maturity_status_counts": maturity_status_counts,
+             "coverage": coverage, "insufficient_reasons": insufficient, "reasons": reasons,
+             "contract_failure_days": [run.get("as_of") for run in contract_failures],
+             "fallback": fallback})
 
 
 def main(argv=None):
@@ -234,6 +361,7 @@ def main(argv=None):
     parser.add_argument("--attribution-root")
     parser.add_argument("--diagnostics-root")
     parser.add_argument("--proposal-root")
+    parser.add_argument("--trading-sessions", help="JSON file or JSON array for monitor calendar")
     parser.add_argument("--json", action="store_true"); args = parser.parse_args(argv)
     if args.command == "close":
         run = run_close(args.as_of, dry_run=args.dry_run,
@@ -245,7 +373,15 @@ def main(argv=None):
                                                        attribution_root=args.attribution_root or DEFAULT_EVALUATION_ROOT,
                                                        diagnostics_root=args.diagnostics_root or DEFAULT_DIAGNOSTICS_ROOT,
                                                        proposal_root=args.proposal_root or Path(CACHE_DIR) / "evolution" / "proposals")
-    elif args.command == "monitor": run = monitoring_snapshot(contract_id=args.contract_id)
+    elif args.command == "monitor":
+        sessions = None
+        if args.trading_sessions:
+            source = Path(args.trading_sessions)
+            raw = json.loads(source.read_text(encoding="utf-8")) if source.is_file() else json.loads(args.trading_sessions)
+            sessions = raw.get("trading_sessions") if isinstance(raw, dict) else raw
+            if not isinstance(sessions, list): raise ValueError("trading_sessions_list_required")
+        run = monitoring_snapshot(contract_id=args.contract_id, expected_trading_days=sessions,
+                                  as_of=args.as_of)
     elif args.command == "publish":
         if args.dry_run:
             record = resolve_experiment(args.experiment_id)

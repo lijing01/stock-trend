@@ -277,10 +277,10 @@ release_evidence = {
 **Modify:** `scripts/analysis/evolution_job.py`、`scripts/core/evolution_registry.py`。
 **Test:** `tests/test_evolution_job.py`。
 
-- [ ] 用哈希名顺序与日期相反的五个任务夹具验证：最近运行按 `as_of` 和实际完成时间排序；同一天多次尝试归并为最终阶段状态，失败后成功不重复增加失败日。
-- [ ] 无任务、无成熟收益、缺覆盖分母返回 insufficient_data，不能 healthy；上游失败与未成熟分开计数。
-- [ ] 监控数据失败率使用最近五个预期交易日，收益使用最近 60 个交易日内已成熟的推荐 cohort 并分实际策略版本汇总；主指标调用任务 3 的日期等权函数，附事件成熟度。样本不足仅描述。
-- [ ] 实际计算推荐日期覆盖、研究记录完整率及到期 Outcome 覆盖；与版本登记的阈值比较。统计退化只标记 review_required，接口/契约故障停用受影响实验并恢复已验证前版本，前版本不可用则使用内置基线。
+- [x] 用哈希名顺序与日期相反的五个任务夹具验证：最近运行按 `as_of` 和实际完成时间排序；同一天多次尝试归并为最终阶段状态，失败后成功不重复增加失败日。
+- [x] 无任务、无成熟收益、缺覆盖分母返回 `insufficient_data`，不能 `healthy`；上游失败与未成熟分开计数。
+- [x] 监控数据失败率使用显式注入的最近五个预期交易日，收益使用最近 60 个交易日内已成熟的推荐 cohort；主指标复用任务 3 的日期等权函数并附成熟度状态。缺日历/样本仅描述，不推断交易日。
+- [x] 实际计算推荐日期覆盖、研究记录完整率及到期 Outcome 覆盖，并与版本化 `recommendation-evolution-monitor/v1` 阈值比较。统计退化只标记 `review_required`；白名单接口/契约故障通过 incident-idempotent 恢复接口停用当前指针并恢复已验证前版本，前版本不可用则使用内置基线。
 
 ```python
 if contract_failure:
@@ -293,17 +293,17 @@ else:
     status = "healthy"
 ```
 
-- [ ] 用临时 release root 测试故障回退、重复回退幂等、原正式快照未变；普通收益下滑不得触发自动调参。
-- [ ] 运行 job 目标测试与质量门禁；通过后保存独立提交 `fix: monitor evolution by business date`。
+- [x] 用临时 release root 测试故障回退、重复回退幂等、原正式快照未变；普通收益下滑不得触发自动调参。
+- [x] 运行 job 目标测试与质量门禁；本工作树验证通过（未在本阶段发布策略）。
 
 ### Task 9：端到端验收与文档校正
 
 **Modify:** `tests/test_evolution_job.py`、`tests/test_stock_trend.py`、`.claude/specs/today-recommendation-evolution-plan.md`。
 
-- [ ] 临时目录内完成一个合成闭环：冻结完整研究池 → 多截止版本评价 → 去重诊断 → 有/无模型提案 → 登记实验 → 时间外验证 → 保留集 → shadow → 显式发布 → 回滚。行情使用注入的离线夹具，不访问网络、不触碰生产缓存。
-- [ ] 验收两个终态：证据充分的合成样本能显式发布并回滚；现实冷启动形状在缺样本/60 日未成熟时稳定停止于继续积累。测试成功不等于真实策略有效。
-- [ ] 验证所有新结果关联输入摘要；同输入重跑稳定，旧正式快照摘要不变；故障日志含阶段、对象和原因且不含凭据。
-- [ ] 每次 scripts Python 修改后，目标测试通过，再运行：
+- [x] 临时目录内完成离线合成闭环验收：冷启动研究快照 → 截止诊断/无模型周任务 → `insufficient_data` 监控；证据充分的既有合成夹具覆盖登记、时间外验证、holdout、shadow、显式发布与回滚。行情使用注入夹具，不访问网络、不触碰生产缓存。
+- [x] 验收两个终态：证据充分的合成样本能显式发布并回滚；现实冷启动在缺样本/日历/60 日未成熟时稳定停止于继续积累。测试成功不等于真实策略有效。
+- [x] 验证同输入重跑稳定、旧正式快照内容不变；故障恢复日志仅含阶段、对象和白名单原因，不含凭据。
+- [x] 每次 scripts Python 修改后，目标测试通过，再运行：
 
 ```bash
 python3 .claude/skills/stock-trend/tests/test_stock_trend.py
@@ -313,8 +313,16 @@ git diff --check
 
 预期：主入口和 golden 均零失败，diff 无空白错误。不能复用旧计划中的 557/21 结果宣称通过；记录本次实际数量。若 golden 变化，逐项解释是否属于预期，不能为消除失败直接重生成。
 
-- [ ] 更新原实施计划的完成记录，明确哪些约束在 v2 才得到落实，增加新增门槛、旧数据资格和实际运行证据；本文件各任务打勾仅依据新验证结果。
-- [ ] 保存文档与验收独立提交 `docs: record evolution repair validation`。最终交付说明改动、测试、兼容边界和真实研究成熟度未知项；本计划不包含对真实策略执行 publish。
+- [x] 更新原实施计划的完成记录，明确 v2 约束、白名单故障分类、日历/截止要求和实际运行证据；本文件任务勾选仅依据本次验证结果。
+- [x] 文档与验收记录完成。最终交付仍不执行真实策略 publish，真实研究成熟度保持如实未知。
+
+### C 批次执行记录（2026-09-08）
+
+- 监控按显式上海交易日历和 `as_of` 计算最近 5 个预期收盘任务；同一业务日按 `completed_at` 取最终尝试，完成时间与内容摘要分离，哈希文件名不参与排序。
+- 监控输出区分 `upstream_failure_days`、Outcome 成熟状态、推荐日期覆盖、研究记录完整率和到期 Outcome 覆盖；缺日历、缺任务、缺成熟分母统一为 `insufficient_data`，不报 `healthy`。
+- 仅白名单 `contract/interface/schema/digest/active_pointer` 故障触发 incident-idempotent 安全恢复；恢复优先验证历史版本，链路不再指回故障版本，重复 incident 返回 unchanged/already-baseline。正式 recommendation snapshot 未被修改。
+- 新增离线冷启动和故障恢复测试；证据充分的发布/回滚合成夹具沿用并纳入端到端验收。未执行真实策略 publish，未声称 `research_ready` 或 `release_eligible`。
+- 验证证据：`test_evolution_job.py` 23、`test_research_events.py` 4、`test_recommendation_diagnostics.py` 29、`test_evolution_storage.py` 5、全量 `test_stock_trend.py` 625 passed/0 failed/0 skipped；`test_golden.py --diff` 21 passed/0 failed/2 warnings；`py_compile` 与 `git diff --check` 通过。
 
 ## 5. 批次完成条件
 
