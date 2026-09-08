@@ -1,6 +1,6 @@
 # 今日推荐 AI 自进化闭环修复 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 本轮执行 A 批次（任务 1–4）；B/C 批次不在本次范围内，不发布策略。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. A、B 批次（任务 1–7）已执行；C 批次（任务 8–9）尚未执行，不发布策略。
 
 **Goal:** 修复研究数据、统计、重放、晋级和监控之间的断点，使不完整或不合格证据无法形成调参结论或进入正式策略。
 
@@ -207,8 +207,8 @@ else:
 **Modify:** `scripts/backtesting/recommendation_experiments.py`、`scripts/scans/daily_candidates.py`、`scripts/core/candidate_research_snapshot.py`。
 **Test:** `tests/test_recommendation_experiments.py`、`tests/test_recommendation_snapshot.py`、`tests/test_recommendation_quality.py`。
 
-- [ ] 增加两层候选、并列分数、门控拒绝、Top N 边界夹具；同样输入与奖励下，重放选择代码及顺序必须逐项等于生产 `select_candidate_pool`/`classify_candidates` 的结果。
-- [ ] 复用现有确定性选择函数，先确认其无取数或写入副作用；仅传冻结 candidate、policy、top、min_score 和奖金。不要继续在 `_replay_date` 维护另一套分数排序。
+- [x] 增加两层候选、并列分数、门控拒绝、Top N 边界夹具；同样输入与奖励下，重放选择代码及顺序必须逐项等于生产 `select_candidate_pool`/`classify_candidates` 的结果。
+- [x] 复用现有确定性选择函数，先确认其无取数或写入副作用；仅传冻结 candidate、policy、top、min_score 和奖金。不要继续在 `_replay_date` 维护另一套分数排序。
 
 ```python
 selected = select_candidate_pool(
@@ -218,19 +218,19 @@ selected = select_candidate_pool(
 buckets = classify_candidates(selected, frozen_policy)
 ```
 
-- [ ] 研究快照保存重放所需的 preselection 资格、层级和参数。字段缺失、候选记录损坏、资格 unknown 时拒绝该日期并报具体原因，不能跳过坏记录后声称输入完整。
-- [ ] 明确新排序可能选 B 替代 A 的用例：B 的 Outcome 必须来自任务 2；若 B 缺结果，整日不进入收益配对，数据覆盖下降；不把“有推荐”覆盖当作“可评价”覆盖。
-- [ ] 运行三个目标测试及质量门禁；通过后保存独立提交 `fix: replay production candidate selection`。
+- [x] 研究快照保存重放所需的 preselection 资格、层级和参数。字段缺失、候选记录损坏、资格 unknown 时拒绝该日期并报具体原因，不能跳过坏记录后声称输入完整。
+- [x] 明确新排序可能选 B 替代 A 的用例：B 的 Outcome 必须来自任务 2；若 B 缺结果，整日不进入收益配对，数据覆盖下降；不把“有推荐”覆盖当作“可评价”覆盖。
+- [x] 运行三个目标测试及质量门禁；通过后保存独立提交 `fix: replay production candidate selection`。
 
 ### Task 6：真实时间分区与区间估计
 
 **Modify:** `scripts/backtesting/recommendation_experiments.py`、`scripts/core/evolution_registry.py`。
 **Test:** `tests/test_recommendation_experiments.py`。
 
-- [ ] 替换 `2026-01-32` 一类日期和 `exit_date=day` 的伪标签。使用显式历史交易日列表，覆盖春节休市；20/60 日端点由同一日历计算并以固定日期断言锁定。
-- [ ] 实验定义冻结 discovery、三个 validation 和 final_holdout 的具体起止日期；命令缺完整分区时拒绝，不从最新数据长度自动推导分区。检查分区顺序、标签越界、60 日隔离、freeze 时间早于保留区间。
-- [ ] 测试三个区间中只有一个有结果，不能满足 three_valid_oos_blocks；训练/发现区间不得出现在验证结果；不足跨度明确继续积累。
-- [ ] 将逐日独立抽样替换为连续交易日块抽样。20 日主指标 block_length=20、seed=20260907、draws=2000；各分区独立抽连续块，不跨隔离边界；缺失日期不能压缩成相邻交易日。元数据记录有效块数；不足两个完整块不能形成晋级置信区间。
+- [x] 替换 `2026-01-32` 一类日期和 `exit_date=day` 的伪标签。使用显式历史交易日列表，覆盖春节休市；20/60 日端点由同一日历计算并以固定日期断言锁定。
+- [x] 实验定义冻结 discovery、三个 validation 和 final_holdout 的具体起止日期；命令缺完整分区时拒绝，不从最新数据长度自动推导分区。检查分区顺序、标签越界、60 日隔离、freeze 时间早于保留区间。
+- [x] 测试三个区间中只有一个有结果，不能满足 three_valid_oos_blocks；训练/发现区间不得出现在验证结果；不足跨度明确继续积累。
+- [x] 将逐日独立抽样替换为连续交易日块抽样。20 日主指标 block_length=20、seed=20260907、draws=2000；各分区独立抽连续块，不跨隔离边界；缺失日期不能压缩成相邻交易日。元数据记录有效块数；不足两个完整块不能形成晋级置信区间。
 
 ```python
 bootstrap_contract = {
@@ -243,17 +243,17 @@ bootstrap_contract = {
 }
 ```
 
-- [ ] 测试采样索引必须为连续交易日块、种子复现、零差异不晋级；不得仅断言输出 method 字符串。
-- [ ] 按第 3 节冻结条件输出逐臂、逐区间的实际计数和 gate；补齐 60 日成熟度、最终保留集确认与缺失覆盖。测试“20 日全通过但 60 日 pending”最多只能进入 shadow。
-- [ ] 运行 experiments 目标测试及质量门禁；通过后保存独立提交 `fix: validate evolution time partitions`。
+- [x] 测试采样索引必须为连续交易日块、种子复现、零差异不晋级；不得仅断言输出 method 字符串。
+- [x] 按第 3 节冻结条件输出逐臂、逐区间的实际计数和 gate；补齐 60 日成熟度、最终保留集确认与缺失覆盖。测试“20 日全通过但 60 日 pending”最多只能进入 shadow。
+- [x] 运行 experiments 目标测试及质量门禁；通过后保存独立提交 `fix: validate evolution time partitions`。
 
 ### Task 7：证据驱动的晋级与保留集管理
 
 **Modify:** `scripts/core/evolution_registry.py`、`scripts/analysis/evolution_job.py`、`scripts/backtesting/recommendation_experiments.py`。
 **Test:** `tests/test_recommendation_experiments.py`、`tests/test_evolution_job.py`。
 
-- [ ] 先让旧测试中的 `transition(..., "eligible", {"result": "ok"})` 明确失败；补合法证据发布、缺 60 日、缺 shadow、其他实验结果、摘要不符、篡改 gate 和旧 schema 的拒绝用例。
-- [ ] 增加证据加载/验证入口：从现有实验和 shadow 存储解析 ID，检查内容哈希、定义和输入一致性，以实际指标重算全部 gate；不信任调用方传来的布尔值。状态迁移与 publish 都调用同一验证入口。
+- [x] 先让旧测试中的 `transition(..., "eligible", {"result": "ok"})` 明确失败；补合法证据发布、缺 60 日、缺 shadow、其他实验结果、摘要不符、篡改 gate 和旧 schema 的拒绝用例。
+- [x] 增加证据加载/验证入口：从现有实验和 shadow 存储解析 ID，检查内容哈希、定义和输入一致性，以实际指标重算全部 gate；不信任调用方传来的布尔值。状态迁移与 publish 都调用同一验证入口。
 
 ```python
 release_evidence = {
@@ -266,11 +266,11 @@ release_evidence = {
 }
 ```
 
-- [ ] shadow 必须消费真实的独立影子快照，累计至少 20 个完整配对且 20 日已成熟的正式推荐日期；记录输入一致、生产历史未写入、数据覆盖符合阈值及平均差值非负。历史重放结果不能冒充前瞻 shadow。
-- [ ] 按研究批次登记 holdout 首次消费：先原子登记结果任务 ID 再评价；同一冻结输入的中断可幂等恢复，修改参数后再次使用相同 holdout 拒绝。消费记录和失败尝试均追加保存。
-- [ ] 新发布要求 v2 完整证据；旧注册与结果只读保留，不自动赋予 eligible。合法旧活动版本不在本次修复中擅自撤回；显式标记 legacy_unverified，并保留已授权回滚路径。
-- [ ] 保留人工显式 publish；成功后原子更新指针。回滚不受新策略研究门槛阻塞，也不改旧正式记录。
-- [ ] 运行 experiments/job 目标测试及质量门禁；通过后保存独立提交 `fix: verify evidence before strategy release`。
+- [x] shadow 必须消费真实的独立影子快照，累计至少 20 个完整配对且 20 日已成熟的正式推荐日期；记录输入一致、生产历史未写入、数据覆盖符合阈值及平均差值非负。历史重放结果不能冒充前瞻 shadow。
+- [x] 按研究批次登记 holdout 首次消费：先原子登记结果任务 ID 再评价；同一冻结输入的中断可幂等恢复，修改参数后再次使用相同 holdout 拒绝。消费记录和失败尝试均追加保存。
+- [x] 新发布要求 v2 完整证据；旧注册与结果只读保留，不自动赋予 eligible。合法旧活动版本不在本次修复中擅自撤回；显式标记 legacy_unverified，并保留已授权回滚路径。
+- [x] 保留人工显式 publish；成功后原子更新指针。回滚不受新策略研究门槛阻塞，也不改旧正式记录。
+- [x] 运行 experiments/job 目标测试及质量门禁；通过后保存独立提交 `fix: verify evidence before strategy release`。
 
 ### Task 8：监控、重试与故障状态
 
@@ -335,4 +335,12 @@ git diff --check
 - 提案门控改为有限 alpha 的 20 个成熟日期及 100 个去重事件；每周生成/修复尝试和最多 3 条提案使用原子锁与输入摘要绑定，响应支持按尝试号幂等恢复，跨诊断包不会重放旧响应。
 - 新增来源时间、决策时间、评价截止、冲突和研究链接缺口状态；缺口只进入内存审计，不写入正常评价 sidecar。`run_close` 同时返回当日采集与历史成熟度阶段，交易模拟资格与候选信号资格分开。
 - 验证证据：A 定向测试 attribution 23、diagnostics 28、job 7、events 4、snapshot 6 全部通过；全量门禁 `590 passed, 0 failed, 1 skipped`，golden `21 passed, 0 failed, 2 warnings`，`git diff --check` 通过。
-- 已验证状态：`module_delivered`、`integration_verified`。当前未声称 `research_ready` 或 `release_eligible`；真实样本成熟度仍需后续运行确认。B/C 任务（生产选择重放、分区/60 日/shadow、监控与端到端发布验证）保持未执行。
+- 已验证状态：`module_delivered`、`integration_verified`。当前未声称 `research_ready` 或 `release_eligible`；真实样本成熟度仍需后续运行确认。C 任务（监控与端到端发布验证）保持未执行。
+
+## B 批次执行记录（2026-09-08）
+
+- 任务 5 已完成：实验重放直接调用生产 `select_candidate_pool` 与 `classify_candidates`，冻结 preselection 资格、层级和选择参数；缺失、冲突、损坏或重复的研究记录拒绝整日重放，跨市场代码按市场隔离，Outcome 缺失不伪造覆盖。
+- 任务 6 已完成：实验定义要求显式 trading-session calendar、discovery、三个 validation block、final holdout、freeze_at 及至少 60 个交易日 purge；20/60 日标签端点按同一日历校验，连续交易日 moving block bootstrap 固定为 block length 20、seed 20260907、draws 2000，跨分区或缺交易日不能压缩采样；60 日确认不足时只保留 shadow。
+- 任务 7 已完成：注册表迁移与 publish 共用 v2 证据校验，重算实际 gate 并校验结果内容哈希、结果 ID、定义、输入清单、独立 shadow 与 holdout 消费；裸 evidence、旧 schema、篡改摘要、缺 shadow/60 日或重复消费均拒绝。holdout 首次消费原子登记，同输入幂等，参数变更写入失败尝试并拒绝。
+- B 独立提交：`36b07eb fix: replay production candidate selection`、`f993fc4 fix: validate evolution time partitions`、`90814d7 fix: verify evidence before strategy release`。定向测试 experiments 12、job 10 全部通过；全量门禁 `601 passed, 0 failed, 1 skipped`，golden `21 passed, 0 failed, 2 warnings`，`git diff --check` 通过。
+- 已验证状态仍为 `module_delivered`、`integration_verified`；B 代码具备审查级阻断能力，但未声称真实样本 `research_ready` 或 `release_eligible`，也未执行正式策略 publish。C 批次（监控、重试、端到端离线验收）留待后续。
