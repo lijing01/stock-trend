@@ -9,10 +9,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from backtesting.recommendation_experiments import (
-    _bootstrap, _replay_selection, _resolve_time_partitions, default_experiment,
+    _bootstrap, _metrics_for_rows, _outcomes, _replay_selection,
+    _partition_input_manifest,
+    _resolve_time_partitions, build_forward_shadow_result, default_experiment, run_final_holdout,
     run_walk_forward, save_experiment,
 )
-from core.evolution_registry import register_experiment, transition
+from core.research_events import assign_research_events
+from core.recommendation_snapshot import content_sha256
+from core.evolution_registry import _verify_holdout_result, register_experiment, transition
 from scans.daily_candidates import classify_candidates, select_candidate_pool
 
 
@@ -33,6 +37,7 @@ def snapshot(day, code, quality, level):
 
 def outcome(day, code, alpha):
     return {"recommendation_date": day, "code": code,
+            "contract_id": default_experiment()["contract_id"],
             "windows": {"20": {"status": "complete", "hs300_alpha": alpha, "mae": -.03,
                                  "exit_date": day}}}
 
@@ -70,6 +75,223 @@ def research_record(code, quality=80, level="strict_level_1", eligible=True,
 
 
 class T(unittest.TestCase):
+    @staticmethod
+    def _frozen_definition():
+        sessions = [(date(2026, 1, 1) + timedelta(days=number)).isoformat()
+                    for number in range(400)]
+        definition = default_experiment()
+        definition.update({
+            "trading_sessions": sessions,
+            "freeze_at": sessions[0],
+            "partitions": {
+                "discovery": {"start": sessions[0], "end": sessions[9]},
+                "validation_1": {"start": sessions[70], "end": sessions[89]},
+                "validation_2": {"start": sessions[160], "end": sessions[179]},
+                "validation_3": {"start": sessions[250], "end": sessions[269]},
+                "final_holdout": {"start": sessions[340], "end": sessions[359]},
+            },
+        })
+        return definition
+
+    def test_final_holdout_is_separate_consumed_result(self):
+        sessions = []
+        current = date(2026, 1, 1)
+        while len(sessions) < 400:
+            sessions.append(current.isoformat())
+            current += timedelta(days=1)
+        definition = default_experiment()
+        definition.update({
+            "trading_sessions": sessions,
+            "freeze_at": sessions[0],
+            "partitions": {
+                "discovery": {"start": sessions[0], "end": sessions[9]},
+                "validation_1": {"start": sessions[70], "end": sessions[89]},
+                "validation_2": {"start": sessions[160], "end": sessions[179]},
+                "validation_3": {"start": sessions[250], "end": sessions[269]},
+                "final_holdout": {"start": sessions[340], "end": sessions[359]},
+            },
+        })
+        snapshots, outcomes = [], []
+        for number, day in enumerate(sessions[340:360]):
+            records = []
+            position = sessions.index(day)
+            for code, level, score in ((f"A{number:02d}", "strict_level_3", 80),
+                                       (f"B{number:02d}", "strict_level_1", 80.5)):
+                candidate = {"code": code, "composite_score": score,
+                             "quality_adjusted_score": score,
+                             "buy_point_level": level,
+                             "wyckoff": {"short_term": {
+                                 "sub_phase": "jac" if level == "strict_level_3" else "spring",
+                                 "signal_status": "confirmed", "signal_age_bars": 0,
+                                 "post_lps_reconfirmation": True}},
+                             "data_quality": {"eligible": True},
+                             "sector_actionable": True, "score_eligible": True}
+                records.append({"record_id": f"{day}:SH:{code}", "code": code,
+                                "market": "SH", "candidate": candidate,
+                                "preselection": {"composite_score": score,
+                                    "quality_adjusted_score": score,
+                                    "data_quality_eligible": True,
+                                    "sector_actionable": True, "score_eligible": True,
+                                    "qualification_status": "eligible", "min_score": 50}})
+                outcomes.append({"recommendation_date": day, "market": "SH", "code": code,
+                                 "record_id": f"{day}:SH:{code}",
+                                 "contract_id": definition["contract_id"],
+                                 "evaluation_contract": {"contract_id": definition["contract_id"]},
+                                 "windows": {"20": {"status": "complete",
+                                     "hs300_alpha": .1 if code.startswith("B") else 0,
+                                     "mae": -.03, "entry_date": day,
+                                     "exit_date": sessions[position + 19]}}})
+            snapshots.append({"content": {"recommendation_date": day,
+                "snapshot_type": "formal", "official_snapshot": {"link_status": "linked"},
+                "parameter_summary": {"top": 1, "min_score": 50},
+                "policy": {"mode": "actionable", "max_recommendations": 1},
+                "records": records}})
+        receipt_manifest = _partition_input_manifest(
+            snapshots, outcomes, definition, "final_holdout", sessions[340:360], sessions)
+        result = run_final_holdout(
+            snapshots, outcomes, definition=definition,
+            holdout_consumption={"status": "created", "consumption_id": "c1",
+                                 "experiment_id": "experiment-1",
+                                 "research_batch_id": "batch-1", "result_id": "holdout-1",
+                                 "input_manifest_sha256": receipt_manifest["input_sha256"]},
+            experiment_id="experiment-1")
+        self.assertEqual(result["experiment_id"], "holdout-1")
+        self.assertEqual(result["content"]["status"], "holdout_confirmed", result["content"]["promotion"])
+        self.assertTrue(result["content"]["promotion"]["gates"]["primary_delta_positive"])
+        self.assertEqual(_verify_holdout_result(result, "holdout-1")["result_id"], "holdout-1")
+
+    def test_final_holdout_rejects_path_like_result_identity(self):
+        with self.assertRaisesRegex(ValueError, "result_id_invalid"):
+            run_final_holdout([], [], definition=default_experiment(),
+                              holdout_consumption={
+                                  "status": "created", "consumption_id": "c1",
+                                  "research_batch_id": "b1",
+                                  "input_manifest_sha256": "h1",
+                                  "result_id": "../escape",
+                              })
+
+    def test_final_holdout_rejects_receipt_hash_not_matching_partition_inputs(self):
+        definition = self._frozen_definition()
+        with self.assertRaisesRegex(ValueError, "holdout_input_manifest_mismatch"):
+            run_final_holdout(
+                [], [], definition=definition, experiment_id="experiment-1",
+                holdout_consumption={"status": "created", "consumption_id": "c1",
+                                     "experiment_id": "experiment-1",
+                                     "research_batch_id": "batch-1",
+                                     "input_manifest_sha256": "arbitrary-receipt",
+                                     "result_id": "holdout-1"})
+
+    def test_result_persistence_rejects_path_escape(self):
+        result = run_walk_forward([], [])
+        result["experiment_id"] = "../escape"
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(ValueError, "result_id_invalid"):
+                save_experiment(result, root)
+
+    def test_forward_shadow_aggregate_requires_measured_evaluation(self):
+        selection = {"top": 1, "min_score": 50.0, "policy": {"mode": "actionable"},
+                     "baseline": {"selected": [], "buckets": {"actionable": []}},
+                     "treatment": {"selected": [], "buckets": {"actionable": []}}}
+        source_input = {"basis_date": "2027-01-01", "selection": selection}
+        source = {
+            "schema_version": "recommendation-strategy-shadow/v1",
+            "basis_date": "2027-01-01", "snapshot_type": "formal",
+            "definition": default_experiment(), "experiment_id": "exp-1",
+            "contract_id": default_experiment()["contract_id"],
+            "shadow_type": "forward", "retrospective": False,
+            "independent_snapshot": True, "formal_policy_affected": False,
+            "selection": selection,
+            "input_manifest": {"inputs": source_input,
+                                "input_sha256": content_sha256(source_input)},
+        }
+        source["content_sha256"] = content_sha256(source)
+        source["input_digest"] = source["content_sha256"]
+        with self.assertRaisesRegex(ValueError, "shadow_evaluation_required"):
+            build_forward_shadow_result(source)
+
+    def test_forward_shadow_aggregate_binds_each_event_to_source_selection(self):
+        from test_evolution_job import T as ReleaseFixtures
+        aggregate = ReleaseFixtures._shadow_result("shadow-1")
+        source_runs = []
+        for source in aggregate["content"]["source_runs"]:
+            snapshot = source["snapshot"]
+            source_runs.append({
+                **snapshot,
+                "content_sha256": source["content_sha256"],
+                "input_digest": source["content_sha256"],
+            })
+        evaluation = {
+            "paired_dates": aggregate["content"]["paired_dates"],
+            "coverage_rows": aggregate["content"]["coverage_rows"],
+            "event_rows": aggregate["content"]["event_rows"],
+            "trading_sessions": aggregate["content"]["trading_sessions"],
+            "valid_alpha_events": 100,
+            "coverage": aggregate["content"]["coverage"],
+            "input_manifest": {"input_sha256": "evaluation-input"},
+        }
+        result = build_forward_shadow_result(source_runs, evaluation)
+        self.assertEqual(result["content"]["complete_paired_dates"], 20)
+        self.assertEqual(result["content"]["valid_alpha_events"], 100)
+
+    def test_forward_shadow_rejects_unmatured_selected_event(self):
+        from test_evolution_job import T as ReleaseFixtures
+        aggregate = ReleaseFixtures._shadow_result("shadow-1")
+        source_runs = []
+        for source in aggregate["content"]["source_runs"]:
+            snapshot = source["snapshot"]
+            source_runs.append({
+                **snapshot,
+                "content_sha256": source["content_sha256"],
+                "input_digest": source["content_sha256"],
+            })
+        evaluation = {
+            "paired_dates": aggregate["content"]["paired_dates"],
+            "coverage_rows": aggregate["content"]["coverage_rows"],
+            "event_rows": copy.deepcopy(aggregate["content"]["event_rows"]),
+            "trading_sessions": aggregate["content"]["trading_sessions"],
+            "valid_alpha_events": 100,
+            "coverage": aggregate["content"]["coverage"],
+            "input_manifest": {"input_sha256": "evaluation-input"},
+        }
+        evaluation["event_rows"]["baseline"][0]["evaluation_complete"] = False
+        with self.assertRaisesRegex(ValueError, "shadow_selection_event_incomplete"):
+            build_forward_shadow_result(source_runs, evaluation)
+
+    def test_replay_identity_keeps_same_code_on_different_markets(self):
+        records = []
+        for market in ("SH", "HK"):
+            row = research_record("000001")
+            row["market"] = market
+            row["record_id"] = f"2026-08-20:{market}:000001"
+            records.append(row)
+        result = _replay_selection(records, {"strict_level_1": 0,
+                                             "strict_level_2": 0,
+                                             "strict_level_3": 0}, 2)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(result["selected"]), 2)
+
+    def test_missing_earliest_overlap_cannot_become_new_mature_event(self):
+        outcomes = _outcomes([
+            {"recommendation_date": "2026-01-01", "market": "SH", "code": "A",
+             "record_id": "r1", "windows": {"20": {"status": "pending",
+                 "entry_date": "2026-01-01", "exit_date": "2026-01-20"}}},
+            {"recommendation_date": "2026-01-05", "market": "SH", "code": "A",
+             "record_id": "r2", "windows": {"20": {"status": "complete", "hs300_alpha": .1,
+                 "entry_date": "2026-01-05", "exit_date": "2026-01-23"}}},
+        ])
+        rows = [{"code": "A", "_research_market": "SH"}]
+        skipped = []
+        first = _metrics_for_rows(rows, "2026-01-01", outcomes, None, 20,
+                                  "baseline", skipped)
+        second = _metrics_for_rows(rows, "2026-01-05", outcomes, None, 20,
+                                   "baseline", skipped)
+        assigned = assign_research_events(first["events"] + second["events"], 20)
+        mature_ids = first["complete_event_ids"] | second["complete_event_ids"]
+        mature = [event for event in assigned["events"]
+                  if event["record_id"] in mature_ids]
+        self.assertEqual(len(assigned["events"]), 1)
+        self.assertEqual(mature, [])
+
     def test_requires_three_time_ordered_purged_blocks(self):
         result = run_walk_forward([snapshot("2026-01-02", "1", 80, "strict_level_1")], [])
         self.assertEqual(result["content"]["status"], "continue_accumulating")
@@ -89,8 +311,8 @@ class T(unittest.TestCase):
 
     def test_registry_is_immutable_and_transition_guarded(self):
         with tempfile.TemporaryDirectory() as root:
-            saved = register_experiment(default_experiment(), root)
-            again = register_experiment(default_experiment(), root)
+            saved = register_experiment(self._frozen_definition(), root)
+            again = register_experiment(self._frozen_definition(), root)
             self.assertEqual((saved["status"], again["status"]), ("created", "unchanged"))
         record = {"experiment_id": "x", "content": {"state": "draft", "history": []}}
         self.assertEqual(transition(record, "validated", {"test": True})["content"]["state"], "validated")
@@ -255,6 +477,7 @@ class T(unittest.TestCase):
                                 "preselection": preselection})
                 position = sessions.index(day)
                 outcomes.append({"recommendation_date": day, "code": code,
+                                 "contract_id": definition["contract_id"],
                                  "windows": {"20": {
                                      "status": "complete", "hs300_alpha": .02,
                                      "mae": -.03, "entry_date": day,
@@ -268,8 +491,12 @@ class T(unittest.TestCase):
                 "records": records,
             }})
         result = run_walk_forward(snapshots, outcomes, definition=definition)
-        self.assertEqual(result["content"]["status"], "validated")
-        self.assertTrue(result["content"]["promotion"]["shadow_only"])
+        # A 60-day-pending run is eligible for shadow only after every
+        # primary gate (including positive block-bootstrap CI) passes.  This
+        # fixture has zero delta, so it must continue accumulating instead of
+        # being labelled validated.
+        self.assertEqual(result["content"]["status"], "continue_accumulating")
+        self.assertFalse(result["content"]["promotion"]["shadow_only"])
         self.assertFalse(result["content"]["promotion"]["gates"]["confirmation_60d"])
         self.assertEqual(result["content"]["maturity"]["confirmation_60d"]["complete_paired_dates"], 0)
 

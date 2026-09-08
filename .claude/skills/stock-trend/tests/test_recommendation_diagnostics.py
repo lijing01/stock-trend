@@ -14,6 +14,7 @@ from analysis.recommendation_diagnostics import (
     build_diagnostics, load_candidate_signal_items, load_primary_research_snapshots, save_diagnostics,
 )
 from core.recommendation_snapshot import content_sha256
+from core.evolution_contract import build_evaluation_contract
 
 
 def _snapshot(day="2026-08-20", records=None, formal=True):
@@ -103,27 +104,44 @@ class T(unittest.TestCase):
 
     def test_future_v2_evaluation_partition_is_excluded_by_cutoff(self):
         with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "contract" / "v2" / "2026-10-01"
+            contract = build_evaluation_contract((5, 10, 20, 60), {},
+                                                  population_kind="official_candidate_population")
+            path = Path(root) / contract["contract_id"] / "v2" / "2026-10-01"
             path.mkdir(parents=True)
             payload = {"evaluation_version": "v2", "evaluation_as_of": "2026-10-01",
+                       "evaluation_contract": contract,
                        "candidate_signal_items": [_outcome()]}
             (path / "2026-08-20.json").write_text(__import__("json").dumps(payload), encoding="utf-8")
-            self.assertEqual(load_candidate_signal_items(root, "contract", as_of="2026-09-01"), [])
+            self.assertEqual(load_candidate_signal_items(root, contract["contract_id"],
+                                                         as_of="2026-09-01"), [])
 
     def test_cutoff_loader_selects_latest_evaluation_per_recommendation_date(self):
         with tempfile.TemporaryDirectory() as root:
+            contract = build_evaluation_contract((5, 10, 20, 60), {},
+                                                  population_kind="official_candidate_population")
             for as_of, alpha in (("2026-08-27", .1), ("2026-09-01", .2)):
-                path = Path(root) / "contract" / "v2" / as_of
+                path = Path(root) / contract["contract_id"] / "v2" / as_of
                 path.mkdir(parents=True)
                 item = _outcome()
                 item["windows"]["20"]["hs300_alpha"] = alpha
                 payload = {"evaluation_version": "v2", "evaluation_as_of": as_of,
+                           "evaluation_contract": contract,
                            "recommendation_date": "2026-08-20",
                            "candidate_signal_items": [item]}
                 (path / "2026-08-20.json").write_text(__import__("json").dumps(payload), encoding="utf-8")
-            items = load_candidate_signal_items(root, "contract", as_of="2026-09-02")
+            items = load_candidate_signal_items(root, contract["contract_id"], as_of="2026-09-02")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["windows"]["20"]["hs300_alpha"], .2)
+
+    def test_v2_loader_rejects_payload_without_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "contract" / "v2" / "2026-09-01"
+            path.mkdir(parents=True)
+            payload = {"evaluation_version": "v2", "evaluation_as_of": "2026-09-01",
+                       "candidate_signal_items": [_outcome()]}
+            (path / "2026-08-20.json").write_text(__import__("json").dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "evaluation_contract_missing"):
+                load_candidate_signal_items(root, "contract")
 
     def test_evaluation_conflict_is_audit_visible_but_not_mature(self):
         item = _outcome()

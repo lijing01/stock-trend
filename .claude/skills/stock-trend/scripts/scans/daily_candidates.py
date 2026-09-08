@@ -2654,8 +2654,14 @@ def _load_strategy_shadow(path):
         return {"status": "disabled"}
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
-        definition = validate_experiment_definition(value.get("definition", value))
-        return {"status": "ready", "definition": definition}
+        nested = value.get("content") if isinstance(value.get("content"), dict) else {}
+        definition = validate_experiment_definition(
+            value.get("definition") or nested.get("definition") or value)
+        experiment_id = value.get("experiment_id") or nested.get("experiment_id")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            raise ValueError("strategy_shadow_experiment_id_required")
+        return {"status": "ready", "definition": definition,
+                "experiment_id": experiment_id}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {"status": "invalid", "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -2664,11 +2670,48 @@ def _run_strategy_shadow(scored, top, min_score, policy, basis_date, state):
     """Persist a paired, non-promoting treatment ranking for this same run."""
     if state.get("status") != "ready":
         return dict(state, formal_policy_affected=False)
+    def identity(item):
+        market = item.get("market") or item.get("exchange")
+        if not market:
+            ts_code = str(item.get("ts_code") or "")
+            market = ts_code.rsplit(".", 1)[-1] if "." in ts_code else "default"
+        return {"market": str(market).upper(), "code": str(item.get("code") or "")}
+
     trial_scored = copy.deepcopy(scored)
+    baseline_scored = copy.deepcopy(scored)
+    baseline = select_candidate_pool(
+        baseline_scored, top, min_score, policy=policy,
+        priority_bonuses=state["definition"]["baseline"])
     trial = select_candidate_pool(
         trial_scored, top, min_score, policy=policy,
         priority_bonuses=state["definition"]["treatment"])
+    baseline_buckets = classify_candidates(baseline, copy.deepcopy(policy))
     trial_buckets = classify_candidates(trial, copy.deepcopy(policy))
+    selection = {
+        "top": top,
+        "min_score": min_score,
+        "policy": copy.deepcopy(policy),
+        "baseline": {
+            "selected": sorted((identity(item) for item in baseline),
+                                key=lambda item: (item["market"], item["code"])),
+            "buckets": {name: [identity(item) for item in rows]
+                        for name, rows in baseline_buckets.items()},
+        },
+        "treatment": {
+            "selected": sorted((identity(item) for item in trial),
+                                key=lambda item: (item["market"], item["code"])),
+            "buckets": {name: [identity(item) for item in rows]
+                        for name, rows in trial_buckets.items()},
+        },
+    }
+    shadow_input = {
+        "basis_date": basis_date,
+        "formal_input_codes": sorted(str(item.get("code")) for item in scored),
+        "definition": state["definition"],
+        "experiment_id": state.get("experiment_id"),
+        "contract_id": state["definition"]["contract_id"],
+        "selection": selection,
+    }
     payload = {
         "schema_version": "recommendation-strategy-shadow/v1",
         "basis_date": basis_date,
@@ -2676,8 +2719,16 @@ def _run_strategy_shadow(scored, top, min_score, policy, basis_date, state):
         "sample_scope": "same_scanned_population",
         "definition": state["definition"],
         "formal_input_codes": sorted(str(item.get("code")) for item in scored),
-        "treatment_buckets": {name: [str(item.get("code")) for item in rows]
-                              for name, rows in trial_buckets.items()},
+        "selection": selection,
+        "baseline_buckets": selection["baseline"]["buckets"],
+        "treatment_buckets": selection["treatment"]["buckets"],
+        "shadow_type": "forward",
+        "retrospective": False,
+        "independent_snapshot": True,
+        "input_manifest": {"inputs": shadow_input,
+                            "input_sha256": content_sha256(shadow_input)},
+        "contract_id": state["definition"]["contract_id"],
+        "experiment_id": state.get("experiment_id"),
         "formal_policy_affected": False,
     }
     try:

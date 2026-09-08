@@ -20,7 +20,7 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from core.cache_utils import CACHE_DIR
-from core.evolution_contract import PRIMARY_WINDOW
+from core.evolution_contract import PRIMARY_WINDOW, build_evaluation_contract
 from core.evolution_storage import LEGACY_RESEARCH_ROOT, input_manifest, load_research_snapshot, storage_root
 from core.recommendation_snapshot import canonical_json, content_sha256
 from core.research_events import assign_research_events, summarize_daily_alpha
@@ -63,6 +63,27 @@ def _cutoff(value):
     if parsed is None:
         raise ValueError("invalid_evaluation_as_of")
     return parsed
+
+
+def _validate_payload_contract(contract):
+    """Validate a persisted v2 contract, not only its directory name."""
+    if not isinstance(contract, dict):
+        raise ValueError("evaluation_contract_missing")
+    try:
+        expected = build_evaluation_contract(
+            contract.get("windows") or [], contract.get("trade_cost_model") or {},
+            primary_window=contract.get("primary_window", PRIMARY_WINDOW),
+            primary_benchmark=contract.get("primary_benchmark", "hs300"),
+            adjustment=contract.get("adjustment", "qfq"),
+            population_kind=contract.get("population_kind", ""),
+            evaluation_version=contract.get("evaluation_version", ""),
+            population_identity=contract.get("population_identity") or {},
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError("evaluation_contract_invalid") from exc
+    if expected != contract or not contract.get("contract_id"):
+        raise ValueError("evaluation_contract_invalid")
+    return contract
 
 
 def _median(values):
@@ -374,6 +395,7 @@ def load_candidate_signal_items(root, contract_id=None, as_of=None):
     cutoff = _cutoff(as_of)
     selected_by_day = {}
     payloads = []
+    seen_payload_contract_id = None
     paths = roots[0].rglob("*.json")
     for path in sorted(paths):
         try:
@@ -383,6 +405,17 @@ def load_candidate_signal_items(root, contract_id=None, as_of=None):
         if not isinstance(payload, dict):
             continue
         payload_version = payload.get("evaluation_version")
+        payload_contract = payload.get("evaluation_contract")
+        payload_contract_id = None
+        if payload_version == "v2":
+            payload_contract = _validate_payload_contract(payload_contract)
+            payload_contract_id = payload_contract["contract_id"]
+            if contract_id and payload_contract_id != str(contract_id):
+                raise ValueError("evaluation_contract_mismatch")
+            if seen_payload_contract_id is not None \
+                    and payload_contract_id != seen_payload_contract_id:
+                raise ValueError("evaluation_contract_mixed")
+            seen_payload_contract_id = payload_contract_id
         payload_as_of = _day(payload.get("evaluation_as_of"))
         # Versioned v2 sidecars are partitioned by evaluation_as_of.  The
         # directory fallback keeps hand-copied/audit fixtures safe when the
@@ -415,6 +448,9 @@ def load_candidate_signal_items(root, contract_id=None, as_of=None):
     items = []
     for path, payload, _rank in payloads:
         payload_version = payload.get("evaluation_version")
+        payload_contract = payload.get("evaluation_contract")
+        payload_contract_id = (payload_contract or {}).get("contract_id") \
+            if isinstance(payload_contract, dict) else None
         payload_day = _day(payload.get("recommendation_date"))
         for item in payload.get("candidate_signal_items") or []:
             item_day = _day(item.get("recommendation_date")) if isinstance(item, dict) else None
@@ -436,6 +472,20 @@ def load_candidate_signal_items(root, contract_id=None, as_of=None):
                 # be promoted to point-in-time evidence without a v2 identity.
                 item = copy.deepcopy(item)
                 item["point_in_time_status"] = "legacy_unverified"
+            if payload_version == "v2" and isinstance(item, dict):
+                item = copy.deepcopy(item)
+                item_contract = item.get("evaluation_contract")
+                item_contract_id = item.get("contract_id")
+                if isinstance(item_contract, dict) and item_contract.get("contract_id") \
+                        and item_contract.get("contract_id") != payload_contract_id:
+                    raise ValueError("evaluation_contract_mismatch")
+                if item_contract_id and item_contract_id != payload_contract_id:
+                    raise ValueError("evaluation_contract_mismatch")
+                # Candidate-signal records historically carried only the
+                # window outcomes.  Attach the immutable payload contract so
+                # replay cannot silently mix contracts after loading.
+                item["contract_id"] = payload_contract_id
+                item["evaluation_contract"] = copy.deepcopy(payload_contract)
             items.append(item)
     return items
 

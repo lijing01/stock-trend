@@ -342,5 +342,12 @@ git diff --check
 - 任务 5 已完成：实验重放直接调用生产 `select_candidate_pool` 与 `classify_candidates`，冻结 preselection 资格、层级和选择参数；缺失、冲突、损坏或重复的研究记录拒绝整日重放，跨市场代码按市场隔离，Outcome 缺失不伪造覆盖。
 - 任务 6 已完成：实验定义要求显式 trading-session calendar、discovery、三个 validation block、final holdout、freeze_at 及至少 60 个交易日 purge；20/60 日标签端点按同一日历校验，连续交易日 moving block bootstrap 固定为 block length 20、seed 20260907、draws 2000，跨分区或缺交易日不能压缩采样；60 日确认不足时只保留 shadow。
 - 任务 7 已完成：注册表迁移与 publish 共用 v2 证据校验，重算实际 gate 并校验结果内容哈希、结果 ID、定义、输入清单、独立 shadow 与 holdout 消费；裸 evidence、旧 schema、篡改摘要、缺 shadow/60 日或重复消费均拒绝。holdout 首次消费原子登记，同输入幂等，参数变更写入失败尝试并拒绝。
-- B 独立提交：`36b07eb fix: replay production candidate selection`、`f993fc4 fix: validate evolution time partitions`、`90814d7 fix: verify evidence before strategy release`、`878d313 fix: harden evolution evidence inputs`。定向测试 experiments 12、job 10 全部通过；全量门禁 `601 passed, 0 failed, 1 skipped`，golden `21 passed, 0 failed, 2 warnings`，`git diff --check` 通过。
+- B 初次实现提交：`36b07eb fix: replay production candidate selection`、`f993fc4 fix: validate evolution time partitions`、`90814d7 fix: verify evidence before strategy release`、`878d313 fix: harden evolution evidence inputs`。复审加固后的最终门禁见下方记录。
 - 已验证状态仍为 `module_delivered`、`integration_verified`；B 代码具备审查级阻断能力，但未声称真实样本 `research_ready` 或 `release_eligible`，也未执行正式策略 publish。C 批次（监控、重试、端到端离线验收）留待后续。
+
+### B 批次复审加固（2026-09-08）
+
+- 注册入口现在强制冻结并校验完整交易日历、discovery/三个 validation/final_holdout 分区、freeze_at、60 日 purge；发布时将结果日历和分区与注册定义逐项比较。默认评价契约改为与 `recommendation_attribution` 的冻结研究池合同一致（`6b0d9d40299b003e`），Outcome loader 校验 payload 合同并把合同绑定注入每一行。
+- validation/holdout 结果写入注册 `experiment_id`；holdout 消费凭证的输入摘要必须等于评价前由分区输入计算的派生摘要，不能覆盖规范摘要。结果持久化使用安全 ID、唯一临时文件和冲突即失败的幂等策略。
+- 注册表从原始 event alpha 重算逐日 paired/60 日均值与差值，并按 `record_id/market/code/recommendation_date` 绑定 MAE；缺原始行、伪造摘要、错误端点、覆盖分母或 bootstrap 均拒绝。前瞻 shadow 聚合要求每个正式 source snapshot 恰对应一个 basis_date，paired/coverage/event 日期集合、来源摘要和 manifest 完全一致；source snapshot 的 digest、回放参数、两臂选择身份也必须逐项绑定。
+- 复审新增回归：experiments `21`、job `19`、diagnostics `29` 全部通过；manifest 缺少生产候选输入、holdout 派生摘要不一致、shadow event 使用未入选证券、选中事件未成熟或身份集合缺失均有拒绝用例。最终全量门禁 `620 passed, 0 failed, 1 skipped`（唯一跳过项为资金流网络超时），golden `21 passed, 0 failed, 2 warnings`，`py_compile` 与 `git diff --check` 通过。仍只验证 `module_delivered`、`integration_verified`，不宣称真实样本成熟或执行 publish；C 批次保持未执行。

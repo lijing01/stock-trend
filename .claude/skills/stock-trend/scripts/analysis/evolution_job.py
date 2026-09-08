@@ -177,7 +177,8 @@ def run_weekly(as_of, research_root=DEFAULT_RESEARCH_ROOT,
     if experiment_id:
         registered = resolve_experiment(experiment_id)
         definition = (registered.get("content") or {}).get("definition")
-        experiment = run_walk_forward(research, items, definition=definition)
+        experiment = run_walk_forward(
+            research, items, definition=definition, experiment_id=experiment_id)
         content["experiment"] = {"experiment_id": experiment_id, "result_id": experiment["experiment_id"],
                                  "status": experiment["content"]["status"]}
         if not dry_run:
@@ -186,7 +187,6 @@ def run_weekly(as_of, research_root=DEFAULT_RESEARCH_ROOT,
                 content["experiment"]["registry"] = transition_experiment(
                     experiment_id, "validated", {
                         "validation_result_id": experiment["experiment_id"],
-                        "validation_result": experiment,
                         "as_of": as_of,
                     })
     return _package("weekly", content)
