@@ -72,14 +72,41 @@ def _normalise_sessions(values):
     return sorted(set(result))
 
 
+def _market_from_value(value, fallback="default"):
+    text = str(value or "").strip()
+    return text.upper() if text else fallback
+
+
+def _market_from_item(item):
+    if not isinstance(item, dict):
+        return "default"
+    market = item.get("market") or item.get("exchange")
+    if market:
+        return _market_from_value(market)
+    ts_code = str(item.get("ts_code") or "")
+    if "." in ts_code:
+        return _market_from_value(ts_code.rsplit(".", 1)[-1])
+    return "default"
+
+
 def _outcomes(items):
     result = {}
     for item in items or []:
-        window = (item.get("windows") or {}).get(str(PRIMARY_WINDOW), {})
-        value = copy.deepcopy(window)
+        if not isinstance(item, dict):
+            continue
+        windows = item.get("windows") or {}
+        value = {"windows": copy.deepcopy(windows)}
+        # Keep the primary window fields at the top level for old callers and
+        # fixtures while retaining the independent 60-day confirmation data.
+        value.update(copy.deepcopy(windows.get(str(PRIMARY_WINDOW), {})))
         value["_market_sessions"] = item.get("market_sessions")
         value["_record_id"] = item.get("record_id")
-        result[(str(item.get("recommendation_date") or ""), str(item.get("code") or ""))] = value
+        key = (str(item.get("recommendation_date") or ""),
+               _market_from_item(item), str(item.get("code") or ""))
+        if key in result and canonical_json(result[key]) != canonical_json(value):
+            result[key] = {"_duplicate_outcome_conflict": True}
+            continue
+        result[key] = value
     return result
 
 
@@ -98,7 +125,7 @@ def _empty_buckets():
     )}
 
 
-def _frozen_replay_candidate(record):
+def _frozen_replay_candidate(record, min_score=None):
     """Validate and detach one research row before production replay.
 
     Research snapshots are input archives, not a second implementation of
@@ -129,6 +156,12 @@ def _frozen_replay_candidate(record):
     quality = _number(preselection.get("quality_adjusted_score"))
     if composite is None or quality is None:
         return None, "replay_input_damaged_score"
+    frozen_min_score = _number(preselection.get("min_score"))
+    if min_score is not None:
+        if frozen_min_score is None:
+            return None, "replay_input_missing_min_score"
+        if abs(frozen_min_score - float(min_score)) > 1e-9:
+            return None, "replay_input_parameter_mismatch"
     frozen = copy.deepcopy(candidate)
     frozen_code = str(frozen.get("code") or "")
     if frozen_code != str(record.get("code") or frozen_code):
@@ -145,9 +178,21 @@ def _frozen_replay_candidate(record):
     existing_quality = quality_payload.get("eligible")
     if existing_quality is not None and existing_quality is not preselection["data_quality_eligible"]:
         return None, "replay_input_qualification_conflict"
+    for field in ("sector_actionable", "score_eligible"):
+        existing = frozen.get(field)
+        if existing is not None and existing is not preselection[field]:
+            return None, "replay_input_qualification_conflict"
+    expected_qualification = (
+        "eligible" if all(preselection[field] for field in (
+            "data_quality_eligible", "sector_actionable", "score_eligible"))
+        else "ineligible"
+    )
+    if preselection["qualification_status"] != expected_qualification:
+        return None, "replay_input_qualification_conflict"
     quality_payload["eligible"] = preselection["data_quality_eligible"]
     # Keep a stable link for diagnostics without exposing it to the selector.
     frozen["_research_record_id"] = str(record.get("record_id") or "")
+    frozen["_research_market"] = _market_from_item(record)
     return frozen, None
 
 
@@ -164,7 +209,7 @@ def _replay_selection(records, bonuses, limit, min_score=50, policy=None):
                 "reasons": ["replay_input_missing_priority_bonuses"]}
     frozen, reasons, seen = [], [], set()
     for record in records or []:
-        candidate, reason = _frozen_replay_candidate(record)
+        candidate, reason = _frozen_replay_candidate(record, min_score=min_score)
         if reason:
             reasons.append(reason)
             continue
@@ -194,7 +239,7 @@ def _replay_date(records, bonuses, limit, min_score=50, policy=None):
 
 
 def _bootstrap(deltas, seed=20260907, draws=2000, block_length=PRIMARY_WINDOW,
-               dates=None, partitions=None):
+               dates=None, partitions=None, trading_sessions=None):
     """Estimate a date-level effect with moving trading-session blocks.
 
     ``deltas`` is ordered by trading date.  A block is valid only when its
@@ -232,6 +277,8 @@ def _bootstrap(deltas, seed=20260907, draws=2000, block_length=PRIMARY_WINDOW,
                 "lower_95": None, "upper_95": None}
     if dates is None:
         ordered_dates = [str(index) for index in range(len(values))]
+    calendar = _normalise_sessions(trading_sessions or [])
+    calendar_positions = {day: index for index, day in enumerate(calendar)}
 
     partition_by_day = {}
     if isinstance(partitions, dict):
@@ -247,7 +294,12 @@ def _bootstrap(deltas, seed=20260907, draws=2000, block_length=PRIMARY_WINDOW,
         block = list(range(start, start + block_length))
         labels = {partition_by_day.get(ordered_dates[index], "default")
                   for index in block}
-        if len(labels) == 1:
+        adjacent = True
+        if calendar_positions:
+            positions = [calendar_positions.get(ordered_dates[index]) for index in block]
+            adjacent = (all(position is not None for position in positions)
+                        and positions == list(range(positions[0], positions[0] + block_length)))
+        if len(labels) == 1 and adjacent:
             valid_blocks.append(block)
     contract = {"method": "moving_trading_session_block_bootstrap",
                 "status": "ready" if len(valid_blocks) >= 2 else "insufficient_data",
@@ -323,6 +375,10 @@ def _partition_interval(raw, sessions, name):
             allowed = set(sessions)
             if any(value not in allowed for value in values):
                 return None, f"partition_{name}_session_not_registered"
+            positions = {day: index for index, day in enumerate(sessions)}
+            indexes = [positions[value] for value in values]
+            if indexes != list(range(indexes[0], indexes[0] + len(indexes))):
+                return None, f"partition_{name}_non_contiguous"
         return values, None
     start, end = _normalise_day(start), _normalise_day(end)
     if start is None or end is None or start > end:
@@ -358,7 +414,6 @@ def _resolve_time_partitions(definition, dates, sessions):
     sessions = _normalise_sessions(sessions)
     if not sessions:
         return {"status": "invalid", "reason": "trading_sessions_required"}
-    available = set(_normalise_sessions(dates or []))
     resolved = {}
     for name in required:
         values, reason = _partition_interval(raw[name], sessions, name)
@@ -373,10 +428,6 @@ def _resolve_time_partitions(definition, dates, sessions):
         return {"status": "invalid", "reason": "purge_window_below_confirmation_window"}
     for name in ordered:
         values = resolved[name]
-        if any(day not in available for day in values):
-            # Explicit partitions may include an evaluation-only date with no
-            # recommendation; retain it for isolation but never infer data.
-            continue
         first, last = positions[values[0]], positions[values[-1]]
         if previous_end is not None and first - previous_end - 1 < purge:
             return {"status": "invalid", "reason": "partition_purge_gap_insufficient"}
@@ -430,16 +481,39 @@ def _research_record_date(content, record):
     return _normalise_day(content.get("recommendation_date") or record.get("basis_date"))
 
 
-def _metrics_for_rows(rows, day, outcomes, block_end, window, side, skipped):
+def _metrics_for_rows(rows, day, outcomes, block_end, window, side, skipped,
+                      trading_sessions=None):
     values, maes, missing, events, alpha_rows = [], [], [], [], []
     for row in rows:
         code = str(row.get("code") or "")
-        outcome = outcomes.get((day, code)) or {}
+        market = _market_from_value(row.get("_research_market") or row.get("market"))
+        outcome = outcomes.get((day, market, code)) or outcomes.get(
+            (day, "default", code)) or {}
+        if outcome.get("_duplicate_outcome_conflict"):
+            missing.append({"code": code, "reason": "duplicate_outcome_conflict", "side": side})
+            continue
         label = _outcome_window(outcome, window)
+        entry_date = _normalise_day(label.get("entry_date"))
         exit_date = _normalise_day(label.get("exit_date") or label.get("mark_date"))
+        if not entry_date:
+            missing.append({"code": code, "reason": "missing_label_start", "side": side})
+            continue
         if not exit_date:
             missing.append({"code": code, "reason": "missing_label_end", "side": side})
             continue
+        raw_calendar = outcome.get("_market_sessions") or trading_sessions or []
+        if isinstance(raw_calendar, dict):
+            raw_calendar = raw_calendar.get(market) or raw_calendar.get("*") or []
+        calendar = _normalise_sessions(raw_calendar)
+        if raw_calendar and calendar is None:
+            missing.append({"code": code, "reason": "invalid_market_calendar", "side": side})
+            continue
+        if calendar:
+            positions = {session: index for index, session in enumerate(calendar)}
+            if (entry_date not in positions or exit_date not in positions
+                    or positions[exit_date] - positions[entry_date] != window - 1):
+                missing.append({"code": code, "reason": "label_endpoint_mismatch", "side": side})
+                continue
         if block_end and exit_date > block_end:
             skipped.append("label_crosses_oos_boundary")
             missing.append({"code": code, "reason": "label_crosses_oos_boundary", "side": side})
@@ -454,11 +528,10 @@ def _metrics_for_rows(rows, day, outcomes, block_end, window, side, skipped):
                            "hs300_alpha": alpha, "evaluation_status": "complete"})
         if mae is not None:
             maes.append(mae)
-        entry_date = _normalise_day(label.get("entry_date"))
         if entry_date and exit_date:
             events.append({
                 "record_id": outcome.get("_record_id") or f"{day}:default:{code}",
-                "market": outcome.get("market") or "default", "code": code,
+                "market": outcome.get("market") or market, "code": code,
                 "entry_date": entry_date, "exit_date": exit_date,
                 "recommendation_date": day,
                 "market_sessions": outcome.get("_market_sessions"),
@@ -473,6 +546,7 @@ def _metrics_for_rows(rows, day, outcomes, block_end, window, side, skipped):
 def run_walk_forward(research_snapshots, candidate_signal_items, definition=None, top=None):
     definition = validate_experiment_definition(definition or default_experiment())
     by_date, metadata, skipped = defaultdict(list), {}, []
+    invalid_dates = set()
     for snapshot in research_snapshots or []:
         content = snapshot.get("content", snapshot) if isinstance(snapshot, dict) else {}
         if content.get("snapshot_type") != "formal" or (content.get("official_snapshot") or {}).get("link_status") != "linked":
@@ -498,9 +572,11 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
         for record in content.get("records") or []:
             if not isinstance(record, dict):
                 skipped.append("replay_input_missing_record")
+                invalid_dates.add(day)
                 continue
             if _research_record_date(content, record) != day:
                 skipped.append("replay_input_date_mismatch")
+                invalid_dates.add(day)
                 continue
             by_date[day].append(record)
     outcomes = _outcomes(candidate_signal_items)
@@ -566,6 +642,14 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
         label_limits[name] = sessions[max(0, session_positions[next_values[0]] - 1)]
     for block_no, block in enumerate(blocks, 1):
         for day in block:
+            if day in invalid_dates:
+                reason = "replay_input_invalid_date_records"
+                replay_rejections.append({"date": day, "baseline": [reason],
+                                          "treatment": [reason]})
+                coverage.append({"date": day, "block": block_no,
+                                 "baseline_count": 0, "treatment_count": 0,
+                                 "status": "replay_input_rejected"})
+                continue
             meta = metadata[day]
             baseline_replay = _replay_selection(
                 by_date[day], definition["baseline"], meta["top"],
@@ -585,16 +669,16 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
             trial = treatment_replay["selected"]
             label_limit = label_limits[VALIDATION_BLOCK_NAMES[block_no - 1]]
             old = _metrics_for_rows(base, day, outcomes, label_limit, PRIMARY_WINDOW,
-                                    "baseline", skipped)
+                                    "baseline", skipped, sessions)
             new = _metrics_for_rows(trial, day, outcomes, label_limit, PRIMARY_WINDOW,
-                                    "treatment", skipped)
+                                    "treatment", skipped, sessions)
             baseline_maes.extend(old["maes"]); treatment_maes.extend(new["maes"])
             baseline_events.extend(old["events"]); treatment_events.extend(new["events"])
             baseline_daily_rows.extend(old["alpha_rows"]); treatment_daily_rows.extend(new["alpha_rows"])
             old60 = _metrics_for_rows(base, day, outcomes, label_limit, CONFIRMATION_WINDOW,
-                                      "baseline_60d", skipped)
+                                      "baseline_60d", skipped, sessions)
             new60 = _metrics_for_rows(trial, day, outcomes, label_limit, CONFIRMATION_WINDOW,
-                                      "treatment_60d", skipped)
+                                      "treatment_60d", skipped, sessions)
             confirmation_baseline_events.extend(old60["events"])
             confirmation_treatment_events.extend(new60["events"])
             if old["complete"] and new["complete"] and old["mean"] is not None and new["mean"] is not None:
@@ -626,11 +710,18 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
         block_length=(definition.get("bootstrap") or {}).get("block_length", PRIMARY_WINDOW),
         dates=paired_dates,
         partitions=validation_partition_dates,
+        trading_sessions=sessions,
     )
-    baseline_assigned = assign_research_events(baseline_events, PRIMARY_WINDOW)
-    treatment_assigned = assign_research_events(treatment_events, PRIMARY_WINDOW)
-    baseline_60_assigned = assign_research_events(confirmation_baseline_events, CONFIRMATION_WINDOW)
-    treatment_60_assigned = assign_research_events(confirmation_treatment_events, CONFIRMATION_WINDOW)
+    baseline_assigned = assign_research_events(
+        baseline_events, PRIMARY_WINDOW, market_sessions=sessions)
+    treatment_assigned = assign_research_events(
+        treatment_events, PRIMARY_WINDOW, market_sessions=sessions)
+    baseline_60_assigned = assign_research_events(
+        confirmation_baseline_events, CONFIRMATION_WINDOW,
+        market_sessions=sessions)
+    treatment_60_assigned = assign_research_events(
+        confirmation_treatment_events, CONFIRMATION_WINDOW,
+        market_sessions=sessions)
     baseline_daily = summarize_daily_alpha(baseline_daily_rows)
     treatment_daily = summarize_daily_alpha(treatment_daily_rows)
     confirmation_deltas = [row["delta"] for row in confirmation_pairs]
@@ -638,6 +729,19 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
                          if confirmation_deltas else None)
     baseline_coverage = sum(row["baseline_complete"] for row in coverage)
     treatment_coverage = sum(row["treatment_complete"] for row in coverage)
+    block_pair_counts = {
+        str(block_no): sum(
+            row["block"] == block_no and row["status"] == "paired"
+            for row in coverage
+        )
+        for block_no in range(1, len(blocks) + 1)
+    }
+    baseline_expected_days = sum(row["baseline_count"] > 0 for row in coverage)
+    treatment_expected_days = sum(row["treatment_count"] > 0 for row in coverage)
+    baseline_complete_ratio = (baseline_coverage / baseline_expected_days
+                               if baseline_expected_days else 0.0)
+    treatment_complete_ratio = (treatment_coverage / treatment_expected_days
+                                if treatment_expected_days else 0.0)
     baseline_tail = _percentile(baseline_maes, .05)
     treatment_tail = _percentile(treatment_maes, .05)
     maturity = {
@@ -665,8 +769,12 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
         "minimum_events_baseline": len(baseline_assigned["events"]) >= 100,
         "minimum_events_treatment": len(treatment_assigned["events"]) >= 100,
         "minimum_dates": len(paired_dates) >= 20,
+        "minimum_dates_per_block": all(count >= 20 for count in block_pair_counts.values()),
         "three_oos_blocks": len(blocks) == 3,
         "coverage": treatment_coverage >= .9 * baseline_coverage if baseline_coverage else False,
+        "pair_completeness_95pct": (
+            baseline_complete_ratio >= .95 and treatment_complete_ratio >= .95
+        ),
         "ci_lower_positive": bool(interval and interval.get("lower_95") is not None
                                    and interval.get("lower_95") > 0),
         "mae_tail": bool(baseline_tail is not None and treatment_tail is not None
@@ -678,7 +786,8 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
             and confirmation_mean is not None and confirmation_mean >= 0
         ),
     }
-    primary_ready = (gates["minimum_events"] and gates["minimum_dates"]
+    primary_ready = (gates["calendar_verified"] and gates["minimum_events"] and gates["minimum_dates"]
+                     and gates["minimum_dates_per_block"]
                      and gates["three_oos_blocks"])
     status = "validated" if primary_ready else "continue_accumulating"
     content.update({
@@ -688,7 +797,10 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
         "coverage": {"baseline_dates": baseline_coverage,
                       "treatment_dates": treatment_coverage,
                       "ratio": treatment_coverage / baseline_coverage if baseline_coverage else None,
-                      "complete_pair_ratio": len(paired_dates) / len(coverage) if coverage else None},
+                      "complete_pair_ratio": len(paired_dates) / len(coverage) if coverage else None,
+                      "baseline_complete_ratio": baseline_complete_ratio,
+                      "treatment_complete_ratio": treatment_complete_ratio},
+        "block_pair_counts": block_pair_counts,
         "coverage_rows": coverage, "replay_rejections": replay_rejections,
         "interval": interval, "maturity": maturity,
         "mae_tail_5pct": {"baseline": baseline_tail, "treatment": treatment_tail},
