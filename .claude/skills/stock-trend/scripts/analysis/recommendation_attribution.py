@@ -31,12 +31,16 @@ from core.cache_utils import CACHE_DIR
 from core.evolution_contract import (
     PRIMARY_WINDOW, build_evaluation_contract,
 )
-from core.recommendation_snapshot import iter_official_snapshots
+from core.evolution_storage import input_manifest, storage_root
+from core.recommendation_snapshot import canonical_json, content_sha256, iter_official_snapshots
+from core.research_events import assign_research_events, summarize_daily_alpha
 
 
 WINDOWS = (5, 10, 20, 60)
-EVALUATOR_VERSION = "recommendation-attribution/v4"
-CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v2"
+EVALUATOR_VERSION = "recommendation-attribution/v5"
+CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v3"
+EVALUATION_RESULT_VERSION = "v2"
+DEFAULT_RESEARCH_ROOT = storage_root("research")
 
 
 class AttributionDataError(ValueError):
@@ -107,8 +111,11 @@ def _rows_by_date(rows):
 
 
 def _number(row, key, default=None):
+    raw = row.get(key, default) if isinstance(row, dict) else default
+    if isinstance(raw, bool):
+        return default
     try:
-        value = float(row.get(key, default))
+        value = float(raw)
         return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
@@ -180,10 +187,11 @@ def _ret(start, end):
     return None if start in (None, 0) or end is None else end / start - 1
 
 
-def _error_result(recommendation_date, code, evaluation_as_of, cost_model, windows, reason):
+def _error_result(recommendation_date, code, evaluation_as_of, cost_model, windows, reason,
+                  evaluator_version=EVALUATOR_VERSION):
     costs = dataclasses.asdict(cost_model)
     return {
-        "evaluator_version": EVALUATOR_VERSION,
+        "evaluator_version": evaluator_version,
         "recommendation_date": recommendation_date,
         "code": code,
         "evaluation_as_of": evaluation_as_of,
@@ -275,11 +283,13 @@ def evaluate_candidate_signal(recommendation, evaluation_as_of, market_sessions,
         validate_series_metadata(stock_meta)
         sessions = _normalized_sessions(market_sessions)
     except AttributionDataError as exc:
-        return _error_result(recommendation_date, code, evaluation_as_of, CostModel(), windows, str(exc))
+        return _error_result(recommendation_date, code, evaluation_as_of, CostModel(), windows, str(exc),
+                             evaluator_version=CANDIDATE_EVALUATOR_VERSION)
     future = [session for session in sessions if recommendation_date < session <= evaluation_as_of]
     result = {"evaluator_version": CANDIDATE_EVALUATOR_VERSION,
               "recommendation_date": recommendation_date, "code": code,
               "evaluation_as_of": evaluation_as_of,
+              "market_sessions": sessions,
               "measurement": {"status": "signal_close_to_close", "entry_rule": "next_market_session_close", "trade_plan_required": False},
               "windows": {}}
     rows = _rows_by_date(stock_rows)
@@ -362,6 +372,7 @@ def evaluate_recommendation(
             "recommendation_date": recommendation_date,
             "code": code,
             "evaluation_as_of": evaluation_as_of,
+            "market_sessions": sessions,
             "execution": {
                 "status": "pending",
                 "reason": "evaluation_cutoff_before_t1",
@@ -382,6 +393,7 @@ def evaluate_recommendation(
         "recommendation_date": recommendation_date,
         "code": code,
         "evaluation_as_of": evaluation_as_of,
+        "market_sessions": sessions,
         "execution": execution,
         "cost_model": dataclasses.asdict(costs),
         "windows": {},
@@ -508,7 +520,12 @@ def evaluate_recommendation(
     return result
 
 
-_IDENTITY_FIELDS = ("snapshot_sha256", "evaluator_version", "recommendation_date", "code", "cost_model", "evaluation_contract")
+_IDENTITY_FIELDS = (
+    "snapshot_sha256", "evaluator_version", "evaluation_version",
+    "recommendation_date", "code", "cost_model", "evaluation_contract",
+    "evaluation_identity", "research_run_id", "research_snapshot_sha256",
+    "population_kind", "research_link_status", "input_manifest",
+)
 
 
 def _assert_compatible(existing, incoming):
@@ -532,8 +549,12 @@ def _merge_record(existing, incoming):
     out = copy.deepcopy(existing)
     can_update_metadata = _is_newer_or_equal(existing, incoming)
     for field in (
-        "snapshot_sha256", "evaluator_version", "recommendation_date", "code",
-        "evaluation_as_of", "cost_model", "evaluation_contract", "execution",
+        "snapshot_sha256", "evaluator_version", "evaluation_version",
+        "recommendation_date", "code", "evaluation_as_of", "cost_model",
+        "evaluation_contract", "evaluation_identity", "research_run_id",
+        "research_snapshot_sha256", "population_kind", "research_link_status",
+        "record_id", "execution",
+        "input_manifest",
     ):
         if field in incoming and (can_update_metadata or field in _IDENTITY_FIELDS):
             out[field] = copy.deepcopy(incoming[field])
@@ -544,6 +565,18 @@ def _merge_record(existing, incoming):
             previous.get("status") in ("pending", "data_error") and can_update_metadata
         ):
             old_windows[label] = copy.deepcopy(window)
+        elif (previous.get("status") == "complete"
+              and isinstance(window, dict)
+              and window.get("status") == "complete"
+              and canonical_json(previous) != canonical_json(window)):
+            conflict = {
+                "window": str(label),
+                "existing_sha256": content_sha256(previous),
+                "incoming_sha256": content_sha256(window),
+            }
+            conflicts = out.setdefault("conflicts", [])
+            if conflict not in conflicts:
+                conflicts.append(conflict)
     return out
 
 
@@ -556,8 +589,11 @@ def merge_attribution(existing, incoming):
     out = copy.deepcopy(existing)
     can_update_metadata = _is_newer_or_equal(existing, incoming)
     for field in (
-        "snapshot_sha256", "evaluator_version", "recommendation_date",
-        "evaluation_as_of", "cost_model", "evaluation_contract", "execution",
+        "snapshot_sha256", "evaluator_version", "evaluation_version",
+        "recommendation_date", "evaluation_as_of", "cost_model",
+        "evaluation_contract", "evaluation_identity", "research_run_id",
+        "research_snapshot_sha256", "population_kind", "research_link_status", "execution",
+        "input_manifest",
     ):
         if field in incoming and (can_update_metadata or field in _IDENTITY_FIELDS):
             out[field] = copy.deepcopy(incoming[field])
@@ -570,11 +606,14 @@ def merge_attribution(existing, incoming):
             else copy.deepcopy(item)
         )
     out["items"] = [old_items[key] for key in sorted(old_items)]
-    old_signals = {str(item.get("code")): item for item in out.setdefault("candidate_signal_items", [])}
+    old_signals = {
+        str(item.get("record_id") or item.get("code")): item
+        for item in out.setdefault("candidate_signal_items", [])
+    }
     for item in incoming.get("candidate_signal_items", []):
-        code = str(item.get("code"))
-        old_signals[code] = (_merge_record(old_signals[code], item)
-                             if code in old_signals else copy.deepcopy(item))
+        key = str(item.get("record_id") or item.get("code"))
+        old_signals[key] = (_merge_record(old_signals[key], item)
+                            if key in old_signals else copy.deepcopy(item))
     out["candidate_signal_items"] = [old_signals[key] for key in sorted(old_signals)]
     if "candidate_signal_evaluator_version" in incoming:
         out["candidate_signal_evaluator_version"] = incoming["candidate_signal_evaluator_version"]
@@ -634,8 +673,20 @@ def _sidecar_lock(path):
         handle.close()
 
 
-def sidecar_path(root, recommendation_date):
-    return Path(root) / (normalize_trade_date(recommendation_date) + ".json")
+def sidecar_path(root, recommendation_date, evaluation_as_of=None,
+                 version=EVALUATION_RESULT_VERSION):
+    """Return the immutable v2 result location.
+
+    The two extra dimensions prevent a later close from overwriting an older
+    cutoff.  Omitting ``evaluation_as_of`` retains the v1-compatible helper
+    shape for callers that only need to inspect a legacy sidecar.
+    """
+    root = Path(root)
+    recommendation_date = normalize_trade_date(recommendation_date)
+    if evaluation_as_of:
+        return (root / str(version) / normalize_trade_date(evaluation_as_of)
+                / (recommendation_date + ".json"))
+    return root / (recommendation_date + ".json")
 
 
 def _completed_primary_events(items, primary_window=PRIMARY_WINDOW):
@@ -648,26 +699,52 @@ def _completed_primary_events(items, primary_window=PRIMARY_WINDOW):
     """
     label = str(primary_window)
     candidates = []
+    original_by_id = {}
     for item in items:
         window = (item.get("windows") or {}).get(label, {})
-        if window.get("status") != "complete":
-            continue
         entry_date = window.get("entry_date") or (item.get("execution") or {}).get("date")
         exit_date = window.get("exit_date") or window.get("mark_date")
         if not entry_date or not exit_date:
             # Complete records from an old evaluator without endpoints remain
             # observable but cannot be treated as independently de-duplicated.
             continue
-        candidates.append((str(item.get("code", "")), normalize_trade_date(entry_date),
-                           normalize_trade_date(exit_date), item, window))
-    kept, duplicates, last_exit = [], [], {}
-    for code, entry_date, exit_date, item, window in sorted(candidates, key=lambda row: (row[0], row[1], row[2])):
-        if code and code in last_exit and entry_date <= last_exit[code]:
-            duplicates.append((item, window))
+        try:
+            normalized_entry = normalize_trade_date(entry_date)
+            normalized_exit = normalize_trade_date(exit_date)
+        except AttributionDataError:
             continue
-        kept.append((item, window))
-        if code:
-            last_exit[code] = exit_date
+        record_id = str(item.get("record_id") or (
+            f"{item.get('recommendation_date', '')}:"
+            f"{item.get('market', 'default')}:{item.get('code', '')}:{label}"))
+        record = {
+            "record_id": record_id,
+            "market": item.get("market") or item.get("exchange") or "default",
+            "code": str(item.get("code", "")),
+            "recommendation_date": item.get("recommendation_date"),
+            "entry_date": normalized_entry,
+            "exit_date": normalized_exit,
+            "market_sessions": item.get("market_sessions"),
+        }
+        candidates.append(record)
+        original_by_id[record_id] = (item, window)
+    assigned = assign_research_events(candidates, primary_window)
+    kept = []
+    kept_ids = set()
+    for event in assigned["events"]:
+        original = original_by_id.get(event["record_id"])
+        if original and original[0].get("windows", {}).get(label, {}).get("status") == "complete":
+            kept.append(original)
+            kept_ids.add(event["record_id"])
+    # A complete later signal whose interval overlaps an earlier pending or
+    # errored anchor remains a duplicate; it cannot become a new event merely
+    # because its result happened to arrive first.
+    duplicates = []
+    for record in candidates:
+        original = original_by_id.get(record["record_id"])
+        if not original or original[0].get("windows", {}).get(label, {}).get("status") != "complete":
+            continue
+        if record["record_id"] not in kept_ids:
+            duplicates.append(original)
     return kept, duplicates
 
 
@@ -733,17 +810,65 @@ def summarize_candidate_performance(items, minimum_dates=20, minimum_mature=100,
                                     primary_window=PRIMARY_WINDOW):
     """Keep candidate-signal statistics distinct from simulated trade P&L."""
     summary = summarize_attribution(items, minimum_dates, minimum_mature, primary_window)
+    primary_label = str(primary_window)
+    primary_events, _ = _completed_primary_events(items, primary_window)
+    valid_primary_alpha = [
+        (item, window)
+        for item, window in primary_events
+        if _number(window, "hs300_alpha") is not None
+    ]
+    valid_primary_dates = set()
+    for item, _ in valid_primary_alpha:
+        try:
+            valid_primary_dates.add(normalize_trade_date(item.get("recommendation_date")))
+        except AttributionDataError:
+            continue
+    valid_alpha_events = len(valid_primary_alpha)
+    valid_alpha_dates = len(valid_primary_dates)
+    # Candidate readiness is an alpha-evidence gate, not merely a count of
+    # complete endpoint records. A complete window with missing/non-finite
+    # benchmark alpha remains evidence-insufficient.
+    summary["valid_alpha_events"] = valid_alpha_events
+    summary["valid_alpha_dates"] = valid_alpha_dates
+    summary["alpha_mature_dates"] = valid_alpha_dates
+    summary["status"] = (
+        "ready"
+        if primary_label in summary["by_window"]
+        and valid_alpha_events >= minimum_mature
+        and valid_alpha_dates >= minimum_dates
+        else "evidence_insufficient"
+    )
     for label, stats in summary["by_window"].items():
-        if label == str(primary_window):
-            completed = [window for _, window in _completed_primary_events(items, primary_window)[0]]
+        if label == primary_label:
+            completed = [window for _, window in primary_events]
             stats["deduplicated_mature_events"] = len(completed)
         else:
             completed = [window for item in items for key, window in (item.get("windows") or {}).items()
                          if key == label and window.get("status") == "complete"]
         values = [row.get("signal_return") for row in completed if row.get("signal_return") is not None]
-        alphas = [row.get("hs300_alpha") for row in completed if row.get("hs300_alpha") is not None]
+        alpha_rows = []
+        if label == primary_label:
+            alpha_items = primary_events
+        else:
+            alpha_items = [
+                (item, (item.get("windows") or {}).get(label) or {})
+                for item in items
+            ]
+        for item, window in alpha_items:
+            alpha_rows.append({
+                "recommendation_date": item.get("recommendation_date"),
+                "hs300_alpha": window.get("hs300_alpha"),
+                "evaluation_status": window.get("status"),
+            })
+        daily_alpha = summarize_daily_alpha(alpha_rows)
         stats["mean_signal_return"] = sum(values) / len(values) if values else None
-        stats["mean_hs300_alpha"] = sum(alphas) / len(alphas) if alphas else None
+        stats["mean_hs300_alpha"] = daily_alpha["mean_alpha"]
+        stats["daily_alpha"] = daily_alpha["daily"]
+        stats["alpha_mature_dates"] = daily_alpha["mature_dates"]
+        stats["alpha_missing_records"] = daily_alpha["missing_records"]
+        if label == primary_label:
+            stats["valid_alpha_events"] = valid_alpha_events
+            stats["valid_alpha_dates"] = valid_alpha_dates
         stats.pop("mean_net_return", None)
     summary["measurement"] = "候选信号表现（次一交易日收盘至窗口收盘），非交易模拟、非实际成交收益"
     return summary
@@ -790,6 +915,77 @@ def calibration_readiness(candidate_summary, trade_summary):
     }
 
 
+def _research_record_is_excluded(record):
+    """Return a stable exclusion reason for non-investable research rows."""
+    statuses = {
+        str(record.get("final_status") or ""),
+        str(record.get("selection_status") or ""),
+    }
+    reason = str(record.get("selection_reason") or record.get("research_terminal_reason") or "")
+    excluded_statuses = {"excluded", "data_rejected", "phase2_filtered", "hard_excluded"}
+    if statuses & excluded_statuses:
+        return reason or sorted(statuses & excluded_statuses)[0]
+    if reason.startswith(("phase2_", "hard_", "excluded_")):
+        return reason
+    return None
+
+
+def _excluded_signal_result(recommendation_date, candidate, evaluation_as_of,
+                            windows, reason, record=None):
+    code = str((candidate or {}).get("code") or "")
+    result = {
+        "evaluator_version": CANDIDATE_EVALUATOR_VERSION,
+        "recommendation_date": recommendation_date,
+        "code": code,
+        "market": (record or {}).get("market") or (record or {}).get("exchange") or "default",
+        "evaluation_as_of": evaluation_as_of,
+        "measurement": {"status": "research_population", "trade_plan_required": False},
+        "population_kind": "frozen_investable_research_population",
+        "research_status": "excluded",
+        "exclusion_reason": reason,
+        "windows": {
+            str(window): {"status": "excluded", "reason": reason}
+            for window in windows
+        },
+    }
+    if record and record.get("record_id"):
+        result["record_id"] = record["record_id"]
+    return result
+
+
+def _research_signal_records(snapshot, research_snapshot=None):
+    """Return frozen research records, or the legacy formal candidates.
+
+    The new population is deliberately selected from the persisted research
+    snapshot rather than reconstructed from the presentation Top-N buckets.
+    """
+    if research_snapshot:
+        research_content = research_snapshot.get("content", research_snapshot)
+        records = []
+        for record in research_content.get("records") or []:
+            if not isinstance(record, dict) or not record.get("code"):
+                continue
+            candidate = copy.deepcopy(record.get("candidate") or {})
+            candidate.setdefault("code", str(record["code"]))
+            records.append({
+                "record": copy.deepcopy(record),
+                "candidate": candidate,
+                "research_run_id": research_snapshot.get("run_id"),
+                "research_snapshot_sha256": research_snapshot.get("content_sha256"),
+                "population_kind": "frozen_investable_research_population",
+            })
+        return records
+    content = snapshot.get("content", snapshot)
+    return [{
+        "record": {"record_id": f"official:{content.get('recommendation_date', '')}:{candidate.get('code', '')}"},
+        "candidate": copy.deepcopy(candidate),
+        "research_run_id": None,
+        "research_snapshot_sha256": None,
+        "population_kind": "official_candidate_population",
+    } for candidate in (content.get("candidates") or [])
+      if isinstance(candidate, dict) and candidate.get("code")]
+
+
 def _call_series_loader(loader, code, candidate, recommendation_date, evaluation_as_of):
     try:
         signature = inspect.signature(loader)
@@ -802,14 +998,26 @@ def _call_series_loader(loader, code, candidate, recommendation_date, evaluation
     return loader(code, candidate)
 
 
-def track_attribution(snapshot, series_loader, evaluation_as_of, root=None, cost_model=None, windows=WINDOWS):
-    """Evaluate actionable items and merge their mutable date sidecar."""
+def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
+                      cost_model=None, windows=WINDOWS, research_snapshot=None,
+                      research_link_status=None):
+    """Evaluate the frozen population and merge its versioned sidecar.
+
+    ``research_snapshot`` is the preferred input.  It contains every
+    investable object scanned that day, including candidates omitted from the
+    formal Top-N display.  Without it, the legacy formal candidate/actionable
+    paths remain available for old records and tests.
+    """
     content = snapshot.get("content", snapshot)
     recommendation_date = normalize_trade_date(content["recommendation_date"])
     evaluation_as_of = normalize_trade_date(evaluation_as_of)
     buckets = content.get("buckets") or {}
+    population = (
+        [] if research_link_status in ("missing", "mismatch", "unverified")
+        else _research_signal_records(snapshot, research_snapshot)
+    )
     candidates = list(buckets.get("actionable", []))
-    signal_candidates = list(content.get("candidates") or [])
+    signal_candidates = population
     results = []
     signal_results = []
     for candidate in candidates:
@@ -836,32 +1044,111 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None, cost
                 evaluation_as_of, cost_model or CostModel(), windows, reason,
             )
         results.append(result)
-    for candidate in signal_candidates:
+    for population_item in signal_candidates:
+        candidate = population_item["candidate"]
+        record = population_item["record"]
+        exclusion_reason = _research_record_is_excluded(record)
+        if exclusion_reason:
+            signal_results.append(_excluded_signal_result(
+                recommendation_date, candidate, evaluation_as_of, windows,
+                exclusion_reason, record,
+            ))
+            continue
         try:
             series = _call_series_loader(series_loader, candidate.get("code"), candidate,
                                          recommendation_date, evaluation_as_of) or {}
-            signal_results.append(evaluate_candidate_signal(
+            signal_result = evaluate_candidate_signal(
                 {"recommendation_date": recommendation_date, "candidate": candidate},
                 evaluation_as_of, series.get("market_sessions", []), series.get("stock_rows", []),
                 series.get("hs300_rows"), series.get("sector_rows"), windows,
-                series.get("stock_meta")))
+                series.get("stock_meta"))
+            signal_result["evaluator_version"] = CANDIDATE_EVALUATOR_VERSION
+            signal_result.update({
+                "record_id": record.get("record_id") or (
+                    f"{recommendation_date}:{candidate.get('code', '')}"),
+                "market": record.get("market") or record.get("exchange") or "default",
+                "population_kind": population_item["population_kind"],
+                "research_run_id": population_item.get("research_run_id"),
+                "research_snapshot_sha256": population_item.get("research_snapshot_sha256"),
+                "selection_status": record.get("selection_status") or record.get("final_status"),
+                "selection_reason": record.get("selection_reason"),
+            })
+            signal_results.append(signal_result)
         except (AttributionDataError, OSError, RuntimeError, ValueError) as exc:
-            signal_results.append(_error_result(recommendation_date, candidate.get("code", ""), evaluation_as_of,
-                                                CostModel(), windows, str(exc)))
-    contract = build_evaluation_contract(windows, dataclasses.asdict(cost_model or CostModel()))
+            signal_result = _error_result(
+                recommendation_date, candidate.get("code", ""), evaluation_as_of,
+                CostModel(), windows, str(exc),
+                evaluator_version=CANDIDATE_EVALUATOR_VERSION,
+            )
+            signal_result.update({
+                "record_id": record.get("record_id") or (
+                    f"{recommendation_date}:{candidate.get('code', '')}"),
+                "market": record.get("market") or record.get("exchange") or "default",
+                "population_kind": population_item["population_kind"],
+                "research_run_id": population_item.get("research_run_id"),
+                "research_snapshot_sha256": population_item.get("research_snapshot_sha256"),
+            })
+            signal_results.append(signal_result)
+    population_kind = (
+        "frozen_investable_research_population" if research_snapshot
+        else ("research_population_gap" if research_link_status in ("missing", "mismatch", "unverified")
+              else "official_candidate_population")
+    )
+    population_identity = {
+        "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
+        "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "record_ids": sorted(str(item["record"].get("record_id") or
+                                 f"{recommendation_date}:{item['candidate'].get('code', '')}")
+                             for item in population),
+    }
+    contract = build_evaluation_contract(
+        windows, dataclasses.asdict(cost_model or CostModel()),
+        population_kind=population_kind, evaluation_version=EVALUATION_RESULT_VERSION,
+        population_identity=population_identity,
+    )
+    evaluation_identity = {
+        "contract_id": contract["contract_id"],
+        "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
+        "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "recommendation_date": recommendation_date,
+        "evaluation_as_of": evaluation_as_of,
+        "population_kind": population_kind,
+        "research_link_status": research_link_status or (
+            "linked" if research_snapshot else "legacy_fallback"),
+    }
     payload = {
         "evaluator_version": EVALUATOR_VERSION,
+        "evaluation_version": EVALUATION_RESULT_VERSION,
         "recommendation_date": recommendation_date,
         "evaluation_as_of": evaluation_as_of,
         "snapshot_sha256": snapshot.get("content_sha256"),
+        "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
+        "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "population_kind": population_kind,
+        "research_link_status": research_link_status or (
+            "linked" if research_snapshot else "legacy_fallback"),
+        "evaluation_identity": evaluation_identity,
         "cost_model": dataclasses.asdict(cost_model or CostModel()),
         "evaluation_contract": contract,
+        "input_manifest": input_manifest(
+            official_snapshot_sha256=snapshot.get("content_sha256"),
+            research_run_id=research_snapshot.get("run_id") if research_snapshot else None,
+            research_snapshot_sha256=research_snapshot.get("content_sha256") if research_snapshot else None,
+            evaluation_as_of=evaluation_as_of,
+            population_identity=population_identity,
+        ),
         "items": results,
         "candidate_signal_items": signal_results,
         "candidate_signal_evaluator_version": CANDIDATE_EVALUATOR_VERSION,
     }
-    if root is not None:
-        path = sidecar_path(Path(root) / contract["contract_id"], recommendation_date)
+    # Link gaps are returned for the close-job audit but never written into a
+    # normal evaluation contract.  This prevents a missing research day from
+    # creating a second contract directory alongside the frozen population.
+    if root is not None and research_link_status not in ("missing", "mismatch", "unverified"):
+        path = sidecar_path(
+            Path(root) / contract["contract_id"], recommendation_date,
+            evaluation_as_of=evaluation_as_of,
+        )
         with _sidecar_lock(path):
             prior = read_sidecar(path)
             payload = merge_attribution(prior, payload) if prior else payload
@@ -913,22 +1200,64 @@ def track_official_history(
     cost_model=None,
     windows=WINDOWS,
     history=120,
+    research_root=None,
 ):
     """Process the most recent valid official snapshots."""
     history_root = Path(history_root or (Path(CACHE_DIR) / "recommendation_history"))
     attribution_root = Path(attribution_root or (Path(CACHE_DIR) / "evolution" / "evaluations"))
     normalized_through = normalize_trade_date(through_date) if through_date else None
-    snapshots, rejected = iter_official_snapshots(history_root, normalized_through)
+    as_of = normalize_trade_date(evaluation_as_of or normalized_through or date.today())
+    snapshot_cutoff = as_of
+    if normalized_through and normalized_through < snapshot_cutoff:
+        snapshot_cutoff = normalized_through
+    snapshots, rejected = iter_official_snapshots(history_root, snapshot_cutoff)
     if history > 0:
         snapshots = snapshots[-history:]
-    as_of = normalize_trade_date(evaluation_as_of or normalized_through or date.today())
-    payloads = [
-        track_attribution(
+    research_by_date = {}
+    if research_root is None:
+        research_root = DEFAULT_RESEARCH_ROOT
+    try:
+        from analysis.recommendation_diagnostics import load_primary_research_snapshots
+        research_by_date = {
+            str((item.get("content") or {}).get("recommendation_date")): item
+            for item in load_primary_research_snapshots(research_root, as_of=as_of)
+        }
+    except (OSError, ValueError, json.JSONDecodeError):
+        # Missing research snapshots are a visible legacy fallback, not a
+        # reason to discard already persisted official candidate outcomes.
+        research_by_date = {}
+
+    def linked_research(snapshot):
+        day = str((snapshot.get("content") or {}).get("recommendation_date"))
+        research = research_by_date.get(day)
+        if not research:
+            return None, "missing"
+        official = (snapshot.get("content") or {}).get("content_sha256")
+        if official is None:
+            official = snapshot.get("content_sha256")
+        official_link = (research.get("content") or {}).get("official_snapshot") or {}
+        if official_link.get("link_status") != "linked":
+            return None, "unverified"
+        linked = official_link.get("content_sha256")
+        if not official or not linked:
+            return None, "unverified"
+        if official != linked:
+            return None, "mismatch"
+        return research, "linked"
+
+    payloads = []
+    research_link_statuses = []
+    for snapshot in snapshots:
+        research, link_status = linked_research(snapshot)
+        research_link_statuses.append({
+            "recommendation_date": str((snapshot.get("content") or {}).get("recommendation_date")),
+            "status": link_status,
+        })
+        payloads.append(track_attribution(
             snapshot, series_loader, as_of, root=attribution_root,
             cost_model=cost_model, windows=windows,
-        )
-        for snapshot in snapshots
-    ]
+            research_snapshot=research, research_link_status=link_status,
+        ))
     items = [item for payload in payloads for item in payload.get("items", [])]
     signal_items = [item for payload in payloads
                     for item in payload.get("candidate_signal_items", [])]
@@ -936,10 +1265,14 @@ def track_official_history(
     summary["snapshots"] = len(snapshots)
     summary["rejected_snapshots"] = rejected
     candidate_summary = summarize_candidate_performance(
-        signal_items, minimum_dates=len(snapshots))
+        # The 20-date/100-event readiness policy is fixed; observed snapshot
+        # count remains available in the surrounding history summary and must
+        # not lower the research gate during a short cold-start run.
+        signal_items, minimum_dates=20, minimum_mature=100)
     return {"summary": summary, "items": items,
             "candidate_signal_summary": candidate_summary,
             "candidate_signal_items": signal_items,
+            "research_link_statuses": research_link_statuses,
             "strategy_calibration": calibration_readiness(candidate_summary, summary)}
 
 
@@ -948,6 +1281,7 @@ def main(argv=None):
     parser.add_argument("--through")
     parser.add_argument("--history", type=int, default=120)
     parser.add_argument("--history-root")
+    parser.add_argument("--research-root")
     parser.add_argument("--attribution-root")
     parser.add_argument("--evaluation-as-of")
     parser.add_argument("--windows", default="5,10,20,60")
@@ -966,6 +1300,7 @@ def main(argv=None):
     output = track_official_history(
         args.history_root, args.attribution_root, args.evaluation_as_of,
         args.through, windows=windows, cost_model=costs, history=args.history,
+        research_root=args.research_root,
     )
     output.update({
         "evaluator_version": EVALUATOR_VERSION,

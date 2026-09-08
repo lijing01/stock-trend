@@ -1576,6 +1576,7 @@ def run_daily_recommendation_tests():
         from test_candidate_trade_plan import run_candidate_trade_plan_tests
         from test_recommendation_snapshot import run_recommendation_snapshot_tests
         from test_recommendation_attribution import run_recommendation_attribution_tests
+        from test_research_events import run_research_event_tests
         from test_recommendation_diagnostics import run_recommendation_diagnostics_tests
         from test_recommendation_experiments import run_recommendation_experiment_tests
         from test_evolution_job import run_evolution_job_tests
@@ -1595,6 +1596,7 @@ def run_daily_recommendation_tests():
             run_candidate_trade_plan_tests,
             run_recommendation_snapshot_tests,
             run_recommendation_attribution_tests,
+            run_research_event_tests,
             run_recommendation_diagnostics_tests,
             run_recommendation_experiment_tests,
             run_evolution_job_tests,

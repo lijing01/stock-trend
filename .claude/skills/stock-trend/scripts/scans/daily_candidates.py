@@ -3437,10 +3437,12 @@ def main():
     research_snapshot = build_research_snapshot(
         research_population, buckets, expected_date, policy, regime, sector_codes,
         args.min_score, official_tracking=tracking,
-        # A formal candidate decision is only knowable after that trading
-        # day's close.  Keep it deterministic so identical reruns share one
-        # research identity rather than creating pseudo-independent samples.
-        known_at=f"{expected_date}T15:00:00+08:00",
+        # 15:00 is the decision baseline, not a claim about provider fetch
+        # time.  Source timestamps remain unknown unless an adapter supplies
+        # them explicitly.  captured_at records when this assembled snapshot
+        # was persisted, distinct from any provider known_at.
+        decision_at=f"{expected_date}T15:00:00+08:00",
+        captured_at=datetime.now().astimezone().isoformat(),
         parameter_summary={
             "top": args.top,
             "min_candidates": args.min_candidates,

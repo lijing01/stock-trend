@@ -15,6 +15,7 @@ from analysis.recommendation_diagnostics import load_candidate_signal_items, loa
 from core.recommendation_snapshot import canonical_json, content_sha256
 from core.evolution_registry import validate_experiment_definition
 from core.evolution_storage import input_manifest, storage_root
+from core.research_events import assign_research_events, summarize_daily_alpha
 
 SCHEMA_VERSION = "recommendation-experiment/v1"
 DEFAULT_ROOT = storage_root("experiments")
@@ -29,6 +30,8 @@ def default_experiment():
 
 
 def _number(value):
+    if isinstance(value, bool):
+        return None
     try:
         value = float(value); return value if math.isfinite(value) else None
     except (TypeError, ValueError): return None
@@ -38,7 +41,10 @@ def _outcomes(items):
     result = {}
     for item in items or []:
         window = (item.get("windows") or {}).get(str(PRIMARY_WINDOW), {})
-        result[(str(item.get("recommendation_date") or ""), str(item.get("code") or ""))] = window
+        value = copy.deepcopy(window)
+        value["_market_sessions"] = item.get("market_sessions")
+        value["_record_id"] = item.get("record_id")
+        result[(str(item.get("recommendation_date") or ""), str(item.get("code") or ""))] = value
     return result
 
 
@@ -122,7 +128,8 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
         content.update({"status": "continue_accumulating", "reason": "insufficient_time_span_for_three_purged_oos_blocks"})
         return _package(content)
     paired, coverage, baseline_maes, treatment_maes = [], [], [], []
-    mature_events = set()
+    mature_event_records = []
+    daily_alpha_rows = []
     for block_no, block in enumerate(blocks, 1):
         for day in block:
             limit = top if top is not None else (next((s.get("content", s).get("parameter_summary", {}).get("top") for s in research_snapshots if str(s.get("content", s).get("recommendation_date")) == day), None))
@@ -139,7 +146,18 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
                         continue
                     alpha = _number(outcome.get("hs300_alpha")); mae = _number(outcome.get("mae"))
                     if outcome.get("status") == "complete" and alpha is not None:
-                        values.append(alpha); mature_events.add((day, str(row.get("code"))))
+                        values.append(alpha)
+                        daily_alpha_rows.append({"recommendation_date": day,
+                            "hs300_alpha": alpha, "evaluation_status": "complete"})
+                        if outcome.get("entry_date") and outcome.get("exit_date"):
+                            mature_event_records.append({
+                                "record_id": outcome.get("_record_id") or f"{day}:{outcome.get('market', 'default')}:{row.get('code')}",
+                                "market": outcome.get("market") or "default",
+                                "code": str(row.get("code")),
+                                "entry_date": outcome.get("entry_date"),
+                                "exit_date": outcome.get("exit_date"),
+                                "market_sessions": outcome.get("_market_sessions"),
+                            })
                     if outcome.get("status") == "complete" and mae is not None: maes.append(mae)
                 return (sum(values) / len(values) if values else None), maes
             old, old_maes = metrics(base, "baseline"); new, new_maes = metrics(trial, "treatment")
@@ -149,7 +167,15 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
     deltas = [row["delta"] for row in paired]; interval = _bootstrap(deltas)
     baseline_coverage = sum(row["baseline_count"] > 0 for row in coverage); treatment_coverage = sum(row["treatment_count"] > 0 for row in coverage)
     baseline_tail, treatment_tail = _percentile(baseline_maes, .05), _percentile(treatment_maes, .05)
-    maturity = {"dedup_mature_events": len(mature_events), "mature_dates": len({row["date"] for row in paired})}
+    assigned_events = assign_research_events(mature_event_records, PRIMARY_WINDOW)
+    daily_alpha = summarize_daily_alpha(daily_alpha_rows)
+    maturity = {"dedup_mature_events": len(assigned_events["events"]),
+                "mature_dates": len({row["date"] for row in paired}),
+                "valid_alpha_events": len(assigned_events["events"]),
+                "alpha_mature_dates": daily_alpha["mature_dates"],
+                "alpha_mean": daily_alpha["mean_alpha"],
+                "daily_alpha": daily_alpha["daily"],
+                "alpha_missing_records": daily_alpha["missing_records"]}
     gates = {"minimum_events": maturity["dedup_mature_events"] >= 100,
              "minimum_dates": maturity["mature_dates"] >= 20,
              "three_oos_blocks": len(blocks) >= 3,

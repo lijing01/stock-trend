@@ -58,6 +58,20 @@ class T(unittest.TestCase):
         unchanged = self.build(rows, buckets, {"status": "unchanged", "path": "/x", "content_sha256": "abc"})
         self.assertEqual(created["run_id"], unchanged["run_id"])
 
+    def test_source_and_capture_times_keep_distinct_statuses(self):
+        captured = build_research_snapshot([candidate("A")], {}, "2026-09-07",
+            {}, {}, [], 50, captured_at="2026-09-07T16:00:00+08:00")
+        known = build_research_snapshot([candidate("A")], {}, "2026-09-07",
+            {}, {}, [], 50, known_at="2026-09-07T15:30:00+08:00")
+        both = build_research_snapshot([candidate("A")], {}, "2026-09-07",
+            {}, {}, [], 50, known_at="2026-09-07T15:30:00+08:00",
+            captured_at="2026-09-07T16:00:00+08:00")
+        unknown = self.build([candidate("A")], {})
+        self.assertEqual(captured["content"]["source_time_status"], "captured")
+        self.assertEqual(known["content"]["source_time_status"], "known")
+        self.assertEqual(both["content"]["source_time_status"], "known_and_captured")
+        self.assertEqual(unknown["content"]["source_time_status"], "unknown")
+
     def test_provisional_never_enters_training_set(self):
         snap = build_research_snapshot([candidate("A")], {}, "2026-09-07",
             {"provisional": True}, {}, [], 50, official_tracking={"status": "skipped_provisional"})

@@ -59,11 +59,32 @@ def _evidence_summary(item):
     }
 
 
+def _market_for(item):
+    value = item.get("market") or item.get("exchange")
+    if value:
+        return str(value)
+    ts_code = str(item.get("ts_code") or "")
+    if "." in ts_code:
+        return ts_code.rsplit(".", 1)[-1].upper()
+    return "default"
+
+
+def _source_time_status(known_at, captured_at):
+    if known_at and captured_at:
+        return "known_and_captured"
+    if known_at:
+        return "known"
+    if captured_at:
+        return "captured"
+    return "unknown"
+
+
 def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
                             policy, market_regime, sector_codes, min_score,
                             official_tracking=None, known_at=None,
                             model_version="daily-candidates/v4",
-                            parameter_summary=None):
+                            parameter_summary=None, decision_at=None,
+                            captured_at=None):
     """Build a detached, deterministic snapshot for every scanned object."""
     by_code = _bucket_by_code(buckets)
     records = []
@@ -72,11 +93,19 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
             continue
         candidate = copy.deepcopy(item)
         code = str(candidate["code"])
+        market = _market_for(candidate)
+        record_known_at = known_at if known_at is not None else candidate.get("known_at")
+        record_captured_at = captured_at if captured_at is not None else candidate.get("captured_at")
         bucket = by_code.get(code)
         records.append({
+            "record_id": f"{recommendation_date}:{market}:{code}",
             "code": code,
+            "market": market,
             "basis_date": recommendation_date,
-            "known_at": known_at or recommendation_date,
+            "decision_at": decision_at,
+            "known_at": record_known_at,
+            "captured_at": record_captured_at,
+            "source_time_status": _source_time_status(record_known_at, record_captured_at),
             "selection_status": "selected" if bucket else "not_selected",
             "final_status": bucket or item.get("research_terminal_status") or "not_selected",
             "selection_reason": _selection_reason(candidate, bucket, min_score),
@@ -104,6 +133,10 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
     content = {
         "schema_version": SCHEMA_VERSION,
         "recommendation_date": recommendation_date,
+        "decision_at": decision_at,
+        "known_at": known_at,
+        "captured_at": captured_at,
+        "source_time_status": _source_time_status(known_at, captured_at),
         "snapshot_type": "provisional" if (policy or {}).get("provisional") else "formal",
         "model_version": model_version,
         "policy": copy.deepcopy(policy or {}),

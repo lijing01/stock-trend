@@ -1,6 +1,6 @@
 # 今日推荐 AI 自进化闭环修复 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 本文件仅为修复计划；本轮不实施代码、不发布策略。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 本轮执行 A 批次（任务 1–4）；B/C 批次不在本次范围内，不发布策略。
 
 **Goal:** 修复研究数据、统计、重放、晋级和监控之间的断点，使不完整或不合格证据无法形成调参结论或进入正式策略。
 
@@ -82,9 +82,9 @@
 **Modify:** `scripts/analysis/evolution_job.py`、`scripts/analysis/recommendation_diagnostics.py`。
 **Test:** `tests/test_evolution_job.py`、`tests/test_evolution_storage.py`。
 
-- [ ] 增加仅在 `evolution/research` 写正式样本的临时目录夹具：默认 weekly 必须读到它；同日新旧目录都有样本时只取新记录，自定义 root 不扫描其他目录。
-- [ ] 增加历史 cutoff 用例：未来推荐排除；截止后才成熟的标签不能进入诊断。dry-run 不创建目录、不调用模型、不写结果。
-- [ ] 默认入口直接复用 diagnostics 的 `DEFAULT_RESEARCH_ROOT`，loaders 显式接收 `as_of`；保留旧目录只读兼容。截止过滤核心：
+- [x] 增加仅在 `evolution/research` 写正式样本的临时目录夹具：默认 weekly 必须读到它；同日新旧目录都有样本时只取新记录，自定义 root 不扫描其他目录。
+- [x] 增加历史 cutoff 用例：未来推荐排除；截止后才成熟的标签不能进入诊断。dry-run 不创建目录、不调用模型、不写结果。
+- [x] 默认入口直接复用 diagnostics 的 `DEFAULT_RESEARCH_ROOT`，loaders 显式接收 `as_of`；保留旧目录只读兼容。截止过滤核心：
 
 ```python
 if recommendation_date > as_of:
@@ -93,17 +93,17 @@ if label_end > as_of:
     window = {"status": "pending", "reason": "after_evaluation_cutoff"}
 ```
 
-- [ ] 运行 `python3 .claude/skills/stock-trend/tests/test_evolution_job.py` 和 `python3 .claude/skills/stock-trend/tests/test_evolution_storage.py`，预期全部通过。
-- [ ] 运行第 9 节质量门禁；通过后保存独立提交 `fix: bound evolution inputs by cutoff`。
+- [x] 运行 `python3 .claude/skills/stock-trend/tests/test_evolution_job.py` 和 `python3 .claude/skills/stock-trend/tests/test_evolution_storage.py`，预期全部通过。
+- [x] 运行第 9 节质量门禁；通过后纳入本次 A 批次提交。
 
 ### Task 2：完整研究池 Outcome 与评价版本
 
 **Modify:** `scripts/analysis/recommendation_attribution.py`、`scripts/core/evolution_contract.py`、`scripts/core/evolution_storage.py`、`scripts/core/candidate_research_snapshot.py`、`scripts/scans/daily_candidates.py`、`scripts/analysis/evolution_job.py`、`scripts/analysis/recommendation_diagnostics.py`。
 **Test:** `tests/test_recommendation_attribution.py`、`tests/test_evolution_storage.py`、`tests/test_evolution_job.py`、`tests/test_recommendation_snapshot.py`。
 
-- [ ] 夹具设正式 Top 1=A、完整可投资池=A/B、硬排除=C：A/B 都获得 Outcome，C 保留 excluded 状态；给 B 注入取数失败，A 仍成功，B 可单独重试。
-- [ ] 增加版本用例：同样输入重试不新增；同日不同内容留冲突；不同评价截止写不同版本；旧正式快照字节摘要不变；读取旧 sidecar 不伪造 point-in-time 资格。
-- [ ] 收盘任务加载关联正式研究快照，以冻结对象集合计算信号结果，复用 `evaluate_candidate_signal` 和现有 series loader；交易模拟仍只处理有相应交易输入的对象。对象身份和输入哈希进入评价契约。
+- [x] 夹具设正式 Top 1=A、完整可投资池=A/B、硬排除=C：A/B 都获得 Outcome，C 保留 excluded 状态；给 B 注入取数失败，A 仍成功，B 可单独重试。
+- [x] 增加版本用例：同样输入重试不新增；同日不同内容留冲突；不同评价截止写不同版本；旧正式快照字节摘要不变；读取旧 sidecar 不伪造 point-in-time 资格。
+- [x] 收盘任务加载关联正式研究快照，以冻结对象集合计算信号结果，复用 `evaluate_candidate_signal` 和现有 series loader；交易模拟仍只处理有相应交易输入的对象。对象身份和输入哈希进入评价契约。
 
 ```python
 evaluation_identity = {
@@ -115,9 +115,9 @@ evaluation_identity = {
 }
 ```
 
-- [ ] 删除研究时点的伪精确语义：15:00 仅可表示规定的决策基准；真实抓取时间另存，来源未知显式 unknown。写入失败仍不影响原候选展示。
-- [ ] 正式当日记录缺失时保留 gap，但继续评价此前已存在的研究事件；非交易日不伪造推荐。返回当日采集与历史到期评价两个阶段状态。
-- [ ] 运行上述四个测试文件及质量门禁；通过后保存独立提交 `fix: evaluate frozen research population`。
+- [x] 删除研究时点的伪精确语义：15:00 仅可表示规定的决策基准；真实抓取时间另存，来源未知显式 unknown。写入失败仍不影响原候选展示。
+- [x] 正式当日记录缺失时保留 gap，但继续评价此前已存在的研究事件；非交易日不伪造推荐。返回当日采集与历史到期评价两个阶段状态。
+- [x] 运行上述四个测试文件及质量门禁；通过后纳入本次 A 批次提交。
 
 ### Task 3：统一事件与日期等权统计
 
@@ -125,9 +125,9 @@ evaluation_identity = {
 **Modify:** `scripts/analysis/recommendation_attribution.py`、`scripts/analysis/recommendation_diagnostics.py`、`scripts/backtesting/recommendation_experiments.py`、`scripts/analysis/evolution_job.py`、`tests/test_stock_trend.py`。
 **Test:** 新测试以及现有 attribution、diagnostics、experiments、job 测试。
 
-- [ ] 新增真实交易日夹具：同股连续十次推荐产生十条原记录、一个重叠事件；端点之后的新信号形成新事件；跨市场同代码不合并；缺端点不可用于就绪门槛。
-- [ ] 增加选择偏差用例：最早推荐结果缺失而后续推荐有结果，不能把后续记录升级为新的独立事件。
-- [ ] 新模块定义两个公开接口，迁移现有 `_completed_primary_events` 调用为兼容包装，不改变旧外部字段：
+- [x] 新增真实交易日夹具：同股连续十次推荐产生十条原记录、一个重叠事件；端点之后的新信号形成新事件；跨市场同代码不合并；缺端点不可用于就绪门槛。
+- [x] 增加选择偏差用例：最早推荐结果缺失而后续推荐有结果，不能把后续记录升级为新的独立事件。
+- [x] 新模块定义两个公开接口，迁移现有 `_completed_primary_events` 调用为兼容包装，不改变旧外部字段：
 
 ```python
 # 输入为已冻结、已按窗口补齐交易日端点的记录；输出稳定事件归属。
@@ -174,21 +174,22 @@ def summarize_daily_alpha(rows):
 
 调用前使用现有日期解析和交易日历验证日期及窗口端点、拒绝倒置区间，并由冻结记录产生唯一 `record_id`；相同记录重试先幂等归并。配对比较须先执行任务 5 的完整性检查再调用日均函数。所有消费者使用同一实现，不复制不同版本的去重循环。
 
-- [ ] 增加日权重断言：第一日十只各 +10%，第二日一只 -10%，日期等权平均必须为 0，不能为约 +8.18%。
-- [ ] 将新测试 runner 接入 `test_stock_trend.py`；运行 `python3 .claude/skills/stock-trend/tests/test_research_events.py`、四个现有目标测试与质量门禁。
-- [ ] 通过后保存独立提交 `fix: unify evolution event statistics`。
+- [x] 增加日权重断言：第一日十只各 +10%，第二日一只 -10%，日期等权平均必须为 0，不能为约 +8.18%。
+- [x] 将新测试 runner 接入 `test_stock_trend.py`；运行 `python3 .claude/skills/stock-trend/tests/test_research_events.py`、四个现有目标测试与质量门禁。
+- [x] 通过后纳入本次 A 批次提交。
 
 ### Task 4：提案成熟度与周预算
 
 **Modify:** `scripts/analysis/evolution_proposals.py`、`scripts/analysis/evolution_job.py`。
 **Test:** `tests/test_recommendation_diagnostics.py`、`tests/test_evolution_job.py`。
 
-- [ ] 加入已复现失败用例：overall=30 事件/1 日期、分组 eligible、格式合法提案，必须返回 continue_accumulating、proposals=[]。
-- [ ] 对 99/20、100/19、100/20、分组 29/30 分别测试边界；拒绝空 values、bool、NaN、inf 和额外修改字段。
-- [ ] 总体门槛先于模型调用和提案接收：
+- [x] 加入已复现失败用例：overall=30 事件/1 日期、分组 eligible、格式合法提案，必须返回 continue_accumulating、proposals=[]。
+- [x] 对 99/20、100/19、100/20、分组 29/30 分别测试边界；拒绝空 values、bool、NaN、inf 和额外修改字段。
+- [x] 总体门槛先于模型调用和提案接收：
 
 ```python
-ready = overall["mature_events"] >= 100 and overall["mature_dates"] >= 20
+ready = (overall["valid_alpha_events"] >= 100
+         and overall["alpha_mature_dates"] >= 20)
 if not ready:
     valid, errors = [], ["overall_research_not_ready"]
     status = "continue_accumulating"
@@ -197,9 +198,9 @@ else:
     status = "proposed" if valid else "no_valid_proposal"
 ```
 
-- [ ] ISO 周预算使用现有原子文件/锁模式保存每周唯一生成尝试和最多一次格式修复；调用前领取尝试号，崩溃后不得自动重复模型调用。响应可按尝试号幂等补录；每周累计最多三条，不同诊断包不能刷新预算。
-- [ ] 对重复生成、同周新诊断、并发领取、失败重跑写测试；usage 记录真实调用状态，不伪造 token 数。无模型仍完成统计。
-- [ ] 运行 diagnostics/job 目标测试与质量门禁；通过后保存独立提交 `fix: enforce evolution proposal gates`。
+- [x] ISO 周预算使用现有原子文件/锁模式保存每周唯一生成尝试和最多一次格式修复；调用前领取尝试号，崩溃后不得自动重复模型调用。响应可按尝试号幂等补录；每周累计最多三条，不同诊断包不能刷新预算。
+- [x] 对重复生成、同周新诊断、并发领取、失败重跑写测试；usage 记录真实调用状态，不伪造 token 数。无模型仍完成统计。
+- [x] 运行 diagnostics/job 目标测试与质量门禁；通过后纳入本次 A 批次提交。
 
 ### Task 5：生产选择与实验重放一致
 
@@ -326,3 +327,12 @@ git diff --check
 工程完成允许没有任何真实实验晋级。交易日自然成熟、来源历史时间戳不足或缺完整研究历史，均需如实显示，不能用随机分割、当前成分回填或放宽阈值替代。
 
 本计划仅供学习参考，不构成投资建议。
+
+## A 批次执行记录（2026-09-08）
+
+- 任务 1–4 已完成代码实现与集成验证：默认研究入口切换为 `evolution/research`，周任务及诊断按 `evaluation_as_of` 过滤；冻结研究池中的可投资候选（含未入选 Top N 对象）均产生独立信号 Outcome，硬排除项保留 `excluded` 状态；评价契约升级为 v2 并绑定记录、研究快照和人群身份。
+- 事件去重与日度 alpha 汇总统一复用 `core/research_events.py`：同市场同代码重叠区间只保留最早事件锚点，跨市场不合并，缺失/非法端点不计入成熟事件；日度先股票等权、再日期等权。
+- 提案门控改为有限 alpha 的 20 个成熟日期及 100 个去重事件；每周生成/修复尝试和最多 3 条提案使用原子锁与输入摘要绑定，响应支持按尝试号幂等恢复，跨诊断包不会重放旧响应。
+- 新增来源时间、决策时间、评价截止、冲突和研究链接缺口状态；缺口只进入内存审计，不写入正常评价 sidecar。`run_close` 同时返回当日采集与历史成熟度阶段，交易模拟资格与候选信号资格分开。
+- 验证证据：A 定向测试 attribution 23、diagnostics 28、job 7、events 4、snapshot 6 全部通过；全量门禁 `590 passed, 0 failed, 1 skipped`，golden `21 passed, 0 failed, 2 warnings`，`git diff --check` 通过。
+- 已验证状态：`module_delivered`、`integration_verified`。当前未声称 `research_ready` 或 `release_eligible`；真实样本成熟度仍需后续运行确认。B/C 任务（生产选择重放、分区/60 日/shadow、监控与端到端发布验证）保持未执行。
