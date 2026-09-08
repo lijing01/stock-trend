@@ -10,8 +10,9 @@ from analysis.evolution_job import run_close, run_weekly
 from backtesting.recommendation_experiments import default_experiment
 from core.candidate_research_snapshot import build_research_snapshot, save_research_snapshot
 from core.evolution_registry import (load_active_policy, publish_experiment, register_experiment,
-                                     rollback_active_policy, transition_experiment)
-from core.recommendation_snapshot import build_snapshot
+                                     register_holdout_consumption, rollback_active_policy,
+                                     transition, transition_experiment)
+from core.recommendation_snapshot import build_snapshot, content_sha256
 
 
 class T(unittest.TestCase):
@@ -78,17 +79,145 @@ class T(unittest.TestCase):
     def test_explicit_publish_and_rollback_keep_old_records_untouched(self):
         with tempfile.TemporaryDirectory() as root:
             registry, releases = Path(root) / "registry", Path(root) / "releases"
+            experiments, shadow = Path(root) / "experiments", Path(root) / "shadow"
             registered = register_experiment(default_experiment(), registry)
             identifier = registered["experiment_id"]
-            transition_experiment(identifier, "validated", {"result": "ok"}, registry)
-            transition_experiment(identifier, "shadow", {"result": "ok"}, registry)
-            transition_experiment(identifier, "eligible", {"result": "ok"}, registry)
-            published = publish_experiment(identifier, {"operator": "test"}, registry, releases)
+            validation = self._release_result(identifier, "validation-1")
+            holdout = self._release_result(identifier, "holdout-1")
+            shadow_result = self._shadow_result("shadow-1")
+            experiments.mkdir()
+            (experiments / "validation-1.json").write_text(
+                __import__("json").dumps(validation), encoding="utf-8")
+            (experiments / "holdout-1.json").write_text(
+                __import__("json").dumps(holdout), encoding="utf-8")
+            shadow.mkdir()
+            (shadow / "shadow-1.json").write_text(
+                __import__("json").dumps(shadow_result), encoding="utf-8")
+            consumption = register_holdout_consumption(
+                identifier, "batch-1", "input-1", "holdout-1",
+                {"definition": default_experiment()}, registry)
+            evidence = self._release_evidence(
+                identifier, validation, holdout, shadow_result, consumption,
+            )
+            transition_experiment(identifier, "validated", {
+                "validation_result": validation,
+            }, registry)
+            transition_experiment(identifier, "shadow", {
+                "shadow_result": shadow_result,
+            }, registry)
+            transition_experiment(identifier, "eligible", evidence, registry)
+            published = publish_experiment(identifier, evidence, registry, releases)
             self.assertEqual(published["status"], "published")
             self.assertEqual(load_active_policy(releases)["experiment_id"], identifier)
             rolled = rollback_active_policy({"operator": "test"}, releases)
             self.assertEqual(rolled["status"], "rolled_back_to_baseline")
             self.assertEqual(load_active_policy(releases)["experiment_id"], "baseline")
+
+    @staticmethod
+    def _release_result(experiment_id, result_id):
+        content = {
+            "schema_version": "recommendation-experiment/v2",
+            "definition": default_experiment(),
+            "contract_id": "contract-1",
+            "calendar_verified": True,
+            "partitions": {"status": "valid"},
+            "maturity": {
+                "baseline": {"valid_alpha_events": 100, "alpha_mature_dates": 20},
+                "treatment": {"valid_alpha_events": 100, "alpha_mature_dates": 20},
+                "confirmation_60d": {
+                    "baseline_valid_alpha_events": 100,
+                    "treatment_valid_alpha_events": 100,
+                    "complete_paired_dates": 20,
+                    "mean_delta": .01,
+                },
+            },
+            "paired_dates": [{"date": f"2026-08-{number:02d}", "delta": .01}
+                             for number in range(1, 21)],
+            "block_pair_counts": {"1": 20, "2": 20, "3": 20},
+            "coverage": {"baseline_dates": 60, "treatment_dates": 60,
+                          "baseline_complete_ratio": 1.0,
+                          "treatment_complete_ratio": 1.0},
+            "interval": {"lower_95": .001, "valid_block_count": 2},
+            "mae_tail_5pct": {"baseline": -.03, "treatment": -.03},
+            "promotion": {"eligible": True},
+            "input_manifest": {"input_sha256": "input-1"},
+        }
+        return {"experiment_id": result_id,
+                "content_sha256": content_sha256(content), "content": content}
+
+    @staticmethod
+    def _shadow_result(result_id):
+        content = {
+            "schema_version": "recommendation-shadow/v1",
+            "shadow_type": "forward", "formal_policy_affected": False,
+            "retrospective": False, "independent_snapshot": True,
+            "complete_paired_dates": 20, "valid_alpha_events": 100,
+            "input_manifest": {"input_sha256": "shadow-input"},
+        }
+        return {"experiment_id": result_id,
+                "content_sha256": content_sha256(content), "content": content}
+
+    @staticmethod
+    def _release_evidence(experiment_id, validation, holdout, shadow, consumption):
+        return {
+            "schema_version": "evolution-release-evidence/v2",
+            "experiment_id": experiment_id,
+            "validation_result_id": validation["experiment_id"],
+            "holdout_result_id": holdout["experiment_id"],
+            "shadow_result_id": shadow["experiment_id"],
+            "contract_id": "contract-1",
+            "validation_result": validation,
+            "holdout_result": holdout,
+            "shadow_result": shadow,
+            "holdout_consumption": consumption,
+        }
+
+    def test_bare_evidence_cannot_reach_eligible(self):
+        registered = register_experiment(default_experiment(), tempfile.mkdtemp())
+        record = {
+            "experiment_id": registered["experiment_id"],
+            "content": {
+                "schema_version": "evolution-registry/v2",
+                "definition": default_experiment(),
+                "state": "shadow", "history": [],
+            },
+        }
+        with self.assertRaises(ValueError):
+            transition(record, "eligible", {"result": "ok"})
+
+    def test_legacy_registered_schema_cannot_reach_eligible(self):
+        record = {
+            "experiment_id": "legacy1",
+            "content": {
+                "schema_version": "evolution-registry/v1",
+                "definition": default_experiment(),
+                "state": "shadow", "history": [],
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "legacy_experiment_unverified"):
+            transition(record, "eligible", {"result": "ok"})
+
+    def test_holdout_consumption_is_idempotent_but_parameter_changes_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = register_holdout_consumption(
+                "experiment-1", "batch-1", "input-1", "result-1",
+                {"bonus": {"strict_level_1": 0}}, root,
+            )
+            again = register_holdout_consumption(
+                "experiment-1", "batch-1", "input-1", "result-1",
+                {"bonus": {"strict_level_1": 0}}, root,
+            )
+            self.assertEqual(first["status"], "created")
+            self.assertEqual(again["status"], "unchanged")
+            self.assertEqual(first["consumption_id"], again["consumption_id"])
+            with self.assertRaises(ValueError):
+                register_holdout_consumption(
+                    "experiment-1", "batch-1", "input-1", "result-2",
+                    {"bonus": {"strict_level_1": 1}}, root,
+                )
+            attempts = list((Path(root) / "holdout_consumption" / "experiment-1"
+                             / "attempts").glob("*.json"))
+            self.assertEqual(len(attempts), 1)
 
     def test_weekly_dry_run_is_offline_and_idempotent_shape(self):
         with tempfile.TemporaryDirectory() as root:

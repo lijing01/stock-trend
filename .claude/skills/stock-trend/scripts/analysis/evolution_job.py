@@ -59,6 +59,21 @@ def _package(kind, content):
     return {"job_id": content_sha256(body)[:16], "content_sha256": content_sha256(body), "content": body}
 
 
+def _load_publish_evidence(value):
+    """Load structured v2 release evidence from a JSON file or JSON argument."""
+    candidate = Path(str(value or ""))
+    if candidate.is_file():
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    else:
+        try:
+            payload = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("publish_evidence_json_required") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("publish_evidence_object_required")
+    return payload
+
+
 def _formal_preflight(as_of, history_root):
     path = Path(history_root) / f"{as_of}.json"
     if not path.exists(): return {"ready": False, "reason": "formal_snapshot_missing", "path": str(path)}
@@ -165,7 +180,11 @@ def run_weekly(as_of, research_root=DEFAULT_RESEARCH_ROOT,
             content["experiment"]["persistence"] = save_experiment(experiment)
             if experiment["content"]["status"] == "validated" and registered["content"].get("state") == "draft":
                 content["experiment"]["registry"] = transition_experiment(
-                    experiment_id, "validated", {"result_id": experiment["experiment_id"], "as_of": as_of})
+                    experiment_id, "validated", {
+                        "validation_result_id": experiment["experiment_id"],
+                        "validation_result": experiment,
+                        "as_of": as_of,
+                    })
     return _package("weekly", content)
 
 
@@ -229,7 +248,7 @@ def main(argv=None):
             run = _package("publish", {"status": "dry_run", "experiment_id": args.experiment_id,
                                         "registry_state": record["content"].get("state")})
         else:
-            run = publish_experiment(args.experiment_id, {"summary": args.evidence})
+            run = publish_experiment(args.experiment_id, _load_publish_evidence(args.evidence))
     else:
         if args.dry_run:
             run = _package("rollback", {"status": "dry_run", "active_policy": load_active_policy()})
