@@ -61,8 +61,12 @@ def _package(kind, content):
 
 def _load_publish_evidence(value):
     """Load structured v2 release evidence from a JSON file or JSON argument."""
-    candidate = Path(str(value or ""))
-    if candidate.is_file():
+    try:
+        candidate = Path(str(value or ""))
+        is_file = candidate.is_file()
+    except (OSError, ValueError):
+        candidate, is_file = None, False
+    if is_file:
         payload = json.loads(candidate.read_text(encoding="utf-8"))
     else:
         try:

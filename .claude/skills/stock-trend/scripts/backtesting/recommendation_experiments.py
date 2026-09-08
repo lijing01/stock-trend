@@ -793,6 +793,7 @@ def run_walk_forward(research_snapshots, candidate_signal_items, definition=None
     content.update({
         "status": status, "partitions": partition_result,
         "oos_blocks": blocks, "validation_partition_dates": validation_partition_dates,
+        "skipped_reasons": sorted(set(skipped)),
         "paired_dates": paired, "confirmation_60d_pairs": confirmation_pairs,
         "coverage": {"baseline_dates": baseline_coverage,
                       "treatment_dates": treatment_coverage,
