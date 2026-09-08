@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from analysis.evolution_job import run_close, run_weekly
+from analysis.evolution_job import monitoring_snapshot, run_close, run_weekly
 from backtesting.recommendation_experiments import _bootstrap, default_experiment
 from core.candidate_research_snapshot import build_research_snapshot, save_research_snapshot
 from core.evolution_registry import (load_active_policy, publish_experiment, register_experiment,
@@ -98,6 +98,63 @@ class T(unittest.TestCase):
             run = run_close("2026-09-07", history_root=root, dry_run=True,
                             tracker=lambda **_: self.fail("tracker must not run"))
         self.assertEqual(run["content"]["status"], "dry_run")
+
+    def test_monitor_uses_business_date_and_latest_retry_not_hash_filename(self):
+        with tempfile.TemporaryDirectory() as root:
+            close = Path(root, "jobs", "close")
+            close.mkdir(parents=True)
+            runs = [
+                ("zzzz", "2026-09-01", "2026-09-01T15:01:00+08:00", "failed"),
+                ("aaaa", "2026-09-01", "2026-09-01T15:02:00+08:00", "completed"),
+                ("yyyy", "2026-09-02", "2026-09-02T15:01:00+08:00", "completed"),
+                ("bbbb", "2026-09-03", "2026-09-03T15:01:00+08:00", "completed"),
+                ("xxxx", "2026-09-04", "2026-09-04T15:01:00+08:00", "completed"),
+                ("cccc", "2026-09-05", "2026-09-05T15:01:00+08:00", "completed"),
+            ]
+            for name, as_of, completed_at, status in runs:
+                Path(close, name + ".json").write_text(__import__("json").dumps({
+                    "content": {"kind": "close", "as_of": as_of,
+                                "completed_at": completed_at, "status": status}
+                }), encoding="utf-8")
+            result = monitoring_snapshot(
+                job_root=Path(root, "jobs"), attribution_root=Path(root, "evaluations"),
+                expected_trading_days=["2026-09-01", "2026-09-02", "2026-09-03",
+                                       "2026-09-04", "2026-09-05"],
+            )
+        self.assertEqual(result["content"]["data_failure_rate"], 0.0)
+        self.assertEqual(result["content"]["status"], "insufficient_data")
+        self.assertEqual(result["content"]["close_run_days"], 5)
+
+    def test_monitor_never_reports_healthy_without_tasks_or_mature_outcomes(self):
+        with tempfile.TemporaryDirectory() as root:
+            result = monitoring_snapshot(job_root=Path(root, "jobs"),
+                                         attribution_root=Path(root, "evaluations"),
+                                         expected_trading_days=[])
+        self.assertEqual(result["content"]["status"], "insufficient_data")
+        self.assertIn("close_runs_missing", result["content"]["insufficient_reasons"])
+        self.assertIn("mature_outcomes_missing", result["content"]["insufficient_reasons"])
+
+    def test_monitor_contract_failure_falls_back_once_without_touching_formal_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            jobs, releases, history = Path(root, "jobs", "close"), Path(root, "releases"), Path(root, "history")
+            jobs.mkdir(parents=True); releases.mkdir(); history.mkdir()
+            formal = history / "2026-09-01.json"; formal.write_text('{"formal":"unchanged"}', encoding="utf-8")
+            pointer = {"experiment_id": "experiment-1", "definition": self._frozen_definition(),
+                       "previous_experiment_id": "baseline",
+                       "previous_definition": {"strict_level_1": 1, "strict_level_2": 3,
+                                               "strict_level_3": 2}}
+            (releases / "active_policy.json").write_text(__import__("json").dumps(pointer), encoding="utf-8")
+            Path(jobs, "contract-error.json").write_text(__import__("json").dumps({"content": {
+                "kind": "close", "as_of": "2026-09-01", "completed_at": "2026-09-01T15:00:00+08:00",
+                "status": "failed", "failure_class": "contract"}}), encoding="utf-8")
+            first = monitoring_snapshot(job_root=Path(root, "jobs"), attribution_root=Path(root, "evaluations"),
+                                        release_root=releases, expected_trading_days=["2026-09-01"])
+            second = monitoring_snapshot(job_root=Path(root, "jobs"), attribution_root=Path(root, "evaluations"),
+                                         release_root=releases, expected_trading_days=["2026-09-01"])
+            self.assertEqual(formal.read_text(encoding="utf-8"), '{"formal":"unchanged"}')
+        self.assertEqual(first["content"]["status"], "fallback_required")
+        self.assertEqual(first["content"]["fallback"]["status"], "recovered")
+        self.assertEqual(second["content"]["fallback"]["status"], "already_baseline")
 
     def test_explicit_publish_and_rollback_keep_old_records_untouched(self):
         with tempfile.TemporaryDirectory() as root:
@@ -560,6 +617,25 @@ class T(unittest.TestCase):
                              attribution_root=Path(root) / "evaluations", dry_run=True)
         self.assertEqual(run["content"]["input"]["research_snapshots"], 1)
         self.assertEqual(run["content"]["as_of"], "2026-09-07")
+
+    def test_cold_start_offline_loop_stops_before_release_and_monitor_is_explicitly_insufficient(self):
+        with tempfile.TemporaryDirectory() as root:
+            research_root = Path(root) / "research"
+            save_research_snapshot(self._research("2026-09-01", "A"), research_root)
+            weekly = run_weekly(
+                "2026-09-01", research_root=research_root,
+                attribution_root=Path(root) / "evaluations",
+                diagnostics_root=Path(root) / "diagnostics",
+                proposal_root=Path(root) / "proposals",
+            )
+            monitor = monitoring_snapshot(
+                job_root=Path(root) / "jobs", attribution_root=Path(root) / "evaluations",
+                expected_trading_days=["2026-09-01"], as_of="2026-09-01",
+                release_root=Path(root) / "releases",
+            )
+            self.assertEqual(weekly["content"]["status"], "completed")
+            self.assertEqual(monitor["content"]["status"], "insufficient_data")
+            self.assertFalse((Path(root) / "releases" / "active_policy.json").exists())
 
 
 def run_evolution_job_tests():
