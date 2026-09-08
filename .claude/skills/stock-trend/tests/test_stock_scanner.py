@@ -1046,11 +1046,33 @@ class TestSectorConstituentFallback(unittest.TestCase):
                 stocks = sd.get_sector_stocks("BK0001")
 
         self.assertEqual(stocks[0]["membership_source"], "cache")
-        self.assertEqual(stocks[0]["membership_quality"], "degraded")
+        self.assertEqual(stocks[0]["membership_quality"], "same_day_verified")
         self.assertTrue(stocks[0]["membership_data_date"])
         self.assertEqual(
             stocks[0]["membership_fallback_reason"], "dns")
         self.assertIn("membership_cache_age_hours", stocks[0])
+
+    def test_same_day_sector_cache_is_verified_after_transient_live_failure(self):
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 6, 16, 0, 0)
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+                patch.object(sd, "datetime", FrozenDateTime), \
+                patch.object(sd, "_fetch_json",
+                             side_effect=RuntimeError("dns")):
+            sd.save_sector_stocks_cache(
+                "BK0001", [{"code": "600001", "name": "测试"}],
+                data_date="2026-08-06", provider="eastmoney")
+            stocks = sd.get_sector_stocks("BK0001", with_evidence=True)
+
+        self.assertEqual(
+            stocks["payload"][0]["membership_quality"],
+            "same_day_verified",
+        )
+        self.assertEqual(stocks["payload"][0]["membership_source"], "cache")
 
     def test_empty_live_sector_stocks_fall_back_to_snapshot(self):
         empty_payload = {"rc": 0, "data": {"diff": []}}
@@ -1740,6 +1762,21 @@ class TestRunPhase2Funnel(unittest.TestCase):
             result[0]["quality_adjusted_score"],
             result[0]["raw_composite_score"],
         )
+
+    def test_same_day_verified_sector_cache_remains_candidate_eligible(self):
+        quality = sc.apply_membership_quality(
+            {"eligible": True, "reasons": [], "freshness_factor": 1.0},
+            {
+                "membership_source": "cache",
+                "membership_quality": "same_day_verified",
+                "membership_data_date": "2026-08-06",
+            },
+            as_of_date="2026-08-06",
+        )
+
+        self.assertTrue(quality["eligible"])
+        self.assertEqual(quality["freshness_factor"], 1.0)
+        self.assertNotIn("sector_membership_stale", quality["reasons"])
 
     def test_cached_sector_membership_is_observation_only(self):
         candidate = _make_candidate("600001")

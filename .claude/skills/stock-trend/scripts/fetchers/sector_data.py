@@ -528,11 +528,24 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
         return []
     fetched_at = cached.get("fetched_at") or cached.get("cached_at", "")
     cache_metadata = _sector_cache_metadata(fetched_at)
+    data_date = str(cached.get("data_date") or fetched_at)[:10]
+    trusted_fallback = fallback_reason in {
+        "dns", "timeout", "connection_error", "proxy_error", "http",
+        "cache_only",
+    } or fallback_reason.startswith("cache_only_")
+    cache_quality = (
+        "same_day_verified"
+        if cached.get("provider") == "eastmoney"
+        and cache_metadata.get("tier") == "same_day"
+        and data_date == datetime.now().strftime("%Y-%m-%d")
+        and trusted_fallback
+        else "degraded"
+    )
     return _tag_sector_stocks(
         cached["stocks"],
         source="cache",
-        data_date=str(cached.get("data_date") or fetched_at)[:10],
-        quality="degraded",
+        data_date=data_date,
+        quality=cache_quality,
         cache_metadata=cache_metadata,
         fallback_reason=fallback_reason,
         provider_attempts=provider_attempts,

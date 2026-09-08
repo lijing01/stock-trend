@@ -1828,8 +1828,15 @@ def apply_membership_quality(base_quality, membership, as_of_date=""):
     membership_quality = membership.get("membership_quality", "good")
     cache_error = membership.get("membership_cache_error", "")
     date_mismatch = bool(as_of_date and data_date != as_of_date)
-    if source != "realtime" or membership_quality != "good" \
-            or date_mismatch:
+    same_day_verified_cache = (
+        source == "cache"
+        and membership_quality == "same_day_verified"
+        and not cache_error
+        and not date_mismatch
+    )
+    if not same_day_verified_cache and (
+            source != "realtime" or membership_quality != "good"
+            or date_mismatch):
         quality["eligible"] = False
         if cache_error:
             reason = "sector_membership_cache_write_failed"

@@ -1851,6 +1851,39 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(picked[0]["ranking_data_date"], "2026-08-06")
         self.assertEqual(picked[0]["ranking_quality"], "degraded")
 
+    def test_pick_hot_sectors_verifies_complete_same_day_ranking_cache(self):
+        row = {
+            "code": "BK1", "name": "同日缓存板块", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        cached = {
+            "cached_at": "2026-08-06T15:10:00",
+            "data_date": "2026-08-06",
+            "rankings": {
+                "meta": {
+                    "complete": True, "provider": "eastmoney",
+                    "total_sectors": 1,
+                },
+                "sectors": [row],
+            },
+        }
+        history = {
+            date: [{"code": "BK1", "hot_score": 70,
+                    "net_flow": 1e8}]
+            for date in ("2026-08-04", "2026-08-05", "2026-08-06")
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value={
+                       "meta": {"total_sectors": 0}, "sectors": []}), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value=history):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-08-06")
+
+        self.assertEqual(picked[0]["ranking_quality"], "same_day_verified")
+
     def test_stale_rankings_cache_is_observation_only(self):
         row = {
             "code": "BK1", "name": "过期缓存板块", "change_pct": 2.0,

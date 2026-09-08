@@ -1502,13 +1502,21 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             if isinstance(source_health, RunSourceHealth):
                 source_health.record_cache_hit(
                     "sector_ranking", stale=True, reason="cache_only")
+            cached_meta = cached_rankings.get("meta", {})
+            same_day_verified = (
+                cached.get("data_date", "") == as_of_date
+                and cached_meta.get("complete") is True
+                and cached_meta.get("provider") == "eastmoney"
+            )
             ranking_meta = {
                 "source": "cache",
-                "provider": cached_rankings.get("meta", {}).get("provider")
+                "provider": cached_meta.get("provider")
                 or ("ths" if cached_rankings.get("meta", {}).get(
                     "source") == "akshare" else "eastmoney"),
                 "data_date": cached.get("data_date", ""),
-                "quality": "degraded",
+                "quality": (
+                    "same_day_verified" if same_day_verified else "degraded"
+                ),
                 "errors": live_meta.get("errors", [])
                 or live_meta.get("upstream_errors", []),
             }
