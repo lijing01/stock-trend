@@ -79,6 +79,57 @@ def _source_time_status(known_at, captured_at):
     return "unknown"
 
 
+def _finite_number(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value == value and abs(value) != float("inf") else None
+
+
+def _preselection_contract(candidate, min_score):
+    """Freeze the selector inputs required for deterministic experiment replay."""
+    composite = _finite_number(candidate.get("composite_score"))
+    quality = _finite_number(candidate.get("quality_adjusted_score"))
+    quality_payload = candidate.get("data_quality")
+    data_quality_eligible = (
+        quality_payload.get("eligible")
+        if isinstance(quality_payload, dict) else None
+    )
+    sector_actionable = candidate.get("sector_actionable")
+    score_eligible = (
+        quality is not None and _finite_number(min_score) is not None
+        and quality >= float(min_score)
+    ) if isinstance(data_quality_eligible, bool) else None
+    qualification_status = "unknown"
+    if (isinstance(data_quality_eligible, bool)
+            and isinstance(sector_actionable, bool)
+            and isinstance(score_eligible, bool)):
+        qualification_status = (
+            "eligible" if data_quality_eligible and sector_actionable and score_eligible
+            else "ineligible"
+        )
+    # Keep the hierarchy explicit even when the scanner did not expose a
+    # richer phase label.  ``unknown`` is intentionally replay-ineligible.
+    hierarchy = {
+        "phase": candidate.get("selection_phase")
+        or candidate.get("phase") or "unknown",
+        "layer": candidate.get("selection_layer")
+        or candidate.get("layer") or "unknown",
+        "source": candidate.get("ranking_source") or "unknown",
+    }
+    return {
+        "composite_score": composite,
+        "quality_adjusted_score": quality,
+        "data_quality_eligible": data_quality_eligible,
+        "sector_actionable": sector_actionable,
+        "score_eligible": score_eligible,
+        "qualification_status": qualification_status,
+        "hierarchy": hierarchy,
+        "min_score": _finite_number(min_score),
+    }
+
+
 def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
                             policy, market_regime, sector_codes, min_score,
                             official_tracking=None, known_at=None,
@@ -97,6 +148,7 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
         record_known_at = known_at if known_at is not None else candidate.get("known_at")
         record_captured_at = captured_at if captured_at is not None else candidate.get("captured_at")
         bucket = by_code.get(code)
+        preselection = _preselection_contract(candidate, min_score)
         records.append({
             "record_id": f"{recommendation_date}:{market}:{code}",
             "code": code,
@@ -109,6 +161,14 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
             "selection_status": "selected" if bucket else "not_selected",
             "final_status": bucket or item.get("research_terminal_status") or "not_selected",
             "selection_reason": _selection_reason(candidate, bucket, min_score),
+            # Frozen selector inputs are separate from the mutable candidate
+            # payload so replay can reject unknown/contradictory fields.
+            "preselection": preselection,
+            "selection_hierarchy": copy.deepcopy(preselection["hierarchy"]),
+            "selection_parameters": {
+                "top": (parameter_summary or {}).get("top"),
+                "min_score": preselection["min_score"],
+            },
             "scores": {
                 "raw_composite_score": candidate.get("raw_composite_score"),
                 "composite_score": candidate.get("composite_score"),

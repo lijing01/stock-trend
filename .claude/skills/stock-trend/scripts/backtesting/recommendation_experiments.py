@@ -6,6 +6,7 @@ import math
 import random
 import sys
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -16,17 +17,29 @@ from core.recommendation_snapshot import canonical_json, content_sha256
 from core.evolution_registry import validate_experiment_definition
 from core.evolution_storage import input_manifest, storage_root
 from core.research_events import assign_research_events, summarize_daily_alpha
+from scans.daily_candidates import classify_candidates, select_candidate_pool
 
-SCHEMA_VERSION = "recommendation-experiment/v1"
+SCHEMA_VERSION = "recommendation-experiment/v2"
 DEFAULT_ROOT = storage_root("experiments")
 PRIMARY_WINDOW = 20
+CONFIRMATION_WINDOW = 60
+PURGE_SESSIONS = CONFIRMATION_WINDOW
+VALIDATION_BLOCK_NAMES = ("validation_1", "validation_2", "validation_3")
 FROZEN_BASELINE = {"strict_level_1": 1, "strict_level_2": 3, "strict_level_3": 2}
 ZERO_TREATMENT = {"strict_level_1": 0, "strict_level_2": 0, "strict_level_3": 0}
 
 
 def default_experiment():
     return {"kind": "buy_point_priority_bonus", "baseline": FROZEN_BASELINE,
-            "treatment": ZERO_TREATMENT, "changes": ["within_bucket_ranking"]}
+            "treatment": ZERO_TREATMENT, "changes": ["within_bucket_ranking"],
+            "schema_version": "recommendation-experiment-definition/v2",
+            "primary_window": PRIMARY_WINDOW,
+            "confirmation_window": CONFIRMATION_WINDOW,
+            "purge_sessions": PURGE_SESSIONS,
+            "bootstrap": {"method": "moving_trading_session_block_bootstrap",
+                          "block_length": PRIMARY_WINDOW, "seed": 20260907,
+                          "draws": 2000, "confidence": 0.95,
+                          "cross_partition_blocks": False}}
 
 
 def _number(value):
@@ -35,6 +48,28 @@ def _number(value):
     try:
         value = float(value); return value if math.isfinite(value) else None
     except (TypeError, ValueError): return None
+
+
+def _normalise_day(value):
+    if isinstance(value, date):
+        return value.isoformat()
+    text = str(value or "").strip()
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    try:
+        return date.fromisoformat(text[:10]).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_sessions(values):
+    result = []
+    for value in values or []:
+        day = _normalise_day(value)
+        if day is None:
+            return None
+        result.append(day)
+    return sorted(set(result))
 
 
 def _outcomes(items):
@@ -56,26 +91,195 @@ def _eligible(record):
             and not candidate.get("research_terminal_status"))
 
 
-def _replay_date(records, bonuses, limit):
-    """Re-rank frozen eligible inputs only; never relax an eligibility gate."""
-    rows = []
-    for record in records:
-        if not _eligible(record): continue
-        candidate = record.get("candidate") or {}; level = str((record.get("scores") or {}).get("buy_point_level") or candidate.get("buy_point_level") or "")
-        quality = _number((record.get("scores") or {}).get("quality_adjusted_score"))
-        if quality is None: quality = _number(candidate.get("quality_adjusted_score"))
-        if quality is None: continue
-        rows.append((min(100.0, quality + float(bonuses.get(level, 0))), str(record.get("code")), record))
-    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
-    return [row[2] for row in rows[:limit]]
+def _empty_buckets():
+    return {name: [] for name in (
+        "actionable", "waiting_trigger", "next_day_confirmation",
+        "observation", "data_rejected",
+    )}
 
 
-def _bootstrap(deltas, seed=20260907, draws=2000):
-    if not deltas: return None
-    rng = random.Random(seed); values = list(deltas); means = []
-    for _ in range(draws): means.append(sum(rng.choice(values) for _ in values) / len(values))
-    means.sort(); return {"method": "date_block_bootstrap", "seed": seed, "draws": draws,
-                          "lower_95": means[int(.025 * (draws - 1))], "upper_95": means[int(.975 * (draws - 1))]}
+def _frozen_replay_candidate(record):
+    """Validate and detach one research row before production replay.
+
+    Research snapshots are input archives, not a second implementation of
+    candidate ranking.  The preselection envelope records the values needed by
+    ``select_candidate_pool``; an unknown value makes the date ineligible for
+    replay instead of silently dropping the row.
+    """
+    if not isinstance(record, dict):
+        return None, "replay_input_missing_record"
+    candidate = record.get("candidate")
+    preselection = record.get("preselection")
+    if not isinstance(candidate, dict) or not candidate.get("code"):
+        return None, "replay_input_missing_candidate"
+    if not isinstance(preselection, dict):
+        return None, "replay_input_missing_preselection"
+    required = (
+        "composite_score", "quality_adjusted_score", "data_quality_eligible",
+        "sector_actionable", "score_eligible", "qualification_status",
+    )
+    if any(key not in preselection for key in required):
+        return None, "replay_input_missing_preselection"
+    if preselection.get("qualification_status") not in ("eligible", "ineligible"):
+        return None, "replay_input_qualification_unknown"
+    if any(not isinstance(preselection.get(key), bool)
+           for key in ("data_quality_eligible", "sector_actionable", "score_eligible")):
+        return None, "replay_input_qualification_unknown"
+    composite = _number(preselection.get("composite_score"))
+    quality = _number(preselection.get("quality_adjusted_score"))
+    if composite is None or quality is None:
+        return None, "replay_input_damaged_score"
+    frozen = copy.deepcopy(candidate)
+    frozen_code = str(frozen.get("code") or "")
+    if frozen_code != str(record.get("code") or frozen_code):
+        return None, "replay_input_identity_mismatch"
+    # These are the exact hard-gate inputs used by the production selector.
+    frozen["composite_score"] = composite
+    frozen["quality_adjusted_score"] = quality
+    frozen["sector_actionable"] = preselection["sector_actionable"]
+    frozen["score_eligible"] = preselection["score_eligible"]
+    quality_payload = frozen.get("data_quality")
+    if not isinstance(quality_payload, dict):
+        quality_payload = {}
+        frozen["data_quality"] = quality_payload
+    existing_quality = quality_payload.get("eligible")
+    if existing_quality is not None and existing_quality is not preselection["data_quality_eligible"]:
+        return None, "replay_input_qualification_conflict"
+    quality_payload["eligible"] = preselection["data_quality_eligible"]
+    # Keep a stable link for diagnostics without exposing it to the selector.
+    frozen["_research_record_id"] = str(record.get("record_id") or "")
+    return frozen, None
+
+
+def _replay_selection(records, bonuses, limit, min_score=50, policy=None):
+    """Replay the production selector and classifier on frozen research rows."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return {"status": "rejected", "selected": [], "buckets": _empty_buckets(),
+                "reasons": ["replay_input_missing_top"]}
+    if _number(min_score) is None:
+        return {"status": "rejected", "selected": [], "buckets": _empty_buckets(),
+                "reasons": ["replay_input_missing_min_score"]}
+    if not isinstance(bonuses, dict):
+        return {"status": "rejected", "selected": [], "buckets": _empty_buckets(),
+                "reasons": ["replay_input_missing_priority_bonuses"]}
+    frozen, reasons, seen = [], [], set()
+    for record in records or []:
+        candidate, reason = _frozen_replay_candidate(record)
+        if reason:
+            reasons.append(reason)
+            continue
+        code = str(candidate.get("code"))
+        if code in seen:
+            reasons.append("replay_input_duplicate_code")
+            continue
+        seen.add(code)
+        frozen.append(candidate)
+    if reasons:
+        return {"status": "rejected", "selected": [], "buckets": _empty_buckets(),
+                "reasons": sorted(set(reasons))}
+    frozen_policy = copy.deepcopy(policy) if isinstance(policy, dict) else {}
+    selected = select_candidate_pool(
+        frozen, limit, float(min_score), policy=frozen_policy,
+        priority_bonuses=copy.deepcopy(bonuses),
+    )
+    buckets = classify_candidates(selected, frozen_policy)
+    return {"status": "ok", "selected": selected, "buckets": buckets,
+            "reasons": [], "input_count": len(frozen)}
+
+
+def _replay_date(records, bonuses, limit, min_score=50, policy=None):
+    """Compatibility wrapper returning only the production-selected rows."""
+    result = _replay_selection(records, bonuses, limit, min_score, policy)
+    return result["selected"] if result["status"] == "ok" else []
+
+
+def _bootstrap(deltas, seed=20260907, draws=2000, block_length=PRIMARY_WINDOW,
+               dates=None, partitions=None):
+    """Estimate a date-level effect with moving trading-session blocks.
+
+    ``deltas`` is ordered by trading date.  A block is valid only when its
+    indices are adjacent in the supplied date order and belong to one
+    partition.  Keeping the sampled indices in the result makes the sampling
+    contract auditable and allows deterministic replay from ``seed``.
+    """
+    values = []
+    for value in deltas or []:
+        number = _number(value)
+        if number is None:
+            return {"method": "moving_trading_session_block_bootstrap",
+                    "status": "invalid_input", "seed": seed,
+                    "draws": draws, "block_length": block_length,
+                    "valid_block_count": 0, "valid_blocks": [],
+                    "sample_indices": [], "lower_95": None,
+                    "upper_95": None}
+        values.append(number)
+    if not values:
+        return None
+    if isinstance(block_length, bool) or not isinstance(block_length, int) \
+            or block_length < 1:
+        return {"method": "moving_trading_session_block_bootstrap",
+                "status": "invalid_input", "seed": seed, "draws": draws,
+                "block_length": block_length, "valid_block_count": 0,
+                "valid_blocks": [], "sample_indices": [],
+                "lower_95": None, "upper_95": None}
+    ordered_dates = [_normalise_day(value) for value in (dates or [])]
+    if dates is not None and (len(ordered_dates) != len(values)
+                              or any(day is None for day in ordered_dates)):
+        return {"method": "moving_trading_session_block_bootstrap",
+                "status": "invalid_input", "seed": seed, "draws": draws,
+                "block_length": block_length, "valid_block_count": 0,
+                "valid_blocks": [], "sample_indices": [],
+                "lower_95": None, "upper_95": None}
+    if dates is None:
+        ordered_dates = [str(index) for index in range(len(values))]
+
+    partition_by_day = {}
+    if isinstance(partitions, dict):
+        for name, raw in partitions.items():
+            if isinstance(raw, dict):
+                raw = raw.get("dates") or raw.get("sessions") or []
+            for value in raw or []:
+                day = _normalise_day(value)
+                if day is not None:
+                    partition_by_day[day] = str(name)
+    valid_blocks = []
+    for start in range(0, len(values) - block_length + 1):
+        block = list(range(start, start + block_length))
+        labels = {partition_by_day.get(ordered_dates[index], "default")
+                  for index in block}
+        if len(labels) == 1:
+            valid_blocks.append(block)
+    contract = {"method": "moving_trading_session_block_bootstrap",
+                "status": "ready" if len(valid_blocks) >= 2 else "insufficient_data",
+                "seed": seed, "draws": draws, "block_length": block_length,
+                "confidence": 0.95, "cross_partition_blocks": False,
+                "valid_block_count": len(valid_blocks),
+                "valid_blocks": valid_blocks, "sample_indices": [],
+                "lower_95": None, "upper_95": None}
+    if len(valid_blocks) < 2:
+        return contract
+    try:
+        draw_count = int(draws)
+    except (TypeError, ValueError):
+        draw_count = 0
+    if draw_count < 1:
+        contract["status"] = "invalid_input"
+        return contract
+    rng = random.Random(seed)
+    means = []
+    target_size = len(values)
+    blocks_needed = (target_size + block_length - 1) // block_length
+    for _ in range(draw_count):
+        indices = []
+        for _block in range(blocks_needed):
+            indices.extend(rng.choice(valid_blocks))
+        indices = indices[:target_size]
+        contract["sample_indices"].append(indices)
+        means.append(sum(values[index] for index in indices) / target_size)
+    means.sort()
+    contract["lower_95"] = means[int(.025 * (draw_count - 1))]
+    contract["upper_95"] = means[int(.975 * (draw_count - 1))]
+    return contract
 
 
 def _percentile(values, q):
@@ -84,9 +288,9 @@ def _percentile(values, q):
     return values[max(0, min(len(values) - 1, int(q * (len(values) - 1))))]
 
 
-def _split_dates(dates, max_window=PRIMARY_WINDOW):
-    """Three ordered OOS blocks; leave one max-window-sized purge gap."""
-    ordered = sorted(set(dates)); gap = int(max_window)
+def _split_dates(dates, max_window=PURGE_SESSIONS, sessions=None):
+    """Legacy fallback splitter used only for diagnostics and old fixtures."""
+    ordered = sorted(set(sessions or dates)); gap = int(max_window)
     usable = len(ordered) - 2 * gap
     if usable < 3: return None
     step = usable // 3
@@ -99,96 +303,401 @@ def _split_dates(dates, max_window=PRIMARY_WINDOW):
     return blocks
 
 
-def run_walk_forward(research_snapshots, candidate_signal_items, definition=None, top=None):
-    definition = validate_experiment_definition(definition or default_experiment())
-    by_date = defaultdict(list); skipped = []
+def _partition_interval(raw, sessions, name):
+    """Resolve one explicit partition interval to registered trading sessions."""
+    if isinstance(raw, (list, tuple)):
+        if len(raw) != 2:
+            return None, f"partition_{name}_invalid_interval"
+        start, end = raw
+        explicit_dates = None
+    elif isinstance(raw, dict):
+        explicit_dates = raw.get("dates") or raw.get("sessions")
+        start, end = raw.get("start"), raw.get("end")
+    else:
+        return None, f"partition_{name}_invalid_interval"
+    if explicit_dates is not None:
+        values = _normalise_sessions(explicit_dates)
+        if not values:
+            return None, f"partition_{name}_empty"
+        if sessions:
+            allowed = set(sessions)
+            if any(value not in allowed for value in values):
+                return None, f"partition_{name}_session_not_registered"
+        return values, None
+    start, end = _normalise_day(start), _normalise_day(end)
+    if start is None or end is None or start > end:
+        return None, f"partition_{name}_invalid_interval"
+    values = [day for day in sessions if start <= day <= end]
+    if not values:
+        return None, f"partition_{name}_empty"
+    return values, None
+
+
+def _resolve_time_partitions(definition, dates, sessions):
+    """Validate frozen discovery/validation/holdout partitions.
+
+    The caller must provide explicit partition boundaries.  ``dates`` are the
+    available frozen recommendation dates; ``sessions`` is the trading
+    calendar used to measure purge and label windows.
+    """
+    raw = (definition or {}).get("partitions")
+    if not isinstance(raw, dict):
+        return {"status": "invalid", "reason": "experiment_partitions_required"}
+    required = ("discovery", *VALIDATION_BLOCK_NAMES, "final_holdout")
+    # Accept a compact ``validation`` list while normalising it to named
+    # blocks in the result and in the content hash.
+    validation = raw.get("validation")
+    if validation is not None:
+        if not isinstance(validation, (list, tuple)) or len(validation) != 3:
+            return {"status": "invalid", "reason": "partition_validation_blocks_required"}
+        raw = dict(raw)
+        for name, value in zip(VALIDATION_BLOCK_NAMES, validation):
+            raw.setdefault(name, value)
+    if any(name not in raw for name in required):
+        return {"status": "invalid", "reason": "partition_definition_incomplete"}
+    sessions = _normalise_sessions(sessions)
+    if not sessions:
+        return {"status": "invalid", "reason": "trading_sessions_required"}
+    available = set(_normalise_sessions(dates or []))
+    resolved = {}
+    for name in required:
+        values, reason = _partition_interval(raw[name], sessions, name)
+        if reason:
+            return {"status": "invalid", "reason": reason}
+        resolved[name] = values
+    ordered = ["discovery", *VALIDATION_BLOCK_NAMES, "final_holdout"]
+    positions = {day: index for index, day in enumerate(sessions)}
+    previous_end = None
+    purge = int((definition or {}).get("purge_sessions") or PURGE_SESSIONS)
+    if purge < CONFIRMATION_WINDOW:
+        return {"status": "invalid", "reason": "purge_window_below_confirmation_window"}
+    for name in ordered:
+        values = resolved[name]
+        if any(day not in available for day in values):
+            # Explicit partitions may include an evaluation-only date with no
+            # recommendation; retain it for isolation but never infer data.
+            continue
+        first, last = positions[values[0]], positions[values[-1]]
+        if previous_end is not None and first - previous_end - 1 < purge:
+            return {"status": "invalid", "reason": "partition_purge_gap_insufficient"}
+        previous_end = last
+    freeze_at = _normalise_day((definition or {}).get("freeze_at")
+                               or (definition or {}).get("frozen_at"))
+    holdout_start = resolved["final_holdout"][0]
+    if freeze_at is None or freeze_at >= holdout_start:
+        return {"status": "invalid", "reason": "holdout_freeze_timestamp_required"}
+    return {
+        "status": "valid", "calendar_verified": True,
+        "purge_sessions": purge, "freeze_at": freeze_at,
+        "discovery": resolved["discovery"],
+        "validation": {name: resolved[name] for name in VALIDATION_BLOCK_NAMES},
+        "final_holdout": resolved["final_holdout"],
+        "all_dates": sorted(set(day for values in resolved.values() for day in values)),
+    }
+
+
+def _calendar_from_inputs(research_snapshots, candidate_signal_items, definition):
+    """Collect an explicit trading-session calendar from frozen inputs."""
+    candidates = []
+    definition = definition or {}
+    candidates.extend(definition.get("trading_sessions") or [])
+    calendar = definition.get("calendar") or {}
+    if isinstance(calendar, dict):
+        candidates.extend(calendar.get("sessions") or calendar.get("trading_sessions") or [])
     for snapshot in research_snapshots or []:
         content = snapshot.get("content", snapshot) if isinstance(snapshot, dict) else {}
-        if content.get("snapshot_type") != "formal" or (content.get("official_snapshot") or {}).get("link_status") != "linked": continue
-        limit = (content.get("parameter_summary") or {}).get("top") if top is None else top
-        if not isinstance(limit, int) or limit < 1:
-            skipped.append("replay_input_missing_top"); continue
+        candidates.extend(content.get("trading_sessions") or content.get("market_sessions") or [])
         for record in content.get("records") or []:
-            if not isinstance(record, dict) or not record.get("code") or not isinstance(record.get("candidate"), dict):
-                skipped.append("replay_input_missing_candidate"); continue
-            by_date[str(content.get("recommendation_date") or record.get("basis_date") or "")].append(record)
-    outcomes = _outcomes(candidate_signal_items); dates = sorted(day for day in by_date if day)
-    blocks = _split_dates(dates)
+            if isinstance(record, dict):
+                candidates.extend(record.get("market_sessions") or [])
+    for item in candidate_signal_items or []:
+        if isinstance(item, dict):
+            candidates.extend(item.get("market_sessions") or [])
+    sessions = _normalise_sessions(candidates)
+    return sessions or []
+
+
+def _outcome_window(outcome, window):
+    if not isinstance(outcome, dict):
+        return {}
+    windows = outcome.get("windows")
+    if isinstance(windows, dict):
+        return copy.deepcopy(windows.get(str(window)) or {})
+    return copy.deepcopy(outcome)
+
+
+def _research_record_date(content, record):
+    return _normalise_day(content.get("recommendation_date") or record.get("basis_date"))
+
+
+def _metrics_for_rows(rows, day, outcomes, block_end, window, side, skipped):
+    values, maes, missing, events, alpha_rows = [], [], [], [], []
+    for row in rows:
+        code = str(row.get("code") or "")
+        outcome = outcomes.get((day, code)) or {}
+        label = _outcome_window(outcome, window)
+        exit_date = _normalise_day(label.get("exit_date") or label.get("mark_date"))
+        if not exit_date:
+            missing.append({"code": code, "reason": "missing_label_end", "side": side})
+            continue
+        if block_end and exit_date > block_end:
+            skipped.append("label_crosses_oos_boundary")
+            missing.append({"code": code, "reason": "label_crosses_oos_boundary", "side": side})
+            continue
+        alpha = _number(label.get("hs300_alpha"))
+        mae = _number(label.get("mae"))
+        if label.get("status") != "complete" or alpha is None:
+            missing.append({"code": code, "reason": label.get("status") or "missing_alpha", "side": side})
+            continue
+        values.append(alpha)
+        alpha_rows.append({"recommendation_date": day, "code": code,
+                           "hs300_alpha": alpha, "evaluation_status": "complete"})
+        if mae is not None:
+            maes.append(mae)
+        entry_date = _normalise_day(label.get("entry_date"))
+        if entry_date and exit_date:
+            events.append({
+                "record_id": outcome.get("_record_id") or f"{day}:default:{code}",
+                "market": outcome.get("market") or "default", "code": code,
+                "entry_date": entry_date, "exit_date": exit_date,
+                "recommendation_date": day,
+                "market_sessions": outcome.get("_market_sessions"),
+            })
+    return {
+        "mean": sum(values) / len(values) if values else None,
+        "maes": maes, "missing": missing, "events": events,
+        "alpha_rows": alpha_rows, "complete": not missing and bool(rows),
+    }
+
+
+def run_walk_forward(research_snapshots, candidate_signal_items, definition=None, top=None):
+    definition = validate_experiment_definition(definition or default_experiment())
+    by_date, metadata, skipped = defaultdict(list), {}, []
+    for snapshot in research_snapshots or []:
+        content = snapshot.get("content", snapshot) if isinstance(snapshot, dict) else {}
+        if content.get("snapshot_type") != "formal" or (content.get("official_snapshot") or {}).get("link_status") != "linked":
+            continue
+        day = _normalise_day(content.get("recommendation_date"))
+        if day is None:
+            skipped.append("replay_input_invalid_recommendation_date")
+            continue
+        parameters = content.get("parameter_summary") or {}
+        limit = parameters.get("top") if top is None else top
+        min_score = parameters.get("min_score", 50)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            skipped.append("replay_input_missing_top")
+            continue
+        if _number(min_score) is None:
+            skipped.append("replay_input_missing_min_score")
+            continue
+        policy = content.get("policy")
+        if not isinstance(policy, dict):
+            policy = {"mode": "actionable", "max_recommendations": limit}
+        metadata[day] = {"top": limit, "min_score": float(min_score),
+                         "policy": copy.deepcopy(policy)}
+        for record in content.get("records") or []:
+            if not isinstance(record, dict):
+                skipped.append("replay_input_missing_record")
+                continue
+            if _research_record_date(content, record) != day:
+                skipped.append("replay_input_date_mismatch")
+                continue
+            by_date[day].append(record)
+    outcomes = _outcomes(candidate_signal_items)
+    dates = sorted(day for day in by_date if day)
+    sessions = _calendar_from_inputs(research_snapshots, candidate_signal_items, definition)
+    # A real experiment must carry an explicit calendar.  Keep a date-ordered
+    # fallback only for audit output; it can never satisfy a promotion gate.
+    calendar_verified = bool(sessions)
+    if not sessions:
+        sessions = dates
+        skipped.append("trading_sessions_required")
+    partition_result = _resolve_time_partitions(definition, dates, sessions)
     content = {"schema_version": SCHEMA_VERSION, "definition": definition,
-               "primary_window": PRIMARY_WINDOW, "purge_sessions": PRIMARY_WINDOW,
+               "primary_window": PRIMARY_WINDOW, "confirmation_window": CONFIRMATION_WINDOW,
+               "purge_sessions": PURGE_SESSIONS, "calendar_verified": calendar_verified,
                "input_dates": dates, "skipped_reasons": sorted(set(skipped)),
                "input_manifest": input_manifest(
                    research_run_ids=sorted(str((item or {}).get("run_id") or "") for item in research_snapshots or []),
                    research_content_sha256=sorted(str((item or {}).get("content_sha256") or "") for item in research_snapshots or []),
                    candidate_signal_items=candidate_signal_items or [],
-                   definition=definition,
-                   primary_window=PRIMARY_WINDOW,
+                   definition=definition, primary_window=PRIMARY_WINDOW,
+                   confirmation_window=CONFIRMATION_WINDOW,
+                   trading_sessions=sessions,
                )}
-    if not blocks:
-        content.update({"status": "continue_accumulating", "reason": "insufficient_time_span_for_three_purged_oos_blocks"})
+    if partition_result.get("status") != "valid":
+        reason = partition_result.get("reason", "partition_definition_invalid")
+        if not dates:
+            reason += ":insufficient_time_span_for_three_purged_oos_blocks"
+        content.update({"status": "continue_accumulating",
+                        "reason": reason, "partition_status": partition_result,
+                        "promotion": {"eligible": False, "gates": {
+                            "calendar_verified": calendar_verified,
+                            "partition_contract": False},
+                            "reason": "frozen_p3_promotion_gates"}})
         return _package(content)
+    blocks = []
+    for name in VALIDATION_BLOCK_NAMES:
+        available = [day for day in partition_result["validation"][name] if day in by_date]
+        blocks.append(available)
+    if any(len(block) < 1 for block in blocks):
+        content.update({"status": "continue_accumulating",
+                        "reason": "validation_block_insufficient_data",
+                        "partitions": partition_result, "oos_blocks": blocks,
+                        "promotion": {"eligible": False, "gates": {
+                            "calendar_verified": calendar_verified,
+                            "partition_contract": True,
+                            "three_oos_blocks": False},
+                            "reason": "frozen_p3_promotion_gates"}})
+        return _package(content)
+
     paired, coverage, baseline_maes, treatment_maes = [], [], [], []
-    mature_event_records = []
-    daily_alpha_rows = []
+    baseline_events, treatment_events = [], []
+    confirmation_pairs, confirmation_baseline_events, confirmation_treatment_events = [], [], []
+    baseline_daily_rows, treatment_daily_rows = [], []
+    replay_rejections = []
+    partition_order = [*VALIDATION_BLOCK_NAMES, "final_holdout"]
+    session_positions = {day: index for index, day in enumerate(sessions)}
+    label_limits = {}
+    for index, name in enumerate(VALIDATION_BLOCK_NAMES):
+        next_name = partition_order[index + 1]
+        next_values = (partition_result["final_holdout"] if next_name == "final_holdout"
+                       else partition_result["validation"][next_name])
+        label_limits[name] = sessions[max(0, session_positions[next_values[0]] - 1)]
     for block_no, block in enumerate(blocks, 1):
         for day in block:
-            limit = top if top is not None else (next((s.get("content", s).get("parameter_summary", {}).get("top") for s in research_snapshots if str(s.get("content", s).get("recommendation_date")) == day), None))
-            base = _replay_date(by_date[day], definition["baseline"], limit); trial = _replay_date(by_date[day], definition["treatment"], limit)
-            def metrics(rows, side):
-                values, maes = [], []
-                for row in rows:
-                    outcome = outcomes.get((day, str(row.get("code")))) or {}
-                    # A forward label that crosses this OOS block's end would
-                    # leak its future realization into the next time split.
-                    exit_date = str(outcome.get("exit_date") or "")
-                    if not exit_date or exit_date > block[-1]:
-                        skipped.append("label_crosses_oos_boundary")
-                        continue
-                    alpha = _number(outcome.get("hs300_alpha")); mae = _number(outcome.get("mae"))
-                    if outcome.get("status") == "complete" and alpha is not None:
-                        values.append(alpha)
-                        daily_alpha_rows.append({"recommendation_date": day,
-                            "hs300_alpha": alpha, "evaluation_status": "complete"})
-                        if outcome.get("entry_date") and outcome.get("exit_date"):
-                            mature_event_records.append({
-                                "record_id": outcome.get("_record_id") or f"{day}:{outcome.get('market', 'default')}:{row.get('code')}",
-                                "market": outcome.get("market") or "default",
-                                "code": str(row.get("code")),
-                                "entry_date": outcome.get("entry_date"),
-                                "exit_date": outcome.get("exit_date"),
-                                "market_sessions": outcome.get("_market_sessions"),
-                            })
-                    if outcome.get("status") == "complete" and mae is not None: maes.append(mae)
-                return (sum(values) / len(values) if values else None), maes
-            old, old_maes = metrics(base, "baseline"); new, new_maes = metrics(trial, "treatment")
-            baseline_maes.extend(old_maes); treatment_maes.extend(new_maes)
-            coverage.append({"date": day, "baseline_count": len(base), "treatment_count": len(trial)})
-            if old is not None and new is not None: paired.append({"date": day, "block": block_no, "delta": new - old})
-    deltas = [row["delta"] for row in paired]; interval = _bootstrap(deltas)
-    baseline_coverage = sum(row["baseline_count"] > 0 for row in coverage); treatment_coverage = sum(row["treatment_count"] > 0 for row in coverage)
-    baseline_tail, treatment_tail = _percentile(baseline_maes, .05), _percentile(treatment_maes, .05)
-    assigned_events = assign_research_events(mature_event_records, PRIMARY_WINDOW)
-    daily_alpha = summarize_daily_alpha(daily_alpha_rows)
-    maturity = {"dedup_mature_events": len(assigned_events["events"]),
-                "mature_dates": len({row["date"] for row in paired}),
-                "valid_alpha_events": len(assigned_events["events"]),
-                "alpha_mature_dates": daily_alpha["mature_dates"],
-                "alpha_mean": daily_alpha["mean_alpha"],
-                "daily_alpha": daily_alpha["daily"],
-                "alpha_missing_records": daily_alpha["missing_records"]}
-    gates = {"minimum_events": maturity["dedup_mature_events"] >= 100,
-             "minimum_dates": maturity["mature_dates"] >= 20,
-             "three_oos_blocks": len(blocks) >= 3,
-             "coverage": treatment_coverage >= .9 * baseline_coverage,
-             "ci_lower_positive": bool(interval and interval["lower_95"] > 0),
-             "mae_tail": bool(baseline_tail is not None and treatment_tail is not None and treatment_tail >= baseline_tail - .01)}
-    status = "validated" if len(paired) >= 3 else "continue_accumulating"
-    content.update({"status": status, "oos_blocks": blocks, "paired_dates": paired,
-                    "coverage": {"baseline_dates": baseline_coverage, "treatment_dates": treatment_coverage,
-                    "ratio": treatment_coverage / baseline_coverage if baseline_coverage else None}, "interval": interval,
-                    "maturity": maturity, "mae_tail_5pct": {"baseline": baseline_tail, "treatment": treatment_tail},
-                    "promotion": {"eligible": all(gates.values()), "gates": gates,
-                                  "reason": "frozen_p3_promotion_gates"}})
+            meta = metadata[day]
+            baseline_replay = _replay_selection(
+                by_date[day], definition["baseline"], meta["top"],
+                meta["min_score"], meta["policy"])
+            treatment_replay = _replay_selection(
+                by_date[day], definition["treatment"], meta["top"],
+                meta["min_score"], meta["policy"])
+            if baseline_replay["status"] != "ok" or treatment_replay["status"] != "ok":
+                replay_rejections.append({"date": day,
+                    "baseline": baseline_replay["reasons"],
+                    "treatment": treatment_replay["reasons"]})
+                coverage.append({"date": day, "block": block_no,
+                                 "baseline_count": 0, "treatment_count": 0,
+                                 "status": "replay_input_rejected"})
+                continue
+            base = baseline_replay["selected"]
+            trial = treatment_replay["selected"]
+            label_limit = label_limits[VALIDATION_BLOCK_NAMES[block_no - 1]]
+            old = _metrics_for_rows(base, day, outcomes, label_limit, PRIMARY_WINDOW,
+                                    "baseline", skipped)
+            new = _metrics_for_rows(trial, day, outcomes, label_limit, PRIMARY_WINDOW,
+                                    "treatment", skipped)
+            baseline_maes.extend(old["maes"]); treatment_maes.extend(new["maes"])
+            baseline_events.extend(old["events"]); treatment_events.extend(new["events"])
+            baseline_daily_rows.extend(old["alpha_rows"]); treatment_daily_rows.extend(new["alpha_rows"])
+            old60 = _metrics_for_rows(base, day, outcomes, label_limit, CONFIRMATION_WINDOW,
+                                      "baseline_60d", skipped)
+            new60 = _metrics_for_rows(trial, day, outcomes, label_limit, CONFIRMATION_WINDOW,
+                                      "treatment_60d", skipped)
+            confirmation_baseline_events.extend(old60["events"])
+            confirmation_treatment_events.extend(new60["events"])
+            if old["complete"] and new["complete"] and old["mean"] is not None and new["mean"] is not None:
+                paired.append({"date": day, "block": block_no,
+                               "delta": new["mean"] - old["mean"]})
+            confirmation_entry = {"date": day, "baseline_complete": old60["complete"],
+                                  "treatment_complete": new60["complete"],
+                                  "baseline_missing": old60["missing"],
+                                  "treatment_missing": new60["missing"]}
+            if old60["complete"] and new60["complete"] and old60["mean"] is not None and new60["mean"] is not None:
+                confirmation_entry["delta"] = new60["mean"] - old60["mean"]
+                confirmation_pairs.append(confirmation_entry)
+            coverage.append({"date": day, "block": block_no,
+                             "baseline_count": len(base), "treatment_count": len(trial),
+                             "baseline_complete": old["complete"],
+                             "treatment_complete": new["complete"],
+                             "baseline_missing": old["missing"],
+                             "treatment_missing": new["missing"],
+                             "status": "paired" if old["complete"] and new["complete"] else "incomplete"})
+    paired_dates = [row["date"] for row in paired]
+    deltas = [row["delta"] for row in paired]
+    validation_partition_dates = {
+        name: [day for day in partition_result["validation"][name] if day in by_date]
+        for name in VALIDATION_BLOCK_NAMES}
+    interval = _bootstrap(
+        deltas,
+        seed=(definition.get("bootstrap") or {}).get("seed", 20260907),
+        draws=(definition.get("bootstrap") or {}).get("draws", 2000),
+        block_length=(definition.get("bootstrap") or {}).get("block_length", PRIMARY_WINDOW),
+        dates=paired_dates,
+        partitions=validation_partition_dates,
+    )
+    baseline_assigned = assign_research_events(baseline_events, PRIMARY_WINDOW)
+    treatment_assigned = assign_research_events(treatment_events, PRIMARY_WINDOW)
+    baseline_60_assigned = assign_research_events(confirmation_baseline_events, CONFIRMATION_WINDOW)
+    treatment_60_assigned = assign_research_events(confirmation_treatment_events, CONFIRMATION_WINDOW)
+    baseline_daily = summarize_daily_alpha(baseline_daily_rows)
+    treatment_daily = summarize_daily_alpha(treatment_daily_rows)
+    confirmation_deltas = [row["delta"] for row in confirmation_pairs]
+    confirmation_mean = (sum(confirmation_deltas) / len(confirmation_deltas)
+                         if confirmation_deltas else None)
+    baseline_coverage = sum(row["baseline_complete"] for row in coverage)
+    treatment_coverage = sum(row["treatment_complete"] for row in coverage)
+    baseline_tail = _percentile(baseline_maes, .05)
+    treatment_tail = _percentile(treatment_maes, .05)
+    maturity = {
+        "baseline": {"valid_alpha_events": len(baseline_assigned["events"]),
+                      "alpha_mature_dates": baseline_daily["mature_dates"],
+                      "alpha_mean": baseline_daily["mean_alpha"],
+                      "alpha_missing_records": baseline_daily["missing_records"]},
+        "treatment": {"valid_alpha_events": len(treatment_assigned["events"]),
+                       "alpha_mature_dates": treatment_daily["mature_dates"],
+                       "alpha_mean": treatment_daily["mean_alpha"],
+                       "alpha_missing_records": treatment_daily["missing_records"]},
+        "valid_alpha_events": min(len(baseline_assigned["events"]), len(treatment_assigned["events"])),
+        "alpha_mature_dates": len(paired_dates),
+        "confirmation_60d": {
+            "baseline_valid_alpha_events": len(baseline_60_assigned["events"]),
+            "treatment_valid_alpha_events": len(treatment_60_assigned["events"]),
+            "complete_paired_dates": len(confirmation_pairs),
+            "mean_delta": confirmation_mean,
+        },
+    }
+    gates = {
+        "calendar_verified": calendar_verified,
+        "partition_contract": True,
+        "minimum_events": maturity["valid_alpha_events"] >= 100,
+        "minimum_events_baseline": len(baseline_assigned["events"]) >= 100,
+        "minimum_events_treatment": len(treatment_assigned["events"]) >= 100,
+        "minimum_dates": len(paired_dates) >= 20,
+        "three_oos_blocks": len(blocks) == 3,
+        "coverage": treatment_coverage >= .9 * baseline_coverage if baseline_coverage else False,
+        "ci_lower_positive": bool(interval and interval.get("lower_95") is not None
+                                   and interval.get("lower_95") > 0),
+        "mae_tail": bool(baseline_tail is not None and treatment_tail is not None
+                          and treatment_tail >= baseline_tail - .01),
+        "confirmation_60d": (
+            len(baseline_60_assigned["events"]) >= 100
+            and len(treatment_60_assigned["events"]) >= 100
+            and len(confirmation_pairs) >= 20
+            and confirmation_mean is not None and confirmation_mean >= 0
+        ),
+    }
+    primary_ready = (gates["minimum_events"] and gates["minimum_dates"]
+                     and gates["three_oos_blocks"])
+    status = "validated" if primary_ready else "continue_accumulating"
+    content.update({
+        "status": status, "partitions": partition_result,
+        "oos_blocks": blocks, "validation_partition_dates": validation_partition_dates,
+        "paired_dates": paired, "confirmation_60d_pairs": confirmation_pairs,
+        "coverage": {"baseline_dates": baseline_coverage,
+                      "treatment_dates": treatment_coverage,
+                      "ratio": treatment_coverage / baseline_coverage if baseline_coverage else None,
+                      "complete_pair_ratio": len(paired_dates) / len(coverage) if coverage else None},
+        "coverage_rows": coverage, "replay_rejections": replay_rejections,
+        "interval": interval, "maturity": maturity,
+        "mae_tail_5pct": {"baseline": baseline_tail, "treatment": treatment_tail},
+        "holdout": {"status": "unconsumed", "dates": partition_result["final_holdout"],
+                    "freeze_at": partition_result["freeze_at"]},
+        "promotion": {"eligible": all(gates.values()), "gates": gates,
+                       "reason": "frozen_p3_promotion_gates",
+                       "shadow_only": primary_ready and not gates["confirmation_60d"]},
+    })
     return _package(content)
 
 
