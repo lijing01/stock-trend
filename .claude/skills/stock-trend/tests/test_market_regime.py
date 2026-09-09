@@ -6,7 +6,7 @@ Tests for analysis/market_regime.py covering:
   - score_volume: 成交额 vs 20日均额 + 缺失降级
   - score_breadth: 涨跌家数比 + 缺失降级
   - score_zt_emotion: 历史均值 + 连板加成 + 无历史
-  - score_capital: 北向 + 主力降级 + 双缺失
+  - score_capital: 主力资金 + 缺失
   - compute_regime: 加权/钳制/gate 三档
   - build_plan: 三档 if-then + 持仓信号
   - generate_report: 五段渲染
@@ -227,7 +227,6 @@ def test_collect_context_rejects_stale_turnover_leg():
             patch.object(mr, "fetch_sector_rankings", return_value=[]), \
             patch.object(mr, "fetch_zt_stats", return_value={"count": 0}), \
             patch.object(mr, "fetch_market_activity", return_value=None), \
-            patch.object(mr, "fetch_northbound", return_value=None), \
             patch.object(mr, "load_history", return_value={}), \
             patch.object(mr, "load_portfolio", return_value=[]):
         ctx = mr.collect_context()
@@ -282,18 +281,14 @@ def test_zt():
 
 def test_capital():
     print("\n--- score_capital ---")
-    # 北向净买入 → 高分
-    r = mr.score_capital(15.0, None)
-    test("北向流入>50", r["score"] > 50.0, f"got {r['score']}")
+    r = mr.score_capital({"main_force_yi": 300.0})
+    test("主力资金>50", r["score"] > 50.0, f"got {r['score']}")
+    test("主力资金为完整数据", r["data_status"] == "good", str(r))
+    test("不再标记北向降级", "北向" not in r["detail"], r["detail"])
 
-    # 北向不可用 → 降级主力净流入
-    r = mr.score_capital(None, {"main_force_yi": 300.0})
-    test("降级主力>50", r["score"] > 50.0, f"got {r['score']}")
-    test("降级标记", "降级" in r["detail"], r["detail"])
-
-    # 双缺失 → 50
-    r = mr.score_capital(None, None)
-    test("双缺失=50", r["score"] == 50.0, f"got {r['score']}")
+    r = mr.score_capital(None)
+    test("资金缺失=50", r["score"] == 50.0, f"got {r['score']}")
+    test("资金缺失状态", r["data_status"] == "missing", str(r))
 
 
 # ──────────────── compute_regime ────────────────
@@ -634,7 +629,6 @@ def test_collect_context_intraday_blend_not_weak():
                              return_value={"count": 55, "streak_count": 20, "max_streak": 5}), \
                 patch.object(mr, "fetch_market_activity",
                              return_value={"up": 1827, "down": 3542, "main_force_yi": -232.6}), \
-                patch.object(mr, "fetch_northbound", return_value=None), \
                 patch.object(mr, "load_history", return_value=history), \
                 patch.object(mr, "load_portfolio", return_value=[]):
             return mr.collect_context(now=now)

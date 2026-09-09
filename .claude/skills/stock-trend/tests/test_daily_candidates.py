@@ -2584,10 +2584,95 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(policy["mode"], "observation")
         self.assertIn("regime_stale", policy["reasons"])
 
+    def test_legacy_northbound_partial_cache_is_promoted_in_memory(self):
+        context = {
+            "data_date": "2026-08-06",
+            "regime": {
+                "score": 70,
+                "label": "中性",
+                "data_quality": "partial",
+                "missing_components": [],
+                "partial_components": ["capital"],
+            },
+            "components": {
+                "capital": {
+                    "score": 48.0,
+                    "data_status": "partial",
+                    "detail": "全市场主力净流入 +10.0亿(北向不可用降级)",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            (cache_dir / "market_regime.json").write_text(
+                json.dumps(context), encoding="utf-8")
+            with patch.object(dc, "CACHE_DIR", cache_dir):
+                loaded = dc.load_regime_context()
+
+        self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(loaded["partial_components"], [])
+        self.assertNotIn(
+            "regime_data_partial",
+            loaded["market_explanation"]["blocking_reasons"],
+        )
+
+    def test_legacy_cache_with_other_partial_component_stays_blocked(self):
+        context = {
+            "data_date": "2026-08-06",
+            "regime": {
+                "score": 70,
+                "data_quality": "partial",
+                "missing_components": [],
+                "partial_components": ["capital", "volume"],
+            },
+            "components": {
+                "capital": {
+                    "score": 48.0,
+                    "data_status": "partial",
+                    "detail": "全市场主力净流入 +10.0亿(北向不可用降级)",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            (cache_dir / "market_regime.json").write_text(
+                json.dumps(context), encoding="utf-8")
+            with patch.object(dc, "CACHE_DIR", cache_dir):
+                loaded = dc.load_regime_context()
+
+        policy = build_recommendation_policy(loaded, "2026-08-06")
+        self.assertEqual(policy["max_recommendations"], 0)
+        self.assertIn("regime_data_partial", policy["reasons"])
+
     def test_weak_regime_allows_observation_only(self):
         regime = {"score": 59, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(regime, "2026-08-06")
         self.assertEqual(policy["mode"], "observation")
+
+    def test_good_regime_with_primary_market_capital_allows_waiting(self):
+        regime = {
+            "score": 70,
+            "data_date": "2026-08-06",
+            "data_quality": "good",
+            "partial_components": [],
+            "capital_score": 48.0,
+        }
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        self.assertEqual(policy["mode"], "waiting_trigger")
+        self.assertEqual(policy["max_recommendations"], 2)
+        self.assertNotIn("regime_data_partial", policy["reasons"])
+
+    def test_non_capital_partial_still_blocks_recommendations(self):
+        regime = {
+            "score": 70,
+            "data_date": "2026-08-06",
+            "data_quality": "partial",
+            "partial_components": ["volume"],
+        }
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        self.assertEqual(policy["mode"], "observation")
+        self.assertEqual(policy["max_recommendations"], 0)
+        self.assertIn("regime_data_partial", policy["reasons"])
 
     def test_intraday_preserves_actionable_tier_but_marks_provisional(self):
         regime = {"score": 90, "data_date": "2026-08-06"}

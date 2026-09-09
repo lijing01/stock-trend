@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """今日复盘 + 市场环境评分 — 独立市场上下文整合.
 
-聚合全市场数据(大盘指数/两市成交额/涨跌家数/涨停情绪/北向资金/板块排行),
+聚合全市场数据(大盘指数/两市成交额/涨跌家数/涨停情绪/市场主力资金/板块排行),
 输出市场环境评分(0-100) + 每日复盘报告,并持久化上下文供 /stock-trend 做大盘/板块对比.
 
 数据源(全部复用现有 fetcher):
@@ -9,7 +9,7 @@
   - 涨跌家数: sector_data 行业板块 up/down_count 加总(仅 industry,避免概念重复计数)
   - 板块排行: sector_data.get_sector_rankings (industry)
   - 涨停情绪: zt_replay.fetch_limitup_stocks + 连板统计
-  - 资金:     capital_flow.fetch_northbound_flow(北向不可用降级用板块主力净流入)
+  - 资金:     地域板块主力净流入加总
 
 评分公式(对齐投资体系文档第一层):
   市场环境分 = 大盘趋势(25%) + 成交额(20%) + 赚钱效应(25%) + 涨停情绪(20%) + 资金(10%)
@@ -282,20 +282,6 @@ def fetch_market_activity() -> dict | None:
         return None
 
 
-def fetch_northbound() -> float | None:
-    """北向净买入(亿元);不可用或全零(2024-08 披露机制调整后净买入已不公开)返回 None."""
-    try:
-        from fetchers.capital_flow import fetch_northbound_flow
-        flow = fetch_northbound_flow()
-        if flow:
-            vals = [_safe_float(r.get("net_buy_billion")) for r in flow]
-            if vals and any(v != 0 for v in vals):
-                return vals[-1]
-    except Exception:
-        pass
-    return None
-
-
 # ──────────────── 评分 ────────────────
 
 
@@ -394,17 +380,14 @@ def score_zt_emotion(zt: dict, history_counts: list[int]) -> dict:
     }
 
 
-def score_capital(northbound_yi: float | None, market_activity: dict | None) -> dict:
-    """资金分: 北向净买入;不可用降级用全市场主力净流入(地域板块加总,精确)."""
-    if northbound_yi is not None:
-        score = _clamp(50 + northbound_yi * 8)
-        return {"score": round(score, 1), "detail": f"北向净买入 {northbound_yi:+.1f}亿", "data_status": "good"}
+def score_capital(market_activity: dict | None) -> dict:
+    """资金分: 全市场主力净流入(地域板块加总,精确)."""
     main_force_yi = market_activity.get("main_force_yi") if market_activity else None
     if main_force_yi is not None:
         score = _clamp(50 + main_force_yi * 0.06)
         return {"score": round(score, 1),
-                "detail": f"全市场主力净流入 {main_force_yi:+.1f}亿(北向不可用降级)",
-                "data_status": "partial"}
+                "detail": f"全市场主力净流入 {main_force_yi:+.1f}亿",
+                "data_status": "good"}
     return {"score": 50.0, "detail": "资金数据不可用", "data_status": "missing"}
 
 
@@ -1002,15 +985,12 @@ def collect_context(now=None) -> dict:
         for h in _baseline_history(history, data_date).values()
     ]
 
-    # 北向(不可用降级到全市场主力净流入)
-    northbound = fetch_northbound()
-
     components = {
         "index_trend": score_index_trend(index_metrics),
         "volume": score_volume(today_amount_yi, amount_history_yi),
         "breadth": score_breadth(activity, sectors),
         "zt_emotion": score_zt_emotion(zt, history_zt_counts),
-        "capital": score_capital(northbound, activity),
+        "capital": score_capital(activity),
     }
     regime = compute_regime(components)
 
@@ -1042,7 +1022,7 @@ def collect_context(now=None) -> dict:
                 "volume": score_volume(est_amount, amount_history_yi),
                 "breadth": score_breadth(est_activity, sectors),
                 "zt_emotion": score_zt_emotion(est_zt, history_zt_counts),
-                "capital": score_capital(northbound, est_activity),
+                "capital": score_capital(est_activity),
             }
             ext_regime = compute_regime(ext_components)
             amount_yi_display = round(est_amount, 0)
@@ -1099,18 +1079,12 @@ def collect_context(now=None) -> dict:
         "components": components,
         "intraday_evidence": intraday_evidence,
         "capital_context": {
-            "metric": (
-                "northbound_net_buy" if northbound is not None
-                else "market_main_force_net_inflow"
-                if activity and activity.get("main_force_yi") is not None
-                else "capital_flow"
-            ),
-            "source_kind": (
-                "primary" if northbound is not None
-                else "alternative"
-                if activity and activity.get("main_force_yi") is not None
-                else "unknown"
-            ),
+            "metric": "market_main_force_net_inflow" if (
+                activity and activity.get("main_force_yi") is not None
+            ) else "capital_flow",
+            "source_kind": "primary" if (
+                activity and activity.get("main_force_yi") is not None
+            ) else "unknown",
             "provider": "unknown",
             "data_date": None,
             "fetched_at": None,
@@ -1196,7 +1170,7 @@ def main():
         print("[1/5] 拉取指数K线 + 成交额...")
         print("[2/5] 拉取行业板块排行...")
         print("[3/5] 拉取涨停情绪...")
-        print("[4/5] 拉取资金(北向/主力)...")
+        print("[4/5] 拉取资金(全市场主力净流入)...")
         print("[5/5] 计算评分 + 持仓分析...")
         ctx = collect_context()
         # 持久化: 盘中快照不写 history(避免 partial 污染基线),但 context 仍写

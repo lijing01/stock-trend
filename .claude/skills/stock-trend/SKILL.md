@@ -367,7 +367,7 @@ publish 使用通过 `scripts/core/evolution_registry.py` 中 `verify_release_ev
 
 **评分解释与数据资格**: 正式大盘趋势组件当前使用上证(`000001.SH`)、沪深300(`000300.SH`)和深成指(`399001.SZ`)的 MA20 状态平均；中证500、 中证1000、创业板指和科创50不自动计入该正式分，除非后续版本明确变更模型。成交额组件另用上证与深证综指(`399106.SZ`)拼接两市成交额。每次上下文同时保存 `market_explanation/v1`：五项分数、权重、归一化分母、贡献、指数名单及证据资格。`data_quality=partial` 是正式推荐硬门控，不能因为分数可计算就放行。
 
-证据资格与分数状态分开记录：完整/部分/缺失、fresh/stale/unknown、primary/alternative/estimate/unknown、scorable/reference_only/unavailable。北向净买入(`northbound_net_buy`)与全市场主力净流入(`market_main_force_net_inflow`)必须分别标识；北向不可用时主力净流入可作为旧公式的替代计分输入，但仍显示 `alternative`/`reference_only`，并保留 `regime_data_partial` 限制。缺少来源时间戳不得标记为 fresh。盘中解释额外保存锚分、外推分和混合权重；无法取得锚证据时只显示已存正式分，不声称组件合计解释了盘中混合分。
+证据资格与分数状态分开记录：完整/部分/缺失、fresh/stale/unknown、primary/alternative/estimate/unknown、scorable/reference_only/unavailable。市场资金正式使用全市场主力净流入(`market_main_force_net_inflow`)；该数据有效时标记 `primary`/`scorable`，不因北向数据不可用产生 `partial` 或 `regime_data_partial`。其他组件仍按各自完整性标记，缺少来源时间戳不得标记为 fresh。盘中解释额外保存锚分、外推分和混合权重；无法取得锚证据时只显示已存正式分，不声称组件合计解释了盘中混合分。
 
 **盘中混合口径**: 交易时间内跑，评分为「上一收盘锚 + 盘中按已过 240 交易分钟占比外推」的混合 —— 半日成交额/涨停/涨跌家数按已过时间占比放大估全天值再打分，早盘(开盘约 40 分钟内)不外推、直接用上一收盘。越早越依赖昨收，因此**不会因半日数据误报弱势**。报告标 `盘中临时`，输出含 `intraday: true` + `intraday_note`；盘中快照**不写** `market_regime_history.json`(避免 partial 数据污染后续基线)。
 
@@ -381,7 +381,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refre
 ```bash
 open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
 ```
-3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/主力净流入、北向(不可用降级主力净流入)。
+3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/全市场主力净流入。
 4. 输出: 复盘报告(①市场环境 ②板块最强/最弱 ③持仓轻量分析 ④明日if-then计划) → `reports/lists/daily-review-<时间>.md` + `.html`。
 4. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。上下文记录持仓文件版本、活跃代码和持仓快照时间。
 5. `--no-refresh` 用今日缓存重出报告(非交易日/盘中补看)：市场数据不刷新，但会重新读取当前活跃持仓、重建持仓段落与 if-then 计划；新增持仓标记为待下次实时复盘补齐技术数据。任何“当前持仓”结论应以 `/portfolio list|status` 为准。

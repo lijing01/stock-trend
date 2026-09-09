@@ -65,11 +65,8 @@ def _source_metadata(ctx, component_id):
             provider = capital_context.get("provider") or provider
             data_date = capital_context.get("data_date") or data_date
             fetched_at = capital_context.get("fetched_at") or fetched_at
-        elif "主力" in detail or "降级" in detail:
+        elif "主力" in detail:
             metric = "market_main_force_net_inflow"
-            source_kind = explicit or "alternative"
-        elif "北向" in detail:
-            metric = "northbound_net_buy"
             source_kind = explicit or "primary"
         else:
             metric = component.get("metric") or "capital_flow"

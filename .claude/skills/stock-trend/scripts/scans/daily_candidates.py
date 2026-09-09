@@ -2346,6 +2346,40 @@ def _append_candidate_table(lines, title, items, empty_text):
         )
 
 
+def _normalize_legacy_northbound_partial(context):
+    """Promote the retired northbound fallback in old same-day caches.
+
+    Before the market-funds policy change, a valid main-force value was
+    labelled ``capital=partial`` solely because northbound data was absent.
+    Keep genuine missing/partial components conservative while allowing an
+    old cache with that exact legacy marker to use the current policy.
+    """
+    if not isinstance(context, dict):
+        return context
+    regime = context.get("regime") or {}
+    capital = (context.get("components") or {}).get("capital") or {}
+    detail = str(capital.get("detail") or "")
+    partial_components = list(regime.get("partial_components") or [])
+    main_force = capital.get("score") is not None and "全市场主力净流入" in detail
+    legacy_marker = "北向不可用降级" in detail
+    if (
+        capital.get("data_status") == "partial"
+        and partial_components == ["capital"]
+        and main_force
+        and legacy_marker
+    ):
+        normalized = copy.deepcopy(context)
+        normalized_capital = normalized["components"]["capital"]
+        normalized_capital["data_status"] = "good"
+        normalized_capital["detail"] = detail.replace("(北向不可用降级)", "")
+        normalized_regime = normalized["regime"]
+        normalized_regime["partial_components"] = []
+        if not normalized_regime.get("missing_components"):
+            normalized_regime["data_quality"] = "good"
+        return normalized
+    return context
+
+
 def load_regime_context():
     """Return market-regime summary line if today's context exists."""
     try:
@@ -2353,9 +2387,13 @@ def load_regime_context():
         if not p.exists():
             return None
         with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f)
+            raw_context = json.load(f)
+        d = _normalize_legacy_northbound_partial(raw_context)
         r = d.get("regime", {})
-        explanation = d.get("market_explanation")
+        # A legacy explanation carries the retired partial/alternative status;
+        # rebuild it from the normalized context instead of exposing stale
+        # evidence alongside the current recommendation policy.
+        explanation = None if d is not raw_context else d.get("market_explanation")
         if not isinstance(explanation, dict):
             try:
                 basis_date = d.get("data_date")

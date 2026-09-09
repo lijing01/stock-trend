@@ -29,13 +29,13 @@ def fixture_close_context():
         key: {
             "score": score,
             "detail": f"{key} fixture",
-            "data_status": "partial" if key == "capital" else "good",
+            "data_status": "good",
         }
         for key, score in COMPONENT_SCORES.items()
     }
     components["capital"].update({
         "metric": "market_main_force_net_inflow",
-        "source_kind": "alternative",
+        "source_kind": "primary",
         "provider": "eastmoney",
         "data_date": "2026-09-07",
         "fetched_at": None,
@@ -47,9 +47,9 @@ def fixture_close_context():
         "regime": {
             "score": 53.4,
             "label": "弱势",
-            "data_quality": "partial",
+            "data_quality": "good",
             "missing_components": [],
-            "partial_components": ["capital"],
+            "partial_components": [],
         },
         "components": components,
         "indices": {
@@ -106,13 +106,10 @@ class MarketExplanationTests(unittest.TestCase):
             53.43,
         )
         self.assertIn("regime_weak", result["blocking_reasons"])
-        self.assertIn("regime_data_partial", result["blocking_reasons"])
-        self.assertEqual(
-            result["blocking_reasons"],
-            ["regime_data_partial", "regime_weak"],
-        )
+        self.assertNotIn("regime_data_partial", result["blocking_reasons"])
+        self.assertEqual(result["blocking_reasons"], ["regime_weak"])
 
-    def test_fixed_components_expose_index_and_alternative_capital_evidence(self):
+    def test_fixed_components_expose_index_and_primary_capital_evidence(self):
         result = build_market_explanation(fixture_close_context(), "2026-09-07")
 
         self.assertEqual(result["schema_version"], "market-explanation/v1")
@@ -130,10 +127,9 @@ class MarketExplanationTests(unittest.TestCase):
         self.assertEqual(len(index["indices"]), 3)
         capital = result["components"][-1]["evidence"]
         self.assertEqual(capital["metric"], "market_main_force_net_inflow")
-        self.assertEqual(capital["source_kind"], "alternative")
-        self.assertEqual(capital["usage"], "reference_only")
+        self.assertEqual(capital["source_kind"], "primary")
+        self.assertEqual(capital["usage"], "scorable")
         self.assertEqual(capital["freshness"], "unknown")
-        self.assertIn("capital_alternative_metric", result["quality_notes"])
         self.assertIn("source_timestamp_missing", capital["reasons"])
 
     def test_legacy_cache_uses_unknown_evidence_without_inventing_timestamps(self):
@@ -203,10 +199,7 @@ class MarketExplanationTests(unittest.TestCase):
                 self.assertEqual(capital["contribution"], 0.0)
                 self.assertEqual(capital["evidence"]["usage"], "unavailable")
                 self.assertIn("regime_data_missing", result["blocking_reasons"])
-                self.assertLess(
-                    result["blocking_reasons"].index("regime_data_missing"),
-                    result["blocking_reasons"].index("regime_data_partial"),
-                )
+                self.assertNotIn("regime_data_partial", result["blocking_reasons"])
                 self.assertEqual(result["reconciliation"], "unavailable")
                 assert_all_finite(self, result)
 
