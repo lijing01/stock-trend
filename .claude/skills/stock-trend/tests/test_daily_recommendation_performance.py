@@ -357,7 +357,7 @@ class TestProductionPerformanceContract(unittest.TestCase):
         contract = _source_health_contract(self)
         # The production budget was widened with the 25s provider fallback
         # chain; keep the contract aligned with the current source constant.
-        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 180)
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 240)
         self.assertEqual(contract.KLINE_PHASE_SECONDS, 110)
         self.assertEqual(contract.CAPITAL_PREFETCH_LIMIT, 36)
         self.assertEqual(contract.CAPITAL_PREFETCH_BATCH_SIZE, 12)

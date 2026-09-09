@@ -14,7 +14,9 @@ SOURCES = (
     "sector_ranking", "sector_membership", "kline", "capital",
     "fundamental",
 )
-SCAN_DEADLINE_SECONDS = 180
+# Give the post-K-line capital phase a 120-second window (up from 60s) while
+# retaining the final report reserve and the protected top-up window.
+SCAN_DEADLINE_SECONDS = 240
 FINALIZATION_RESERVE_SECONDS = 10
 KLINE_PHASE_SECONDS = 110
 CAPITAL_PREFETCH_LIMIT = 36
@@ -193,7 +195,7 @@ class RunSourceHealth:
 
         The property is derived from the run start and the live deadline so
         callers cannot accidentally move the phase boundary independently of
-        the shared 170-second live window.
+        the shared 230-second live window.
         """
         return min(
             self.live_deadline,
