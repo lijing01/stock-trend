@@ -1,117 +1,94 @@
-# today-recommendation-evolution 使用说明
+# “今日推荐”统一入口使用说明
 
-`today-recommendation-evolution` 实际对应：
+运行要求：Python >=3.10，工作目录为仓库根目录。本文命令中的 `python3` 指满足该要求的解释器。本环境默认 `python3` 为 3.9.6，Agent 必须选用已安装的 `/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3` 执行下列命令，无需修改全局环境。
 
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py
-```
-
-它不是选股命令，而是“今日推荐”策略的研究、验证、监控和版本发布闭环。
-
-## 推荐使用流程
-
-先完成收盘后的正式流程：
+用户说“今日推荐”时，直接运行统一入口（本环境可执行命令）：
 
 ```bash
-# 1. 生成市场环境和正式候选推荐
-python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py --json
-python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py --json
+/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
 ```
 
-然后运行每日评价：
+该命令在本次调用中依次完成市场环境刷新、候选扫描、历史推荐评价、每周研究和策略监控；不安装后台定时器，不向外部服务推送通知，也不自动打开 GUI 或浏览器。
+
+## 日常使用
+
+候选扫描的常用参数可以直接透传：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
+  --top 30 --min-candidates 20 --no-html --json
+```
+
+只查看执行计划，不联网、不写文件：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --dry-run --json
+```
+
+`--json` 保留原候选扫描的 JSON 字段，并追加：
+
+- `workflow`：各阶段的执行、跳过、失败和恢复结果。
+- `notifications`：本次调用以及跨调用检测到的策略版本或参数变化；首次建立基线不报“变更”。`invalid_pointer_fallback` 等安全回退也会明确通知。
+
+调用者应在当前对话中醒目呈现 `notifications`；它们不是短信、邮件或其他外部推送。
+
+## 执行规则
+
+1. 先刷新 `market_regime`，成功后才运行 candidates。市场刷新失败时停止候选扫描，不得沿用陈旧市场上下文继续推荐。
+2. 交易日期从仓库已有的权威交易日历解析，统一使用上海时区。15:10 前评价上一已完成交易日；15:10 后可评价当天；休市日使用最近已知完成交易日。日历只提供历史区间时，仍评价已知区间，并输出 `calendar.status=historical_only` 与 `coverage_end`；未覆盖日期不直接解释为休市。
+3. 按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，都允许同周后续调用再次尝试。
+4. monitor 使用真实交易日。交易日历缺失时明确跳过依赖交易日的后处理，不把自然日伪装成交易日。
+5. monitor 遇到接口或契约异常时可按现有机制安全恢复到已验证策略，并在 `workflow` 和 `notifications` 中说明；普通统计退化只标记人工复核，不自动恢复。
+6. publish 始终要求显式人工审核，不由“今日推荐”自动执行。
+
+`/candidates` 仍是独立候选扫描入口，适合只需要候选结果、不运行评价、周研究和监控时使用。
+
+## 高级研究与发布 CLI
+
+日常无需手动串联以下命令；研究排障、实验回放和人工发布时可直接使用 `evolution_job.py`。
+
+每日评价：
 
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
   close --as-of 2026-09-09 --json
 ```
 
-`close` 会读取已有的正式推荐快照和历史行情，评价已经成熟的 20 日信号。它不会自动执行市场扫描；缺少正式快照时会保留为 `upstream_gap`，不会伪造数据。
-
-## 每周研究
-
-先用 dry-run 检查输入：
+每周研究或实验回放：
 
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
   weekly --as-of 2026-09-09 --dry-run --json
-```
 
-确认无误后正式生成诊断和提案：
-
-```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
-  weekly --as-of 2026-09-09 --json
+  weekly --as-of 2026-09-09 --experiment-id <实验ID> --json
 ```
 
-可选地回放已经登记的实验：
-
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
-  weekly --as-of 2026-09-09 \
-  --experiment-id <实验ID> \
-  --json
-```
-
-## 监控当前策略
-
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
-  monitor \
-  --trading-sessions '["2026-09-01","2026-09-02","2026-09-03","2026-09-04","2026-09-07","2026-09-08","2026-09-09"]' \
-  --json
-```
-
-也可以传 JSON 文件：
+手动监控：
 
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
   monitor --trading-sessions trading_sessions.json --json
 ```
 
-监控关注：
+数据不足返回 `insufficient_data` 时，不应直接解读为策略失败。
 
-- 数据失败率
-- 推荐日期覆盖率
-- 研究记录完整率
-- 20 日成熟超额收益
-- 是否需要人工复核或安全恢复
-
-数据不足时会输出 `insufficient_data`，不应解读为策略失败。
-
-## 发布或回滚实验
-
-只有实验已经进入 `eligible`，并完成人工审核后，才发布：
+只有实验已进入 `eligible` 且完成人工审核后，才可显式发布。`release_evidence.json` 必须是通过既有 `verify_release_evidence` 验证的完整 `evolution-release-evidence/v2` 证据，且引用的验证、留出和影子结果须能从受控存储解析并通过校验。不得用任意 `summary/reviewer/checks` 摘要代替完整证据。契约以 `scripts/core/evolution_registry.py` 的 `verify_release_evidence` 及 `tests/test_evolution_job.py` 的发布测试为准（路径均相对 `.claude/skills/stock-trend/`）。
 
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
-  publish \
-  --experiment-id <实验ID> \
-  --evidence release_evidence.json \
-  --json
+  publish --experiment-id <实验ID> --evidence release_evidence.json --json
 ```
 
-发生策略版本问题时显式回滚：
+需要显式回滚时，`--evidence` 接收纯文本原因，CLI 将其作为 `summary`，不会读取文件：
 
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
-  rollback \
-  --evidence '{"summary":"监控发现正式策略退化"}' \
-  --json
+  rollback --evidence '监控发现策略异常，人工回滚' --json
 ```
 
 发布和回滚会改变当前策略版本指针，但不会修改既有正式推荐历史。
 
-## 当前环境检查结果
+详细契约见 `.claude/skills/stock-trend/SKILL.md` 和 `.claude/specs/today-recommendation-evolution-plan.md`。
 
-2026-09-09 在本仓库执行 dry-run 的结果：
-
-- `close`：缺少正式推荐快照，状态为 `formal_snapshot_missing`。
-- `weekly`：发现 3 个研究快照、684 条候选信号记录。
-- `monitor`：状态为 `insufficient_data`，尚未形成足够成熟的监控样本。
-
-详细规范见：
-
-- `.claude/skills/stock-trend/SKILL.md`
-- `.claude/specs/today-recommendation-evolution-plan.md`
-
-以上仅用于学习和研究，不构成投资建议。
+**本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。**

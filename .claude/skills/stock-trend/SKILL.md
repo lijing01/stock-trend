@@ -1,6 +1,6 @@
 ---
 name: stock-trend
-description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于 ETF 扫描、持仓与预警、ETF/维科夫回测、市场主线与龙头扫描、涨停和龙虎榜跟踪、每日复盘、周报、候选股及整合扫描。用户提到股票或 ETF 趋势、代码分析、持仓管理、市场主题、龙头、选股、复盘或上述工作流时使用。
+description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、持仓与预警、ETF/维科夫回测、市场主线与龙头扫描、涨停和龙虎榜跟踪、每日复盘、周报、候选股及整合扫描。用户提到股票或 ETF 趋势、代码分析、持仓管理、市场主题、龙头、选股、复盘或上述工作流时使用。
 ---
 
 # 股票趋势判断
@@ -9,7 +9,9 @@ description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告
 
 运行 Python 脚本时以仓库根目录为工作目录。行情和新闻属于时效性数据，必须使用可用的联网工具或脚本实时获取；网络受限时申请授权，若仍不可用则明确标注降级或数据缺失，不得把旧缓存冒充实时数据。仅在用户明确要求时打开 GUI 或浏览器。
 
-**分支路由**：`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。各流程独立。
+Python 运行要求为 >=3.10；下文 `python3` 指满足要求的解释器。本环境默认 `python3` 为 3.9.6，Agent 必须将命令中的解释器替换为已安装的 `/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3`，无需修改全局环境。
+
+**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
 
@@ -268,6 +270,27 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ---
 
+## /today-recommendation [candidates 参数] [--dry-run] [--json]
+
+“今日推荐”的统一入口。用户使用该自然语言时，直接运行：
+
+```bash
+/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
+```
+
+`--top`、`--min-candidates`、`--no-html` 等原 candidates 参数可直接传入。`--dry-run` 不联网、不写入，只输出计划。该入口仅在本次调用中依次执行，不安装后台定时器：
+
+1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。
+2. 从已有权威交易日历按上海时区取得最近已知完成交易日；15:10 前用上一交易日评价历史。日历缺失时明确跳过依赖交易日的后处理；日历只覆盖历史区间时继续评价已知区间，并明确呈现 `workflow.calendar.coverage_end`，不得把未覆盖日期解释为休市。
+3. 按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，均允许同周再次尝试。
+4. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
+
+JSON 保留候选输出，并追加 `workflow` 阶段结果和 `notifications`。通知覆盖本次及跨调用检测到的策略版本/参数变化与 `invalid_pointer_fallback` 等安全回退；首次建立基线不报告变更。回复中醒目呈现通知，但不向外部渠道推送。publish 仍需显式人工审核，统一入口不得自动发布。不得自动打开 GUI 或浏览器。
+
+只需候选扫描时继续使用独立的 `/candidates`。
+
+---
+
 ## /candidates [--top N] [--min-candidates N] [--min-score N] [--sectors BK...] [--json] [--no-html] [--style-shadow FILE] [--strategy-shadow FILE] [--memberships FILE]
 
 每日候选股 — 以热点板块绝对热度门槛筛选板块 → 维科夫漏斗扫成分股(每板块 25 只,吸筹/拉升买点子阶段)→ 按“综合分 + 数据资格”扩池 → 分为今日可执行、等待触发、观察池。
@@ -279,7 +302,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] [--min-candidates 20]
 # 手动指定板块: --sectors BK0420,BK0897; Agent 消费: --json（默认同时生成 HTML）; 仅 MD: --no-html
 ```
-2. **默认打开 HTML 报告**:
+2. 默认可生成 HTML 报告，但不自动打开；仅在用户明确要求查看时运行：
 ```bash
 open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 ```
@@ -304,16 +327,18 @@ python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py \
 ```
 五个风格固定为沪深300(`000300.SH`)、中证500(`000905.SH`)、中证1000(`000852.SH`)、创业板指(`399006.SZ`)和科创50(`000688.SH`)。影子模型只记录 MA20 上下方/斜率观察，运行结果、旧上下文指纹和原始输入独立留痕；不替代正式市场环境评分，也不改变候选推荐门槛。成分匹配必须使用当时已知(`known_at`)且覆盖基准日的历史区间，并带来源；缺证据显示 unknown。
 
-推荐演进的调度入口（默认只写研究缓存和任务日志，不生成报告）：
+推荐演进的高级 CLI（“今日推荐”日常调用使用上方统一入口；以下命令用于研究排障、实验回放和人工审核）：
 ```bash
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py close --as-of YYYY-MM-DD --json
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py weekly --as-of YYYY-MM-DD --dry-run --json
 python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py monitor --json
 # 仅人工审核且实验已处于 eligible 状态后：
-python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py publish --experiment-id <ID> --evidence '审核摘要' --json
-python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py rollback --evidence '回滚原因' --json
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py publish --experiment-id <ID> --evidence release_evidence.json --json
+python3 .claude/skills/stock-trend/scripts/analysis/evolution_job.py rollback --evidence '监控发现策略异常，人工回滚' --json
 ```
-`close` 发现缺少正式上下文、板块快照或候选记录时保留缺口，下次可重试；`weekly` 即使未配置模型也会完成统计。统计退化只要求人工复核，接口/契约异常应先执行显式回滚到已验证版本。
+publish 使用通过 `scripts/core/evolution_registry.py` 中 `verify_release_evidence` 验证的完整 `evolution-release-evidence/v2` 文件；任意摘要不能代替发布证据，引用结果必须从受控存储解析并验证。rollback 的 `--evidence` 则为纯文本 `summary`，不读取文件。
+
+`close` 发现缺少正式上下文、板块快照或候选记录时保留缺口，下次可重试；`weekly` 即使未配置模型也会完成统计。统计退化只要求人工复核；monitor 遇到接口/契约异常时按现有机制安全恢复到已验证版本并通知，不能把普通统计退化当作自动恢复条件。
 
 ---
 

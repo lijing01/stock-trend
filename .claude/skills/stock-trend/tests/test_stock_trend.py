@@ -1580,6 +1580,7 @@ def run_daily_recommendation_tests():
         from test_recommendation_diagnostics import run_recommendation_diagnostics_tests
         from test_recommendation_experiments import run_recommendation_experiment_tests
         from test_evolution_job import run_evolution_job_tests
+        from test_run_today import run_today_tests
         from test_evolution_storage import run_evolution_storage_tests
         from test_recommendation_lifecycle import run_recommendation_lifecycle_tests
         from test_recommendation_quality import run_recommendation_quality_tests
@@ -1600,6 +1601,7 @@ def run_daily_recommendation_tests():
             run_recommendation_diagnostics_tests,
             run_recommendation_experiment_tests,
             run_evolution_job_tests,
+            run_today_tests,
             run_evolution_storage_tests,
             run_recommendation_lifecycle_tests,
         ):
