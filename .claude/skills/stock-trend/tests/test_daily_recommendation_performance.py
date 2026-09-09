@@ -325,6 +325,32 @@ class TestRunSourceHealthContract(unittest.TestCase):
         self.assertEqual(
             results[0][1]["live_attempt"]["reason"], "deadline")
 
+    def test_enrichment_admission_is_global_per_run_and_stage(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth()
+
+        self.assertEqual(
+            health.admit_enrichment_slots("capital", "initial", 30, 36),
+            30)
+        self.assertEqual(
+            health.admit_enrichment_slots("capital", "initial", 12, 36),
+            6)
+        self.assertEqual(
+            health.admit_enrichment_slots("capital", "initial", 12, 36),
+            0)
+        # Top-up has an independent run-global quota.
+        self.assertEqual(
+            health.admit_enrichment_slots("capital", "topup", 12, 12),
+            12)
+        self.assertEqual(
+            health.admit_enrichment_slots("capital", "topup", 1, 12),
+            0)
+        self.assertEqual(health.enrichment_admitted("capital", "initial"), 36)
+        self.assertEqual(health.enrichment_admitted("capital", "topup"), 12)
+        self.assertTrue(any(
+            event.get("event") == "enrichment_budget_limited"
+            for event in health.events()))
+
 
 class TestProductionPerformanceContract(unittest.TestCase):
     def test_production_deadline_and_budget_constants_bound_critical_path(self):

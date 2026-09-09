@@ -255,8 +255,11 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_priority_count", "capital_live_started", "capital_valid_count",
     "capital_cache_valid_count", "capital_skipped_by_budget",
     "capital_enrichment_population", "capital_initial_priority_count",
+    "capital_initial_budget_cutoff", "capital_global_queue_omitted",
     "capital_topup_selected_count", "capital_topup_live_started",
     "capital_topup_valid_count", "capital_topup_skipped_deadline",
+    "capital_topup_executable_count", "capital_topup_budget_insufficient",
+    "capital_topup_global_omitted",
     "sector_membership_queued_count", "sector_membership_attempted_count",
     "sector_membership_success_count", "sector_membership_failure_count",
     "sector_membership_cache_count", "sector_membership_live_success_count",
@@ -614,6 +617,9 @@ def _performance_markdown(performance):
         f"有效 {performance.get('capital_valid_count', 0)}（缓存有效 "
         f"{performance.get('capital_cache_valid_count', 0)}） → "
         f"预算跳过 {performance.get('capital_skipped_by_budget', 0)} | "
+        f"首轮预算截断 {performance.get('capital_initial_budget_cutoff', 0)} | "
+        f"二轮可执行 {performance.get('capital_topup_executable_count', 0)} | "
+        f"二轮预算不足 {performance.get('capital_topup_budget_insufficient', 0)} | "
         f"增强总体 {performance.get('capital_enrichment_population', 0)} | "
         f"接口失败原因 {json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}",
         "",
@@ -744,6 +750,11 @@ def _performance_html(performance):
         f"capital_topup_live_started={performance.get('capital_topup_live_started', 0)} "
         f"capital_topup_valid={performance.get('capital_topup_valid_count', 0)} "
         f"capital_topup_skipped_deadline={performance.get('capital_topup_skipped_deadline', 0)} "
+        f"capital_initial_budget_cutoff={performance.get('capital_initial_budget_cutoff', 0)} "
+        f"capital_topup_executable={performance.get('capital_topup_executable_count', 0)} "
+        f"capital_topup_budget_insufficient={performance.get('capital_topup_budget_insufficient', 0)} "
+        f"capital_global_queue_omitted={performance.get('capital_global_queue_omitted', 0)} "
+        f"capital_topup_global_omitted={performance.get('capital_topup_global_omitted', 0)} "
         f"capital_live_started={performance.get('capital_live_started', 0)} "
         f"capital_valid={performance.get('capital_valid_count', 0)} "
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
@@ -809,6 +820,11 @@ def _emit_performance_summary(performance):
         f"capital_topup_live_started={performance.get('capital_topup_live_started', 0)} "
         f"capital_topup_valid={performance.get('capital_topup_valid_count', 0)} "
         f"capital_topup_skipped_deadline={performance.get('capital_topup_skipped_deadline', 0)} "
+        f"capital_initial_budget_cutoff={performance.get('capital_initial_budget_cutoff', 0)} "
+        f"capital_topup_executable={performance.get('capital_topup_executable_count', 0)} "
+        f"capital_topup_budget_insufficient={performance.get('capital_topup_budget_insufficient', 0)} "
+        f"capital_global_queue_omitted={performance.get('capital_global_queue_omitted', 0)} "
+        f"capital_topup_global_omitted={performance.get('capital_topup_global_omitted', 0)} "
         f"capital_live_started={performance.get('capital_live_started', 0)} "
         f"capital_valid={performance.get('capital_valid_count', 0)} "
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
@@ -2010,6 +2026,9 @@ def _reason_detail(code, item):
                 "调度原因码" if code in NON_PROVIDER_ENRICHMENT_STATUSES
                 else "抓取原因码")
             details.append(f"{reason_label}{evidence['reason']}")
+        if evidence.get("scheduler_reason"):
+            details.append(
+                f"调度细分原因码{evidence['scheduler_reason']}")
         if evidence.get("status") and evidence.get("status") != code:
             details.append(f"状态码{evidence['status']}")
         if evidence.get("provider_attempts"):
@@ -3425,8 +3444,15 @@ def main():
     performance = {}
     source_health = RunSourceHealth()
     regime = load_regime_context()
-    style_shadow_state = _load_style_shadow(args.style_shadow, regime)
-    style_memberships = _load_style_memberships(args.memberships)
+    # Keep main() compatible with lightweight Namespace stubs used by
+    # downstream integrations and tests that predate optional shadow flags.
+    style_shadow_path = getattr(args, "style_shadow", None)
+    memberships_path = getattr(args, "memberships", None)
+    strategy_shadow_path = getattr(args, "strategy_shadow", None)
+    max_sector_expansion = getattr(
+        args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION)
+    style_shadow_state = _load_style_shadow(style_shadow_path, regime)
+    style_memberships = _load_style_memberships(memberships_path)
     from fetchers.sector_data import get_last_trading_day
     current_time = datetime.now()
     last_trading_date, trading_date_source = get_last_trading_day(
@@ -3446,7 +3472,7 @@ def main():
     active_policy = load_active_policy()
     policy["evolution_version"] = active_policy["experiment_id"]
     policy["evolution_policy_status"] = active_policy["status"]
-    strategy_shadow_state = _load_strategy_shadow(args.strategy_shadow)
+    strategy_shadow_state = _load_strategy_shadow(strategy_shadow_path)
 
     # 板块来源
     if args.sectors:
@@ -3501,8 +3527,7 @@ def main():
         metrics=performance,
         capital_top=args.top,
         policy=policy,
-        max_sector_expansion=getattr(
-            args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION),
+        max_sector_expansion=max_sector_expansion,
         return_research_population=True,
     )
     # Compatibility for injected legacy scanner stubs in downstream callers.
@@ -3544,7 +3569,7 @@ def main():
             "top": args.top,
             "min_candidates": args.min_candidates,
             "min_score": args.min_score,
-            "max_sector_expansion": args.max_sector_expansion,
+            "max_sector_expansion": max_sector_expansion,
             "wyckoff_required": True,
             "evolution_version": active_policy["experiment_id"],
             "buy_point_priority_bonus": active_policy["priority_bonuses"],
@@ -3558,7 +3583,7 @@ def main():
     report_buckets = copy.deepcopy(buckets)
     shadow_scanned_candidates = copy.deepcopy(scored)
     style_shadow_report = None
-    if args.style_shadow:
+    if style_shadow_path:
         style_shadow_report = copy.deepcopy(style_shadow_state)
         style_shadow_report.pop("shadow", None)
         style_shadow_report["membership"] = {

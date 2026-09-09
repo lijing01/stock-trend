@@ -34,6 +34,14 @@ LIVE_ATTEMPT_TIMEOUT_SECONDS = {
     "capital": 25,
     "fundamental": 25,
 }
+# A capital top-up needs one complete capital/fundamental admission window.
+# Reserve two provider windows so the initial frontier cannot consume the
+# entire shared live budget immediately before the second pass.
+CAPITAL_TOPUP_SAFETY_SECONDS = 2
+CAPITAL_TOPUP_RESERVE_SECONDS = (
+    LIVE_ATTEMPT_TIMEOUT_SECONDS["capital"] * 2
+    + CAPITAL_TOPUP_SAFETY_SECONDS
+)
 MAX_PROVIDER_ATTEMPTS = {
     "sector_ranking": 4,
     "sector_membership": 2,
@@ -169,6 +177,10 @@ class RunSourceHealth:
         self._lock = threading.RLock()
         self._states = {source: _new_source_state() for source in SOURCES}
         self._events: list[dict] = []
+        # Enrichment is invoked once per sector window in the compatibility
+        # scanner. Keep admission budgets on the shared run object so those
+        # windows cannot each allocate a fresh prefetch/top-up queue.
+        self._enrichment_admitted = {}
         self._sequence = 0
         self.started_at = time.monotonic()
         self.live_deadline = (
@@ -187,6 +199,50 @@ class RunSourceHealth:
             self.live_deadline,
             self.started_at + KLINE_PHASE_SECONDS,
         )
+
+    @property
+    def capital_initial_deadline(self) -> float:
+        """Latest safe admission time for the initial capital frontier."""
+        return self.live_deadline - CAPITAL_TOPUP_RESERVE_SECONDS
+
+    def admit_enrichment_slots(self, source: str, stage: str,
+                               requested: int, limit: int) -> int:
+        """Reserve a run-global number of logical enrichment slots.
+
+        The return value is the number admitted for this window. This is a
+        scheduler decision, not a provider request, so it deliberately does
+        not affect source health counters or circuit state.
+        """
+        try:
+            requested = max(0, int(requested))
+        except (TypeError, ValueError):
+            requested = 0
+        try:
+            limit = max(0, int(limit))
+        except (TypeError, ValueError):
+            limit = 0
+        key = (str(source), str(stage))
+        with self._lock:
+            admitted = self._enrichment_admitted.get(key, 0)
+            available = max(0, limit - admitted)
+            granted = min(requested, available)
+            self._enrichment_admitted[key] = admitted + granted
+            if requested > granted:
+                self._events.append({
+                    "event": "enrichment_budget_limited",
+                    "source": str(source),
+                    "stage": str(stage),
+                    "requested": requested,
+                    "admitted": granted,
+                    "limit": limit,
+                })
+            return granted
+
+    def enrichment_admitted(self, source: str, stage: str) -> int:
+        """Return the run-global logical slots admitted for a stage."""
+        with self._lock:
+            return self._enrichment_admitted.get(
+                (str(source), str(stage)), 0)
 
     def _state(self, source: str) -> dict:
         return self._states.setdefault(source, _new_source_state())
@@ -363,6 +419,7 @@ def bounded_source_map(
         cache_usable: Callable[[Any], bool] | None = None,
         include_evidence: bool = False,
         cache_fetch_with_reason: Callable[[Any, str], Any] | None = None,
+        deadline_reason: str = "deadline",
         ) -> list[tuple[Any, Any]]:
     """Run admitted live work incrementally, then finish cache-only.
 
@@ -493,7 +550,7 @@ def bounded_source_map(
         if health.unavailable(source):
             pending_reason = "source_unavailable"
         elif time.monotonic() >= live_deadline:
-            pending_reason = "deadline"
+            pending_reason = deadline_reason or "deadline"
         else:
             pending_reason = "scheduler_capacity"
         for item in pending_items:

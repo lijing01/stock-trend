@@ -3662,6 +3662,35 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("调度阶段队列外", detail)
         self.assertNotIn("抓取原因码not_selected_for_enrichment", detail)
 
+    def test_budget_limited_deadline_exposes_scheduler_subreason(self):
+        item = candidate("budget-limited", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["not_started_deadline"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "not_started_deadline",
+                    "stale_reason": "not_started_deadline",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "attempted": False,
+                "status": "not_started_deadline",
+                "reason": "not_started_deadline",
+                "scheduler_reason": "budget_insufficient_for_attempt",
+                "cache_used": False,
+                "selection_stage": "topup",
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("调度细分原因码budget_insufficient_for_attempt", detail)
+
     def test_source_unavailable_capital_is_rendered_as_unrequested_scheduler_state(self):
         item = candidate("source-unavailable", eligible=False)
         item["data_quality"] = {

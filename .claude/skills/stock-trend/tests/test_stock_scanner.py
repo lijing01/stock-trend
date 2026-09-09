@@ -1329,6 +1329,12 @@ class TestRunPhase2Funnel(unittest.TestCase):
              candidates[5]["code"]],
         )
 
+    def test_topup_capacity_requires_a_complete_provider_window(self):
+        self.assertEqual(sc._bounded_live_capacity("capital", 24.9, 12), 0)
+        self.assertEqual(sc._bounded_live_capacity("capital", 25.0, 12), 4)
+        self.assertEqual(sc._bounded_live_capacity("capital", 50.0, 12), 8)
+        self.assertEqual(sc._bounded_live_capacity("capital", None, 12), 12)
+
     def test_capital_topup_enriches_unprocessed_top_candidates_once(self):
         candidates = [
             _make_candidate(f"614{index:03d}") for index in range(40)
@@ -1449,6 +1455,11 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertTrue(all(
             item["source_evidence"]["capital"].get("status")
             == "not_started_deadline"
+            for item in topup_items
+        ))
+        self.assertTrue(all(
+            item["source_evidence"]["capital"].get("scheduler_reason")
+            == "budget_insufficient_for_attempt"
             for item in topup_items
         ))
 
