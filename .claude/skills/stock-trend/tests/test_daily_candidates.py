@@ -1601,6 +1601,26 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(captured["market_regime"], regime)
         self.assertEqual(tracking["status"], "saved")
 
+    def test_incomplete_post_close_scope_cannot_create_official_snapshot(self):
+        policy = {"mode": "observation", "max_recommendations": 0,
+                  "reasons": []}
+        buckets = {
+            "actionable": [], "waiting_trigger": [],
+            "next_day_confirmation": [], "observation": [],
+        }
+
+        tracking = dc._save_recommendation_snapshot(
+            [], [], policy, buckets, "2026-08-06",
+            performance={
+                "scan_mode": "post_close_final",
+                "scope_complete": False,
+                "scan_status": "incomplete",
+            },
+        )
+
+        self.assertEqual(tracking["status"], "blocked_scope_incomplete")
+        self.assertIsNone(tracking["path"])
+
     def test_outputs_keep_quality_score_and_expose_execution_priority(self):
         item = _set_buy_level(
             candidate("l2", adjusted_score=78.0), "lps")
@@ -2174,6 +2194,50 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(full_metrics["sector_scan_coverage"], 1.0)
         self.assertFalse(full_metrics["sector_expansion_truncated"])
         self.assertEqual(len(full_result), len(contexts))
+
+    def test_post_close_final_scan_completes_fixed_scope_without_early_stop(self):
+        gather_calls = []
+        contexts = {
+            f"BK{i:02d}": {
+                "name": f"板块{i}", "ranking_position": i,
+                "sector_actionable": True, "sector_score": 80,
+            }
+            for i in range(1, 8)
+        }
+
+        def fake_gather(batch, **_kwargs):
+            gather_calls.append(tuple(batch))
+            return {"candidates": [{
+                "code": f"600{int(code[2:]):03d}", "sector_code": code,
+            } for code in batch]}
+
+        def fake_phase2(candidates, **_kwargs):
+            return [{
+                **item, "composite_score": 80,
+                "quality_adjusted_score": 80,
+                "data_quality": {"eligible": True},
+            } for item in candidates]
+
+        metrics = {}
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            result = dc.scan_sectors(
+                list(contexts), min_candidates=1,
+                sector_context=contexts, source_health=sc.RunSourceHealth(),
+                metrics=metrics, initial_sector_window=3,
+                sector_expansion_step=2, max_sector_expansion=1,
+                scan_mode="post_close_final")
+
+        self.assertEqual(len(gather_calls), 3)
+        self.assertEqual(len(result), len(contexts))
+        self.assertEqual(metrics["scan_mode"], "post_close_final")
+        self.assertEqual(metrics["scope_policy"], "fixed_top_120")
+        self.assertEqual(metrics["scope_expected_count"], len(contexts))
+        self.assertEqual(metrics["scope_attempted_count"], len(contexts))
+        self.assertEqual(metrics["scope_completed_count"], len(contexts))
+        self.assertEqual(metrics["scope_failed_count"], 0)
+        self.assertTrue(metrics["scope_complete"])
+        self.assertFalse(metrics["scope_early_stopped"])
 
     def test_multi_batch_scan_fetches_ranking_snapshot_exactly_once(self):
         """One scan run owns one immutable full-market ranking snapshot."""

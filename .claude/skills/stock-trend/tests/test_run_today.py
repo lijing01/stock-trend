@@ -29,6 +29,7 @@ class TodayTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.calls = []
+        self.candidate_arguments = []
         self.policy = copy.deepcopy(BASELINE)
         self.weekly_fails = False
         self.scan_fails = False
@@ -37,6 +38,8 @@ class TodayTests(unittest.TestCase):
 
         def run_script(script, arguments):
             self.calls.append(script)
+            if "daily_candidates" in script:
+                self.candidate_arguments.append(list(arguments))
             if (self.market_fails and "market_regime" in script) or (self.scan_fails and "daily_candidates" in script):
                 raise RuntimeError("fixture failure")
             return {"policy": {"evolution_version": self.policy["experiment_id"]},
@@ -79,6 +82,14 @@ class TodayTests(unittest.TestCase):
                                      "close:2026-09-09", "weekly:2026-09-09", "monitor:2026-09-09"])
         self.assertEqual(result["recommendations"], [{"code": "600000"}])
         self.assertEqual(result["notifications"], [])
+
+    def test_post_close_automatically_uses_fixed_scan_scope(self):
+        self.run_job(hour=16)
+        self.assertIn("--post-close-final", self.candidate_arguments[0])
+
+        self.candidate_arguments.clear()
+        self.run_job(hour=11)
+        self.assertNotIn("--post-close-final", self.candidate_arguments[0])
 
     def test_intraday_evaluates_only_previous_close(self):
         result = self.run_job(hour=11)

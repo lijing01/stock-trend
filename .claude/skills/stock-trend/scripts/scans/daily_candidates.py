@@ -276,6 +276,8 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "sector_membership_coverage",
     "sector_membership_attempt_coverage",
     "sector_expanded_attempt_coverage",
+    "scope_expected_count", "scope_attempted_count",
+    "scope_completed_count", "scope_failed_count",
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
@@ -318,6 +320,24 @@ def _complete_performance(performance, source_health, candidates, buckets,
     completed.setdefault(
         "sector_expansion_total_count",
         completed.get("sector_qualified_count", 0),
+    )
+    completed.setdefault("scan_mode", "exploratory")
+    completed.setdefault("scope_policy", "adaptive_bounded")
+    completed.setdefault("scope_expected_count",
+                         completed.get("sector_expanded_count", 0))
+    completed.setdefault("scope_attempted_count",
+                         completed.get("scope_expected_count", 0))
+    completed.setdefault("scope_completed_count",
+                         completed.get("scope_attempted_count", 0))
+    completed.setdefault("scope_failed_count", 0)
+    completed.setdefault("scope_early_stopped", False)
+    completed.setdefault("scope_codes_sha256", "")
+    completed["scope_complete"] = (
+        int(completed.get("scope_attempted_count", 0) or 0)
+        == int(completed.get("scope_expected_count", 0) or 0)
+        and int(completed.get("scope_completed_count", 0) or 0)
+        == int(completed.get("scope_expected_count", 0) or 0)
+        and int(completed.get("scope_failed_count", 0) or 0) == 0
     )
     completed["final_candidate_count"] = len(candidates)
     # Alias the historical ``final`` name with the business-facing output
@@ -470,10 +490,15 @@ def _complete_performance(performance, source_health, candidates, buckets,
     completed.setdefault("failed_batches", [])
     attempted_batches = int(completed.get("batch_count", 0))
     failed_batches = len(completed["failed_batches"])
-    completed["scan_status"] = (
-        "error" if attempted_batches > 0 and failed_batches == attempted_batches
-        else ("degraded" if completed["degradation_reasons"] else "complete")
-    )
+    if (completed.get("scan_mode") == "post_close_final"
+            and not completed["scope_complete"]):
+        completed["scan_status"] = "incomplete"
+        _record_degradation(completed, "post_close_scope_incomplete")
+    else:
+        completed["scan_status"] = (
+            "error" if attempted_batches > 0 and failed_batches == attempted_batches
+            else ("degraded" if completed["degradation_reasons"] else "complete")
+        )
 
     snapshot = (source_health.snapshot()
                 if isinstance(source_health, RunSourceHealth)
@@ -557,6 +582,17 @@ def _performance_markdown(performance):
         f"热度合格 {performance.get('sector_qualified_count', 0)} → "
         f"实际展开 {performance.get('sector_expanded_count', 0)}",
         "",
+        "**盘后范围审计**: "
+        f"模式 {performance.get('scan_mode', 'exploratory')} | "
+        f"策略 {performance.get('scope_policy', 'adaptive_bounded')} | "
+        f"计划 {performance.get('scope_expected_count', 0)} | "
+        f"尝试 {performance.get('scope_attempted_count', 0)} | "
+        f"完成 {performance.get('scope_completed_count', 0)} | "
+        f"失败 {performance.get('scope_failed_count', 0)} | "
+        f"提前停止 {'是' if performance.get('scope_early_stopped') else '否'} | "
+        f"范围完整 {'是' if performance.get('scope_complete') else '否'} | "
+        f"范围哈希 {performance.get('scope_codes_sha256') or '—'}",
+        "",
         f"**板块覆盖率（计划展开）**: "
         f"{_coverage_text(performance.get('sector_scan_coverage', 1.0))} | "
         f"实际尝试覆盖 {_coverage_text(performance.get('sector_expanded_attempt_coverage'))} | "
@@ -565,7 +601,8 @@ def _performance_markdown(performance):
         + (
             f" | 如需完整展开可复跑 `--max-sector-expansion "
             f"{expansion_total}`"
-            if performance.get('sector_expansion_truncated') else ""
+            if performance.get('sector_expansion_truncated')
+            and performance.get('scope_policy') != 'fixed_top_120' else ""
         ),
         "",
         "**板块成分展开审计**: "
@@ -768,6 +805,13 @@ def _performance_html(performance):
     advisory_reasons = escape(
         "、".join(performance.get("advisory_reasons", [])) or "无")
     coverage_text = (
+        f"扫描模式={performance.get('scan_mode', 'exploratory')} | "
+        f"范围策略={performance.get('scope_policy', 'adaptive_bounded')} | "
+        f"范围={performance.get('scope_completed_count', 0)}/"
+        f"{performance.get('scope_expected_count', 0)} | "
+        f"范围失败={performance.get('scope_failed_count', 0)} | "
+        f"提前停止={'是' if performance.get('scope_early_stopped') else '否'} | "
+        f"范围完整={'是' if performance.get('scope_complete') else '否'} | "
         f"板块覆盖率（计划展开）={_coverage_text(performance.get('sector_scan_coverage', 1.0))} | "
         f"实际尝试覆盖率={_coverage_text(performance.get('sector_expanded_attempt_coverage'))} | "
         f"成分合格板块={performance.get('sector_qualified_count', 0)} | "
@@ -781,7 +825,8 @@ def _performance_html(performance):
         + (
             f" | 完整展开可复跑 --max-sector-expansion "
             f"{expansion_total}"
-            if performance.get('sector_expansion_truncated') else ""
+            if performance.get('sector_expansion_truncated')
+            and performance.get('scope_policy') != 'fixed_top_120' else ""
         )
     )
     return (
@@ -846,6 +891,12 @@ def _emit_performance_summary(performance):
         f"data_rejected={performance.get('data_rejected_count', 0)} "
         f"final_valid={performance.get('final_valid_count', 0)} "
         f"actionable={performance.get('actionable_count', 0)} "
+        f"scan_mode={performance.get('scan_mode', 'exploratory')} "
+        f"scope={performance.get('scope_completed_count', 0)}/"
+        f"{performance.get('scope_expected_count', 0)} "
+        f"scope_failed={performance.get('scope_failed_count', 0)} "
+        f"scope_complete={performance.get('scope_complete', True)} "
+        f"scope_early_stopped={performance.get('scope_early_stopped', False)} "
         f"{capital_text} "
         f"sources=[{source_text}]",
         file=sys.stderr,
@@ -1721,9 +1772,15 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
-                 policy=None, return_research_population=False):
-    """Expand until enough score-qualified, data-eligible candidates exist."""
+                 policy=None, return_research_population=False,
+                 scan_mode="exploratory"):
+    """Scan the bounded sector universe, optionally completing a fixed scope."""
     metrics = metrics if metrics is not None else {}
+    formal_scope = scan_mode == "post_close_final"
+    metrics["scan_mode"] = scan_mode
+    metrics["scope_policy"] = (
+        "fixed_top_120" if formal_scope else "adaptive_bounded")
+    metrics.setdefault("scope_early_stopped", False)
     if sector_context is None:
         from fetchers.sector_data import get_sector_rankings, rank_hot_sectors
         try:
@@ -1778,7 +1835,12 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         # current window has not produced enough eligible candidates.
         initial_window = max(1, int(initial_sector_window))
         expansion_step = max(1, int(sector_expansion_step))
-        expansion_limit = max(1, int(max_sector_expansion))
+        # The formal post-close route has one immutable population boundary.
+        # Ignore caller-specific caps there so a rerun cannot silently scan a
+        # different prefix of the same ranking snapshot.
+        expansion_limit = (
+            DEFAULT_MAX_SECTOR_EXPANSION if formal_scope
+            else max(1, int(max_sector_expansion)))
         scan_limit = min(len(ordered_sector_codes), expansion_limit)
         total_sector_count = len(ordered_sector_codes)
         metrics["sector_expansion_total_count"] = total_sector_count
@@ -1788,9 +1850,10 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         if len(ordered_sector_codes) > scan_limit:
             metrics["sector_expansion_limit"] = expansion_limit
             reasons = metrics.setdefault("degradation_reasons", [])
-            reason = f"sector_expansion_capped:{expansion_limit}"
-            if reason not in reasons:
-                reasons.append(reason)
+            if not formal_scope:
+                reason = f"sector_expansion_capped:{expansion_limit}"
+                if reason not in reasons:
+                    reasons.append(reason)
         windows = []
         cursor = 0
         window_size = min(initial_window, scan_limit)
@@ -1802,15 +1865,24 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         metrics["sector_expansion_total_count"] = len(ordered_sector_codes)
         metrics["sector_scan_coverage"] = 1.0
         metrics["sector_expansion_truncated"] = False
+        scan_limit = len(ordered_sector_codes)
         windows = [
             (i, min(batch_size, len(ordered_sector_codes) - i))
             for i in range(0, len(ordered_sector_codes), batch_size)
         ]
 
+    metrics["scope_expected_count"] = scan_limit
+    metrics.setdefault("scope_attempted_count", 0)
+    metrics.setdefault("scope_completed_count", 0)
+    metrics.setdefault("scope_failed_count", 0)
+    metrics["scope_codes_sha256"] = content_sha256(
+        ordered_sector_codes[:scan_limit])
+
     for i, window_size in windows:
         batch = ordered_sector_codes[i:i + window_size]
         metrics["sector_expanded_codes"].extend(batch)
         metrics["batch_count"] += 1
+        metrics["scope_attempted_count"] += len(batch)
         membership_started = time.monotonic()
         try:
             try:
@@ -1829,6 +1901,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         except Exception as e:
             print(f"  ⚠️ 板块 {batch} 汇聚失败: {e}", file=sys.stderr)
             _record_failed_batch(metrics, batch, e)
+            metrics["scope_failed_count"] += len(batch)
             continue
         finally:
             metrics["sector_membership_seconds"] = metrics.get(
@@ -1909,8 +1982,15 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
             f"  批次完成,候选 {len(all_scored)} 只,有效 {eligible_count} 只",
             file=sys.stderr,
         )
-        if eligible_count >= min_candidates:
+        metrics["scope_completed_count"] += len(batch)
+        if eligible_count >= min_candidates and not formal_scope:
+            metrics["scope_early_stopped"] = True
             break
+    metrics["scope_complete"] = (
+        metrics["scope_attempted_count"] == metrics["scope_expected_count"]
+        and metrics["scope_completed_count"] == metrics["scope_expected_count"]
+        and metrics["scope_failed_count"] == 0
+    )
     selected = [all_scored[code] for code in sorted(all_scored)]
     if not return_research_population:
         return selected
@@ -2979,6 +3059,15 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
                                   recommendation_date, performance=None,
                                   market_regime=None):
     """Persist one official snapshot while keeping report generation resilient."""
+    performance = performance or {}
+    if (performance.get("scan_mode") == "post_close_final"
+            and performance.get("scope_complete") is False):
+        return {
+            "status": "blocked_scope_incomplete",
+            "path": None,
+            "content_sha256": None,
+            "reason": "post_close_scope_incomplete",
+        }
     source = {
         "recommendation_date": recommendation_date,
         "generated_at": datetime.now().astimezone().isoformat(),
@@ -2989,7 +3078,7 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
         "sectors": copy.deepcopy(sector_codes),
         "candidates": copy.deepcopy(candidates),
         "buckets": copy.deepcopy(buckets),
-        "scan_status": (performance or {}).get("scan_status", "complete"),
+        "scan_status": performance.get("scan_status", "complete"),
     }
     try:
         result = save_snapshot_if_official(source)
@@ -3420,6 +3509,9 @@ def main():
         "--max-sector-expansion", type=int,
         default=DEFAULT_MAX_SECTOR_EXPANSION,
         help="单次运行最多展开的热点板块数(默认120)")
+    parser.add_argument(
+        "--post-close-final", action="store_true",
+        help="盘后正式扫描：固定热点板块前120名并扫描完整范围，不因候选数达标提前停止")
     parser.add_argument("--min-score", type=float, default=50, help="最低综合分(默认50)")
     parser.add_argument("--sectors", type=str,
                         help="手动指定板块,逗号分隔(覆盖自动选板块)")
@@ -3451,6 +3543,11 @@ def main():
     strategy_shadow_path = getattr(args, "strategy_shadow", None)
     max_sector_expansion = getattr(
         args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION)
+    post_close_final = bool(getattr(args, "post_close_final", False))
+    scan_mode = "post_close_final" if post_close_final else "exploratory"
+    scan_expansion_limit = (
+        DEFAULT_MAX_SECTOR_EXPANSION if post_close_final
+        else max_sector_expansion)
     style_shadow_state = _load_style_shadow(style_shadow_path, regime)
     style_memberships = _load_style_memberships(memberships_path)
     from fetchers.sector_data import get_last_trading_day
@@ -3527,7 +3624,8 @@ def main():
         metrics=performance,
         capital_top=args.top,
         policy=policy,
-        max_sector_expansion=max_sector_expansion,
+        max_sector_expansion=scan_expansion_limit,
+        scan_mode=scan_mode,
         return_research_population=True,
     )
     # Compatibility for injected legacy scanner stubs in downstream callers.
@@ -3569,7 +3667,8 @@ def main():
             "top": args.top,
             "min_candidates": args.min_candidates,
             "min_score": args.min_score,
-            "max_sector_expansion": max_sector_expansion,
+            "max_sector_expansion": scan_expansion_limit,
+            "scan_mode": scan_mode,
             "wyckoff_required": True,
             "evolution_version": active_policy["experiment_id"],
             "buy_point_priority_bonus": active_policy["priority_bonuses"],

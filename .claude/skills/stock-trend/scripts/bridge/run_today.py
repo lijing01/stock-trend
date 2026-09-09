@@ -83,6 +83,11 @@ def _completed_sessions(now):
              (day == today and now.time() >= time(15, 10))], dates[-1] if dates else None)
 
 
+def _should_use_post_close_final(now):
+    """Use the immutable scan scope once the current session is closed."""
+    return now.weekday() >= 5 or now.time() >= time(15, 10)
+
+
 def _weekly_completed(job_root, as_of):
     week = date.fromisoformat(as_of).isocalendar()[:2]
     for path in (job_root / "weekly").glob("*.json"):
@@ -175,6 +180,10 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         return output
     now = now or datetime.now(SHANGHAI)
     now = now.replace(tzinfo=SHANGHAI) if now.tzinfo is None else now.astimezone(SHANGHAI)
+    if (_should_use_post_close_final(now)
+            and "--post-close-final" not in candidate_args):
+        candidate_args.append("--post-close-final")
+        workflow["candidate_args"] = candidate_args
     state_root = Path(state_root)
     job_root = state_root / "jobs"
     state_path = state_root / "today_state.json"
