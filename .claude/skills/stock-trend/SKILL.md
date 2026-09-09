@@ -11,6 +11,20 @@ description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告
 
 Python 运行要求为 >=3.10；下文 `python3` 指满足要求的解释器。本环境默认 `python3` 为 3.9.6，Agent 必须将命令中的解释器替换为已安装的 `/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3`，无需修改全局环境。
 
+## 东方财富 / 同花顺实时接口运行契约
+
+东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、`ths_theme.py`、`market_theme.py`、`market_leader.py`、行业/涨停/龙虎榜扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
+
+```bash
+NO_PROXY="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.10jqka.com.cn" \\
+no_proxy="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.10jqka.com.cn" \\
+/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 <script> [args]
+```
+
+- 对 Codex 工具调用，这意味着使用 `require_escalated` 启动该命令；不要先在沙盒内重试这些实时接口。
+- 仅追加本次进程的代理绕过名单，不修改 shell profile、全局代理或系统 DNS 设置。`eastmoney.com` / `.eastmoney.com` 覆盖东方财富子域，`10jqka.com.cn` / `.10jqka.com.cn` 覆盖同花顺子域。
+- 外部直连仍失败时，记录失败来源与原因，按既有缓存/降级规则继续；报告必须标注 `degraded`、`cached` 或数据缺失，绝不能称为实时数据。
+
 **分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/lhb-tracker`→暗线跟踪；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
@@ -270,7 +284,7 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 ---
 
-## /today-recommendation [candidates 参数] [--dry-run] [--json]
+## /today-recommendation [candidates 参数] [--dry-run] [--json] [--postprocess background|sync]
 
 “今日推荐”的统一入口。用户使用该自然语言时，直接运行：
 
@@ -278,12 +292,15 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 /Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
 ```
 
-`--top`、`--min-candidates`、`--no-html` 等原 candidates 参数可直接传入。`--dry-run` 不联网、不写入，只输出计划。该入口仅在本次调用中依次执行，不安装后台定时器：
+`--top`、`--min-candidates`、`--no-html` 等原 candidates 参数可直接传入。`--dry-run` 不联网、不写入，只输出计划。默认先返回候选报告，后处理由本次调用启动的独立后台任务继续执行；不安装后台定时器：
 
 1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。
 2. 从已有权威交易日历按上海时区取得最近已知完成交易日；15:10 前用上一交易日评价历史。日历缺失时明确跳过依赖交易日的后处理；日历只覆盖历史区间时继续评价已知区间，并明确呈现 `workflow.calendar.coverage_end`，不得把未覆盖日期解释为休市。
-3. 按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，均允许同周再次尝试。
-4. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
+3. 报告就绪后返回 `workflow.status=report_ready`，并给出 `workflow.postprocess.task_id`；后台按 close → weekly → monitor 执行。用 `--status <task_id> --json` 查询，用 `--resume <task_id>` 显式续跑。
+4. 后台按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，均允许同周再次尝试。
+5. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
+
+需要诊断或兼容旧的同步行为时，显式传 `--postprocess sync`。后台任务状态保存在 `.cache/stock-trend/evolution/background/<task_id>/`，包括冻结输入、状态、日志和最终结果；报告成功不代表后台研究已完成。
 
 JSON 保留候选输出，并追加 `workflow` 阶段结果和 `notifications`。通知覆盖本次及跨调用检测到的策略版本/参数变化与 `invalid_pointer_fallback` 等安全回退；首次建立基线不报告变更。回复中醒目呈现通知，但不向外部渠道推送。publish 仍需显式人工审核，统一入口不得自动发布。不得自动打开 GUI 或浏览器。
 

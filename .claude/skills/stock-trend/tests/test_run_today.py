@@ -253,6 +253,54 @@ class TodayTests(unittest.TestCase):
         result = job.run_today(now=datetime(2026, 9, 9, 8, tzinfo=timezone.utc), state_root=self.root)
         self.assertEqual(result["workflow"]["as_of"], "2026-09-09")
 
+    def test_background_mode_returns_report_before_auxiliary_stages(self):
+        task = {"task_id": "task-1", "status": "queued"}
+        with patch.object(job, "_launch_background", return_value=task):
+            result = job.run_today(now=datetime(2026, 9, 9, 16, tzinfo=job.SHANGHAI),
+                                   state_root=self.root, postprocess="background")
+        self.assertEqual(result["workflow"]["status"], "report_ready")
+        self.assertEqual(result["workflow"]["postprocess"]["task_id"], "task-1")
+        self.assertEqual(result["workflow"]["close"]["status"], "background")
+        self.assertEqual(result["recommendations"], [{"code": "600000"}])
+
+    def test_background_worker_persists_final_status_and_stages(self):
+        from bridge import today_background
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            manifest = {"as_of": "2026-09-09", "trading_sessions": ["2026-09-09"],
+                        "job_root": str(root / "jobs"), "budget_seconds": 30}
+            task = today_background.ensure_task(manifest, root=root / "background")
+            package = lambda kind, content: job.evolution._package(kind, content)
+            with patch.object(today_background.evolution, "run_close",
+                              return_value=package("close", {"status": "completed"})), \
+                 patch.object(today_background.evolution, "run_weekly",
+                              return_value=package("weekly", {"status": "completed"})), \
+                 patch.object(today_background.evolution, "monitoring_snapshot",
+                              return_value=package("monitor", {"status": "healthy"})):
+                result = today_background.run_task(task["task_id"], root=root / "background")
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(today_background.read_status(task["task_id"], root=root / "background")["status"],
+                             "completed")
+            self.assertTrue((root / "background" / task["task_id"] / "result.json").exists())
+
+    def test_shared_series_loader_deduplicates_benchmark_and_sector(self):
+        from analysis import recommendation_attribution as attribution
+        loader = attribution.SharedSeriesLoader()
+        stock_calls = []; benchmark_calls = []; sector_calls = []
+        stock = {"data": [{"date": "2026-09-09", "close": 10}], "meta": {}}
+        with patch("scans.stock_scanner._fetch_kline", side_effect=lambda *args, **kwargs:
+                   stock_calls.append(args[0]) or stock), \
+             patch("analysis.market_regime.fetch_index_kline", side_effect=lambda *args, **kwargs:
+                   benchmark_calls.append(args[0]) or [{"date": "2026-09-09", "close": 1}]), \
+             patch("fetchers.sector_kline.fetch_single_kline", side_effect=lambda *args, **kwargs:
+                   sector_calls.append(args[0]) or [{"date": "2026-09-09", "close": 1}]):
+            loader("600000", {"sector_code": "BK001"}, "2026-09-08", "2026-09-09")
+            loader("600001", {"sector_code": "BK001"}, "2026-09-08", "2026-09-09")
+        self.assertEqual(len(stock_calls), 2)
+        self.assertEqual(benchmark_calls, ["000300.SH"])
+        self.assertEqual(sector_calls, ["BK001"])
+        self.assertEqual(loader.stats["cache_hits"], 2)
+
 
 def run_today_tests():
     result = unittest.TextTestRunner(verbosity=0).run(unittest.defaultTestLoader.loadTestsFromTestCase(TodayTests))

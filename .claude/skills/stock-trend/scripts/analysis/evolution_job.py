@@ -168,6 +168,7 @@ def run_close(as_of, history_root=DEFAULT_HISTORY_ROOT, attribution_root=DEFAULT
                                   "reason": None if preflight["ready"] else preflight.get("reason"),
                                   "candidate_signal_summary": output.get("candidate_signal_summary", {}),
                                   "research_link_statuses": output.get("research_link_statuses", []),
+                                  "loader_stats": output.get("loader_stats"),
                                   "snapshots": summary.get("snapshots", 0),
                                   "historical_evaluation_status": historical_status,
                                   "trade_simulation_status": summary.get("status", "evidence_insufficient"),

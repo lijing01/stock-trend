@@ -14,6 +14,7 @@ import math
 import os
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -593,7 +594,7 @@ def merge_attribution(existing, incoming):
         "recommendation_date", "evaluation_as_of", "cost_model",
         "evaluation_contract", "evaluation_identity", "research_run_id",
         "research_snapshot_sha256", "population_kind", "research_link_status", "execution",
-        "input_manifest",
+        "input_manifest", "incremental",
     ):
         if field in incoming and (can_update_metadata or field in _IDENTITY_FIELDS):
             out[field] = copy.deepcopy(incoming[field])
@@ -1018,9 +1019,59 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
     )
     candidates = list(buckets.get("actionable", []))
     signal_candidates = population
+    population_kind = (
+        "frozen_investable_research_population" if research_snapshot
+        else ("research_population_gap" if research_link_status in ("missing", "mismatch", "unverified")
+              else "official_candidate_population")
+    )
+    population_identity = {
+        "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
+        "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "record_ids": sorted(str(item["record"].get("record_id") or
+                                 f"{recommendation_date}:{item['candidate'].get('code', '')}")
+                             for item in population),
+    }
+    contract = build_evaluation_contract(
+        windows, dataclasses.asdict(cost_model or CostModel()),
+        population_kind=population_kind, evaluation_version=EVALUATION_RESULT_VERSION,
+        population_identity=population_identity,
+    )
+    prior = None
+    if root is not None and research_link_status not in ("missing", "mismatch", "unverified"):
+        prior_path = sidecar_path(Path(root) / contract["contract_id"], recommendation_date,
+                                  evaluation_as_of=evaluation_as_of)
+        try:
+            candidate_prior = read_sidecar(prior_path)
+            if (snapshot.get("content_sha256") and candidate_prior
+                    and candidate_prior.get("snapshot_sha256") == snapshot.get("content_sha256")
+                    and candidate_prior.get("research_snapshot_sha256") == (
+                        research_snapshot.get("content_sha256") if research_snapshot else None)):
+                prior = candidate_prior
+        except (OSError, ValueError, json.JSONDecodeError):
+            prior = None
+
+    def reusable(item, evaluator_version):
+        if not isinstance(item, dict) or item.get("evaluator_version") != evaluator_version:
+            return False
+        windows_by_name = item.get("windows") or {}
+        if not windows_by_name:
+            return item.get("execution", {}).get("status") not in {"error", "failed"}
+        return all((window or {}).get("status") not in {"data_error", "error", "failed"}
+                   for window in windows_by_name.values())
+
+    prior_items = {str(item.get("code")): item for item in (prior or {}).get("items", [])}
+    prior_signals = {str(item.get("record_id") or item.get("code")): item
+                     for item in (prior or {}).get("candidate_signal_items", [])}
+    reused_items = 0
+    reused_signals = 0
     results = []
     signal_results = []
     for candidate in candidates:
+        existing = prior_items.get(str(candidate.get("code")))
+        if reusable(existing, EVALUATOR_VERSION):
+            results.append(copy.deepcopy(existing))
+            reused_items += 1
+            continue
         try:
             series = _call_series_loader(
                 series_loader, candidate.get("code"), candidate,
@@ -1047,6 +1098,12 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
     for population_item in signal_candidates:
         candidate = population_item["candidate"]
         record = population_item["record"]
+        record_id = str(record.get("record_id") or f"{recommendation_date}:{candidate.get('code', '')}")
+        existing = prior_signals.get(record_id)
+        if reusable(existing, CANDIDATE_EVALUATOR_VERSION):
+            signal_results.append(copy.deepcopy(existing))
+            reused_signals += 1
+            continue
         exclusion_reason = _research_record_is_excluded(record)
         if exclusion_reason:
             signal_results.append(_excluded_signal_result(
@@ -1089,23 +1146,6 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
                 "research_snapshot_sha256": population_item.get("research_snapshot_sha256"),
             })
             signal_results.append(signal_result)
-    population_kind = (
-        "frozen_investable_research_population" if research_snapshot
-        else ("research_population_gap" if research_link_status in ("missing", "mismatch", "unverified")
-              else "official_candidate_population")
-    )
-    population_identity = {
-        "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
-        "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
-        "record_ids": sorted(str(item["record"].get("record_id") or
-                                 f"{recommendation_date}:{item['candidate'].get('code', '')}")
-                             for item in population),
-    }
-    contract = build_evaluation_contract(
-        windows, dataclasses.asdict(cost_model or CostModel()),
-        population_kind=population_kind, evaluation_version=EVALUATION_RESULT_VERSION,
-        population_identity=population_identity,
-    )
     evaluation_identity = {
         "contract_id": contract["contract_id"],
         "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
@@ -1140,6 +1180,9 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
         "items": results,
         "candidate_signal_items": signal_results,
         "candidate_signal_evaluator_version": CANDIDATE_EVALUATOR_VERSION,
+        "incremental": {"reused_items": reused_items, "reused_signal_items": reused_signals,
+                        "recomputed_items": len(results) - reused_items,
+                        "recomputed_signal_items": len(signal_results) - reused_signals},
     }
     # Link gaps are returned for the close-job audit but never written into a
     # normal evaluation contract.  This prevents a missing research day from
@@ -1189,6 +1232,68 @@ def default_series_loader(code, candidate, recommendation_date=None, evaluation_
         "hs300_rows": hs300,
         "sector_rows": sector,
     }
+
+
+class SharedSeriesLoader:
+    """Share benchmark, sector and stock requests during one close run.
+
+    The evaluator still receives a per-record result, but immutable provider
+    series are fetched once per resource key.  Failed keys are cached only for
+    this process, so a later resumed task can retry them.
+    """
+
+    def __init__(self):
+        self._values = {}
+        self._failures = {}
+        self._lock = threading.RLock()
+        self.stats = {"requests": 0, "cache_hits": 0, "failures": 0}
+
+    def _get(self, key, loader):
+        with self._lock:
+            if key in self._values:
+                self.stats["cache_hits"] += 1
+                return self._values[key]
+            if key in self._failures:
+                self.stats["cache_hits"] += 1
+                raise self._failures[key]
+            self.stats["requests"] += 1
+            try:
+                value = loader()
+            except Exception as exc:
+                self.stats["failures"] += 1
+                self._failures[key] = exc
+                raise
+            self._values[key] = value
+            return value
+
+    def __call__(self, code, candidate, recommendation_date=None, evaluation_as_of=None):
+        from scans.stock_scanner import _fetch_kline
+        from analysis.market_regime import fetch_index_kline
+        from fetchers.sector_kline import fetch_single_kline
+
+        trade_plan = candidate.get("trade_plan") or {}
+        basis_date = trade_plan.get("basis_date") or candidate.get("basis_date") or recommendation_date
+        result_cutoff = evaluation_as_of or basis_date
+        ts_code = candidate.get("ts_code") or (
+            str(code) + ".SH" if str(code).startswith(("0", "3", "6")) else str(code)
+        )
+        stock_key = ("stock", ts_code, result_cutoff or "")
+        stock = self._get(stock_key, lambda: _fetch_kline(ts_code, as_of_date=result_cutoff or "") or {})
+        stock_rows = stock.get("data", []) if isinstance(stock, dict) else []
+        if not stock_rows:
+            raise AttributionDataError("historical_data_missing")
+        benchmark = self._get(("benchmark", "000300.SH", 180),
+                              lambda: fetch_index_kline("000300.SH", lmt=180))
+        if not benchmark:
+            raise AttributionDataError("benchmark_data_missing")
+        sector = []
+        if candidate.get("sector_code"):
+            sector = self._get(("sector", candidate["sector_code"], 180),
+                               lambda: fetch_single_kline(candidate["sector_code"], min_records=180))
+        market_sessions = [_row_date(row) for row in benchmark if _row_date(row)]
+        return {"market_sessions": market_sessions, "stock_rows": stock_rows,
+                "stock_meta": stock.get("meta") if isinstance(stock, dict) else None,
+                "hs300_rows": benchmark, "sector_rows": sector}
 
 
 def track_official_history(
@@ -1245,6 +1350,8 @@ def track_official_history(
             return None, "mismatch"
         return research, "linked"
 
+    shared_loader = SharedSeriesLoader() if series_loader is default_series_loader else None
+    effective_loader = shared_loader or series_loader
     payloads = []
     research_link_statuses = []
     for snapshot in snapshots:
@@ -1254,7 +1361,7 @@ def track_official_history(
             "status": link_status,
         })
         payloads.append(track_attribution(
-            snapshot, series_loader, as_of, root=attribution_root,
+            snapshot, effective_loader, as_of, root=attribution_root,
             cost_model=cost_model, windows=windows,
             research_snapshot=research, research_link_status=link_status,
         ))
@@ -1273,6 +1380,7 @@ def track_official_history(
             "candidate_signal_summary": candidate_summary,
             "candidate_signal_items": signal_items,
             "research_link_statuses": research_link_statuses,
+            "loader_stats": shared_loader.stats if shared_loader else None,
             "strategy_calibration": calibration_readiness(candidate_summary, summary)}
 
 

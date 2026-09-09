@@ -8,7 +8,7 @@
 /Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
 ```
 
-该命令在本次调用中依次完成市场环境刷新、候选扫描、历史推荐评价、每周研究和策略监控；不安装后台定时器，不向外部服务推送通知，也不自动打开 GUI 或浏览器。
+该命令先完成市场环境刷新和候选扫描并返回报告；历史推荐评价、每周研究和策略监控由本次调用启动的独立后台任务继续执行。不安装后台定时器，不向外部服务推送通知，也不自动打开 GUI 或浏览器。
 
 ## 日常使用
 
@@ -17,6 +17,10 @@
 ```bash
 python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
   --top 30 --min-candidates 20 --no-html --json
+
+# 兼容/诊断：前台等待 close、weekly、monitor 全部结束
+python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
+  --postprocess sync --json
 ```
 
 只查看执行计划，不联网、不写文件：
@@ -29,6 +33,18 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --dry-run --json
 
 - `workflow`：各阶段的执行、跳过、失败和恢复结果。
 - `notifications`：本次调用以及跨调用检测到的策略版本或参数变化；首次建立基线不报“变更”。`invalid_pointer_fallback` 等安全回退也会明确通知。
+- `workflow.status=report_ready`：报告已落盘，后台仍在处理；`workflow.postprocess.task_id` 可用于查询。
+
+后台状态查询与续跑：
+
+```bash
+python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
+  --status <task_id> --json
+python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
+  --resume <task_id> --json
+```
+
+后台目录 `.cache/stock-trend/evolution/background/<task_id>/` 保存 `manifest.json`、`status.json`、`worker.log` 和 `result.json`。后台使用冻结的评价日期/交易日列表；超出默认 300 秒预算会写入 `timed_out`，可通过 `--resume` 继续未完成任务。close 同一次运行共享沪深300、板块和个股序列，避免对每条历史记录重复发起相同资源请求。
 
 调用者应在当前对话中醒目呈现 `notifications`；它们不是短信、邮件或其他外部推送。
 

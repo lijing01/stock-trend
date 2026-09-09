@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/'scripts'))
 from analysis.recommendation_attribution import *
 from core.candidate_research_snapshot import build_research_snapshot
+from core.recommendation_snapshot import build_snapshot
 class T(unittest.TestCase):
  def test_cost(self): self.assertEqual(CostModel().mode, 'gross')
  def test_entry_and_pending(self):
@@ -142,6 +143,32 @@ class T(unittest.TestCase):
    second=track_attribution(snapshot,loader,'2026-08-27',root=root,windows=(5,),research_snapshot=research)
   self.assertEqual(first['candidate_signal_items'][0]['windows']['5']['status'],'data_error')
   self.assertEqual(second['candidate_signal_items'][0]['windows']['5']['status'],'complete')
+
+ def test_complete_same_cutoff_reuses_sidecar_without_loading_series(self):
+  candidate={'code':'B','ts_code':'B.SH','trade_plan':self._plan(),'trade_plan_status':'complete',
+             'composite_score':80,'data_quality':{'eligible':True}}
+  snapshot=build_snapshot({'recommendation_date':'2026-08-20','generated_at':'2026-08-20T15:10:00+08:00',
+      'snapshot_type':'formal','model_version':'test','policy':{},'market_regime':{'score':80},
+      'sectors':[],'candidates':[candidate], 'scan_status':'complete',
+      'buckets':{'actionable':[candidate], 'waiting_trigger':[], 'observation':[],
+                 'next_day_confirmation':[], 'data_rejected':[]}})
+  days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
+  calls=[]
+  def loader(code,candidate,*args):
+   calls.append(code)
+   return {'market_sessions':days,
+    'stock_rows':[{'date':d,'open':11,'high':12,'low':10,'close':11+i,'vol':1} for i,d in enumerate(days)],
+    'hs300_rows':[{'date':d,'close':100+i} for i,d in enumerate(days)],
+    'stock_meta':{'adj':'qfq'}}
+  with tempfile.TemporaryDirectory() as root:
+   first=track_attribution(snapshot,loader,'2026-08-27',root=root,windows=(5,))
+   self.assertTrue(calls)
+   calls.clear()
+   second=track_attribution(snapshot,loader,'2026-08-27',root=root,windows=(5,))
+  self.assertEqual(calls,[])
+  self.assertEqual(second['incremental']['reused_items'],1)
+  self.assertEqual(second['incremental']['recomputed_items'],0)
+  self.assertEqual(second['items'][0]['windows'],first['items'][0]['windows'])
 
  def test_cutoff_uses_versioned_evaluation_path(self):
   snapshot={'content':{'recommendation_date':'2026-08-20','buckets':{'actionable':[]},'candidates':[]}}
