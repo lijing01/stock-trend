@@ -22,8 +22,16 @@ import os
 import sys
 import urllib.request
 import logging
+import time
 from pathlib import Path
 from core.cache_utils import CACHE_DIR, load_cache, safe_float, save_cache, get_market_day_ttl, output_json
+from core.kline_cache import (
+    KlineCoverage,
+    KlineIdentity,
+    load_best_kline_cache,
+    publish_kline_cache,
+    validate_kline_payload,
+)
 from core.source_health import classify_failure
 from datetime import datetime, timedelta
 from core.eastmoney_utils import EM_HEADERS, build_secid as resolve_secid
@@ -180,12 +188,67 @@ def estimate_capital_flow_from_kline(code, days=5):
     Uses price position within daily range as a buying/selling proxy.
     Main net inflow ~ amount * ((close-open) / (high-low+eps)) * 0.35
     """
-    kline_path = Path(CACHE_ROOT) / code / "kline.json"
-    if not kline_path.exists():
-        return None
+    raw_code = str(code).strip().upper()
+    suffix = ".SH" if raw_code.startswith(("5", "6", "68")) else ".SZ"
+    ts_code = f"{raw_code}{suffix}" if "." not in raw_code else raw_code
+    is_hk = ts_code.endswith(".HK")
+    asset = "FD" if raw_code.startswith(("15", "16", "51", "56", "58")) else "E"
+    adj = "qfq"
+    source_specs = (("tencent_hk", "qfq"),) if is_hk else (
+        ("eastmoney", "qfq"), ("tushare_sdk", "qfq"),
+        ("tushare_http", "none"), ("tencent_a", "qfq"), ("baostock", "qfq")
+    )
+    identities = [
+        KlineIdentity(ts_code, asset, "D", source_adj, source)
+        for source, source_adj in source_specs
+    ]
+    managed = load_best_kline_cache(
+        identities,
+        KlineCoverage(min_records=days, ttl_seconds=get_market_day_ttl()),
+        cache_dir=CACHE_ROOT,
+    )
     try:
-        with open(kline_path, encoding="utf-8") as f:
-            data = json.load(f)
+        data = managed[0] if managed else None
+        if data is None:
+            kline_path = Path(CACHE_ROOT) / code / "kline.json"
+            if not kline_path.exists():
+                return None
+            with open(kline_path, encoding="utf-8") as f:
+                data = json.load(f)
+            meta = data.get("meta", {}) if isinstance(data, dict) else {}
+            if not isinstance(meta, dict):
+                return None
+            for field, expected in (("ts_code", ts_code), ("freq", "D")):
+                actual = meta.get(field)
+                if actual and str(actual).upper() != expected.upper():
+                    return None
+            validation = validate_kline_payload(
+                data,
+                KlineCoverage(min_records=days),
+                cache_timestamp=kline_path.stat().st_mtime,
+            )
+            if not validation["valid"] or (
+                    get_market_day_ttl() is not None
+                    and time.time() - kline_path.stat().st_mtime >= get_market_day_ttl()):
+                return None
+            source = str(meta.get("data_source", "")).lower()
+            if source in {"eastmoney", "tushare_sdk", "tushare_http", "tencent_a", "baostock", "tencent_hk"}:
+                source_adj = "none" if source == "tushare_http" else "qfq"
+                migrated = dict(data)
+                migrated["meta"] = dict(meta)
+                migrated["meta"].update({
+                    "ts_code": ts_code,
+                    "asset": asset,
+                    "freq": "D",
+                    "adj": source_adj,
+                    "data_source": source,
+                })
+                publish_kline_cache(
+                    KlineIdentity(ts_code, asset, "D", source_adj, source),
+                    migrated,
+                    cache_dir=CACHE_ROOT,
+                    fetched_at=kline_path.stat().st_mtime,
+                )
         records = data.get("data", [])
         if not records:
             return None

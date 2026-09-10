@@ -21,7 +21,14 @@ import argparse
 import json
 import os
 import sys
-from core.cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
+from core.cache_utils import get_cache_path, load_cache, output_json, get_market_day_ttl
+from core.kline_cache import (
+    KlineCoverage,
+    KlineIdentity,
+    load_best_kline_cache,
+    publish_kline_cache,
+    validate_kline_payload,
+)
 from core.resolve_code import detect_asset, detect_adj
 from datetime import datetime, timedelta
 from core.eastmoney_utils import (
@@ -288,8 +295,9 @@ def fetch_tencent_a_stock(ts_code, freq):
     klines = stock_data.get(freq_key, [])
 
     if not klines:
-        # Indices use unadjusted day/week keys rather than qfqday/qfqweek.
-        klines = stock_data.get(klt, [])
+        # The adapter contract is qfq.  Do not relabel an unadjusted index
+        # series as qfq merely because Tencent exposes only day/week keys.
+        raise RuntimeError(f"腾讯A股K线API未返回{freq_key}复权数据: {ts_code}")
 
     if not klines:
         raise RuntimeError(f"腾讯A股K线API未返回数据: {ts_code}")
@@ -369,13 +377,85 @@ def main():
     # Check cache (shared key with fetch_kline.py). A cache is a hit only when
     # it covers the expected trading day: a T-1 bar must not be served as fresh
     # merely because its cache age is within TTL.
-    adj = args.adj or detect_adj(args.ts_code)
-    cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
+    asset = args.asset or detect_asset(args.ts_code)
+    requested_adj = args.adj or detect_adj(args.ts_code)
+    # These adapters all request forward-adjusted bars (fqt=1/qfq/adjustflag=2).
+    actual_adj = "qfq"
+    # HK's Tencent adapter is the fallback for the normal omitted-adjustment
+    # path, while an explicitly requested raw/backward series must not be
+    # silently replaced by qfq data.
+    if args.ts_code.endswith(".HK") and args.adj is None:
+        requested_adj = actual_adj
+    if requested_adj != actual_adj:
+        # Do not let an EastMoney fallback silently satisfy a raw or backward
+        # adjusted request with forward-adjusted data.  The caller can route
+        # the request to Tushare (or another provider) instead.
+        output_json({
+            "meta": {
+                "ts_code": args.ts_code,
+                "asset": asset,
+                "freq": args.freq,
+                "adj": requested_adj,
+                "data_source": "error",
+                "error_type": "unsupported_adjustment",
+                "requested_adj": requested_adj,
+                "supported_adj": actual_adj,
+                "record_count": 0,
+                "error": (
+                    f"EastMoney fallback only provides {actual_adj}; "
+                    f"requested {requested_adj}"
+                ),
+            },
+            "data": [],
+        }, output_path=args.output)
+        return
+    if args.ts_code.endswith(".HK"):
+        cache_identities = [
+            KlineIdentity(args.ts_code, asset, args.freq, actual_adj, "tencent_hk")
+        ]
+    else:
+        cache_identities = [
+            KlineIdentity(args.ts_code, asset, args.freq, actual_adj, source)
+            for source in ("eastmoney", "tencent_a", "baostock")
+        ]
+    cache_key = f"kline_{args.ts_code}_{args.freq}_{requested_adj}"
     if not args.no_cache:
+        managed = load_best_kline_cache(
+            cache_identities,
+            KlineCoverage(
+                min_records=args.lmt,
+                expected_date=args.expected_date,
+                ttl_seconds=get_market_day_ttl(),
+            ),
+        )
+        if managed:
+            output_json(managed[0], output_path=args.output)
+            return
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
         validation = cache_validation(cached, args.expected_date) if cached and args.expected_date else None
-        if cached and (validation is None or validation["valid"]):
-            if validation is not None:
+        validation = validate_kline_payload(
+            cached,
+            KlineCoverage(min_records=args.lmt, expected_date=args.expected_date),
+        ) if cached else None
+        if cached and validation and validation["valid"]:
+            source = str(cached.get("meta", {}).get("data_source", "")).lower()
+            if source in {"eastmoney", "tencent_a", "baostock", "tencent_hk"}:
+                legacy_path = Path(get_cache_path(cache_key))
+                migrated = dict(cached)
+                migrated["meta"] = dict(cached.get("meta", {}))
+                migrated["meta"].update({
+                    "ts_code": args.ts_code,
+                    "asset": asset,
+                    "freq": args.freq,
+                    "adj": actual_adj,
+                    "data_source": source,
+                })
+                publish_kline_cache(
+                    KlineIdentity(args.ts_code, asset, args.freq, actual_adj, source),
+                    migrated,
+                    fetched_at=legacy_path.stat().st_mtime if legacy_path.exists() else None,
+                )
+            if args.expected_date:
                 cached = dict(cached)
                 cached["meta"] = dict(cached.get("meta", {}))
                 cached["meta"]["cache_validation"] = validation
@@ -384,8 +464,6 @@ def main():
 
     # Check if market is supported by EastMoney
     secid = build_secid(args.ts_code)
-    asset = args.asset or detect_asset(args.ts_code)
-    adj = args.adj or detect_adj(args.ts_code)
 
     # For HK stocks, use Sina Finance API directly
     if args.ts_code.endswith(".HK"):
@@ -424,7 +502,7 @@ def main():
                 "ts_code": args.ts_code,
                 "asset": asset,
                 "freq": args.freq,
-                "adj": "none",
+                "adj": actual_adj,
                 "record_count": record_count,
                 "data_points": record_count,
                 "data_source": "tencent_hk",
@@ -434,6 +512,15 @@ def main():
         }
         if args.expected_date:
             result = reject_stale_payload(result, args.expected_date)
+        if result.get("meta", {}).get("data_source") not in ("error", None):
+            result_identity = KlineIdentity(
+                args.ts_code,
+                asset,
+                args.freq,
+                result["meta"].get("adj", actual_adj),
+                result["meta"]["data_source"],
+            )
+            publish_kline_cache(result_identity, result)
         output_json(result, output_path=args.output)
         return
 
@@ -511,7 +598,7 @@ def main():
             "ts_code": args.ts_code,
             "asset": asset,
             "freq": args.freq,
-            "adj": adj,
+            "adj": actual_adj,
             "record_count": record_count,
             "data_points": record_count,
             "data_source": data_source,
@@ -527,7 +614,14 @@ def main():
 
     # Cache successful result
     if result.get("meta", {}).get("data_source") not in ("error", None):
-        save_cache(cache_key, result)
+        result_identity = KlineIdentity(
+            args.ts_code,
+            asset,
+            args.freq,
+            result["meta"].get("adj", actual_adj),
+            result["meta"]["data_source"],
+        )
+        publish_kline_cache(result_identity, result)
 
     output_json(result, output_path=args.output)
 

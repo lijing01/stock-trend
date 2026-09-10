@@ -20,13 +20,21 @@ import copy
 import inspect
 import json
 import math
+import os
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from core.cache_utils import run_script, CACHE_DIR
+from core.cache_utils import run_script, CACHE_DIR, get_market_day_ttl
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
+from core.kline_cache import (
+    KlineCoverage,
+    KlineIdentity,
+    load_best_kline_cache,
+    publish_kline_cache,
+)
 from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
     assess_candidate_data,
@@ -970,7 +978,7 @@ def _validate_kline_cache(payload, expected_trading_date=""):
     """Pure validation for a K-line cache candidate."""
     reasons = _payload_validation_reasons(payload)
     rows = payload.get("data", []) if isinstance(payload, dict) else []
-    required = ("open", "high", "low", "close")
+    required = ("open", "high", "low", "close", "vol")
     usable_rows = [
         row for row in rows
         if isinstance(row, dict)
@@ -981,6 +989,8 @@ def _validate_kline_cache(payload, expected_trading_date=""):
             and math.isfinite(float(row[field]))
             for field in required
         )
+        and float(row["high"]) >= max(float(row["open"]), float(row["close"]))
+        and float(row["low"]) <= min(float(row["open"]), float(row["close"]))
     ] if isinstance(rows, list) else []
     if len(usable_rows) < WYCKOFF_MIN_BARS:
         reasons.append("insufficient_data")
@@ -1086,9 +1096,65 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
 
     # A cache is a hit only when it covers the recommendation date.  A
     # post-close scan must not score T-1 data merely because it has enough bars.
-    cached = _read_json(str(cache_path))
+    managed = load_best_kline_cache(
+        [
+            KlineIdentity(ts_code, "E", "D", source_adj, source)
+            for source, source_adj in (
+                ("eastmoney", "qfq"), ("tushare_sdk", "qfq"),
+                ("tencent_a", "qfq"), ("baostock", "qfq"),
+                ("tushare_http", "none"),
+            )
+        ],
+        KlineCoverage(min_records=WYCKOFF_MIN_BARS,
+                      expected_date=as_of_date or None,
+                      ttl_seconds=get_market_day_ttl()),
+        cache_dir=CACHE_DIR,
+    )
+    cached = managed[0] if managed else _read_json(str(cache_path))
     cache_verdict = _validate_kline_cache(cached, as_of_date)
+    if (managed is None and cached and cache_path.exists()
+            and _cache_file_age_seconds(cache_path) >= get_market_day_ttl()):
+        cache_verdict = _cache_verdict(
+            cache_verdict.get("reasons", []) + ["cache_expired"]
+        )
     if cache_verdict["valid"]:
+        if managed is None and cached and cache_path.exists():
+            meta = cached.get("meta", {})
+            source = str(meta.get("data_source", "")).lower()
+            if source in {"eastmoney", "tencent_a", "baostock"}:
+                migrated = copy.deepcopy(cached)
+                migrated["meta"] = dict(meta)
+                migrated["meta"].update({
+                    "ts_code": ts_code,
+                    "asset": "E",
+                    "freq": "D",
+                    "adj": "qfq",
+                    "data_source": source,
+                })
+                publish_kline_cache(
+                    KlineIdentity(ts_code, "E", "D", "qfq", source),
+                    migrated,
+                    cache_dir=CACHE_DIR,
+                    fetched_at=cache_path.stat().st_mtime,
+                )
+                cached = migrated
+            elif source == "tushare_http":
+                migrated = copy.deepcopy(cached)
+                migrated["meta"] = dict(meta)
+                migrated["meta"].update({
+                    "ts_code": ts_code,
+                    "asset": "E",
+                    "freq": "D",
+                    "adj": "none",
+                    "data_source": source,
+                })
+                publish_kline_cache(
+                    KlineIdentity(ts_code, "E", "D", "none", source),
+                    migrated,
+                    cache_dir=CACHE_DIR,
+                    fetched_at=cache_path.stat().st_mtime,
+                )
+                cached = migrated
         result = source_result(cached, live_attempt(
             attempted=False, cache_used=True, stale=False,
             status="cache_valid"))
@@ -1105,10 +1171,18 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
 
     # Fetch via subprocess. Transient EM/Tencent failures under concurrency
     # are common, so retry once before giving up to a stale cache.
+    fd, work_name = tempfile.mkstemp(prefix=f"stock-trend-kline-{code}-", suffix=".json")
+    os.close(fd)
+    work_path = Path(work_name)
+    work_path.unlink(missing_ok=True)
+
+    def _cleanup_work_file():
+        work_path.unlink(missing_ok=True)
+
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"),
         ts_code, "--asset", "E", "--freq", "D",
-        "-o", str(cache_path),
+        "-o", str(work_path),
     ]
     if as_of_date:
         cmd.extend(["--expected-date", as_of_date])
@@ -1124,7 +1198,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     refreshed = None
     refreshed_verdict = {"valid": False}
     if result["success"]:
-        refreshed = _read_json(str(cache_path))
+        refreshed = _read_json(str(work_path))
         refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
     # Retry only when the subprocess itself failed (timeout/crash); a
     # successful-but-stale refresh re-running would just re-read the same
@@ -1133,13 +1207,15 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
         result = _run_kline_subprocess()
         attempt["provider_attempts"] = 2
         if result["success"]:
-            refreshed = _read_json(str(cache_path))
+            refreshed = _read_json(str(work_path))
             refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
     if refreshed_verdict["valid"]:
+        _cleanup_work_file()
         attempt["status"] = "live_success"
         wrapped = source_result(refreshed, attempt)
         return wrapped if with_evidence else refreshed
     if refreshed:
+        _cleanup_work_file()
         refreshed = _with_cache_verdict(refreshed, refreshed_verdict)
         refreshed.setdefault("meta", {})["refresh_error"] = (
             f"K线刷新后仍未覆盖{as_of_date}")
@@ -1150,6 +1226,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     # Keep a stale cache observable to the quality gate instead of dropping it
     # and losing the source/date diagnostic.
     if cached:
+        _cleanup_work_file()
         cached = _with_cache_verdict(cached, cache_verdict)
         cached.setdefault("meta", {})["refresh_error"] = (
             result.get("error") or f"K线刷新失败，未覆盖{as_of_date}")
@@ -1165,6 +1242,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
         result.get("stderr") or result.get("error"))
     attempt["status"] = attempt["reason"]
     wrapped = source_result(None, attempt)
+    _cleanup_work_file()
     return wrapped if with_evidence else None
 
 

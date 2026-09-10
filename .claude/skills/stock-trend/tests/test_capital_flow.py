@@ -12,12 +12,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from fetchers import capital_flow, kline, kline_eastmoney
 from pipeline import runner
+from core.kline_cache import KlineIdentity, publish_kline_cache
 
 
 VALID_FLOW = {"date": "20260807", "main_net_inflow": 1.0}
 
 
 class TestCapitalFlowFallback(unittest.TestCase):
+    def test_hk_estimation_reads_managed_kline_identity(self):
+        payload = {
+            "meta": {
+                "ts_code": "00700.HK", "asset": "E", "freq": "D",
+                "adj": "qfq", "data_source": "tencent_hk",
+            },
+            "data": [{
+                "trade_date": "20260826", "open": 10.0, "high": 11.0,
+                "low": 9.0, "close": 10.5, "amount": 1000.0, "vol": 1.0,
+            }],
+        }
+        with tempfile.TemporaryDirectory() as cache_dir:
+            identity = KlineIdentity("00700.HK", "E", "D", "qfq", "tencent_hk")
+            self.assertTrue(publish_kline_cache(identity, payload, cache_dir=cache_dir))
+            with patch.object(capital_flow, "CACHE_ROOT", Path(cache_dir)):
+                result = capital_flow.estimate_capital_flow_from_kline("00700.HK", days=1)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["estimated"])
+
     def _fetch(self, eastmoney, tushare, estimate, expected_date=""):
         with patch.object(capital_flow, "fetch_stock_capital_flow", return_value=eastmoney) as em, \
                 patch.object(capital_flow, "fetch_stock_capital_flow_tushare", return_value=tushare) as ts, \
@@ -331,6 +351,7 @@ class TestKlineExpectedDateValidation(unittest.TestCase):
         with patch.object(sys, "argv", [
                 "kline.py", "600519.SH", "--expected-date", "2026-08-26",
             ]), \
+                patch.object(kline, "load_best_kline_cache", return_value=None), \
                 patch.object(kline, "load_cache", return_value=None), \
                 patch.object(kline, "resolve_token", return_value="token"), \
                 patch.object(kline, "fetch_kline", return_value=(stale_frame, "tushare_sdk")), \
@@ -359,6 +380,7 @@ class TestKlineExpectedDateValidation(unittest.TestCase):
         with patch.object(sys, "argv", [
                 "kline.py", "600519.SH", "--expected-date", "2026-08-26",
             ]), \
+                patch.object(kline, "load_best_kline_cache", return_value=None), \
                 patch.object(kline, "load_cache", return_value=stale_payload) as load, \
                 patch.object(kline, "resolve_token", return_value="token"), \
                 patch.object(kline, "fetch_kline",
@@ -389,6 +411,7 @@ class TestKlineExpectedDateValidation(unittest.TestCase):
                 "kline_eastmoney.py", "600519.SH",
                 "--expected-date", "2026-08-26",
             ]), \
+                patch.object(kline_eastmoney, "load_best_kline_cache", return_value=None), \
                 patch.object(kline_eastmoney, "load_cache", return_value=None), \
                 patch.object(kline_eastmoney, "build_secid", return_value="1.600519"), \
                 patch("core.eastmoney_utils.rotate_em_host",

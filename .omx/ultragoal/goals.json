@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "createdAt": "2026-09-10T02:10:02.861Z",
+  "updatedAt": "2026-09-10T02:50:08.515Z",
+  "briefPath": ".omx/ultragoal/brief.md",
+  "goalsPath": ".omx/ultragoal/goals.json",
+  "ledgerPath": ".omx/ultragoal/ledger.jsonl",
+  "codexGoalMode": "aggregate",
+  "goals": [
+    {
+      "id": "G001-core-cache",
+      "title": "Core cache",
+      "objective": "Implement a unified K-line cache API with complete identity, coverage validation, atomic writes, and safe cleanup.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-10T02:10:02.861Z",
+      "updatedAt": "2026-09-10T02:17:11.224Z",
+      "startedAt": "2026-09-10T02:10:07.086Z",
+      "completedAt": "2026-09-10T02:17:11.224Z",
+      "evidence": "Implemented .claude/skills/stock-trend/scripts/core/kline_cache.py with namespaced identity, coverage validation, atomic publish, downgrade protection, locking, and managed cleanup. Added .claude/skills/stock-trend/tests/test_kline_cache.py; 7 tests pass."
+    },
+    {
+      "id": "G002-integration",
+      "title": "Integration",
+      "objective": "Switch fetchers, scanner, pipeline, and capital flow to the unified cache without internal duplicate writes.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-10T02:10:02.861Z",
+      "updatedAt": "2026-09-10T02:30:39.821Z",
+      "startedAt": "2026-09-10T02:17:14.246Z",
+      "completedAt": "2026-09-10T02:30:39.821Z",
+      "evidence": "Integrated core.kline_cache into fetchers/kline_eastmoney.py and scans/stock_scanner.py. Managed cache is checked with identity, requested row count, expected date and market TTL; successful results publish by actual source. Scanner prefers managed cache while preserving legacy fallback and output contracts. Full test_stock_trend.py passed (665 passed, 0 failed, 1 skipped); test_golden.py --diff passed (21 passed, 0 failed, 2 warnings); git diff --check passed."
+    },
+    {
+      "id": "G003-verification",
+      "title": "Verification",
+      "objective": "Add migration compatibility, cleanup, concurrency regression tests and run all repository quality gates.",
+      "status": "review_blocked",
+      "attempt": 1,
+      "createdAt": "2026-09-10T02:10:02.861Z",
+      "updatedAt": "2026-09-10T02:47:07.541Z",
+      "startedAt": "2026-09-10T02:30:45.056Z",
+      "reviewBlockedAt": "2026-09-10T02:47:07.541Z",
+      "evidence": "Architect review BLOCK: legacy writes remain in fetchers/kline.py, scanner/pipeline output paths, and capital_flow consumes {code}/kline.json. Current changes cover core cache, kline_eastmoney producer, and stock_scanner managed reads. Core tests 8/8, scanner 95/95, golden 21 passed; full stock-trend gate is network-sensitive and latest run had 647 passed/14 external-data failures.",
+      "reviewBlockerResolution": {
+        "resolverGoalId": "G004-complete-remaining-k-line-cache-cuto",
+        "status": "pending",
+        "evidence": "Architect review BLOCK: legacy writes remain in fetchers/kline.py, scanner/pipeline output paths, and capital_flow consumes {code}/kline.json. Current changes cover core cache, kline_eastmoney producer, and stock_scanner managed reads. Core tests 8/8, scanner 95/95, golden 21 passed; full stock-trend gate is network-sensitive and latest run had 647 passed/14 external-data failures."
+      }
+    },
+    {
+      "id": "G004-complete-remaining-k-line-cache-cuto",
+      "title": "Complete remaining K-line cache cutover",
+      "objective": "Switch kline.py, pipeline runner, and capital_flow consumers to the managed cache or explicitly classify their files as derived exports; add migration compatibility and cleanup evidence, then rerun independent review.",
+      "status": "in_progress",
+      "attempt": 2,
+      "createdAt": "2026-09-10T02:47:07.542Z",
+      "updatedAt": "2026-09-10T02:50:08.515Z",
+      "evidence": "Architect review BLOCK: legacy writes remain in fetchers/kline.py, scanner/pipeline output paths, and capital_flow consumes {code}/kline.json. Current changes cover core cache, kline_eastmoney producer, and stock_scanner managed reads. Core tests 8/8, scanner 95/95, golden 21 passed; full stock-trend gate is network-sensitive and latest run had 647 passed/14 external-data failures.",
+      "resolvesReviewBlockedGoalId": "G003-verification",
+      "startedAt": "2026-09-10T02:50:08.515Z"
+    }
+  ],
+  "codexObjective": "Complete the durable ultragoal plan in .omx/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .omx/ultragoal/ledger.jsonl as the audit trail.",
+  "activeGoalId": "G004-complete-remaining-k-line-cache-cuto"
+}

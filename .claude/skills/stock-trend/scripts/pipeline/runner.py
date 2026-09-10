@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -29,13 +31,23 @@ from pathlib import Path
 
 from core.cache_utils import clean_cache, safe_float, run_script
 from core.eastmoney_utils import latest_kline_record
+from core.kline_cache import (
+    KlineIdentity,
+    clean_kline_cache,
+    get_kline_cache_path,
+    validate_kline_payload,
+)
 from core.resolve_code import resolve_and_save
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 
 
 def get_data_dir(code):
-    """Return data directory path for a given code."""
+    """Return the derived per-run export directory for a given code.
+
+    K-line authority lives under ``CACHE_DIR/klines/v1``; files in this
+    directory are materialized JSON inputs for downstream analysis/reporting.
+    """
     from core.cache_utils import CACHE_DIR
     d = Path(CACHE_DIR) / code
     d.mkdir(parents=True, exist_ok=True)
@@ -51,6 +63,22 @@ def read_json(path):
         return None
 
 
+def managed_kline_path(payload):
+    """Return the verified authority path for a K-line payload."""
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    try:
+        identity = KlineIdentity(
+            meta["ts_code"], meta["asset"], meta["freq"],
+            meta["adj"], meta["data_source"],
+        )
+        authority = get_kline_cache_path(identity)
+        if not authority.exists():
+            return None
+        return authority
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+
+
 def is_successful_kline(kline_data):
     """Return True only when the current K-line payload has usable rows."""
     if not isinstance(kline_data, dict):
@@ -61,6 +89,8 @@ def is_successful_kline(kline_data):
         return False
     rows = kline_data.get("data")
     if not isinstance(rows, list) or not rows:
+        return False
+    if not validate_kline_payload(kline_data)["valid"]:
         return False
     latest_row = latest_kline_record(rows)
     if latest_row is None:
@@ -151,6 +181,12 @@ def main():
     removed = clean_cache()
     if removed:
         print(f"Cache cleanup: removed {removed} stale files")
+    managed_cleanup = clean_kline_cache()
+    if managed_cleanup["removed_count"]:
+        print(
+            "Managed K-line cache cleanup: removed "
+            f"{managed_cleanup['removed_count']} series"
+        )
 
     asset = None
     adj = None
@@ -218,7 +254,18 @@ def main():
 
     # --- Step 2: Fetch K-line data ---
     print(f"[2/5] Fetching K-line data for {ts_code}...")
-    kline_path = str(output_dir / "kline.json")
+    # Explicit output directories receive a regular export. Default runs use
+    # a temporary working file and report the managed authority path.
+    kline_export_path = str(output_dir / "kline.json")
+    kline_temp_path = None
+    if args.output_dir:
+        kline_path = kline_export_path
+    else:
+        fd, kline_temp_path = tempfile.mkstemp(
+            prefix=f"stock-trend-kline-{code}-", suffix=".json")
+        os.close(fd)
+        Path(kline_temp_path).unlink(missing_ok=True)
+        kline_path = kline_temp_path
 
     # Try Tushare first
     kline_cmd = [
@@ -281,6 +328,8 @@ def main():
             "data_source": data_source,
             "record_count": record_count,
         }
+        if kline_meta.get("adj") is not None:
+            results["kline"]["adj"] = kline_meta["adj"]
         for key in ("error_type", "stale_data_source", "cache_validation", "error"):
             if key in kline_meta:
                 results["kline"][key] = kline_meta[key]
@@ -393,6 +442,8 @@ def main():
     else:
         print(f"[3.6/5] Skipping Wyckoff analysis (no K-line data)")
         remove_stale_file(wyckoff_path, "Wyckoff analysis", errors)
+        if kline_path != kline_export_path:
+            remove_stale_file(kline_export_path, "K-line data", errors)
 
     # --- Step 4: ETF data and capital flow (parallel, independent) ---
     print(f"[4/5] Fetching supplementary data...")
@@ -568,7 +619,7 @@ def main():
         "meta": {
             "ts_code": ts_code,
             "asset": asset,
-            "adj": adj,
+            "adj": results.get("kline", {}).get("adj") or adj,
             "freq": args.freq,
             "code": code,
             "is_etf": is_etf,
@@ -584,7 +635,7 @@ def main():
         "timeouts": timeouts,
         "output_files": build_output_files(
             output_dir=output_dir,
-            kline_path=kline_path,
+            kline_path=kline_export_path,
             kline_available=kline_available,
             technical_available=technical_available,
             chip_available=chip_available,
@@ -599,6 +650,37 @@ def main():
             asset=asset,
         ),
     }
+
+    if kline_temp_path:
+        Path(kline_temp_path).unlink(missing_ok=True)
+        if kline_available:
+            authority = managed_kline_path(kline_data)
+            if authority is not None:
+                authority_data = read_json(authority)
+                fresh_validation = validate_kline_payload(kline_data)
+                authority_validation = validate_kline_payload(authority_data)
+                same_identity = all(
+                    kline_data.get("meta", {}).get(field)
+                    == authority_data.get("meta", {}).get(field)
+                    for field in ("ts_code", "asset", "freq", "adj", "data_source")
+                ) if authority_data else False
+                same_coverage = all(
+                    fresh_validation.get(field) == authority_validation.get(field)
+                    for field in ("record_count", "earliest_date", "latest_date")
+                )
+                same_data = (
+                    json.dumps(kline_data.get("data", []), sort_keys=True, separators=(",", ":"))
+                    == json.dumps(authority_data.get("data", []), sort_keys=True, separators=(",", ":"))
+                ) if authority_data else False
+                if (fresh_validation["valid"] and authority_validation["valid"]
+                        and same_identity and same_coverage and same_data):
+                    pipeline_output["output_files"]["kline"] = str(authority)
+                else:
+                    pipeline_output["output_files"]["kline"] = None
+                    pipeline_output["errors"].append("Managed K-line cache does not match fetched export")
+            else:
+                pipeline_output["output_files"]["kline"] = None
+                pipeline_output["errors"].append("Managed K-line cache unavailable")
 
     pipeline_path = str(output_dir / "pipeline_output.json")
     with open(pipeline_path, "w", encoding="utf-8") as f:

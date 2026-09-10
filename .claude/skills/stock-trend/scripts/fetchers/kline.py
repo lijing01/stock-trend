@@ -21,7 +21,14 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from core.cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
+from core.cache_utils import get_cache_path, load_cache, output_json, get_market_day_ttl
+from core.kline_cache import (
+    KlineCoverage,
+    KlineIdentity,
+    load_best_kline_cache,
+    publish_kline_cache,
+    validate_kline_payload,
+)
 from core.resolve_code import detect_asset, detect_adj
 
 # --- Token resolution ---
@@ -146,7 +153,7 @@ def fetch_via_http(token, ts_code, asset, freq, start_date, end_date):
 
     url = "https://api.tushare.pro"
 
-    api_name = "daily"
+    api_name = "weekly" if freq == "W" else "daily"
 
     payload = {
         "api_name": api_name,
@@ -304,14 +311,63 @@ def main():
     # Check cache before fetching
     adj = args.adj or ("none" if args.ts_code.endswith(".HK") else "qfq")
     cache_key = f"kline_{args.ts_code}_{args.freq}_{adj}"
+    min_records = 20 if args.freq == "W" else 60
+    coverage = KlineCoverage(
+        min_records=min_records,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        expected_date=args.expected_date,
+        ttl_seconds=get_market_day_ttl(),
+    )
     if not args.no_cache:
+        source_specs = [("tushare_sdk", adj)]
+        if adj == "none":
+            source_specs.append(("tushare_http", "none"))
+        managed = load_best_kline_cache(
+            [
+                KlineIdentity(args.ts_code, args.asset or detect_asset(args.ts_code),
+                              args.freq, source_adj, source)
+                for source, source_adj in source_specs
+            ],
+            coverage,
+        )
+        if managed:
+            output_json(managed[0], output_path=args.output)
+            return
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
-        validation = cache_validation(cached, args.expected_date) if cached and args.expected_date else None
-        if cached and (validation is None or validation["valid"]):
-            if validation is not None:
+        legacy_coverage = KlineCoverage(
+            min_records=coverage.min_records,
+            start_date=coverage.start_date,
+            end_date=coverage.end_date,
+            expected_date=coverage.expected_date,
+        )
+        validation = validate_kline_payload(cached, legacy_coverage) if cached else None
+        source = str(cached.get("meta", {}).get("data_source", "")).lower() if cached else ""
+        legacy_adjustment_mismatch = source == "tushare_http" and adj != "none"
+        if cached and validation and validation["valid"] and not legacy_adjustment_mismatch:
+            if source in {"tushare_sdk", "tushare_http"}:
+                legacy_path = Path(get_cache_path(cache_key))
+                source_adj = "none" if source == "tushare_http" else adj
+                migrated = dict(cached)
+                migrated["meta"] = dict(cached.get("meta", {}))
+                migrated["meta"].update({
+                    "ts_code": args.ts_code,
+                    "asset": args.asset or detect_asset(args.ts_code),
+                    "freq": args.freq,
+                    "adj": source_adj,
+                    "data_source": source,
+                })
+                publish_kline_cache(
+                    KlineIdentity(args.ts_code, args.asset or detect_asset(args.ts_code),
+                                  args.freq, source_adj, source),
+                    migrated,
+                    fetched_at=legacy_path.stat().st_mtime if legacy_path.exists() else None,
+                )
+                cached = migrated
+            if args.expected_date:
                 cached = dict(cached)
                 cached["meta"] = dict(cached.get("meta", {}))
-                cached["meta"]["cache_validation"] = validation
+                cached["meta"]["cache_validation"] = cache_validation(cached, args.expected_date)
             output_json(cached, output_path=args.output)
             return
 
@@ -395,14 +451,34 @@ def main():
 
     # Fix data_source for HTTP fallback
     if isinstance(source_or_error, str) and source_or_error == "tushare_http":
+        if adj != "none":
+            result = {
+                "meta": {
+                    "ts_code": args.ts_code, "asset": asset,
+                    "freq": args.freq, "adj": adj,
+                    "data_source": "error", "error_type": "unsupported_adjustment",
+                    "error": "Tushare HTTP daily/weekly endpoint returns unadjusted bars",
+                },
+                "data": [],
+            }
+            output_json(result, output_path=args.output)
+            return
         result["meta"]["data_source"] = "tushare_http"
+        result["meta"]["adj"] = "none"
 
     if args.expected_date:
         result = reject_stale_payload(result, args.expected_date)
 
     # Cache successful result (only if data_source is not error)
     if result.get("meta", {}).get("data_source") != "error":
-        save_cache(cache_key, result)
+        publish_kline_cache(
+            KlineIdentity(
+                args.ts_code, asset, args.freq,
+                result.get("meta", {}).get("adj", adj),
+                result.get("meta", {}).get("data_source", "tushare_sdk"),
+            ),
+            result,
+        )
 
     output_json(result, output_path=args.output)
 

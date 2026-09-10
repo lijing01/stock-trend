@@ -284,6 +284,18 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(result, cached)
         run.assert_not_called()
 
+    def test_refresh_uses_ephemeral_export_path(self):
+        refreshed = self._valid_kline("20260813")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[None, refreshed]), \
+             patch.object(sc, "run_script", return_value={"success": True}) as run:
+            result = sc._fetch_kline("600001.SH", as_of_date="2026-08-13")
+        self.assertEqual(result, refreshed)
+        output_path = Path(run.call_args.args[0][run.call_args.args[0].index("-o") + 1])
+        self.assertNotEqual(output_path, Path(tmpdir) / "600001" / "kline.json")
+        self.assertFalse(output_path.exists())
+
     def test_wrong_date_capital_cache_invokes_fetcher(self):
         cached = self._valid_capital("20260812")
         refreshed = self._valid_capital("20260813")
