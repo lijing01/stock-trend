@@ -2503,8 +2503,8 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 买点证据（事件/确认/年龄/状态） | 短线置信度 | 原始分 | 质量分 | 优先分 | 新闻净调整（影子） | 新闻影子优先分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 买点证据（事件/确认/年龄/状态） | 短线置信度 | 原始 / 质量 / 优先 | 新闻净调整 / 影子分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -2521,11 +2521,10 @@ def _append_candidate_table(lines, title, items, empty_text):
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
             f"{buy_text} | "
             f"{wyckoff.get('confidence', 0):.0%}（形态识别，非胜率） | "
-            f"{item['composite_score']:.1f} | "
-            f"{candidate_quality_score(item):.1f} | "
-            f"{candidate_rank_score(item):.1f} | "
-            f"{float(news.get('score', 0) or 0):+.2f}（{news.get('status', 'disabled')}） | "
-            f"{float(news.get('shadow_priority_score', candidate_rank_score(item)) or candidate_rank_score(item)):.1f} | "
+            f"原始 {item['composite_score']:.1f}；质量 {candidate_quality_score(item):.1f}；"
+            f"优先 {candidate_rank_score(item):.1f} | "
+            f"新闻 {float(news.get('score', 0) or 0):+.2f}（{news.get('status', 'disabled')}）；"
+            f"影子 {float(news.get('shadow_priority_score', candidate_rank_score(item)) or candidate_rank_score(item)):.1f} | "
             f"{quality.get('coverage', 0):.0%} | "
             f"{detail} |"
         )
@@ -3417,11 +3416,11 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"<td>{_minor_phase_html(wyckoff)}</td>"
             f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
-            f"<td><strong>{item['composite_score']:.1f}</strong><br>"
+            f"<td><strong>原始 {item['composite_score']:.1f}</strong><br>"
             f"<small>质量 {candidate_quality_score(item):.1f} · "
             f"优先 {candidate_rank_score(item):.1f}</small></td>"
-            f"<td>{float(news.get('score', 0) or 0):+.2f}<br>"
-            f"<small>影子分 {float(news.get('shadow_priority_score', candidate_rank_score(item)) or candidate_rank_score(item)):.1f} · "
+            f"<td><strong>新闻 {float(news.get('score', 0) or 0):+.2f}</strong><br>"
+            f"<small>影子 {float(news.get('shadow_priority_score', candidate_rank_score(item)) or candidate_rank_score(item)):.1f} · "
             f"{escape(str(news.get('status', 'disabled')))}</small></td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
             f"<td class='candidate-diagnostic'>{escape(detail)}</td></tr>"
