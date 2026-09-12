@@ -62,6 +62,9 @@ from core.candidate_research_snapshot import (
 )
 from core.market_shadow_snapshot import save_shadow_run
 from core.evolution_registry import validate_experiment_definition, load_active_policy
+from core.candidate_news import (
+    apply_news_overlay, decision_cutoff, load_news_evidence,
+)
 from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
@@ -2281,6 +2284,16 @@ def _candidate_diagnostic_text(item):
         if style_reasons:
             detail += f"；原因{','.join(map(str, style_reasons))}"
         parts.append(detail)
+    news = item.get("news_analysis")
+    if isinstance(news, dict):
+        status = news.get("status", "unavailable")
+        count = news.get("article_count", 0)
+        score = news.get("score", 0)
+        risk = news.get("risk_level", "unknown")
+        parts.append(
+            f"新闻影子：{status}，近{news.get('lookback_days', 14)}日"
+            f"{count}条，分数{score:+.2f}，风险{risk}；实验观察，不参与推荐"
+        )
     return "；".join(parts)
 
 
@@ -3068,16 +3081,26 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
             "content_sha256": None,
             "reason": "post_close_scope_incomplete",
         }
+    def without_news(value):
+        if isinstance(value, dict):
+            return {key: without_news(child) for key, child in value.items()
+                    if key != "news_analysis"}
+        if isinstance(value, list):
+            return [without_news(child) for child in value]
+        return copy.deepcopy(value)
+
     source = {
         "recommendation_date": recommendation_date,
         "generated_at": datetime.now().astimezone().isoformat(),
         "snapshot_type": "provisional" if policy.get("provisional") else "formal",
+        # The news overlay is experimental evidence only; excluding it keeps
+        # the immutable production decision identical to the v4 selector.
         "model_version": "daily-candidates/v4",
         "policy": copy.deepcopy(policy),
         "market_regime": _legacy_market_regime(market_regime),
         "sectors": copy.deepcopy(sector_codes),
-        "candidates": copy.deepcopy(candidates),
-        "buckets": copy.deepcopy(buckets),
+        "candidates": without_news(candidates),
+        "buckets": without_news(buckets),
         "scan_status": performance.get("scan_status", "complete"),
     }
     try:
@@ -3133,7 +3156,7 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
 
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                     performance=None, tracking=None, market_regime=None,
-                    style_shadow=None):
+                    style_shadow=None, news_shadow=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -3230,6 +3253,40 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                       f"最大主板块占比：{concentration.get('max_primary_sector_share', 0) or 0:.0%}；"
                       f"多板块交叉暴露：{concentration.get('cross_sector_exposure_count', 0)} 只。",
                       "> 主题相关性：未知（缺少可靠的同期收益映射）；本提示不改变候选资格或排序。"])
+    if news_shadow:
+        lines.extend([
+            "", "## 新闻后置判断（影子观察）", "",
+            f"状态：{news_shadow.get('status')}；窗口 {news_shadow.get('lookback_days')} 日；"
+            f"证据截止 {news_shadow.get('cutoff')}；缺失候选 {news_shadow.get('missing_candidates', 0)}。",
+            "",
+            "新闻层在原有量化逻辑完成后运行；当前只记录影子排序和重大风险否决，"
+            "**不改变正式推荐**。待积累成熟样本后比较 5/10/20 日收益、胜率与 MAE，再决定是否启用。",
+            "",
+            f"原排序：{', '.join(news_shadow.get('baseline_order', [])) or '无'}",
+            f"新闻影子排序：{', '.join(news_shadow.get('shadow_order', [])) or '无'}",
+        ])
+        news_rows = []
+        for candidate in candidates:
+            analysis = candidate.get("news_analysis") or {}
+            for article in (analysis.get("articles") or [])[:2]:
+                title = _markdown_cell(article.get("title") or "—")
+                source = _markdown_cell(article.get("source") or "unknown")
+                url = str(article.get("url") or "")
+                title_cell = f"[{title}]({url})" if url.startswith(("http://", "https://")) else title
+                news_rows.append(
+                    f"| {candidate.get('name', '')}({candidate.get('code', '')}) | "
+                    f"{article.get('published_at') or '—'} | {article.get('label') or 'neutral'} | "
+                    f"{article.get('risk_level') or 'none'} | {title_cell} | {source} |"
+                )
+        lines.extend(["", "### 可核验新闻证据", ""])
+        if news_rows:
+            lines.extend([
+                "| 标的 | 发布时间 | 判断 | 风险 | 标题 | 来源 |",
+                "|---|---|---|---|---|---|",
+                *news_rows,
+            ])
+        else:
+            lines.append("> 决策时点前的窗口内无可用新闻，或新闻源不可用。")
     lines.extend([
         "", "---", "",
         "*候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。*",
@@ -3297,7 +3354,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                    performance=None, tracking=None, market_regime=None,
-                   style_shadow=None):
+                   style_shadow=None, news_shadow=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
     regime = market_regime
@@ -3346,6 +3403,40 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         explanation_html = render_market_explanation(
             regime["market_explanation"], "html")
     style_shadow_html = _style_shadow_html(style_shadow)
+    news_shadow_html = ""
+    if news_shadow:
+        news_rows = []
+        for candidate in candidates:
+            for article in ((candidate.get("news_analysis") or {}).get("articles") or [])[:2]:
+                url = str(article.get("url") or "")
+                title = escape(str(article.get("title") or "—"))
+                if url.startswith(("http://", "https://")):
+                    title = f"<a href='{escape(url, quote=True)}'>{title}</a>"
+                news_rows.append(
+                    "<tr>"
+                    f"<td>{escape(str(candidate.get('name') or candidate.get('code') or ''))}</td>"
+                    f"<td>{escape(str(article.get('published_at') or '—'))}</td>"
+                    f"<td>{escape(str(article.get('label') or 'neutral'))}</td>"
+                    f"<td>{escape(str(article.get('risk_level') or 'none'))}</td>"
+                    f"<td>{title}</td><td>{escape(str(article.get('source') or 'unknown'))}</td>"
+                    "</tr>"
+                )
+        evidence_html = (
+            "<table><thead><tr><th>标的</th><th>发布时间</th><th>判断</th><th>风险</th>"
+            "<th>标题</th><th>来源</th></tr></thead><tbody>"
+            + "".join(news_rows) + "</tbody></table>"
+            if news_rows else "<p class='dt'>决策时点前的窗口内无可用新闻，或新闻源不可用。</p>"
+        )
+        news_shadow_html = (
+            "<section><h2 style='font-size:18px;margin:18px 0 8px'>新闻后置判断（影子观察）</h2>"
+            f"<p class='dt'>状态 {escape(str(news_shadow.get('status')))} | "
+            f"窗口 {escape(str(news_shadow.get('lookback_days')))} 日 | "
+            f"证据截止 {escape(str(news_shadow.get('cutoff')))} | "
+            f"缺失候选 {escape(str(news_shadow.get('missing_candidates', 0)))}</p>"
+            "<p class='dt'>新闻层在原量化逻辑后运行，目前不改变正式推荐；"
+            "积累成熟样本后比较5/10/20日收益、胜率与MAE。</p>"
+            f"{evidence_html}</section>"
+        )
 
     tracking_error = ""
     tracking_warnings = ""
@@ -3467,6 +3558,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
 <div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table></div>
+{news_shadow_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
 </div></body></html>"""
@@ -3474,7 +3566,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
                       performance=None, tracking=None, market_regime=None,
-                      style_shadow=None):
+                      style_shadow=None, news_shadow=None):
     output = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -3497,6 +3589,8 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
     }
     if style_shadow is not None:
         output["style_shadow"] = copy.deepcopy(style_shadow)
+    if news_shadow is not None:
+        output["news_shadow"] = copy.deepcopy(news_shadow)
     return output
 
 
@@ -3524,6 +3618,15 @@ def main():
     parser.add_argument(
         "--strategy-shadow", type=str, default=None,
         help="P3 冻结实验 JSON；仅独立保存影子排序，不参与正式推荐")
+    parser.add_argument(
+        "--news-file", type=str, default=None,
+        help="可选新闻证据 JSON；未提供时实时抓取巨潮公告和个股新闻")
+    parser.add_argument("--news", action="store_true",
+                        help="启用新闻影子层（今日推荐入口默认传入）")
+    parser.add_argument("--no-news", action="store_true",
+                        help="跳过新闻影子层（仅用于诊断）")
+    parser.add_argument("--news-lookback", type=int, default=14,
+                        help="新闻回看自然日数（默认14）")
     parser.add_argument("--json", action="store_true", help="stdout 输出 JSON")
     parser.add_argument("--html", dest="html", action="store_true", default=True,
                         help="(默认) 生成 HTML 报告")
@@ -3541,6 +3644,10 @@ def main():
     style_shadow_path = getattr(args, "style_shadow", None)
     memberships_path = getattr(args, "memberships", None)
     strategy_shadow_path = getattr(args, "strategy_shadow", None)
+    news_file_path = getattr(args, "news_file", None)
+    news_enabled = bool(getattr(args, "news", False) or news_file_path) \
+        and not bool(getattr(args, "no_news", False))
+    news_lookback = max(1, min(30, int(getattr(args, "news_lookback", 14))))
     max_sector_expansion = getattr(
         args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION)
     post_close_final = bool(getattr(args, "post_close_final", False))
@@ -3640,6 +3747,55 @@ def main():
         scored, args.top, args.min_score, policy=policy,
         priority_bonuses=active_policy["priority_bonuses"])
     buckets = classify_candidates(candidates, policy)
+    # News is intentionally evaluated only after the existing selector has
+    # finished.  It is frozen as shadow evidence and cannot promote/demote a
+    # production recommendation until forward evaluation proves an edge.
+    if news_file_path:
+        try:
+            news_evidence = load_news_evidence(json.loads(
+                Path(news_file_path).read_text(encoding="utf-8")))
+            news_fetch = {"status": "fixture", "path": str(news_file_path)}
+        except Exception as exc:
+            news_evidence = {}
+            news_fetch = {"status": "failed", "reason": type(exc).__name__}
+    elif news_enabled:
+        try:
+            from fetchers.candidate_news import fetch_candidate_news
+            news_evidence, news_fetch = fetch_candidate_news(
+                [item.get("code") for item in candidates],
+                end_date=expected_date, lookback_days=news_lookback)
+        except Exception as exc:
+            news_evidence = {}
+            news_fetch = {"status": "failed", "reason": type(exc).__name__}
+    else:
+        news_evidence = {}
+        news_fetch = {"status": "disabled"}
+    if news_enabled:
+        if policy.get("provisional") and expected_date == current_time.date().isoformat():
+            news_cutoff = min(
+                current_time.astimezone(), decision_cutoff(expected_date))
+        else:
+            news_cutoff = decision_cutoff(expected_date)
+        candidates, news_shadow = apply_news_overlay(
+            candidates, news_evidence, recommendation_date=expected_date,
+            policy=policy, cutoff=news_cutoff, lookback_days=news_lookback)
+        news_shadow["fetch"] = news_fetch
+        if news_fetch.get("status") == "failed":
+            news_shadow["status"] = "unavailable"
+        elif news_fetch.get("status") == "partial":
+            news_shadow["status"] = "partial"
+        buckets = classify_candidates(candidates, policy)
+    else:
+        news_shadow = None
+    news_by_code = {
+        str(item.get("code")): copy.deepcopy(item.get("news_analysis"))
+        for item in candidates if item.get("news_analysis")
+    }
+    for research_item in research_population:
+        analysis = news_by_code.get(str(research_item.get("code")))
+        if analysis:
+            research_item["news_analysis"] = copy.deepcopy(analysis)
+    performance["news"] = copy.deepcopy(news_fetch)
     strategy_shadow = _run_strategy_shadow(
         scored, args.top, args.min_score, policy, expected_date,
         strategy_shadow_state)
@@ -3657,6 +3813,8 @@ def main():
     research_snapshot = build_research_snapshot(
         research_population, buckets, expected_date, policy, regime, sector_codes,
         args.min_score, official_tracking=tracking,
+        model_version=("daily-candidates/v5-news-shadow"
+                       if news_enabled else "daily-candidates/v4"),
         # 15:00 is the decision baseline, not a claim about provider fetch
         # time.  Source timestamps remain unknown unless an adapter supplies
         # them explicitly.  captured_at records when this assembled snapshot
@@ -3672,6 +3830,15 @@ def main():
             "wyckoff_required": True,
             "evolution_version": active_policy["experiment_id"],
             "buy_point_priority_bonus": active_policy["priority_bonuses"],
+            "news_overlay": {
+                "schema_version": news_shadow["schema_version"] if news_shadow else None,
+                "lookback_days": news_lookback,
+                "status": news_shadow["status"] if news_shadow else "disabled",
+                "formal_policy_affected": False,
+                "baseline_order": news_shadow.get("baseline_order", []) if news_shadow else [],
+                "shadow_order": news_shadow.get("shadow_order", []) if news_shadow else [],
+                "shadow_selected": news_shadow.get("shadow_selected", []) if news_shadow else [],
+            },
         },
     )
     research_tracking = save_research_snapshot_safely(research_snapshot)
@@ -3721,13 +3888,13 @@ def main():
             report_candidates, sector_codes, elapsed, policy, report_buckets,
             performance=performance,
             tracking=tracking, market_regime=regime,
-            style_shadow=style_shadow_report))]
+            style_shadow=style_shadow_report, news_shadow=news_shadow))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
                 report_candidates, sector_codes, elapsed, ts, policy,
                 report_buckets, performance=performance,
                 tracking=tracking, market_regime=regime,
-                style_shadow=style_shadow_report)))
+                style_shadow=style_shadow_report, news_shadow=news_shadow)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -3753,14 +3920,14 @@ def main():
         report_candidates, sector_codes, elapsed, policy, report_buckets,
         performance=performance,
         tracking=tracking, market_regime=regime,
-        style_shadow=style_shadow_report))]
+        style_shadow=style_shadow_report, news_shadow=news_shadow))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
             report_candidates, sector_codes, elapsed, ts, policy,
             report_buckets, performance=performance,
             tracking=tracking, market_regime=regime,
-            style_shadow=style_shadow_report)))
+            style_shadow=style_shadow_report, news_shadow=news_shadow)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(

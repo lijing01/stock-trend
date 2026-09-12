@@ -183,7 +183,9 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
     if (_should_use_post_close_final(now)
             and "--post-close-final" not in candidate_args):
         candidate_args.append("--post-close-final")
-        workflow["candidate_args"] = candidate_args
+    if "--news" not in candidate_args and "--no-news" not in candidate_args:
+        candidate_args.append("--news")
+    workflow["candidate_args"] = candidate_args
     state_root = Path(state_root)
     job_root = state_root / "jobs"
     state_path = state_root / "today_state.json"
