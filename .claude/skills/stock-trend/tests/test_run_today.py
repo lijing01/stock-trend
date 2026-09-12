@@ -82,6 +82,7 @@ class TodayTests(unittest.TestCase):
                                      "close:2026-09-09", "weekly:2026-09-09", "monitor:2026-09-09"])
         self.assertEqual(result["recommendations"], [{"code": "600000"}])
         self.assertEqual(result["notifications"], [])
+        self.assertIn("--news", self.candidate_arguments[0])
 
     def test_post_close_automatically_uses_fixed_scan_scope(self):
         self.run_job(hour=16)
@@ -90,6 +91,12 @@ class TodayTests(unittest.TestCase):
         self.candidate_arguments.clear()
         self.run_job(hour=11)
         self.assertNotIn("--post-close-final", self.candidate_arguments[0])
+
+    def test_explicit_no_news_is_not_overridden(self):
+        job.run_today(["--no-news"], now=datetime(
+            2026, 9, 9, 16, tzinfo=job.SHANGHAI), state_root=self.root)
+        self.assertIn("--no-news", self.candidate_arguments[0])
+        self.assertNotIn("--news", self.candidate_arguments[0])
 
     def test_intraday_evaluates_only_previous_close(self):
         result = self.run_job(hour=11)

@@ -113,6 +113,7 @@ def diagnostic_dimensions(record):
     quality = score.get("quality_adjusted_score")
     if quality is None:
         quality = candidate.get("quality_adjusted_score")
+    news = candidate.get("news_analysis") or {}
     return {
         "selection_status": record.get("final_status") or "unknown",
         "buy_point_level": score.get("buy_point_level") or candidate.get("buy_point_level") or "unknown",
@@ -121,6 +122,14 @@ def diagnostic_dimensions(record):
         "sector_persistence": persistence.get("sector_persistence_status") or (
             "actionable" if persistence.get("sector_actionable") else "not_actionable"),
         "quality_score_band": _band(quality, (60, 80), ("low_<60", "medium_60_79", "high_80_plus")),
+        "news_score_band": _band(
+            news.get("score"), (-0.5, 0.01),
+            ("negative", "neutral", "positive"), unknown="unavailable"),
+        "news_risk_level": news.get("risk_level") or "unavailable",
+        "news_shadow_selection": (
+            "selected" if news.get("shadow_selected") is True else
+            "not_selected" if news.get("shadow_selected") is False else
+            "unavailable"),
     }
 
 
@@ -299,7 +308,8 @@ def build_diagnostics(research_snapshots, candidate_signal_items,
     metric_rows = [row for row in rows if row.get("status") != "excluded"]
     grouped = {name: defaultdict(list) for name in (
         "selection_status", "buy_point_level", "market_regime_band",
-        "sector_persistence", "quality_score_band")}
+        "sector_persistence", "quality_score_band", "news_score_band",
+        "news_risk_level", "news_shadow_selection")}
     for row in metric_rows:
         for name, value in row["dimensions"].items():
             grouped[name][str(value)].append(row)

@@ -294,11 +294,12 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader 
 
 `--top`、`--min-candidates`、`--no-html` 等原 candidates 参数可直接传入。`--dry-run` 不联网、不写入，只输出计划。默认先返回候选报告，后处理由本次调用启动的独立后台任务继续执行；不安装后台定时器：
 
-1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。
+1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。候选原有量化逻辑完成后，默认运行新闻影子层：优先取巨潮公告，再补充个股新闻；只接受推荐决策时点之前、近 14 个自然日且发布时间明确的证据。新闻分数限制为 `[-3,+1]`，重大正式风险可在影子结果中否决，正向消息不得跨越市场环境、数据质量、板块持续性、资金背离或维科夫硬门槛。首版只冻结证据、展示影子排序，不改变正式推荐。
 2. 从已有权威交易日历按上海时区取得最近已知完成交易日；15:10 前用上一交易日评价历史。日历缺失时明确跳过依赖交易日的后处理；日历只覆盖历史区间时继续评价已知区间，并明确呈现 `workflow.calendar.coverage_end`，不得把未覆盖日期解释为休市。
 3. 报告就绪后返回 `workflow.status=report_ready`，并给出 `workflow.postprocess.task_id`；后台按 close → weekly → monitor 执行。用 `--status <task_id> --json` 查询，用 `--resume <task_id>` 显式续跑。
 4. 后台按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，均允许同周再次尝试。
 5. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
+6. 周度诊断按新闻分数档与风险级别统计成熟样本的 5/10/20 日结果、沪深300超额收益、胜率与 MAE。新闻层是否提升准确性必须由前向样本回答；证据不足时明确“继续积累”，不得凭单日案例转正。`--no-news` 仅用于诊断降级，`--news-file <JSON>` 可注入带发布时间和来源的可复现证据。
 
 需要诊断或兼容旧的同步行为时，显式传 `--postprocess sync`。后台任务状态保存在 `.cache/stock-trend/evolution/background/<task_id>/`，包括冻结输入、状态、日志和最终结果；报告成功不代表后台研究已完成。
 
@@ -323,7 +324,7 @@ python3 .claude/skills/stock-trend/scripts/scans/daily_candidates.py [--top 30] 
 ```bash
 open -a "Google Chrome" reports/lists/candidates-<最新时间>.html
 ```
-3. 每只候选附 `data_quality`：统一输出各维度 `data_date/fetched_at/source/quality/stale_reason`；K 线必须覆盖最近有效推荐依据日，总覆盖率必须 ≥70%，已返回的资金/基本面维度不得为错误状态。不满足者保留在观察池，并明确缺失或过期原因。报告将该指标标为“数据维度覆盖率”；候选表只展示小级别维科夫阶段、短线买点和短线置信度，不展示中线结构、周期结论、中线置信度或中期结构 K 线根数。今日推荐分桶不读取长短周期对齐结论，仍由短线买点、市场环境、数据质量和板块持续性共同决定，不以交易计划字段作为候选资格门槛。
+3. 每只候选附 `data_quality`：统一输出各维度 `data_date/fetched_at/source/quality/stale_reason`；K 线必须覆盖最近有效推荐依据日，总覆盖率必须 ≥70%，已返回的资金/基本面维度不得为错误状态。不满足者保留在观察池，并明确缺失或过期原因。报告将该指标标为“数据维度覆盖率”；候选表只展示小级别维科夫阶段、短线买点和短线置信度，不展示中线结构、周期结论、中线置信度或中期结构 K 线根数。今日推荐分桶不读取长短周期对齐结论，仍由短线买点、市场环境、数据质量和板块持续性共同决定，不以交易计划字段作为候选资格门槛。统一“今日推荐”入口另附 `news_analysis` 与 `news_shadow`，二者固定标注“实验观察，不参与推荐”。
 4. 自动读取 `market_regime.json` 并执行硬门控：评分 `<60`、数据缺失或日期过期时仅输出观察池；`60–79` 最多 2 只等待触发；`≥80` 最多 5 只今日可执行。**盘中(交易时间内)保留上述市场环境档位和数量限制**，但所有结果标记 `provisional: true` + reason `intraday_provisional`，顶部报告保留“盘中临时(未收盘确认)”警告，行级诊断显示为“盘中临时状态”而非数据异常；盘中结果不写入正式推荐历史，收盘后需复跑 `/daily-review` + `/candidates` 确认最终结论。
 5. 排序同时保留 `raw_composite_score`/兼容字段 `composite_score`，并新增 `quality_adjusted_score = raw × coverage_factor × freshness_factor`；扩池和最终排名使用质量调整分。候选资格继续使用 `quality_adjusted_score`；同一推荐层级内先检查数据质量、板块持续性、资金背离和短线状态，再使用 `execution_priority_score = min(100, quality_adjusted_score + buy_point_priority_bonus)` 排序并截取。严格一级/二级/三级奖励分别为 `+1/+3/+2`；普通 JAC、未确认或过期信号不奖励。买点优先分不能越过市场环境、数据质量、板块持续性、资金背离、`retest_pending`、`failed_breakout` 或最低质量分门槛。`evidence.status != ready` 时奖励属于保守先验，只允许通过后续回测缩小、归零或调整，不允许自动放大。
 6. 热点板块同时保留绝对/相对热度，读取最近 3/5/10 日快照计算持续性和相对沪深300强弱；缺少至少两日持续性证据的单日脉冲只能进入观察池，手动指定但未经持续性验证的板块同样只观察。正式持续性快照只接受收盘后的东方财富 `push2` 行业+概念完整截面；AKShare 行业数据、BK 历史 K 线和旧 Top-30 记录只能作旁证，不能提升完整覆盖天数。同花顺排行如需使用东方财富成分，只能作为标注为“跨源未验证”的观察回退，不得继承排行资格；同类目录在一次扫描内共享加载，报告分别展示接口状态、映射失败和成分可用覆盖率。
