@@ -186,6 +186,43 @@ class TestRecommendationPolicy(unittest.TestCase):
             ):
                 self.assertNotIn(removed_label, output)
 
+    def test_score_ledger_is_recorded_but_not_rendered(self):
+        item = candidate("ledger-hidden")
+        ledger = {
+            "schema_version": "candidate-score-ledger/v1",
+            "news_shadow_priority_score": 80.0,
+            "entries": [{
+                "category": "test",
+                "rule_id": "private-ledger-marker",
+                "input_value": 1,
+                "contribution": 0.5,
+                "data_provider": "private-source-marker",
+                "data_date": "2026-08-06",
+                "quality": "good",
+                "rule_version": "private-evidence-marker",
+                "url": "https://example.invalid/private-ledger-marker",
+            }],
+        }
+        item["score_ledger"] = ledger
+        policy = build_recommendation_policy(
+            {"score": 90, "data_date": "2026-08-06"},
+            "2026-08-06",
+        )
+        buckets = classify_candidates([item], policy)
+
+        markdown = generate_report([item], [], 0.1, policy, buckets)
+        html = _generate_html(
+            [item], [], 0.1, "20260912-120000", policy, buckets)
+        payload = build_json_output([item], [], 0.1, policy, buckets)
+
+        for report in (markdown, html):
+            self.assertNotIn("候选评分账本与来源", report)
+            self.assertNotIn("private-source-marker", report)
+            self.assertNotIn("private-evidence-marker", report)
+        self.assertEqual(payload["candidates"][0]["score_ledger"], ledger)
+        self.assertEqual(
+            payload["candidates"][0]["data_quality"], item["data_quality"])
+
     def test_final_valid_count_uses_same_predicate_as_scan_early_stop(self):
         valid = candidate("valid", adjusted_score=70)
         low_score = candidate("low", adjusted_score=49)
@@ -3203,23 +3240,25 @@ class TestRecommendationPolicy(unittest.TestCase):
             },
         )
 
-        self.assertEqual(html.count('<table class="candidate-table">'), 5)
+        self.assertEqual(html.count('<table class="candidate-table">'), 1)
         self.assertIn(
-            ".candidate-table{table-layout:fixed;min-width:1180px}",
+            ".candidate-table{table-layout:fixed;min-width:1080px}",
             html,
         )
         self.assertIn(
-            ".candidate-table th:nth-child(2),.candidate-table td:nth-child(2){width:7%}",
+            ".candidate-table th:nth-child(2),.candidate-table td:nth-child(2){width:9%}",
             html,
         )
         self.assertIn(
-            ".candidate-table th:nth-child(3),.candidate-table td:nth-child(3){width:15%}",
+            ".candidate-table th:nth-child(3),.candidate-table td:nth-child(3){width:12%}",
             html,
         )
         self.assertIn(
-            ".candidate-table th:nth-child(4),.candidate-table td:nth-child(4){width:20%}",
+            ".candidate-table th:nth-child(4),.candidate-table td:nth-child(4){width:13%}",
             html,
         )
+        self.assertIn("原始 / 质量 / 优先", html)
+        self.assertIn("当前没有等待触发标的。", html)
         self.assertIn("<span class='sector-tag sector-neutral'>测试板块</span>", html)
         self.assertIn(".sector-hot{background:#b91c1c", html)
 
@@ -3248,14 +3287,15 @@ class TestRecommendationPolicy(unittest.TestCase):
             html,
         )
         self.assertIn(
-            ".candidate-table th:nth-child(11),.candidate-table td:nth-child(11){width:15%}",
+            ".candidate-table th:nth-child(10),.candidate-table td:nth-child(10){width:19%}",
             html,
         )
         self.assertIn(
-            ".candidate-table td.candidate-diagnostic{min-width:180px;"
+            ".candidate-table td.candidate-diagnostic{min-width:220px;"
             "vertical-align:top;overflow-wrap:break-word;word-break:normal}",
             html,
         )
+        self.assertIn("今日暂无符合推荐门槛的标的", html)
         self.assertIn("<td class='candidate-diagnostic'>", html)
 
     def test_wyckoff_buy_level_uses_canonical_short_term_fields(self):
