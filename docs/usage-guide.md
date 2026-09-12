@@ -1,374 +1,61 @@
-# Stock Trend Skill — 使用指南
+# Stock Trend 日常使用指南
 
-> 更新日期：2026-06-01
+> 更新日期：2026-09-12
 
-Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维综合研判。**不推荐日内短线或高频策略**，侧重中线波段建议（1-6个月持仓）。
+本技能聚焦四类日常任务：今日推荐、股票/ETF 单标的分析、ETF 扫描和持仓管理。适合无法盯盘的用户，以 1–6 个月的中线波段为主，不做高频或日内 T+0 建议。
 
-**用户画像**：上班族，交易时段无法盯盘。
+## 今日推荐
 
----
-
-## 目录
-
-- [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
-- [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
-- [3. 市场主线 `/market-theme`](#3-市场主线-market-theme)
-- [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
-- [4. 涨停热力 `/ths-theme`](#4-涨停热力-ths-theme)
-- [5. 龙虎榜跟踪 `/lhb-tracker`](#5-龙虎榜跟踪-lhb-tracker)
-- [6. 持仓管理 `/portfolio`](#6-持仓管理-portfolio)
-- [7. 龙头扫描 `/longtou`](#7-龙头扫描-longtou)
-- [8. 整合扫描 `/integrated-scan`](#8-整合扫描-integrated-scan)
-- [9. 回测 `/etf-backtest`](#9-回测-etf-backtest)
-
----
-
-## 1. 趋势判断 `/stock-trend`
-
-对单只股票或 ETF 做四维综合评分，输出结构化报告。
-
-```bash
-# 分析标的
-/stock-trend <code>
-
-# 聚焦维度
-/stock-trend <code> --focus technical|capital_flow|fundamental|sentiment
-
-# 多周期共振
-/stock-trend <code> --multi-timeframe
-
-# 精简输出
-/stock-trend <code> --compact
+```text
+今日推荐
+今日推荐 --top 30 --min-candidates 20
 ```
 
-**流程**：
+统一入口会先刷新市场环境，再运行候选筛选；候选量化逻辑之后附加新闻影子观察，并在报告就绪后启动后台历史评价、周度研究和策略监控。无需先单独运行市场复盘或候选扫描。
 
-```
-Step 1: 解析代码 → Step 2: 数据管线(并发+四维搜索) → Step 3: 综合评分 → Step 4: 风险管理+报告
-```
+市场环境、数据质量、板块持续性、资金和短线结构共同决定候选资格。数据过期或关键证据缺失时只观察；弱市或证据不足时可以“今日无推荐”。新闻影子只作实验观察，不改变正式推荐。报告附带 `workflow` 阶段状态和后台任务 ID；可在内部维护指南中查看任务查询和恢复方式。
 
-**评分权重**：技术 35% / 资金 25% / 基本 15% / 情绪 15% / 宏观 10%
+## 股票、港股或 ETF 分析
 
-**信号**：≥+2.0 看多 / ≤-2.0 看空 / 其余震荡
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/core/resolve_code.py <code> -o /tmp/resolve.json
-python3 .claude/skills/stock-trend/scripts/pipeline/runner.py --code <code>
-python3 .claude/skills/stock-trend/scripts/analysis/scores.py --code <code> [维度参数]
-python3 .claude/skills/stock-trend/scripts/reporting/report.py --code <code> [输出参数]
+```text
+/stock-trend 600519
+/stock-trend 00700.HK
+/stock-trend 513180
+/stock-trend 600519 --multi-timeframe
+/stock-trend 513180 --focus technical
 ```
 
----
+分析趋势、关键价位、量价和资金；结合标的类型纳入基本面、宏观或 ETF 专属指标。呈现多空证据、数据日期和来源、关键触发条件及失效条件。ETF 关注净值与折溢价、跟踪误差、规模和适用时的基差。
 
-## 2. ETF 扫描 `/etf-scan`
+## ETF 扫描
 
-扫描精选 ETF 池，输出趋势排名。
-
-```bash
-# 全量扫描
+```text
 /etf-scan
-
-# 聚焦板块
-/etf-scan --focus 科技|金融|消费医药|制造周期|商品跨境|宽基指数
-
-# Top N + 精简模式
 /etf-scan --top 10 --output compact
+/etf-scan --focus 科技
 ```
 
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/scans/etf_scanner.py [--top N] [--focus <板块>] [--output compact|full] --output-html
-```
+扫描精选 ETF 池并给出排名、主要逻辑、排除项和板块强弱。可聚焦宽基指数、科技、金融、消费医药、制造周期或商品跨境。
 
-**信号映射**：
-| 条件 | 信号 |
-|------|------|
-| ≥+2.0 | ↑↑ 看多 |
-| +0.5 ~ +2.0 | ↑ 偏多 |
-| -0.5 ~ +0.5 | → 震荡 |
-| < -0.5 | ↓ 偏空 |
+## 持仓管理
 
-**星级**：≥80 ★★★ / ≥65 ★★☆ / ≥50 ★☆☆
-
----
-
-## 3. 市场主线 `/market-theme`
-
-扫描板块 + BK 指数 K 线 → 持续性/趋势强度分析 → 识别市场主线。
-
-```bash
-# 默认 Top 15，回溯 10 天
-/market-theme
-
-# 自定义
-/market-theme --top 20 --days 5 --min-score 40
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [--days 10] [--min-score 30] [--output-html]
-```
-
-**三阶段**：
-1. 板块扫描（实时排行 API）
-2. 快照历史加载
-3. 持续性分析：上榜率 30% + 平均热度 20% + 排名趋势 20% + 今日热度 15% + 上涨率趋势 15%
-
-**分类**：
-| 类别 | 分数 | 含义 |
-|------|------|------|
-| 阶段强势 | ≥70 | 持续上榜，趋势向上 |
-| 稳步上行 | 50-69 | 温和走强 |
-| 新兴主题 | 40-50 | 新冒头方向 |
-| 脉冲热点 | — | 今日热但持续<50，追高警惕 |
-| 退潮板块 | <40 | 降温中 |
-
----
-
-## 3.1 收盘板块快照（无 Tushare）
-
-没有 Tushare 权限时，持续性历史只接受东方财富 `push2` 的行业和概念
-两类完整排行。AKShare 同花顺行业摘要、东方财富 BK 历史 K 线和旧 Top-30
-记录只能作为旁证，不能补齐全量历史覆盖，也不能把当前成分反推成过去的排行。
-
-建议每个交易日收盘后单独运行一次快照任务，不需要先跑耗时的个股候选扫描：
-
-```bash
-# 检查已有完整覆盖：不联网、不写入
-python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --status --json
-
-# 15:10 后采集行业 + 概念完整截面
-python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --json
-
-# 只拉取并验证，不写缓存或历史
-python3 .claude/skills/stock-trend/scripts/analysis/sector_snapshot_job.py --dry-run --json
-```
-
-`status=saved` 表示候选板块完整快照已写入；`status=validated` 表示
-dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
-均不会新增覆盖天数。`--date YYYY-MM-DD` 只能断言当天交易日，不能用于
-历史回填。重复运行同一天只更新该日期记录，不增加历史天数。
-
-首次启用通常需要连续积累 2–3 个有效交易日；在此之前报告继续显示
-“板块历史快照不足，尚不能验证持续性”是预期行为。失败日保留缺口，下一
-交易日继续采集；本流程不自动安装 cron 或 launchd。
-
----
-
-## 4. 涨停热力 `/ths-theme`
-
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分。**默认同时执行涨停概念评分 + 龙虎榜分析**。
-
-```bash
-# 全量（行业 + 涨停 + 龙虎榜）
-/ths-theme
-
-# 仅行业热力（跳过涨停和龙虎榜）
-/ths-theme --no-zt --no-lhb
-
-# 指定日期
-/ths-theme --zt-date 2026-05-29 --lhb-date 20260529
-
-# JSON 输出
-/ths-theme --json
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
-```
-
-**行业评分**：涨跌幅 35% + 主力净流入 35% + 上涨比率 30%
-
-**涨停评分**（默认开启）：涨停数 30% + 连板强度 25% + 早盘强度 20% + 封单强度 15% - 炸板惩罚 10%
-
-**龙虎榜评分**（默认开启）：机构净买额 40% + 上榜家数 25% + 机构参与度 20% + 净买一致性 15%
-
-**数据源**：AKShare 同花顺行业排行 + 东方财富涨停池 + 东方财富龙虎榜
-
----
-
-## 5. 龙虎榜跟踪 `/lhb-tracker`
-
-每日记录龙虎榜机构净买板块快照，验证后续 3/5/10 日表现。
-
-```bash
-# 保存今日快照 + 查看历史
-/lhb-tracker
-
-# 仅保存快照
-/lhb-tracker --snapshot-only
-
-# 生成报告
-/lhb-tracker --report
-/lhb-tracker --html       # 含 Plotly 图表
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30] [--report] [--html] [--snapshot-only]
-```
-
-**数据存储**：`.cache/stock-trend/lhb_snapshots/YYYY-MM-DD.json`
-
-**信号验证**：胜率 > 60% 视为有效信号；买入/卖出分开统计
-
----
-
-## 6. 持仓管理 `/portfolio`
-
-浮动盈亏、止损预警、凯利分析。
-
-```bash
-# 查看持仓
-/portfolio
+```text
 /portfolio list
-
-# 添加
-/portfolio add --code 600519 --price 1500 --date 2026-05-01 --qty 100 [--stop-loss 1350] [--targets 1700,1800]
-
-# 平仓
-/portfolio remove --code 600519 --close-price 1600
-
-# 更新止损/目标
-/portfolio update --code 600519 --stop-loss 1400 --targets 1750,1900
-
-# 全面状态（含预警+凯利+ETF对比）
 /portfolio status
-
-# 仅预警
 /portfolio alerts
-
-# 凯利仓位计算
 /portfolio kelly
+/portfolio add --code 600519 --price 1500 --date 2026-05-01 --qty 100
+/portfolio update --code 600519 --stop-loss 1400 --targets 1750,1900
+/portfolio remove --code 600519 --close-price 1600
 ```
 
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [options]
-```
+`status` 汇总持仓、风险预警、仓位分析和 ETF 对比。`add`、`update`、`remove` 按用户明确提供的信息操作；凯利统计或 ETF 扫描不可用时说明数据降级，不伪造结果。
 
-**数据文件**：`.claude/skills/stock-trend/data/portfolio.yaml`
+## 数据与报告
 
----
+- 行情、公告和新闻使用当前可用数据；每份结果标出日期、来源和质量。实时数据不可用时明确显示缓存或降级状态。
+- 盘中候选带临时状态，收盘结果以交易日为准。后台研究可能在候选报告返回后继续执行。
+- 默认不自动打开浏览器或 GUI；只有用户明确要求查看本地报告时才打开。
+- 所有输出均附带：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。
 
-## 7. 龙头扫描 `/longtou`
-
-扫描热点板块 → 识别龙头/中军 → pipeline 深度分析。
-
-```bash
-# 全市场扫描
-/longtou
-
-# 指定板块
-/longtou --sector 白酒
-
-# 从 ths-theme 热力数据导入板块（整合模式）
-/longtou --sectors-from .cache/stock-trend/qualified_sectors.json
-
-# 精简输出
-/longtou --compact
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--sector <板块名>] [--sectors-from <file>] [--compact] --output-html
-```
-
-**三阶段**：
-1. 板块扫描（涨幅 40%+主力资金 30%+涨跌比 30%）
-2. 龙头筛选（涨幅 50%+成交额 30%+排行 20%）/ 中军筛选（市值 40%+PE 合理性 40%+走势稳定性 20%）
-3. Pipeline 深度分析
-
-**板块热力加成**：使用 `--sectors-from` 导入 ths-theme 热板块数据后，龙头评分增加板块热力加成：`composite = 原评分×70% + heat_score×15% + zt_score×15%`。
-
----
-
-## 8. 整合扫描 `/integrated-scan`
-
-ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块做龙头扫描，输出整合报告。
-
-```bash
-# 默认 Top 10 热板块
-/integrated-scan
-
-# 指定数量 + HTML
-/integrated-scan --top 15 --output-html
-
-# 精简输出
-/integrated-scan --compact
-```
-
-**Pipeline 流程**：
-
-```
-Step 1: ths_theme.py --export-sectors        → 全市场板块热力 + 涨停概念评分
-Step 2: 筛选 heat_score≥50 & zt_score≥50 的板块
-Step 3: market_leader.py --sectors-from      → 只扫热板块内的龙头/中军
-Step 4: 拼接为整合报告                         → 板块热力 + 龙头清单 + 综合信号标签
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
-```
-
-**信号标签**：
-
-| heat≥50+zt≥50 | 龙头评分 | 标签 | 含义 |
-|:---:|:---:|------|------|
-| ✅ | ≥ 1.0 | 🟢 双强·龙头确认 | 首选，可建仓 |
-| ✅ | 0 ~ 1.0 | 🔵 双强·关注中 | 板块有力，个股待确认 |
-| ✅ | < 0 | ⚪ 双强·无龙头 | 板块热但群龙无首，观望 |
-| ❌ | ≥ 1.0 | 🟡 龙头·板块待确认 | 个股强但板块不一致，严设止损 |
-| ❌ | < 0 | ⚫ 弱势区 | 不参与 |
-
-**龙头评分融合**：板块热力（heat_score × 15% + zt_score × 15%）叠加到龙头 composite_score 上，板块越热龙头得分越高。
-
-**边界行为**：
-- 无热板块 → 不跑 longtou，仅输出 ths-theme 热力报告 + 提示无强信号
-- ths-theme 失败 → 降级为 longtou 全市场扫描
-- longtou 失败 → 降级为 ths-theme 热力报告
-
----
-
-## 9. 回测 `/etf-backtest`
-
-回测 ETF Phase 1 速评分模型预测力。
-
-```bash
-# 默认：120 天 / Top 10 / 窗口 5,10,20
-/etf-backtest
-
-# 聚焦板块 + 自定义窗口
-/etf-backtest --focus 科技 --eval-windows 5,10,20
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-days N] [--focus <板块>] [--top-n N] [--eval-windows 5,10,20]
-```
-
-**评判标准**：IC > 0.05 且 5% 显著 = 有预测力；命中率 > 55% = 优于随机
-
----
-
-## 数据源一览
-
-| 系统 | 数据源 | 数据内容 |
-|------|--------|---------|
-| 趋势判断 | AKShare / Tushare / 东方财富 | K线、资金流向、基本面、宏观 |
-| ETF 扫描 | AKShare / 东方财富 | ETF 净值/IOPV/规模/期货基差 |
-| 市场主题 | 东方财富 push2 API | BK 板块排行 + 成分股 |
-| 同花顺热力 | AKShare 同花顺接口 | 行业排行 + 概念事件 |
-| 涨停数据 | 东方财富涨停池 (AKShare) | 涨停股/封板/连板/炸板 |
-| 龙虎榜 | 东方财富龙虎榜 (AKShare) | 机构买卖明细 |
-| 整合扫描 | ths-theme + market_leader | 板块热力 + 龙头扫描 + 信号标签 |
-| 持仓管理 | portfolio.yaml | 用户手动录入持仓 |
-
----
-
-## 免责声明
-
-本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。
+高级诊断、后台任务运维、策略研究和历史回测见 [内部维护指南](stock-trend-internal-maintenance.md)。
