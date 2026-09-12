@@ -124,9 +124,12 @@ class TestRunSourceHealthContract(unittest.TestCase):
         # Degraded throttles concurrency to max(1, cap//2) but still admits:
         # a live fetch may succeed and reset the failure streak.
         first = health.try_acquire_live_permit("fundamental")
+        second = health.try_acquire_live_permit("fundamental")
         self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
         self.assertIsNone(health.try_acquire_live_permit("fundamental"))
         health.release_unstarted(first, "test")
+        health.release_unstarted(second, "test")
 
     def test_failure_classifier_distinguishes_required_reason_codes(self):
         contract = _source_health_contract(self)
@@ -355,14 +358,26 @@ class TestRunSourceHealthContract(unittest.TestCase):
 class TestProductionPerformanceContract(unittest.TestCase):
     def test_production_deadline_and_budget_constants_bound_critical_path(self):
         contract = _source_health_contract(self)
-        # The production budget was widened with the 25s provider fallback
-        # chain; keep the contract aligned with the current source constant.
-        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 240)
+        # The 330-second cap keeps 10 seconds for finalization and derives a
+        # protected three-wave top-up window from the source configuration.
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 330)
+        self.assertEqual(contract.FINALIZATION_RESERVE_SECONDS, 10)
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS - contract.FINALIZATION_RESERVE_SECONDS, 320)
         self.assertEqual(contract.KLINE_PHASE_SECONDS, 110)
         self.assertEqual(contract.CAPITAL_PREFETCH_LIMIT, 36)
         self.assertEqual(contract.CAPITAL_PREFETCH_BATCH_SIZE, 12)
         self.assertEqual(contract.CAPITAL_TOPUP_LIMIT, 12)
         self.assertEqual(contract.MAX_IN_FLIGHT["capital"], 4)
+        self.assertEqual(contract.MAX_IN_FLIGHT["fundamental"], 4)
+        self.assertEqual(contract.CAPITAL_TOPUP_RESERVE_SECONDS, 77)
+        health = contract.RunSourceHealth()
+        self.assertEqual(
+            round(health.capital_initial_deadline - health.started_at), 243)
+        self.assertEqual(contract.capital_topup_reserve_seconds(
+            topup_limit=12,
+            max_in_flight={"capital": 4, "fundamental": 2},
+            timeouts={"capital": 25, "fundamental": 20},
+            safety_seconds=2), 152)
         self.assertGreater(contract.FINALIZATION_RESERVE_SECONDS, 0)
         self.assertEqual(set(contract.LIVE_ATTEMPT_TIMEOUT_SECONDS), set(SOURCES))
         self.assertEqual(set(contract.MAX_PROVIDER_ATTEMPTS), set(SOURCES))

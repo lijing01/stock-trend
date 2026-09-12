@@ -1393,6 +1393,18 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
                 "error_type": meta.get("error_type", ""),
                 "stale_sources": meta.get("stale_sources", []),
                 "failure_detail": meta.get("error", ""),
+                # Keep stale-data diagnosis separate from scheduling.  These
+                # fields describe what the provider returned, not whether the
+                # request was admitted by the budget scheduler.
+                "expected_trading_date": expected_trading_date,
+                "returned_data_date": latest_data_date(payload),
+                "provider": meta.get("data_source") or meta.get("provider", ""),
+                "fetched_at": meta.get("fetch_time") or meta.get("fetched_at", ""),
+                "cache_timestamp": datetime.fromtimestamp(
+                    cache_path.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
+                if cache_path.exists() else "",
+                "stale_validation_reason": ",".join(
+                    refreshed_verdict.get("reasons", [])),
             })
             payload = _with_cache_verdict(payload, refreshed_verdict)
         else:
@@ -2952,6 +2964,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     fundamental_data[ts_code] = fundamental_fallback_data[ts_code]
                 else:
                     fundamental_data[ts_code] = None
+                if stage == "topup" and evidence.get("attempted"):
+                    metrics_ref["fundamental_topup_live_started"] = (
+                        metrics_ref.get("fundamental_topup_live_started", 0) + 1)
+                if stage == "topup" and evidence.get("status") == "live_success":
+                    metrics_ref["fundamental_topup_valid_count"] = (
+                        metrics_ref.get("fundamental_topup_valid_count", 0) + 1)
             _record_source_evidence(source, ts_code, evidence)
             if (not isinstance(source_health, RunSourceHealth)
                     and evidence.get("attempted")):
@@ -3238,27 +3256,28 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 metrics_ref.get("capital_topup_global_omitted", 0)
                 + requested_topup_count - admitted_topup_count)
             topup_candidates = topup_candidates[:admitted_topup_count]
-    topup_deadline_codes = set()
+    topup_deadline_codes = {"capital": set(), "fundamental": set()}
     topup_fundamental_batch = []
-    topup_run_candidates = []
+    topup_capital_batch = []
     topup_status_changed = False
 
-    def _mark_topup_budget_skipped(candidates_to_mark, scheduler_reason):
+    def _mark_topup_budget_skipped(source, candidates_to_mark, scheduler_reason):
         nonlocal topup_status_changed
         if not candidates_to_mark:
             return
         topup_status_changed = True
-        topup_deadline_codes.update(
+        topup_deadline_codes[source].update(
             candidate["code"] for candidate in candidates_to_mark)
-        metrics_ref["capital_topup_skipped_deadline"] = (
-            metrics_ref.get("capital_topup_skipped_deadline", 0)
+        prefix = f"{source}_topup"
+        metrics_ref[f"{prefix}_skipped_deadline"] = (
+            metrics_ref.get(f"{prefix}_skipped_deadline", 0)
             + len(candidates_to_mark))
         if scheduler_reason == "budget_insufficient_for_attempt":
-            metrics_ref["capital_topup_budget_insufficient"] = (
-                metrics_ref.get("capital_topup_budget_insufficient", 0)
+            metrics_ref[f"{prefix}_budget_insufficient"] = (
+                metrics_ref.get(f"{prefix}_budget_insufficient", 0)
                 + len(candidates_to_mark))
         for candidate in candidates_to_mark:
-            evidence = source_evidence["capital"].setdefault(
+            evidence = source_evidence[source].setdefault(
                 candidate["ts_code"], live_attempt(attempted=False))
             evidence.update({
                 "status": "not_started_deadline",
@@ -3278,79 +3297,60 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         metrics_ref["capital_topup_selected_count"] = (
             metrics_ref.get("capital_topup_selected_count", 0)
             + len(topup_candidates))
+        # Fundamental work is a distinct dimension: it may need fewer (or
+        # zero) provider calls because a verified membership quote is enough.
+        topup_fundamental_candidates = [
+            candidate for candidate in topup_candidates
+            if candidate["ts_code"] not in fundamental_cache_valid_codes
+            and (candidate["code"] in queue_by_code
+                 or candidate["ts_code"] not in fundamental_fallback_data)
+        ]
+        metrics_ref["fundamental_topup_selected_count"] = (
+            metrics_ref.get("fundamental_topup_selected_count", 0)
+            + len(topup_fundamental_candidates))
         remaining_time = (
             source_health.live_deadline - time.monotonic()
             if isinstance(source_health, RunSourceHealth) else None)
-        if _source_unavailable(source_health, "capital"):
-            for candidate in topup_candidates:
-                evidence = source_evidence["capital"].setdefault(
-                    candidate["ts_code"], live_attempt(attempted=False))
-                evidence.update({
-                    "status": "source_unavailable",
-                    "reason": "source_unavailable",
-                    "attempted": False,
-                    "cache_used": False,
-                    "stale": False,
-                    "selection_stage": "topup",
-                })
-        elif remaining_time is not None and remaining_time < \
-                LIVE_ATTEMPT_TIMEOUT_SECONDS["capital"]:
-            scheduler_reason = (
-                "deadline" if time.monotonic() >= source_health.live_deadline
-                else "budget_insufficient_for_attempt")
-            _mark_topup_budget_skipped(topup_candidates, scheduler_reason)
-        else:
-            capital_capacity = _bounded_live_capacity(
-                "capital", remaining_time, len(topup_candidates))
-            fundamental_capacity = _bounded_live_capacity(
-                "fundamental", remaining_time, len(topup_candidates))
-            # Keep the full fundamental gate for a candidate that was in the
-            # initial queue but had not reached its joint batch.  Candidates
-            # outside that queue can use the verified membership fallback;
-            # only missing fallbacks need a fundamental request here.
-            for candidate in topup_candidates:
-                if len(topup_run_candidates) >= capital_capacity:
-                    break
-                needs_fundamental = (
-                    candidate["ts_code"] not in fundamental_cache_valid_codes
-                    and (
-                        candidate["code"] in queue_by_code
-                        or candidate["ts_code"] not in fundamental_fallback_data
-                    )
-                )
-                if needs_fundamental and len(topup_fundamental_batch) >= \
-                        fundamental_capacity:
-                    continue
-                topup_run_candidates.append(candidate)
-                if needs_fundamental:
-                    topup_fundamental_batch.append(candidate)
-            skipped_topup_candidates = [
-                candidate for candidate in topup_candidates
-                if candidate not in topup_run_candidates
-            ]
-            _mark_topup_budget_skipped(
-                skipped_topup_candidates,
-                "budget_insufficient_for_attempt")
-            metrics_ref["capital_topup_executable_count"] = (
-                metrics_ref.get("capital_topup_executable_count", 0)
-                + len(topup_run_candidates))
-            if topup_run_candidates:
-                with ThreadPoolExecutor(max_workers=2) as dimension_pool:
-                    capital_future = dimension_pool.submit(
-                        _run_live_batch, "capital", topup_run_candidates)
-                    fundamental_future = dimension_pool.submit(
-                        _run_live_batch, "fundamental", topup_fundamental_batch)
-                    capital_results = capital_future.result()
-                    fundamental_results = fundamental_future.result()
-                _consume_live_results(
-                    "capital", capital_results, stage="topup")
-                _consume_live_results(
-                    "fundamental", fundamental_results, stage="topup")
-                capital_processed_codes.update(
-                    candidate["code"] for candidate in topup_run_candidates)
-                processed_codes.update(
-                    candidate["code"] for candidate in topup_fundamental_batch)
-                latest_scored = _score_current()
+        topup_batches = {
+            "capital": (topup_candidates, topup_capital_batch),
+            "fundamental": (topup_fundamental_candidates, topup_fundamental_batch),
+        }
+        for source, (selected, batch) in topup_batches.items():
+            if not selected:
+                continue
+            if _source_unavailable(source_health, source):
+                for candidate in selected:
+                    evidence = source_evidence[source].setdefault(
+                        candidate["ts_code"], live_attempt(attempted=False))
+                    evidence.update({"status": "source_unavailable",
+                                     "reason": "source_unavailable",
+                                     "attempted": False, "cache_used": False,
+                                     "stale": False, "selection_stage": "topup"})
+                continue
+            capacity = _bounded_live_capacity(source, remaining_time, len(selected))
+            batch.extend(selected[:capacity])
+            scheduler_reason = ("deadline" if isinstance(source_health, RunSourceHealth)
+                                and time.monotonic() >= source_health.live_deadline
+                                else "budget_insufficient_for_attempt")
+            _mark_topup_budget_skipped(source, selected[capacity:], scheduler_reason)
+            prefix = f"{source}_topup"
+            metrics_ref[f"{prefix}_executable_count"] = (
+                metrics_ref.get(f"{prefix}_executable_count", 0) + len(batch))
+        if topup_capital_batch or topup_fundamental_batch:
+            with ThreadPoolExecutor(max_workers=2) as dimension_pool:
+                capital_future = dimension_pool.submit(
+                    _run_live_batch, "capital", topup_capital_batch)
+                fundamental_future = dimension_pool.submit(
+                    _run_live_batch, "fundamental", topup_fundamental_batch)
+                capital_results = capital_future.result()
+                fundamental_results = fundamental_future.result()
+            _consume_live_results("capital", capital_results, stage="topup")
+            _consume_live_results("fundamental", fundamental_results, stage="topup")
+            capital_processed_codes.update(
+                candidate["code"] for candidate in topup_capital_batch)
+            processed_codes.update(
+                candidate["code"] for candidate in topup_fundamental_batch)
+            latest_scored = _score_current()
 
     # Explicitly distinguish budget omission from provider failure.  A
     # priority candidate whose batch never started is a deadline omission;
@@ -3377,7 +3377,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         selection_stage = evidence.get("selection_stage")
         if not selection_stage:
             selection_stage = (
-                "topup" if candidate["code"] in topup_deadline_codes
+                "topup" if candidate["code"] in topup_deadline_codes["capital"]
                 else "omitted")
         status = (
             "not_started_deadline" if (
@@ -3385,7 +3385,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 or candidate["code"] in initial_budget_cutoff_codes)
             and candidate["code"] in queue_by_code
             else "not_selected_for_enrichment")
-        if candidate["code"] in topup_deadline_codes:
+        if candidate["code"] in topup_deadline_codes["capital"]:
             status = "not_started_deadline"
         if current_status == "cache_stale":
             evidence["cache_status"] = current_status

@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+import math
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
@@ -14,9 +15,9 @@ SOURCES = (
     "sector_ranking", "sector_membership", "kline", "capital",
     "fundamental",
 )
-# Give the post-K-line capital phase a 120-second window (up from 60s) while
-# retaining the final report reserve and the protected top-up window.
-SCAN_DEADLINE_SECONDS = 240
+# The scan has a hard end-to-end cap.  Live provider work stops early enough
+# to retain the final report reserve.
+SCAN_DEADLINE_SECONDS = 330
 FINALIZATION_RESERVE_SECONDS = 10
 KLINE_PHASE_SECONDS = 110
 CAPITAL_PREFETCH_LIMIT = 36
@@ -36,14 +37,7 @@ LIVE_ATTEMPT_TIMEOUT_SECONDS = {
     "capital": 25,
     "fundamental": 25,
 }
-# A capital top-up needs one complete capital/fundamental admission window.
-# Reserve two provider windows so the initial frontier cannot consume the
-# entire shared live budget immediately before the second pass.
 CAPITAL_TOPUP_SAFETY_SECONDS = 2
-CAPITAL_TOPUP_RESERVE_SECONDS = (
-    LIVE_ATTEMPT_TIMEOUT_SECONDS["capital"] * 2
-    + CAPITAL_TOPUP_SAFETY_SECONDS
-)
 MAX_PROVIDER_ATTEMPTS = {
     "sector_ranking": 4,
     "sector_membership": 2,
@@ -59,8 +53,35 @@ MAX_IN_FLIGHT = {
     "sector_membership": 2,
     "kline": 4,
     "capital": 4,
-    "fundamental": 2,
+    "fundamental": 4,
 }
+
+
+def capital_topup_reserve_seconds(
+        topup_limit: int = CAPITAL_TOPUP_LIMIT,
+        max_in_flight: dict | None = None,
+        timeouts: dict | None = None,
+        safety_seconds: float = CAPITAL_TOPUP_SAFETY_SECONDS) -> float:
+    """Return the protected window required for independent top-up waves."""
+    workers = max_in_flight or MAX_IN_FLIGHT
+    attempt_timeouts = timeouts or LIVE_ATTEMPT_TIMEOUT_SECONDS
+    try:
+        limit = max(0, int(topup_limit))
+        parallelism = min(
+            max(1, int(workers.get("capital", 1) or 1)),
+            max(1, int(workers.get("fundamental", 1) or 1)),
+        )
+        timeout = max(
+            float(attempt_timeouts.get("capital", 0) or 0),
+            float(attempt_timeouts.get("fundamental", 0) or 0),
+        )
+        margin = max(0.0, float(safety_seconds))
+    except (TypeError, ValueError):
+        return 0.0
+    return math.ceil(limit / parallelism) * timeout + margin if limit else margin
+
+
+CAPITAL_TOPUP_RESERVE_SECONDS = capital_topup_reserve_seconds()
 # A source only hard-stops after this many *consecutive* live failures.
 # Below that it stays "degraded" and keeps retrying so a transient blip
 # (e.g. 1-2 kline timeouts) never orphans the rest of the run to stale cache.

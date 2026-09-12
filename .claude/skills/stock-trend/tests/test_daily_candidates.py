@@ -3631,7 +3631,7 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         detail = _candidate_diagnostic_text(item)
 
-        self.assertIn("达到截止时间", detail)
+        self.assertIn("已达到实时请求截止时间，未启动", detail)
         self.assertNotIn("资金面数据返回错误", detail)
 
     def test_genuine_capital_fetch_failure_stays_provider_error(self):

@@ -45,9 +45,12 @@ from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
 )
 from core.source_health import (
+    CAPITAL_TOPUP_RESERVE_SECONDS,
+    FINALIZATION_RESERVE_SECONDS,
     LIVE_ATTEMPT_TIMEOUT_SECONDS,
     MAX_PROVIDER_ATTEMPTS,
     RunSourceHealth,
+    SCAN_DEADLINE_SECONDS,
     SOURCES as SOURCE_HEALTH_NAMES,
     classify_failure,
     live_attempt,
@@ -83,7 +86,7 @@ REASON_LABELS = {
     "cache_miss": "未命中有效缓存，尚未完成增强",
     "cache_stale": "缓存存在但已过期或不覆盖目标日期",
     "not_selected_for_enrichment": "未进入资金增强优先队列（预算内未选中）",
-    "not_started_deadline": "达到截止时间，资金增强尚未开始",
+    "not_started_deadline": "已达到实时请求截止时间，未启动",
     "source_unavailable": "资金增强源不可用，本轮未调用",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
     "history_insufficient": "板块历史快照不足，尚不能验证持续性",
@@ -263,6 +266,9 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_topup_valid_count", "capital_topup_skipped_deadline",
     "capital_topup_executable_count", "capital_topup_budget_insufficient",
     "capital_topup_global_omitted",
+    "fundamental_topup_selected_count", "fundamental_topup_live_started",
+    "fundamental_topup_valid_count", "fundamental_topup_skipped_deadline",
+    "fundamental_topup_executable_count", "fundamental_topup_budget_insufficient",
     "sector_membership_queued_count", "sector_membership_attempted_count",
     "sector_membership_success_count", "sector_membership_failure_count",
     "sector_membership_cache_count", "sector_membership_live_success_count",
@@ -483,6 +489,26 @@ def _complete_performance(performance, source_health, candidates, buckets,
         capital_failure_reasons[reason] = (
             capital_failure_reasons.get(reason, 0) + 1)
     inferred_capital["capital_failure_reasons"] = capital_failure_reasons
+    candidate_fundamental_statuses = [
+        (item.get("source_evidence", {}) or {}).get("fundamental", {})
+        for item in candidates
+    ]
+    inferred_capital.update({
+        "fundamental_topup_selected_count": sum(
+            status.get("selection_stage") == "topup"
+            for status in candidate_fundamental_statuses),
+        "fundamental_topup_live_started": sum(
+            status.get("selection_stage") == "topup" and bool(status.get("attempted"))
+            for status in candidate_fundamental_statuses),
+        "fundamental_topup_valid_count": sum(
+            status.get("selection_stage") == "topup"
+            and status.get("status") in {"live_success", "cache_valid"}
+            for status in candidate_fundamental_statuses),
+        "fundamental_topup_skipped_deadline": sum(
+            status.get("selection_stage") == "topup"
+            and status.get("status") == "not_started_deadline"
+            for status in candidate_fundamental_statuses),
+    })
     for field, value in inferred_capital.items():
         if field not in supplied_fields:
             completed[field] = (
@@ -506,6 +532,20 @@ def _complete_performance(performance, source_health, candidates, buckets,
     snapshot = (source_health.snapshot()
                 if isinstance(source_health, RunSourceHealth)
                 else completed.get("sources", {}))
+    if isinstance(source_health, RunSourceHealth):
+        now = time.monotonic()
+        completed["budget"] = {
+            "total_seconds": SCAN_DEADLINE_SECONDS,
+            "finalization_reserve_seconds": FINALIZATION_RESERVE_SECONDS,
+            "live_deadline_seconds": (
+                SCAN_DEADLINE_SECONDS - FINALIZATION_RESERVE_SECONDS),
+            "remaining_live_seconds": round(
+                max(0.0, source_health.live_deadline - now), 3),
+            "topup_reserve_seconds": CAPITAL_TOPUP_RESERVE_SECONDS,
+            "initial_enrichment_deadline_seconds": round(
+                source_health.capital_initial_deadline - source_health.started_at,
+                3),
+        }
     if "capital_failure_reasons" not in supplied_fields \
             and isinstance(source_health, RunSourceHealth):
         capital_state = snapshot.get("capital", {})
@@ -647,6 +687,13 @@ def _performance_markdown(performance):
         f"数据失效 {performance.get('data_rejected_count', 0)} → "
         f"可执行 {performance.get('actionable_count', 0)}",
         "",
+        "**运行预算**: "
+        f"总计 {performance.get('budget', {}).get('total_seconds', '未知')}s | "
+        f"实时截止 {performance.get('budget', {}).get('live_deadline_seconds', '未知')}s | "
+        f"当前剩余 {performance.get('budget', {}).get('remaining_live_seconds', '未知')}s | "
+        f"二轮保留 {performance.get('budget', {}).get('topup_reserve_seconds', '未知')}s | "
+        f"首轮增强截止 {performance.get('budget', {}).get('initial_enrichment_deadline_seconds', '未知')}s",
+        "",
         "**资金增强审计**: "
         f"优先队列 {performance.get('capital_priority_count', 0)} → "
         f"二轮补齐 {performance.get('capital_topup_selected_count', 0)}"
@@ -660,6 +707,10 @@ def _performance_markdown(performance):
         f"首轮预算截断 {performance.get('capital_initial_budget_cutoff', 0)} | "
         f"二轮可执行 {performance.get('capital_topup_executable_count', 0)} | "
         f"二轮预算不足 {performance.get('capital_topup_budget_insufficient', 0)} | "
+        f"基本面二轮 {performance.get('fundamental_topup_selected_count', 0)}"
+        f"（启动 {performance.get('fundamental_topup_live_started', 0)}，"
+        f"有效 {performance.get('fundamental_topup_valid_count', 0)}，"
+        f"截止未启动 {performance.get('fundamental_topup_skipped_deadline', 0)}） | "
         f"增强总体 {performance.get('capital_enrichment_population', 0)} | "
         f"接口失败原因 {json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}",
         "",
@@ -793,6 +844,10 @@ def _performance_html(performance):
         f"capital_initial_budget_cutoff={performance.get('capital_initial_budget_cutoff', 0)} "
         f"capital_topup_executable={performance.get('capital_topup_executable_count', 0)} "
         f"capital_topup_budget_insufficient={performance.get('capital_topup_budget_insufficient', 0)} "
+        f"fundamental_topup_selected={performance.get('fundamental_topup_selected_count', 0)} "
+        f"fundamental_topup_live_started={performance.get('fundamental_topup_live_started', 0)} "
+        f"fundamental_topup_valid={performance.get('fundamental_topup_valid_count', 0)} "
+        f"fundamental_topup_skipped_deadline={performance.get('fundamental_topup_skipped_deadline', 0)} "
         f"capital_global_queue_omitted={performance.get('capital_global_queue_omitted', 0)} "
         f"capital_topup_global_omitted={performance.get('capital_topup_global_omitted', 0)} "
         f"capital_live_started={performance.get('capital_live_started', 0)} "
@@ -801,6 +856,14 @@ def _performance_html(performance):
         f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
         f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)} "
         f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
+    )
+    budget = performance.get("budget", {})
+    budget_text = (
+        f"budget_total={budget.get('total_seconds', 'unknown')}s "
+        f"live_deadline={budget.get('live_deadline_seconds', 'unknown')}s "
+        f"live_remaining={budget.get('remaining_live_seconds', 'unknown')}s "
+        f"topup_reserve={budget.get('topup_reserve_seconds', 'unknown')}s "
+        f"initial_enrichment_deadline={budget.get('initial_enrichment_deadline_seconds', 'unknown')}s"
     )
     scan_status = escape(str(performance.get("scan_status", "complete")))
     degradation_reasons = escape(
@@ -839,6 +902,7 @@ def _performance_html(performance):
         f"<p class='dt'>{escape(membership_text)}</p>"
         f"<p class='dt'>{escape(coverage_text)}</p>"
         f"<p class='dt'>{escape(capital_text)}</p>"
+        f"<p class='dt'>{escape(budget_text)}</p>"
         f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
         f"<p class='dt'>辅助提示={advisory_reasons}</p>"
         "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
