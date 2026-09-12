@@ -16,8 +16,8 @@ Usage:
         --scores '{"technical":-1,"capital_flow":-0.5,...}' \\
         --direction '震荡' --score -0.08 --confidence '低' \\
         --risks '["布林带极度收口","RSI顶背离"]' \\
-        --output-md reports/159740.SZ/20260514-2200.md \\
-        --output-html reports/159740.SZ/20260514-2200.html
+        --output-md reports/stocks/159740.SZ/20260514-2200.md \\
+        --output-html reports/stocks/159740.SZ/20260514-2200.html
 """
 
 import sys

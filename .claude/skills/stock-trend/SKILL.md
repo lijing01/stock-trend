@@ -530,8 +530,8 @@ python3 .claude/skills/stock-trend/scripts/analysis/scores.py --mode wyckoff --w
 ```bash
 python3 .claude/skills/stock-trend/scripts/reporting/report.py --code <code> \
   --ts-code <ts_code> --stock-name '<名称>' \
-  --output-md reports/<ts_code>/<YYYYMMDD-HHmm>.md \
-  --output-html reports/<ts_code>/<YYYYMMDD-HHmm>.html
+  --output-md reports/stocks/<ts_code>/<YYYYMMDD-HHmm>.md \
+  --output-html reports/stocks/<ts_code>/<YYYYMMDD-HHmm>.html
 ```
 
 **精简模式**(`--compact`)：
@@ -543,7 +543,7 @@ python3 .claude/skills/stock-trend/scripts/reporting/report.py --code <code> \
 ```
 精简模式仅文本输出，不保存HTML。
 
-**保存路径**：MD→`reports/{ts_code}/{YYYYMMDD-HHmm}.md`，HTML→`reports/{ts_code}/{YYYYMMDD-HHmm}.html`。`ts_code`用Tushare格式(含后缀,如159740.SZ)。
+**保存路径**：MD→`reports/stocks/{ts_code}/{YYYYMMDD-HHmm}.md`，HTML→`reports/stocks/{ts_code}/{YYYYMMDD-HHmm}.html`。`ts_code`用Tushare格式(含后缀,如159740.SZ)。
 
 **默认模式**生成 HTML 后返回文件路径。只有用户明确要求查看时才打开该文件；`compact` 跳过 HTML。
 
