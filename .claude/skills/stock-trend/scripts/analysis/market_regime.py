@@ -8,7 +8,7 @@
   - 指数K线:  kline_eastmoney (000001.SH上证 / 000300.SH沪深300 / 399001.SZ深成 / 399106.SZ深证综指)
   - 涨跌家数: sector_data 行业板块 up/down_count 加总(仅 industry,避免概念重复计数)
   - 板块排行: sector_data.get_sector_rankings (industry)
-  - 涨停情绪: zt_replay.fetch_limitup_stocks + 连板统计
+  - 涨停情绪: AKShare 涨停池数据 + 连板统计
   - 资金:     地域板块主力净流入加总
 
 评分公式(对齐投资体系文档第一层):
@@ -232,7 +232,7 @@ def fetch_sector_rankings() -> list[dict]:
 def fetch_zt_stats() -> dict:
     """涨停家数 / 连板家数 / 最高连板.
 
-    直连 AKShare 涨停池(绕开 zt_replay 的 concept map,避免触发全市场板块映射构建).
+    直连 AKShare 涨停池,避免触发全市场板块映射构建.
     """
     if not HAS_AKSHARE:
         return {"count": 0, "streak_count": 0, "max_streak": 0}

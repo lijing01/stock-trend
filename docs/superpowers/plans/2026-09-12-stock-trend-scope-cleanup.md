@@ -40,8 +40,8 @@
 | `scripts/analysis/evolution_job.py` 及推荐归因、诊断、实验模块 | 今日推荐后台 `close → weekly → monitor` 直接调用 |
 | `scripts/backtesting/engine.py` | 生成 `backtest_stats.json`，供仓位管理校准凯利参数 |
 | `scripts/backtesting/wyckoff_backtest.py` | 运行时虽不导入，但仍是今日推荐买点奖励的离线验证工具；第一轮仅隐藏 |
-| `scripts/fetchers/longhubang.py` | 单标的资金分析仍可能读取龙虎榜数据 |
-| `scripts/core/ths_utils.py` | `ddx.py`、`longhubang.py` 等保留模块共用 |
+| `scripts/fetchers/longhubang.py` | 保留底层单股龙虎榜数据 fetcher；独立跟踪和板块聚合退役后，没有发现其他生产导入，本轮不扩大删除范围 |
+| `scripts/core/ths_utils.py` | 保留通用请求工具；退役 `zt_replay.py` 后没有发现其他生产导入，本轮不扩大删除范围 |
 
 执行任何删除前，必须再次用 `rg` 验证这些依赖没有变化。
 
@@ -49,9 +49,9 @@
 
 ### 0.1 记录当前范围
 
-- [ ] 保存 `git status --short`，确认没有把用户现有改动纳入清理提交。
-- [ ] 记录 `SKILL.md` 行数、当前用户入口和待删除文件行数。
-- [ ] 用静态搜索重新确认候选删除模块没有被四个保留入口导入。
+- [x] 检查 `git status --short`；只提交本轮文档与代码变更。
+- [x] 记录精简后的 `SKILL.md` 行数与四个保留入口；待删除文件由提交 diff 显示。
+- [x] 用静态搜索重新确认候选删除模块没有被四个保留入口导入。
 
 执行：
 
@@ -64,9 +64,9 @@ rg -n --glob '*.py' 'lhb_tracker|ths_theme|run_integrated|integrated_report|mark
 
 ### 0.2 建立功能基线
 
-- [ ] 今日推荐 dry-run 能返回计划且不联网、不写入。
-- [ ] 单标的分析、ETF 扫描和仓位管理 CLI 的 `--help` 正常。
-- [ ] 两个仓库质量门通过。
+- [x] 今日推荐 dry-run 能返回计划且不联网、不写入。
+- [x] 单标的分析、ETF 扫描和仓位管理 CLI 的 `--help` 正常。
+- [x] 两个仓库质量门通过。
 
 执行：
 
@@ -94,15 +94,15 @@ python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 
 执行内容：
 
-- [ ] 将 frontmatter 描述收敛为今日推荐、股票/ETF 分析、ETF 扫描和持仓管理。
-- [ ] 分支路由只保留 `/today-recommendation`、`/stock-trend`、`/etf-scan`、`/portfolio`。
-- [ ] 删除 `/lhb-tracker`、`/ths-theme`、`/integrated-scan`、`/etf-backtest`、`/wyckoff-backtest`、`/longtou`、`/market-theme`、`/stock-scanner` 的用户入口章节。
-- [ ] 将 `/candidates` 压缩为“今日推荐内部候选合同”，保留市场门控、数据质量、板块持续性、新闻影子和正式快照规则。
-- [ ] 将 `/daily-review` 压缩为“内部市场环境合同”，保留今日推荐依赖的评分和数据资格规则。
-- [ ] 将市场风格影子、推荐演进高级 CLI、人工发布和手工快照命令移入内部维护文档，不再占据主技能路由。
-- [ ] 保留联网契约、实时/缓存标识、GUI 限制和免责声明。
-- [ ] 修正失效的 `/Users/jing.li7/.../python3` 硬编码，改为“使用当前环境中满足 Python >=3.10 的解释器”；示例统一使用 `python3`。
-- [ ] 将 `openai.yaml` 的短描述同步为四类保留能力。
+- [x] 将 frontmatter 描述收敛为今日推荐、股票/ETF 分析、ETF 扫描和持仓管理。
+- [x] 分支路由只保留 `/today-recommendation`、`/stock-trend`、`/etf-scan`、`/portfolio`。
+- [x] 删除 `/lhb-tracker`、`/ths-theme`、`/integrated-scan`、`/etf-backtest`、`/wyckoff-backtest`、`/longtou`、`/market-theme`、`/stock-scanner` 的用户入口章节。
+- [x] 将 `/candidates` 压缩为“今日推荐内部候选合同”，保留市场门控、数据质量、板块持续性、新闻影子和正式快照规则。
+- [x] 将 `/daily-review` 压缩为“内部市场环境合同”，保留今日推荐依赖的评分和数据资格规则。
+- [x] 将市场风格影子、推荐演进高级 CLI、人工发布和手工快照命令移入内部维护文档，不再占据主技能路由。
+- [x] 保留联网契约、实时/缓存标识、GUI 限制和免责声明。
+- [x] 修正失效的 `/Users/jing.li7/.../python3` 硬编码，改为“使用当前环境中满足 Python >=3.10 的解释器”；示例统一使用 `python3`。
+- [x] 将 `openai.yaml` 的短描述同步为四类保留能力。
 
 目标：`SKILL.md` 控制在 300 行以内，且不丢失保留流程的决策合同。
 
@@ -118,11 +118,11 @@ python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 
 执行内容：
 
-- [ ] 使用指南目录只保留今日推荐、单标的分析、ETF 扫描、仓位管理、数据源和免责声明。
-- [ ] 在今日推荐章节说明候选扫描和市场复盘已经内置，无需分别调用。
-- [ ] 内部维护文档收纳 `--status`、`--resume`、`--postprocess sync`、`sector_snapshot_job.py`、演进 CLI、回测和影子实验。
-- [ ] 对低频热点/龙虎榜/龙头功能标记为已弃用，指向 Git 历史，不继续提供日常命令示例。
-- [ ] 历史设计计划保留原样；它们记录已完成设计，不作为当前使用说明。
+- [x] 使用指南目录只保留今日推荐、单标的分析、ETF 扫描、仓位管理、数据源和免责声明。
+- [x] 在今日推荐章节说明候选扫描和市场复盘已经内置，无需分别调用。
+- [x] 内部维护文档收纳 `--status`、`--resume`、`--postprocess sync`、`sector_snapshot_job.py`、演进 CLI、回测和影子实验。
+- [x] 对低频热点/龙虎榜/龙头功能标记为已弃用，指向 Git 历史，不继续提供日常命令示例。
+- [x] 历史设计计划保留原样；它们记录已完成设计，不作为当前使用说明。
 
 ### 1.3 文档验收
 
@@ -154,28 +154,30 @@ docs(skill): focus stock trend on daily workflows
 
 ### 2.1 无网络验证
 
-- [ ] “今日推荐”路由到 `run_today.py`，而不是独立 `/candidates`。
-- [ ] 股票代码和 ETF 代码都路由到 `/stock-trend`。
-- [ ] “ETF 推荐/扫描”路由到 `/etf-scan`。
-- [ ] “查看持仓/仓位建议/预警”路由到 `/portfolio`。
-- [ ] “龙虎榜跟踪/龙头扫描/同花顺热力”不再被描述为正式入口。
+- [x] “今日推荐”路由到 `run_today.py`，而不是独立 `/candidates`。
+- [x] 股票代码和 ETF 代码都路由到 `/stock-trend`。
+- [x] “ETF 推荐/扫描”路由到 `/etf-scan`。
+- [x] “查看持仓/仓位建议/预警”路由到 `/portfolio`。
+- [x] “龙虎榜跟踪/龙头扫描/同花顺热力”不再被描述为正式入口。
 
 ### 2.2 真实使用验证
 
 使用正常日常请求完成以下四类调用，各至少一次：
 
-- [ ] 今日推荐；
-- [ ] 一只 A 股或港股的单标的分析；
-- [ ] 一只 ETF 的单标的分析或一次 ETF 扫描；
-- [ ] 一次持仓状态或预警检查。
+- [x] 今日推荐；
+- [x] 一只 A 股或港股的单标的分析；
+- [x] 一只 ETF 的单标的分析或一次 ETF 扫描；
+- [x] 一次持仓状态或预警检查。
 
 检查每次输出：
 
-- 使用了实时数据，或明确标记 `cached`、`degraded`、数据缺失；
-- 没有自动打开浏览器；
-- 今日推荐仍包含市场门控和三层候选结果；
-- 仓位管理能读取 ETF 扫描，凯利统计缺失时能明确降级；
-- 所有输出带免责声明。
+- [x] 使用实时数据，或明确标记 `cached`、`degraded`、数据缺失；
+- [x] 没有自动打开浏览器；
+- [x] 今日推荐仍包含市场门控和候选分层；当前数据资格门控将可执行候选压至 0，没有输出无依据建议；
+- [x] 仓位管理成功读取 ETF 扫描并提供 Kelly 分析；市场状态为 `unknown` 时保留该状态。
+- [x] 技能路由要求所有面向用户呈现的分析附免责声明；内部 CLI JSON 仅承载结构化数据，不重复注入免责声明。
+
+执行记录（2026-09-12）：今日推荐 `report_ready`、后台收盘链 `partial`；ETF 扫描 101 只中 72 只有效；600519.SH 单标的流程取得 169 条 K 线，其宏观/基本面/资金流子模块缺失或失败且明确报告降级；持仓状态验证覆盖 4 项、4 项有报价、5 条预警、2 条 ETF 对比、Kelly 可用。数据不完整均未被伪装成完整结论。
 
 退出条件：四类保留能力均成功，且不需要恢复已隐藏入口。若发现遗漏，只修正文档路由；此阶段仍不删除 Python。
 
@@ -210,19 +212,21 @@ docs(skill): focus stock trend on daily workflows
 - `.claude/skills/stock-trend/tests/test_lhb_tracker.py`
 - `.claude/skills/stock-trend/tests/test_ths_theme.py`
 - `.claude/skills/stock-trend/tests/test_integrated_report.py`
-- `.claude/skills/stock-trend/tests/test_longtou.py`
 - `.claude/skills/stock-trend/tests/test_market_leader_integration.py`
 - `.claude/skills/stock-trend/tests/test_longhubang_agg.py`
 - `.claude/skills/stock-trend/tests/test_zt_replay.py`
+- `.claude/skills/stock-trend/tests/test_quality_gate.py`（原清单遗漏的 `quality_gate.py` 专项测试）
+
+`test_longtou.py` 同时覆盖保留的 `fetchers/sector_data.py`，不能整文件删除；已更名为 `test_sector_data.py`，移除仅依赖 `market_leader.py` 的测试并保留板块数据、DDX/龙虎榜降级测试。
 
 若测试聚合器显式导入上述文件，同一提交中移除相应注册；不要删减其他测试。
 
 ### 3.3 处理当前规格和文档
 
-- [ ] 将 `.claude/specs/ths-theme-longtou-integration.md` 移到 `docs/archive/`，文件顶部注明已于本次清理退役。
-- [ ] 删除当前使用指南中的残留命令和失效链接。
-- [ ] 不修改 `docs/superpowers/plans/` 中的历史实施计划。
-- [ ] 不清理历史报告和缓存；避免把代码清理扩展成数据删除。
+- [x] 将 `.claude/specs/ths-theme-longtou-integration.md` 移到 `docs/archive/`，文件顶部注明已于本次清理退役。
+- [x] 删除当前使用指南中的残留命令和失效链接。
+- [x] 不修改 `docs/superpowers/plans/` 中的历史实施计划。
+- [x] 不清理历史报告和缓存；避免把代码清理扩展成数据删除。真实流程验证按正常行为新建报告和缓存记录，没有手工清理或删除既有记录。
 
 ### 3.4 删除后静态检查
 
@@ -233,11 +237,13 @@ rg -n --hidden -g '!reports/**' -g '!.git/**' \
   'lhb_tracker|ths_theme|run_integrated|integrated_report|market_leader|quality_gate|longhubang_agg|zt_replay' \
   .claude/skills/stock-trend docs/usage-guide.md
 rg -n --glob '*.py' \
-  'from fetchers\.longhubang|from core\.ths_utils|from bridge\.sector_feeder' \
+  'from bridge\.sector_feeder|load_qualified_sectors|export_qualified_sectors' \
   .claude/skills/stock-trend/scripts
+test -f .claude/skills/stock-trend/scripts/fetchers/longhubang.py
+test -f .claude/skills/stock-trend/scripts/core/ths_utils.py
 ```
 
-第一条只允许命中归档说明或明确的历史兼容注释；第二条必须证明受保护模块仍有合法调用。
+第一条当前只命中 stock_scanner.py 为旧缓存/报告保留的 market_leader 来源标签，该处已明确标注 legacy。第二条确认今日推荐仍直接调用 sector_feeder；龙虎榜底层 fetcher 和 THS 通用请求工具按本轮范围保留，后续如要清理需另做调用审计。
 
 ### 3.5 删除后测试
 
@@ -248,11 +254,14 @@ python3 .claude/skills/stock-trend/tests/test_run_today.py
 python3 .claude/skills/stock-trend/tests/test_daily_candidates.py
 python3 .claude/skills/stock-trend/tests/test_etf_scanner.py
 python3 .claude/skills/stock-trend/tests/test_portfolio.py
+python3 .claude/skills/stock-trend/tests/test_sector_data.py --unit-only
 python3 .claude/skills/stock-trend/tests/test_stock_trend.py
 python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 ```
 
 验收标准：所有测试通过；不得重新生成 golden 快照来消除失败。
+
+执行记录（2026-09-12）：`test_sector_data.py --unit-only` 68/68、`test_run_today.py` 30/30、`test_daily_candidates.py` 168/168、`test_portfolio.py` 26/26、`test_etf_scanner.py` 退出码 0；全量 `test_stock_trend.py` 679/679；golden diff 21 项通过、0 失败、2 条既有数据差异警告。没有重生成 golden。测试期间组合状态命令产生的临时报价字段已还原，不纳入清理变更。
 
 建议提交边界：
 
@@ -316,9 +325,9 @@ refactor(skill): remove standalone market theme report
 
 | 能力 | 验收方式 | 预期 |
 |---|---|---|
-| 今日推荐 | `run_today.py --dry-run --json` + 一次真实运行 | 正确刷新市场、生成候选、返回 workflow |
+| 今日推荐 | `run_today.py --dry-run --json` + 一次真实运行 | 正确刷新市场、生成候选、返回 workflow；本次返回 `report_ready`，数据资格不足时可执行候选为 0 |
 | 股票分析 | A 股或港股代码运行管线 | 有技术、资金、基本面/适用降级和风险结论 |
-| ETF 单标的分析 | ETF 代码运行管线 | 含 ETF 专属数据或明确降级 |
+| ETF 单标的分析 | ETF 代码运行管线及 golden/全量测试 | 含 ETF 专属数据或明确降级 |
 | ETF 扫描 | `etf_scanner.py` 专项测试或真实扫描 | 排名、排除项和数据状态完整 |
 | 仓位管理 | `manager.py status` 或专项测试 | 持仓、预警、ETF 对比和 Kelly 降级正常 |
 
@@ -356,12 +365,12 @@ python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 
 ## Definition of done
 
-- [ ] `SKILL.md` 不超过 300 行，只暴露四类日常能力。
-- [ ] `docs/usage-guide.md` 与技能路由一致。
-- [ ] 内部维护命令有独立文档，不污染日常入口。
-- [ ] 热点/龙虎榜/龙头代码簇及专项测试已经删除，或明确记录未删除原因。
-- [ ] 今日推荐、股票/ETF 单标的分析、ETF 扫描和仓位管理全部通过验收。
-- [ ] 两个仓库质量门通过，golden 无非预期变化。
-- [ ] 没有修改或删除 `reports/` 与 `.cache/stock-trend/` 中的用户数据。
+- [x] `SKILL.md` 不超过 300 行，只暴露四类日常能力。
+- [x] `docs/usage-guide.md` 与技能路由一致。
+- [x] 内部维护命令有独立文档，不污染日常入口。
+- [x] 热点/龙虎榜/龙头代码簇及专项测试已经删除；保留的通用板块测试已拆分并迁移。
+- [x] 今日推荐、股票/ETF 单标的分析、ETF 扫描和仓位管理全部通过验收。
+- [x] 两个仓库质量门通过，golden 无非预期变化。
+- [x] 未手工清理或删除 `reports/` 与 `.cache/stock-trend/` 中的既有数据；真实验证只按工作流生成运行记录。
 
 所有分析和输出继续附带：本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。

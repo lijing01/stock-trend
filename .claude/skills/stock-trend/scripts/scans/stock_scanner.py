@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A股个股筛选器 — Scan A-stock constituents of hot sectors after market_theme/market_leader.
+"""A股个股筛选器 — Scan A-stock constituents from supplied hot-sector lists.
 
 Three-phase architecture:
   Phase 1: Gather + hard-filter A-stocks from hot sector constituents
@@ -3618,7 +3618,7 @@ def main():
     parser.add_argument("--sectors", type=str,
                         help="板块代码列表, 逗号分隔 (e.g. BK0477,BK0897)")
     parser.add_argument("--from-leader", type=str,
-                        help="从 market_leader JSON 输出文件读取板块")
+                        help="从既有板块扫描 JSON 文件读取板块")
     parser.add_argument("--top", type=int, default=10,
                         help="输出前N只股票 (默认10)")
     parser.add_argument("--min-score", type=float, default=50,
@@ -3634,6 +3634,7 @@ def main():
     if args.from_leader:
         leader_data = _read_json(args.from_leader)
         if leader_data:
+            # Preserve the legacy source label for existing cached reports.
             source = "market_leader"
             for sec in leader_data.get("sectors_analyzed", []):
                 sector_codes.append(sec.get("code", ""))
