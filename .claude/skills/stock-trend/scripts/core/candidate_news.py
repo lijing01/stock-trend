@@ -9,6 +9,9 @@ import copy
 import hashlib
 import re
 from datetime import date, datetime, time, timedelta, timezone
+from urllib.parse import urlparse
+
+from core.candidate_score_ledger import append_news_overlay
 
 
 SCHEMA_VERSION = "candidate-news-overlay/v1"
@@ -29,6 +32,9 @@ _POSITIVE = (
 )
 _UNCERTAIN = ("澄清", "传闻", "拟", "意向", "框架协议", "尚存在不确定性")
 _OFFICIAL_SOURCES = ("巨潮", "上交所", "深交所", "港交所", "公司公告")
+_OFFICIAL_PROVIDER_LABELS = frozenset({
+    "巨潮资讯", "巨潮资讯/公司公告", "上交所", "深交所", "港交所", "公司公告",
+})
 _NEGATIVE_NEGATIONS = (
     "撤销退市风险警示", "申请撤销退市风险警示", "解除质押",
     "不减持", "终止减持计划", "减持计划实施完毕",
@@ -69,9 +75,14 @@ def decision_cutoff(recommendation_date, provisional=False):
 
 
 def _source_tier(source, url=""):
-    text = f"{source} {url}".lower()
-    if any(name.lower() in text for name in _OFFICIAL_SOURCES) or \
-            any(host in text for host in ("cninfo.com.cn", "sse.com.cn", "szse.cn", "hkexnews.hk")):
+    source_text = str(source or "").strip()
+    hostname = (urlparse(str(url or "")).hostname or "").lower().rstrip(".")
+    official_hosts = ("cninfo.com.cn", "sse.com.cn", "szse.cn", "hkexnews.hk")
+    official_domain = any(hostname == host or hostname.endswith("." + host)
+                          for host in official_hosts)
+    # A provider label is trusted only when it is one of the adapter's
+    # contract values.  Arbitrary text such as "巨潮转载" cannot self-upgrade.
+    if source_text in _OFFICIAL_PROVIDER_LABELS or official_domain:
         return "official"
     return "media"
 
@@ -117,6 +128,8 @@ def classify_article(item):
         "source_tier": tier,
         "url": url,
         "label": label,
+        "base_score": round(score / (1.0 if tier == "official" else 0.6), 2) if score else 0.0,
+        "source_factor": 1.0 if tier == "official" else 0.6,
         "score": round(score, 2),
         "risk_level": risk,
         "matched_terms": {"critical": critical, "negative": negative,
@@ -146,8 +159,9 @@ def evaluate_candidate_news(items, *, cutoff, lookback_days=14):
         if published < start:
             excluded["too_old"] += 1
             continue
+        normalized_title = re.sub(r"\s+", "", article["title"])
         fingerprint = hashlib.sha256(
-            (article["title"] + published.isoformat()).encode("utf-8")
+            (normalized_title + published.date().isoformat()).encode("utf-8")
         ).hexdigest()[:16]
         if fingerprint in seen:
             excluded["duplicate"] += 1
@@ -157,7 +171,10 @@ def evaluate_candidate_news(items, *, cutoff, lookback_days=14):
         decay = max(0.25, 1 - age_days / max(lookback_days, 1))
         article["published_at"] = published.isoformat()
         article["age_days"] = round(age_days, 2)
+        article["time_factor"] = round(decay, 4)
         article["decayed_score"] = round(article["score"] * decay, 3)
+        article["event_id"] = fingerprint
+        article["fetched_at"] = datetime.now(SHANGHAI).isoformat()
         eligible.append(article)
     eligible.sort(key=lambda row: row["published_at"], reverse=True)
     score = sum(row["decayed_score"] for row in eligible)
@@ -176,7 +193,9 @@ def evaluate_candidate_news(items, *, cutoff, lookback_days=14):
         "risk_level": "critical" if critical else "high" if high else "none",
         "shadow_veto": critical,
         "excluded": excluded,
-        "articles": eligible[:8],
+        # Rendering may show a compact subset; the ledger must retain every
+        # eligible item that participated in the capped score.
+        "articles": eligible,
     }
 
 
@@ -205,6 +224,7 @@ def apply_news_overlay(candidates, evidence_by_code, *, recommendation_date,
         analysis["shadow_priority_score"] = round(max(0, min(100, base + analysis["score"])), 2)
         analysis["formal_policy_affected"] = False
         item["news_analysis"] = analysis
+        append_news_overlay(item, analysis)
         annotated.append(item)
     baseline = [str(item.get("code")) for item in annotated]
     ranked = sorted(annotated, key=lambda row: (

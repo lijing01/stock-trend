@@ -87,6 +87,22 @@ class CandidateNewsTests(unittest.TestCase):
         selected = {row["code"]: row["news_analysis"]["shadow_selected"]
                     for row in annotated}
         self.assertEqual(selected, {"A": False, "B": True, "C": False})
+        ledger = next(row for row in annotated if row["code"] == "B")["score_ledger"]
+        self.assertEqual(ledger["formal_priority_score"], 79.0)
+        self.assertGreater(ledger["news_shadow_priority_score"], 79.0)
+        self.assertTrue(all(not entry["affects_formal_score"]
+                            for entry in ledger["entries"]
+                            if entry["category"].startswith("news")))
+
+    def test_news_ledger_retains_all_scored_articles(self):
+        articles = [{"title": f"公司中标重大合同{i}",
+                     "published_at": "2026-09-09 09:00:00",
+                     "source": "巨潮资讯"} for i in range(10)]
+        result = evaluate_candidate_news(articles, cutoff=self.cutoff)
+        self.assertEqual(len(result["articles"]), 10)
+        self.assertTrue(all(article.get("event_id") for article in result["articles"]))
+        self.assertTrue(all("source_factor" in article and "time_factor" in article
+                            for article in result["articles"]))
 
     def test_diagnostics_expose_news_dimensions(self):
         dimensions = diagnostic_dimensions({
@@ -182,6 +198,7 @@ class CandidateNewsTests(unittest.TestCase):
         for rendered in (markdown, html):
             self.assertIn("公司中标重大合同", rendered)
             self.assertIn("巨潮资讯", rendered)
+            self.assertIn("新闻净调整", rendered)
 
 
 def run_candidate_news_tests():

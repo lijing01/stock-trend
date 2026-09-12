@@ -68,6 +68,7 @@ from core.evolution_registry import validate_experiment_definition, load_active_
 from core.candidate_news import (
     apply_news_overlay, decision_cutoff, load_news_evidence,
 )
+from core.candidate_score_ledger import append_wyckoff_bonus, ensure_score_ledger
 from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
@@ -150,6 +151,10 @@ def apply_buy_point_priority(item, priority_bonuses=None):
     item["buy_point_level_name"] = level["name"] if level else ""
     item["buy_point_priority_bonus"] = bonus
     item["execution_priority_score"] = round(min(100.0, quality + bonus), 1)
+    # The strict buy-point reward is a strategy setting.  Keep it separate
+    # from the structural Wyckoff dimension already embedded in raw composite.
+    ensure_score_ledger(item)
+    append_wyckoff_bonus(item, bonus, buy_point_evidence(item.get("wyckoff")))
     return item
 
 
@@ -2497,14 +2502,15 @@ def _append_candidate_table(lines, title, items, empty_text):
         lines.append(f"> {empty_text}")
         return
     lines.extend([
-        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 买点证据（事件/确认/年龄/状态） | 短线置信度 | 原始分 | 质量分 | 优先分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "| # | 名称(代码) | 板块 | 小级别维科夫阶段 | 买点证据（事件/确认/年龄/状态） | 短线置信度 | 原始分 | 质量分 | 优先分 | 新闻净调整（影子） | 新闻影子优先分 | 数据维度覆盖率 | 数据问题/异常及原因 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ])
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
         quality = item.get("data_quality", {})
         detail = _markdown_cell(_candidate_diagnostic_text(item))
         evidence = buy_point_evidence(wyckoff)
+        news = item.get("news_analysis") or {}
         buy_text = (f"{wyckoff.get('sub_phase', '-')}；{evidence['reward_reason']}；"
                     f"事件 {evidence['event_date']}；确认 {evidence['confirmation_date']}；"
                     f"年龄 {evidence['signal_age_bars'] if evidence['age_status'] == 'known' else '未知'}；"
@@ -2517,9 +2523,40 @@ def _append_candidate_table(lines, title, items, empty_text):
             f"{item['composite_score']:.1f} | "
             f"{candidate_quality_score(item):.1f} | "
             f"{candidate_rank_score(item):.1f} | "
+            f"{float(news.get('score', 0) or 0):+.2f}（{news.get('status', 'disabled')}） | "
+            f"{float(news.get('shadow_priority_score', candidate_rank_score(item)) or candidate_rank_score(item)):.1f} | "
             f"{quality.get('coverage', 0):.0%} | "
             f"{detail} |"
         )
+
+
+def _append_score_ledgers(lines, candidates):
+    """Render the same serialized ledger used by JSON, without recalculation."""
+    lines.extend(["", "## 候选评分账本与来源", "",
+                  "维度贡献是原始综合分的加权组成；维科夫严格买点奖励是策略设定，"
+                  "新闻仅影响影子优先分。结构维科夫分不会重复累加。"])
+    for item in candidates:
+        ledger = item.get("score_ledger") or {}
+        if not ledger:
+            continue
+        lines.extend(["", f"### {item.get('name', '')}（{item.get('code', '')}）", "",
+                      f"正式：原始 {float(item.get('raw_composite_score', item.get('composite_score', 0))):.1f} → "
+                      f"质量 {candidate_quality_score(item):.1f} → 优先 {candidate_rank_score(item):.1f}；"
+                      f"新闻影子优先 {float(ledger.get('news_shadow_priority_score') or candidate_rank_score(item)):.1f}。", "",
+                      "| 类别/规则 | 输入与贡献 | 数据来源/日期 | 判分来源与证据 |", "|---|---|---|---|"])
+        for entry in ledger.get("entries", []):
+            evidence = entry.get("evidence") or {}
+            proof = entry.get("rule_version", "")
+            if evidence:
+                proof += "；" + _markdown_cell(evidence)
+            if entry.get("url"):
+                proof += f"；[原文]({entry['url']})"
+            lines.append(
+                f"| {_markdown_cell(entry.get('category', ''))}/{_markdown_cell(entry.get('rule_id', ''))} | "
+                f"输入 {_markdown_cell(entry.get('input_value', ''))}；贡献 {float(entry.get('contribution', 0) or 0):+.4f} | "
+                f"{_markdown_cell(entry.get('data_provider', 'unknown'))} / {_markdown_cell(entry.get('data_date', 'unknown'))} "
+                f"({ _markdown_cell(entry.get('quality', 'unknown')) }) | {proof or '—'} |"
+            )
 
 
 def _normalize_legacy_northbound_partial(context):
@@ -3307,6 +3344,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     _append_candidate_table(
         lines, "数据失效/待修复", buckets.get("data_rejected", []),
         "无数据失效候选。")
+    _append_score_ledgers(lines, candidates)
     concentration = (performance or {}).get("candidate_concentration", {})
     if concentration:
         distribution = "、".join(
@@ -3368,7 +3406,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
         raise ValueError(
             f"unsupported buy level display: {buy_level_display}")
     if not items:
-        return '<tr><td colspan="11">无</td></tr>'
+        return '<tr><td colspan="13">无</td></tr>'
     rows = []
     for index, item in enumerate(items, 1):
         wyckoff = item.get("wyckoff", {})
@@ -3398,6 +3436,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
                 "已确认</span>"
             )
         quality = item.get("data_quality", {})
+        news = item.get("news_analysis") or {}
         detail = _candidate_diagnostic_text(item)
         rows.append(
             f"<tr{row_class}><td>{index}</td><td><strong>{item['name']}</strong><br>"
@@ -3410,10 +3449,35 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"<td><strong>{item['composite_score']:.1f}</strong></td>"
             f"<td><strong>{candidate_quality_score(item):.1f}</strong></td>"
             f"<td><strong>{candidate_rank_score(item):.1f}</strong></td>"
+            f"<td>{float(news.get('score', 0) or 0):+.2f}<br><small>{escape(str(news.get('status', 'disabled')))}</small></td>"
+            f"<td>{float(news.get('shadow_priority_score', candidate_rank_score(item)) or candidate_rank_score(item)):.1f}</td>"
             f"<td>{quality.get('coverage', 0):.0%}</td>"
             f"<td class='candidate-diagnostic'>{escape(detail)}</td></tr>"
         )
     return "".join(rows)
+
+
+def _score_ledger_html(candidates):
+    parts = ["<section><h2 style='font-size:18px;margin:18px 0 8px'>候选评分账本与来源</h2>",
+             "<p class='dt'>维度贡献构成原始综合分；维科夫严格买点奖励是策略设定；新闻只影响影子优先分，结构维科夫分不重复累加。</p>"]
+    for item in candidates:
+        ledger = item.get("score_ledger") or {}
+        if not ledger:
+            continue
+        parts.append(f"<details><summary><strong>{escape(str(item.get('name') or ''))}（{escape(str(item.get('code') or ''))}）</strong>：正式优先 {candidate_rank_score(item):.1f}，新闻影子 {float(ledger.get('news_shadow_priority_score') or candidate_rank_score(item)):.1f}</summary>")
+        parts.append("<table><thead><tr><th>类别/规则</th><th>输入/贡献</th><th>数据来源/日期</th><th>判分规则/证据</th></tr></thead><tbody>")
+        for entry in ledger.get("entries", []):
+            proof = escape(str(entry.get("rule_version") or "—"))
+            if entry.get("url"):
+                url = escape(str(entry["url"]), quote=True)
+                proof += f"；<a href='{url}'>原文</a>"
+            parts.append("<tr>"
+                         f"<td>{escape(str(entry.get('category', '')))}/{escape(str(entry.get('rule_id', '')))}</td>"
+                         f"<td>输入 {escape(str(entry.get('input_value', '')))}；贡献 {float(entry.get('contribution', 0) or 0):+.4f}</td>"
+                         f"<td>{escape(str(entry.get('data_provider', 'unknown')))} / {escape(str(entry.get('data_date', 'unknown')))}<br><small>{escape(str(entry.get('quality', 'unknown')))}</small></td>"
+                         f"<td>{proof}</td></tr>")
+        parts.append("</tbody></table></details>")
+    return "".join(parts) + "</section>"
 
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
@@ -3430,6 +3494,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
     observation_rows = _html_candidate_rows(
         buckets["observation"], buy_level_display="observation")
     rejected_rows = _html_candidate_rows(buckets.get("data_rejected", []))
+    score_ledger_html = _score_ledger_html(candidates)
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
     sector_qualified = performance.get("sector_qualified_count",
@@ -3603,11 +3668,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">二级 · SOS 后 LPS</span>
 <span class="level-3">三级 · JAC/BU 后再确认</span>
 </div>
-<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table></div>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>新闻净调整（影子）</th><th>新闻影子优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{actionable_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">等待触发{tier_suffix}</h2>
-<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table></div>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>新闻净调整（影子）</th><th>新闻影子优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{waiting_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">次日确认观察（非推荐）</h2>
-<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table></div>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>新闻净调整（影子）</th><th>新闻影子优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{confirmation_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">观察池</h2>
 <div class="observation-buy-level-note" role="note">
 <strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>
@@ -3619,9 +3684,10 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <span class="level-2">潜在二级 · SOS 后 LPS</span>
 <span class="level-3">潜在三级 · JAC/BU 后再确认</span>
 </div>
-<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table></div>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>新闻净调整（影子）</th><th>新闻影子优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{observation_rows}</tbody></table></div>
 <h2 style="font-size:18px;margin:18px 0 8px">数据失效/待修复</h2>
-<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table></div>
+<div class="candidate-table-wrap"><table class="candidate-table"><thead><tr><th>#</th><th>名称</th><th>板块</th><th>小级别维科夫阶段</th><th>短线买点</th><th>短线置信度</th><th>原始分</th><th>质量分</th><th>优先分</th><th>新闻净调整（影子）</th><th>新闻影子优先分</th><th>数据维度覆盖率</th><th>数据问题/异常及原因</th></tr></thead><tbody>{rejected_rows}</tbody></table></div>
+{score_ledger_html}
 {news_shadow_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>

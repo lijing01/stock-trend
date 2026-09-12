@@ -49,6 +49,7 @@ from core.candidate_trade_plan import (
     build_candidate_trade_plan,
     validate_trade_plan,
 )
+from core.candidate_score_ledger import ensure_score_ledger
 from analysis.wyckoff import (
     analyze_kline_dict,
     BUY_PHASES, BUY_SUB_PHASES, build_period_alignment, is_buy_signal, normalize_score_100,
@@ -2509,6 +2510,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 item["trade_plan_reasons"] = ["trade_plan_build_error"]
                 item["trade_plan_target_source"] = "unavailable"
 
+        ensure_score_ledger(item)
         scored.append(item)
 
     return scored
@@ -3139,6 +3141,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     item["trade_plan_status"] = "error"
                     item["trade_plan_reasons"] = ["trade_plan_build_error"]
                     item["trade_plan_target_source"] = "unavailable"
+            ensure_score_ledger(item)
             scored.append(item)
         return scored
 
