@@ -42,7 +42,7 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from scans.stock_scanner import _resolve_ts_code, _fetch_kline, gather_candidates, _is_a_share
+from stock_trend.domain.equities import is_a_share, resolve_ts_code
 from analysis.wyckoff import (
     analyze_kline_dict,
     classify_buy_point_level,
@@ -518,22 +518,23 @@ def build_stocks(codes=None, sectors=None, from_candidates=None) -> list[dict]:
             data = json.load(f)
         for c in data.get("candidates", []):
             code = str(c.get("code", ""))
-            if _is_a_share(code):
-                stocks.append({"code": code, "ts_code": _resolve_ts_code(code),
+            if is_a_share(code):
+                stocks.append({"code": code, "ts_code": resolve_ts_code(code),
                                "name": c.get("name", code)})
     elif sectors:
         sector_codes = [c.strip() for c in sectors.split(",") if c.strip()]
-        phase1 = gather_candidates(sector_codes, top_n_per_sector=25)
+        from stock_trend.providers.stock_scanner_compat import gather_sector_candidates
+        phase1 = gather_sector_candidates(sector_codes, top_n_per_sector=25)
         for s in phase1["candidates"]:
             stocks.append({"code": s["code"], "ts_code": s["ts_code"],
                            "name": s["name"], "sector_name": s["sector_name"]})
     elif codes:
         for raw in codes.split(","):
             code = raw.strip()
-            if not _is_a_share(code):
+            if not is_a_share(code):
                 print(f"  ⚠️ 跳过非A股代码: {raw}", file=sys.stderr)
                 continue
-            stocks.append({"code": code, "ts_code": _resolve_ts_code(code), "name": code})
+            stocks.append({"code": code, "ts_code": resolve_ts_code(code), "name": code})
     else:
         raise ValueError("need one of --codes / --sectors / --from-candidates")
     return stocks
@@ -544,7 +545,8 @@ def fetch_klines(stocks, max_workers=4) -> dict:
     kline_map = {}
 
     def _fetch_one(s):
-        return s["ts_code"], _fetch_kline(s["ts_code"])
+        from stock_trend.providers.stock_scanner_compat import fetch_stock_kline
+        return s["ts_code"], fetch_stock_kline(s["ts_code"])
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_fetch_one, s): s for s in stocks}

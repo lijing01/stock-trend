@@ -3854,6 +3854,39 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
     return output
 
 
+# The public candidate-policy functions live in the domain package.  Keep
+# these names here for one release so external callers of the CLI module do
+# not need to change imports during the migration.
+from stock_trend.domain.candidates.policy import (
+    build_recommendation_policy as _domain_build_recommendation_policy,
+    candidate_gate_pass as _domain_candidate_gate_pass,
+    classify_candidates as _domain_classify_candidates,
+    select_candidate_pool as _domain_select_candidate_pool,
+)
+from stock_trend.domain.candidates.ranking import (
+    candidate_concentration as _domain_candidate_concentration,
+    candidate_quality_score as _domain_candidate_quality_score,
+    candidate_rank_score as _domain_candidate_rank_score,
+)
+
+candidate_quality_score = _domain_candidate_quality_score
+candidate_rank_score = _domain_candidate_rank_score
+candidate_concentration = _domain_candidate_concentration
+_candidate_gate_pass = _domain_candidate_gate_pass
+_is_final_valid_candidate = _domain_candidate_gate_pass
+build_recommendation_policy = _domain_build_recommendation_policy
+classify_candidates = _domain_classify_candidates
+
+
+def select_candidate_pool(scored, top, min_score, policy=None,
+                          priority_bonuses=None):
+    return _domain_select_candidate_pool(
+        scored, top, min_score, policy=policy, priority_bonuses=priority_bonuses,
+        priority_applier=lambda item: apply_buy_point_priority(
+            item, priority_bonuses=priority_bonuses),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="每日候选股 — 自动筛出维科夫买点候选")
     parser.add_argument("--top", type=int, default=30, help="输出上限(默认30)")

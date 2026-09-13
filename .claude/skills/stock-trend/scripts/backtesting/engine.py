@@ -42,14 +42,9 @@ CACHE_DIR = PROJECT_ROOT / ".cache" / "stock-trend"
 DEFAULT_WATCHLIST = SCRIPT_DIR / "watchlist.yaml"
 ASSETS_DIR = SKILL_DIR / "assets"
 
-# Import scoring functions from etf_scanner
+# Replay scoring is pure analytics code, independent of scan orchestration.
 sys.path.insert(0, str(SCRIPT_DIR))
-from scans.etf_scanner import (
-    score_momentum, score_volume, score_capital_flow,
-    score_shares_trend, score_iopv, compute_quick_score,
-    normalize_scores_by_cohort, _piecewise_linear,
-    detect_contradictions, detect_trend_stage,
-)
+from stock_trend.analytics.etf_scoring import score_momentum, score_volume, score_shares_trend
 from core.cache_utils import load_cache, save_cache, get_market_day_ttl
 
 

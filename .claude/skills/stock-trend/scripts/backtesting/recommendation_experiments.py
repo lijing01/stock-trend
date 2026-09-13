@@ -18,7 +18,9 @@ from core.evolution_contract import build_evaluation_contract
 from core.evolution_registry import validate_experiment_definition
 from core.evolution_storage import input_manifest, storage_root
 from core.research_events import assign_research_events, summarize_daily_alpha
-from scans.daily_candidates import classify_candidates, select_candidate_pool
+from stock_trend.domain.candidates.policy import (
+    classify_candidates, select_candidate_pool,
+)
 
 SCHEMA_VERSION = "recommendation-experiment/v2"
 DEFAULT_ROOT = storage_root("experiments")
