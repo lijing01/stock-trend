@@ -32,6 +32,7 @@ Stock Trend Skill — Claude Code 的 A股/港股/ETF 日趋势判断技能插�
 - 持仓管理: `/portfolio`
 - 回测验证: `/etf-backtest`
 - 安装 git hooks（新人必做）: `bash .githooks/install-hooks.sh`
+- 完整本地检查: `make check`
 
 ## Architecture
 
@@ -70,5 +71,7 @@ Stock Trend Skill — Claude Code 的 A股/港股/ETF 日趋势判断技能插�
    b. `python3 .claude/skills/stock-trend/tests/test_golden.py --diff`  — Golden snapshot diff 无失败
    c. 如果 diff 有数值变化但合理：用 `--regenerate` 更新 golden，commit message 说明原因
 4. **Commit**: 确认 3a+3b 通过后再提交
+
+日常完整检查优先运行 `make check`，其中包含语法检查、全部可发现的单元测试、综合测试、Golden diff 与空白字符检查；上面的两项 Python 命令仍是强制质量门。
 
 不可跳过步骤 3。合理的 golden 变化必须 `--regenerate` 并在 commit message 说明。

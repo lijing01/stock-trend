@@ -25,6 +25,8 @@ python3 .claude/skills/stock-trend/tests/test_stock_trend.py
 python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 ```
 
+Use `make check` as the preferred full local check. It runs syntax validation, all discovered unit tests, the integration suite, Golden diff, and whitespace validation. The two commands above remain mandatory quality gates.
+
 Do not regenerate golden snapshots merely to make a failure disappear. Regenerate only after confirming that each numerical/output change is intended, and explain the reason in the commit message if committing.
 
 ## Runtime behavior
