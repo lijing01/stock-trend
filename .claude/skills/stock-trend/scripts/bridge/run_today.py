@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from analysis import evolution_job as evolution
+from analysis.market_regime import validate_market_context
 from core.cache_utils import CACHE_DIR
 from core.evolution_registry import _atomic_write, load_active_policy
 from core.recommendation_snapshot import content_sha256
@@ -49,8 +50,10 @@ def _run_script(script, arguments):
             except ValueError:
                 pass
         offset += len(line)
-    if not isinstance(result, dict) or result.get("error"):
+    if not isinstance(result, dict):
         raise ValueError("upstream_output_invalid")
+    if result.get("error"):
+        raise ValueError(str(result["error"]))
     paths = {}
     for line in (process.stderr or "").splitlines():
         match = re.search(r"(?:HTML|HTML report):\s*(\S+)", line)
@@ -66,6 +69,15 @@ def _run_script(script, arguments):
         # does not prove candidates will read this refresh rather than old data.
         saved = json.loads((Path(CACHE_DIR) / "market_regime.json").read_text(encoding="utf-8"))
         meta = result.get("meta") or {}
+        try:
+            as_of = arguments[arguments.index("--as-of") + 1]
+        except (ValueError, IndexError):
+            as_of = meta.get("data_date")
+        verdict = validate_market_context(saved, as_of)
+        if not verdict["valid"]:
+            reason = ("market_context_stale" if "market_context_stale" in verdict["reasons"]
+                      else "market_context_invalid")
+            raise ValueError(reason)
         if (not meta.get("generated_at") or saved.get("generated_at") != meta["generated_at"]
                 or saved.get("data_date") != meta.get("data_date")
                 or saved.get("regime") != result.get("regime")):
@@ -86,6 +98,27 @@ def _completed_sessions(now):
 def _should_use_post_close_final(now):
     """Use the immutable scan scope once the current session is closed."""
     return now.weekday() >= 5 or now.time() >= time(15, 10)
+
+
+def _with_authoritative_as_of(arguments, as_of):
+    """Replace every caller-supplied as-of form with the calendar session."""
+    normalized = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--as-of":
+            if index + 1 >= len(arguments) or arguments[index + 1].startswith("--"):
+                raise ValueError("candidate_as_of_missing_value")
+            index += 2
+            continue
+        if argument.startswith("--as-of="):
+            if not argument.partition("=")[2]:
+                raise ValueError("candidate_as_of_missing_value")
+            index += 1
+            continue
+        normalized.append(argument)
+        index += 1
+    return [*normalized, "--as-of", as_of]
 
 
 def _weekly_completed(job_root, as_of):
@@ -206,21 +239,6 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         output["notifications"].append(notice)
 
     try:
-        _run_script("analysis/market_regime.py", ["--no-html"])
-        workflow["market"] = {"status": "completed"}
-    except Exception as exc:
-        workflow["market"] = {"status": "failed", "reason": type(exc).__name__}
-    if workflow["market"]["status"] == "completed":
-        try:
-            candidates = _run_script("scans/daily_candidates.py", candidate_args)
-            output.update(candidates)
-            workflow["candidates"] = {"status": "completed"}
-        except Exception as exc:
-            workflow["candidates"] = {"status": "failed", "reason": type(exc).__name__}
-    else:
-        workflow["candidates"] = {"status": "skipped", "reason": "market_refresh_failed"}
-
-    try:
         sessions, coverage_end = _completed_sessions(now)
         workflow["calendar"] = {
             "status": ("unavailable" if not sessions else
@@ -233,6 +251,35 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         workflow["calendar"] = {"status": "unavailable", "reason": type(exc).__name__}
     as_of = sessions[-1] if sessions else None
     workflow["as_of"] = as_of
+
+    if not as_of:
+        workflow["market"] = {"status": "skipped", "reason": "trading_calendar_unavailable"}
+    else:
+        try:
+            market = _run_script(
+                "analysis/market_regime.py", ["--no-html", "--as-of", as_of])
+            refresh_status = (market.get("refresh") or {}).get("status", "refreshed")
+            workflow["market"] = {"status": "completed", "refresh_status": refresh_status,
+                                  "data_date": (market.get("meta") or {}).get("data_date")}
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, ValueError) else ""
+            reason = detail if detail in {
+                "market_context_invalid", "market_context_stale",
+                "market_context_not_persisted",
+            } else "market_refresh_failed"
+            workflow["market"] = {"status": "failed", "reason": reason}
+    if workflow["market"]["status"] == "completed":
+        try:
+            candidate_args = _with_authoritative_as_of(candidate_args, as_of)
+            workflow["candidate_args"] = candidate_args
+            candidates = _run_script("scans/daily_candidates.py", candidate_args)
+            output.update(candidates)
+            workflow["candidates"] = {"status": "completed"}
+        except Exception as exc:
+            workflow["candidates"] = {"status": "failed", "reason": type(exc).__name__}
+    else:
+        reason = workflow["market"].get("reason", "market_refresh_failed")
+        workflow["candidates"] = {"status": "skipped", "reason": reason}
     if as_of:
         workflow["report"] = {"status": "ready" if "recommendations" in output else "degraded"}
         if postprocess == "background" and "recommendations" in output:
@@ -316,7 +363,9 @@ def render_summary(result):
         status = detail.get("status", "待执行")
         reason = detail.get("reason", "")
         reason = {"already_completed_this_week": "本周已完成", "trading_calendar_unavailable": "交易日历不可用",
-                  "market_refresh_failed": "市场刷新失败"}.get(reason, reason)
+                  "market_refresh_failed": "市场刷新失败",
+                  "market_context_invalid": "市场上下文不完整",
+                  "market_context_stale": "市场上下文日期过期"}.get(reason, reason)
         lines.append(f"{label}：{labels.get(status, status)} {reason}".rstrip())
     lines.append(f"可执行 {len(result.get('recommendations', []))}；等待触发 {len(result.get('waiting_trigger', []))}；观察 {len(result.get('observation', []))}")
     lines.append("本报告仅供学习参考，不构成任何投资建议。")

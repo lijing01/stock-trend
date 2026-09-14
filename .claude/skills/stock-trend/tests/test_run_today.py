@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from bridge import run_today as job
+from analysis.market_explanation import build_market_explanation
 
 RUN_SCRIPT = job._run_script
 
@@ -21,6 +22,30 @@ BASELINE = {"status": "baseline", "experiment_id": "baseline",
 ACTIVE = {"status": "active", "experiment_id": "experiment-1", "release_id": "release-1",
           "priority_bonuses": {"strict_level_1": 0, "strict_level_2": 0, "strict_level_3": 0}}
 SESSIONS = ["2026-09-04", "2026-09-07", "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-14"]
+
+
+def valid_market_payload(generated_at="2026-09-09 16:00:00",
+                         data_date="2026-09-09"):
+    components = {
+        key: {"score": 80, "detail": key, "data_status": "good",
+              "data_date": data_date}
+        for key in ("index_trend", "volume", "breadth", "zt_emotion", "capital")
+    }
+    context = {
+        "generated_at": generated_at,
+        "data_date": data_date,
+        "regime": {"score": 80, "data_quality": "good", "missing_components": [],
+                   "partial_components": []},
+        "components": components,
+        "indices": {
+            code: {"ok": True, "close": 100.0, "above_ma20": True,
+                   "ma20_rising": True, "data_date": data_date,
+                   "source": "fixture"}
+            for code in ("000001.SH", "000300.SH", "399001.SZ")
+        },
+    }
+    context["market_explanation"] = build_market_explanation(context, data_date)
+    return context
 
 
 class TodayTests(unittest.TestCase):
@@ -83,6 +108,7 @@ class TodayTests(unittest.TestCase):
         self.assertEqual(result["recommendations"], [{"code": "600000"}])
         self.assertEqual(result["notifications"], [])
         self.assertIn("--news", self.candidate_arguments[0])
+        self.assertEqual(self.candidate_arguments[0][-2:], ["--as-of", "2026-09-09"])
 
     def test_post_close_automatically_uses_fixed_scan_scope(self):
         self.run_job(hour=16)
@@ -102,17 +128,36 @@ class TodayTests(unittest.TestCase):
         result = self.run_job(hour=11)
         self.assertEqual(result["workflow"]["as_of"], "2026-09-08")
         self.assertIn("close:2026-09-08", self.calls)
+        self.assertEqual(self.candidate_arguments[0][-2:], ["--as-of", "2026-09-08"])
+
+    def test_caller_as_of_is_replaced_by_authoritative_calendar_date(self):
+        job.run_today(["--as-of", "2025-01-01", "--top", "3"],
+                      now=datetime(2026, 9, 9, 16, tzinfo=job.SHANGHAI),
+                      state_root=self.root)
+        arguments = self.candidate_arguments[0]
+        self.assertEqual(arguments.count("--as-of"), 1)
+        self.assertEqual(arguments[-2:], ["--as-of", "2026-09-09"])
+        self.assertNotIn("2025-01-01", arguments)
+
+    def test_missing_caller_as_of_value_fails_scan_closed(self):
+        result = job.run_today(["--as-of", "--top", "3"],
+                               now=datetime(2026, 9, 9, 16, tzinfo=job.SHANGHAI),
+                               state_root=self.root)
+        self.assertEqual(result["workflow"]["candidates"]["status"], "failed")
+        self.assertEqual(self.candidate_arguments, [])
 
     def test_weekend_evaluates_friday(self):
         result = self.run_job(day=12)
         self.assertEqual(result["workflow"]["as_of"], "2026-09-11")
 
-    def test_calendar_missing_preserves_scan_and_skips_evaluation(self):
+    def test_calendar_missing_skips_market_scan_and_evaluation(self):
         with patch.object(job, "_load_authoritative_trading_dates", return_value=set()):
             result = self.run_job()
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(result["workflow"]["market"]["reason"], "trading_calendar_unavailable")
+        self.assertEqual(result["workflow"]["candidates"]["reason"], "trading_calendar_unavailable")
         self.assertEqual(result["workflow"]["close"]["reason"], "trading_calendar_unavailable")
-        self.assertTrue(result["recommendations"])
+        self.assertNotIn("recommendations", result)
 
     def test_historical_calendar_does_not_claim_current_coverage(self):
         with patch.object(job, "_load_authoritative_trading_dates", return_value={"2025-12-31"}):
@@ -232,9 +277,10 @@ class TodayTests(unittest.TestCase):
 
     def test_subprocess_accepts_market_progress_around_json(self):
         from subprocess import CompletedProcess
-        meta = {"generated_at": "2026-09-09 16:00:00", "data_date": "2026-09-09"}
-        result = {"meta": meta, "regime": {"score": 80}}
-        (self.root / "market_regime.json").write_text(json.dumps({**meta, "regime": result["regime"]}))
+        saved = valid_market_payload()
+        meta = {"generated_at": saved["generated_at"], "data_date": saved["data_date"]}
+        result = {"meta": meta, "regime": saved["regime"]}
+        (self.root / "market_regime.json").write_text(json.dumps(saved))
         payload = '[1/5] 拉取数据\n' + json.dumps(result, indent=2) + '\nDone in 1.0s\n'
         with patch.object(job, "CACHE_DIR", self.root), patch.object(
                 job.subprocess, "run", return_value=CompletedProcess([], 0, payload)) as run:
@@ -245,12 +291,23 @@ class TodayTests(unittest.TestCase):
 
     def test_market_success_with_stale_saved_context_is_rejected(self):
         from subprocess import CompletedProcess
-        (self.root / "market_regime.json").write_text(json.dumps({"generated_at": "old", "regime": {"score": 80}}))
-        payload = json.dumps({"meta": {"generated_at": "new"}, "regime": {"score": 80}})
+        saved = valid_market_payload(generated_at="old")
+        (self.root / "market_regime.json").write_text(json.dumps(saved))
+        payload = json.dumps({"meta": {"generated_at": "new", "data_date": "2026-09-09"},
+                              "regime": saved["regime"]})
         with patch.object(job, "CACHE_DIR", self.root), patch.object(
                 job.subprocess, "run", return_value=CompletedProcess([], 0, payload)):
             with self.assertRaisesRegex(ValueError, "market_context_not_persisted"):
                 RUN_SCRIPT("analysis/market_regime.py", [])
+
+    def test_market_context_error_is_preserved_for_workflow_audit(self):
+        def invalid_market(script, arguments):
+            self.calls.append(script)
+            raise ValueError("market_context_invalid")
+        with patch.object(job, "_run_script", side_effect=invalid_market):
+            result = self.run_job()
+        self.assertEqual(result["workflow"]["market"]["reason"], "market_context_invalid")
+        self.assertEqual(result["workflow"]["candidates"]["reason"], "market_context_invalid")
 
     def test_subprocess_missing_json_is_failure(self):
         from subprocess import CompletedProcess

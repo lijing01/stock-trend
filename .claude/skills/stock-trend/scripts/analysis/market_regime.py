@@ -25,9 +25,11 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import sys
+import tempfile
 import time
 import shutil
 from datetime import datetime, date
@@ -120,6 +122,13 @@ def _sort_kline(records: list[dict]) -> list[dict]:
     records = [r for r in records if r.get("trade_date")]
     records.sort(key=lambda r: r["trade_date"])
     return records
+
+
+def _row_trade_date(row: dict) -> str | None:
+    raw = str(row.get("trade_date") or "")
+    if len(raw) == 8 and raw.isdigit():
+        raw = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    return _verified_history_date(raw)
 
 
 def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2,
@@ -223,24 +232,35 @@ def fetch_sector_rankings() -> list[dict]:
     try:
         from fetchers.sector_data import get_sector_rankings
         result = get_sector_rankings()
-        sectors = [s for s in result.get("sectors", []) if s.get("type") == "industry"]
+        snapshot_date = date.today().isoformat()
+        sectors = [
+            {**s, "data_date": snapshot_date}
+            for s in result.get("sectors", [])
+            if s.get("type") == "industry"
+        ]
         return sectors
     except Exception:
         return []
 
 
-def fetch_zt_stats() -> dict:
+def fetch_zt_stats(as_of: str | None = None) -> dict:
     """涨停家数 / 连板家数 / 最高连板.
 
     直连 AKShare 涨停池,避免触发全市场板块映射构建.
     """
+    snapshot_date = date.fromisoformat(as_of).isoformat() if as_of \
+        else date.today().isoformat()
     if not HAS_AKSHARE:
-        return {"count": 0, "streak_count": 0, "max_streak": 0}
+        return {"count": None, "streak_count": None, "max_streak": None,
+                "data_date": snapshot_date, "data_status": "missing"}
     try:
-        dt = datetime.now().strftime("%Y%m%d")
+        dt = (as_of or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
         df = ak.stock_zt_pool_em(date=dt)
         if df is None or df.empty:
-            return {"count": 0, "streak_count": 0, "max_streak": 0}
+            # An empty response cannot distinguish a true zero-limit-up day
+            # from an unavailable or malformed upstream payload.
+            return {"count": None, "streak_count": None, "max_streak": None,
+                    "data_date": snapshot_date, "data_status": "missing"}
         streaks = []
         for v in df.get("连板数", []):
             try:
@@ -252,9 +272,12 @@ def fetch_zt_stats() -> dict:
             "count": len(streaks),
             "streak_count": sum(1 for s in streaks if s >= 2),
             "max_streak": max(streaks) if streaks else 0,
+            "data_date": snapshot_date,
+            "data_status": "good",
         }
     except Exception:
-        return {"count": 0, "streak_count": 0, "max_streak": 0}
+        return {"count": None, "streak_count": None, "max_streak": None,
+                "data_date": snapshot_date, "data_status": "missing"}
 
 
 def fetch_market_activity() -> dict | None:
@@ -277,7 +300,8 @@ def fetch_market_activity() -> dict | None:
         main_force_yi = sum(float(x.get("f62") or 0) for x in items) / 1e8
         if up + down <= 0:
             return None
-        return {"up": up, "down": down, "main_force_yi": round(main_force_yi, 1)}
+        return {"up": up, "down": down, "main_force_yi": round(main_force_yi, 1),
+                "data_date": date.today().isoformat()}
     except Exception:
         return None
 
@@ -354,7 +378,12 @@ def score_breadth(breadth: dict | None, industry_sectors: list[dict]) -> dict:
 
 def score_zt_emotion(zt: dict, history_counts: list[int]) -> dict:
     """涨停情绪分: 涨停家数 vs 近20日均值 + 连板高度."""
-    count = zt.get("count", 0)
+    count = zt.get("count")
+    if (zt.get("data_status") == "missing"
+            or not isinstance(count, (int, float))
+            or isinstance(count, bool)):
+        return {"score": 50.0, "detail": "涨停数据不可用",
+                "data_status": "missing"}
     max_streak = zt.get("max_streak", 0)
     streak_count = zt.get("streak_count", 0)
     hist = [c for c in history_counts if c > 0][-20:]
@@ -642,13 +671,155 @@ def quarantine_invalid_history_dates(path=None) -> dict:
     }
 
 
-def save_context(ctx: dict) -> None:
+def save_context(ctx: dict) -> bool:
+    tmp = None
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        CONTEXT_FILE.write_text(
-            json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=CACHE_DIR,
+                prefix=f".{CONTEXT_FILE.name}.", suffix=".tmp",
+                delete=False) as handle:
+            handle.write(json.dumps(ctx, ensure_ascii=False, indent=2))
+            tmp = Path(handle.name)
+        os.replace(tmp, CONTEXT_FILE)
+        return True
     except Exception:
-        pass
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def validate_market_context(ctx: dict, expected_date: str) -> dict:
+    """Validate that a context is complete closing evidence for one session."""
+    context = ctx if isinstance(ctx, dict) else {}
+    reasons = []
+    try:
+        expected = date.fromisoformat(expected_date).isoformat()
+    except (TypeError, ValueError):
+        expected = None
+        reasons.append("expected_date_invalid")
+    data_date = context.get("data_date")
+    try:
+        parsed_data_date = date.fromisoformat(data_date).isoformat()
+    except (TypeError, ValueError):
+        parsed_data_date = None
+        reasons.append("market_context_date_invalid")
+    if expected and parsed_data_date and parsed_data_date != expected:
+        reasons.append("market_context_stale")
+    regime = context.get("regime")
+    if not isinstance(regime, dict):
+        reasons.append("market_context_regime_missing")
+        regime = {}
+    quality = regime.get("data_quality", "unknown")
+    if quality != "good":
+        reasons.append(f"market_context_quality_{quality or 'unknown'}")
+    if regime.get("missing_components"):
+        reasons.append("market_context_components_missing")
+    if regime.get("partial_components"):
+        reasons.append("market_context_components_partial")
+    score = regime.get("score")
+    if not isinstance(score, (int, float)) or isinstance(score, bool) or not math.isfinite(score):
+        reasons.append("market_context_score_invalid")
+    components = context.get("components")
+    if not isinstance(components, dict):
+        reasons.append("market_context_components_invalid")
+        components = {}
+    for component_id in REGIME_COMPONENT_ORDER:
+        component = components.get(component_id)
+        if not isinstance(component, dict):
+            reasons.append("market_context_components_invalid")
+            continue
+        component_score = component.get("score")
+        if (not isinstance(component_score, (int, float))
+                or isinstance(component_score, bool)
+                or not math.isfinite(component_score)
+                or component.get("data_status") != "good"):
+            reasons.append("market_context_components_invalid")
+        component_date = component.get("data_date")
+        try:
+            parsed_component_date = date.fromisoformat(component_date).isoformat()
+        except (TypeError, ValueError):
+            parsed_component_date = None
+        if not expected or parsed_component_date != expected:
+            reasons.append("market_context_component_date_invalid")
+    indices = context.get("indices")
+    if not isinstance(indices, dict):
+        reasons.append("market_context_components_invalid")
+        indices = {}
+    for code in TREND_INDEX_CODES:
+        item = indices.get(code)
+        if not isinstance(item, dict) or item.get("ok") is not True:
+            reasons.append("market_context_components_invalid")
+            continue
+        try:
+            index_date = date.fromisoformat(item.get("data_date")).isoformat()
+        except (TypeError, ValueError):
+            index_date = None
+        if not expected or index_date != expected:
+            reasons.append("market_context_component_date_invalid")
+
+    explanation = context.get("market_explanation")
+    if not isinstance(explanation, dict):
+        reasons.append("market_context_explanation_invalid")
+        explanation = {}
+    explanation_components = explanation.get("components")
+    explanation_ids = [item.get("id") for item in explanation_components
+                       if isinstance(item, dict)] \
+        if isinstance(explanation_components, list) else []
+    if (explanation.get("schema_version") != "market-explanation/v1"
+            or explanation.get("basis_date") != expected
+            or explanation.get("reconciliation") != "matched"
+            or explanation_ids != REGIME_COMPONENT_ORDER):
+        reasons.append("market_context_explanation_invalid")
+    blocking = explanation.get("blocking_reasons", [])
+    if not isinstance(blocking, list):
+        reasons.append("market_context_explanation_invalid")
+        blocking = []
+    data_blockers = {
+        "regime_data_missing", "regime_data_partial", "regime_data_quality_unknown",
+        "regime_date_invalid", "regime_stale",
+    }
+    if any(reason in data_blockers for reason in blocking):
+        reasons.append("market_context_explanation_blocked")
+    reasons = list(dict.fromkeys(reasons))
+    return {
+        "valid": not reasons,
+        "reason": reasons[0] if reasons else None,
+        "reasons": reasons,
+        "expected_date": expected_date,
+        "data_date": data_date,
+        "data_quality": quality,
+        "missing_components": list(regime.get("missing_components") or []),
+        "partial_components": list(regime.get("partial_components") or []),
+    }
+
+
+def select_market_context(collected: dict, cached: dict | None,
+                          expected_date: str) -> tuple[dict | None, dict]:
+    """Choose fresh evidence or a same-session verified cache, fail closed."""
+    live_verdict = validate_market_context(collected, expected_date)
+    if live_verdict["valid"]:
+        return collected, {"status": "refreshed", "validation": live_verdict}
+    cached_verdict = validate_market_context(cached, expected_date)
+    if cached_verdict["valid"]:
+        return cached, {
+            "status": "preserved_verified_context",
+            "validation": cached_verdict,
+            "live_validation": live_verdict,
+        }
+    failure = ("market_context_stale" if
+               "market_context_stale" in live_verdict["reasons"] else
+               "market_context_invalid")
+    return None, {
+        "status": "invalid_no_fallback",
+        "error": failure,
+        "validation": live_verdict,
+        "fallback_validation": cached_verdict,
+    }
 
 
 def load_context() -> dict | None:
@@ -939,19 +1110,32 @@ def build_plan(regime: dict, holdings: list[dict]) -> list[str]:
 # ──────────────── 主流程 ────────────────
 
 
-def collect_context(now=None) -> dict:
+def collect_context(now=None, as_of=None) -> dict:
     """拉数据 → 评分 → 组装今日上下文.
 
     now: 可注入时钟供盘中混合测试;默认 datetime.now().
+    as_of: 权威已完成交易日;有更新会话时不混入实时快照型数据.
     """
+    now = now or datetime.now()
+    target_date = date.fromisoformat(as_of).isoformat() if as_of else None
     # 指数
     index_codes = list(dict.fromkeys(TREND_INDEX_CODES + AMOUNT_INDEX_CODES))
     index_rows = {}
     index_diagnostics = {}
     for code in index_codes:
         diagnostics = {}
-        index_rows[code] = fetch_index_kline(code, lmt=80,
-                                             diagnostics=diagnostics)
+        rows = fetch_index_kline(code, lmt=80, diagnostics=diagnostics)
+        latest_date = max(
+            (row_date for row in rows if (row_date := _row_trade_date(row))),
+            default="",
+        )
+        if target_date:
+            rows = [row for row in rows
+                    if _row_trade_date(row) and _row_trade_date(row) <= target_date]
+            diagnostics["data_date"] = _row_trade_date(rows[-1]) if rows else ""
+            diagnostics["record_count"] = len(rows)
+        diagnostics["latest_available_date"] = latest_date
+        index_rows[code] = rows
         index_diagnostics[code] = diagnostics
     index_metrics = {
         code: _index_metrics(index_rows.get(code, []))
@@ -974,9 +1158,18 @@ def collect_context(now=None) -> dict:
     raw_date = data_date.replace("-", "") if data_date else ""
     today_amount_yi = amount_hist.get(raw_date) if raw_date else None
 
-    sectors = fetch_sector_rankings()
-    zt = fetch_zt_stats()
-    activity = fetch_market_activity()
+    historical_target = bool(target_date and target_date < now.date().isoformat())
+    newer_session_available = bool(target_date and any(
+        diagnostics.get("latest_available_date", "") > target_date
+        for diagnostics in index_diagnostics.values()
+    ))
+    suppress_current_snapshots = historical_target or newer_session_available
+    sectors = [] if suppress_current_snapshots else fetch_sector_rankings()
+    zt = fetch_zt_stats(target_date)
+    if target_date and zt.get("data_date") != target_date:
+        zt = {"count": None, "streak_count": None, "max_streak": None,
+              "data_date": zt.get("data_date"), "data_status": "missing"}
+    activity = None if suppress_current_snapshots else fetch_market_activity()
 
     history = load_history()
     amount_history_yi = previous_amounts(history, data_date, amount_hist)
@@ -992,10 +1185,37 @@ def collect_context(now=None) -> dict:
         "zt_emotion": score_zt_emotion(zt, history_zt_counts),
         "capital": score_capital(activity),
     }
+    valid_trend_indices = [
+        code for code in TREND_INDEX_CODES
+        if index_metrics.get(code, {}).get("ok") is True
+        and _row_trade_date({
+            "trade_date": index_diagnostics.get(code, {}).get("data_date")
+        }) == data_date
+    ]
+    if len(valid_trend_indices) < len(TREND_INDEX_CODES):
+        components["index_trend"]["data_status"] = (
+            "partial" if valid_trend_indices else "missing"
+        )
+    sector_dates = {
+        sector.get("data_date") for sector in sectors
+        if isinstance(sector, dict) and sector.get("data_date")
+    }
+    component_dates = {
+        "index_trend": data_date \
+            if len(valid_trend_indices) == len(TREND_INDEX_CODES) else None,
+        "volume": data_date,
+        "breadth": (
+            activity.get("data_date") if activity
+            and sector_dates == {activity.get("data_date")} else None
+        ),
+        "zt_emotion": zt.get("data_date") if zt.get("data_status") != "missing" else None,
+        "capital": activity.get("data_date") if activity else None,
+    }
+    for component_id, component in components.items():
+        component["data_date"] = component_dates[component_id]
     regime = compute_regime(components)
 
     # ── 盘中混合: 昨收锚 + 盘中外推(避免半日数据对全天基线误判弱势) ──
-    now = now or datetime.now()
     fraction = _session_elapsed_fraction(now)
     is_intraday = fraction > 0 and data_date == now.date().isoformat()
     intraday_note = ""
@@ -1071,6 +1291,8 @@ def collect_context(now=None) -> dict:
     ctx = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_date": data_date,
+        "collection_target_date": target_date,
+        "current_snapshot_suppressed": suppress_current_snapshots,
         "stale_note": (
             "" if not data_date or data_date == date.today().isoformat()
             else f"数据日期 {data_date},非今日(可能非交易日或盘中)"
@@ -1086,7 +1308,7 @@ def collect_context(now=None) -> dict:
                 activity and activity.get("main_force_yi") is not None
             ) else "unknown",
             "provider": "unknown",
-            "data_date": None,
+            "data_date": activity.get("data_date") if activity else None,
             "fetched_at": None,
         },
         "amount_yi": amount_yi_display,
@@ -1100,7 +1322,9 @@ def collect_context(now=None) -> dict:
                 "pct_chg": m.get("pct_chg"),
                 "above_ma20": m.get("above_ma20"),
                 "ma20_rising": m.get("ma20_rising"),
-                "data_date": index_diagnostics.get(code, {}).get("data_date"),
+                "data_date": _row_trade_date({
+                    "trade_date": index_diagnostics.get(code, {}).get("data_date")
+                }),
                 "source": index_diagnostics.get(code, {}).get("source"),
             }
             for code, m in index_metrics.items()
@@ -1154,6 +1378,7 @@ def main():
                         help="(默认) 生成 HTML 报告")
     parser.add_argument("--no-html", dest="html", action="store_false",
                         help="不生成 HTML(仅 MD)")
+    parser.add_argument("--as-of", help="要求市场上下文覆盖的完整交易日(YYYY-MM-DD)")
     args = parser.parse_args()
 
     start = time.time()
@@ -1172,10 +1397,22 @@ def main():
         print("[3/5] 拉取涨停情绪...")
         print("[4/5] 拉取资金(全市场主力净流入)...")
         print("[5/5] 计算评分 + 持仓分析...")
-        ctx = collect_context()
-        # 持久化: 盘中快照不写 history(避免 partial 污染基线),但 context 仍写
-        # (candidates 盘中需要当日 regime 分档)
-        if should_save_history(ctx):
+        collected = collect_context(as_of=args.as_of)
+        expected_date = args.as_of or collected.get("data_date")
+        ctx, refresh = select_market_context(
+            collected, load_context(), expected_date)
+        if ctx is None:
+            print(json.dumps(refresh, ensure_ascii=False, indent=2))
+            return
+        if refresh["status"] == "refreshed" and not save_context(ctx):
+            print(json.dumps({
+                "status": "failed",
+                "error": "market_context_not_persisted",
+                "validation": refresh.get("validation"),
+            }, ensure_ascii=False, indent=2))
+            return
+        # 持久化成功后再写历史；盘中快照不写 history，避免 partial 污染基线。
+        if refresh["status"] == "refreshed" and should_save_history(ctx):
             history_entry = {
                 "date": ctx["data_date"],
                 "regime_score": ctx["regime"]["score"],
@@ -1186,13 +1423,15 @@ def main():
                 "intraday": False,
             }
             save_history(history_entry)
-        save_context(ctx)
 
     now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     if args.json:
         # 精简 JSON 供 Agent 消费
-        print(json.dumps(build_agent_output(ctx), ensure_ascii=False, indent=2))
+        agent_output = build_agent_output(ctx)
+        if not args.no_refresh:
+            agent_output["refresh"] = refresh
+        print(json.dumps(agent_output, ensure_ascii=False, indent=2))
     else:
         report = generate_report(ctx)
         print(report)

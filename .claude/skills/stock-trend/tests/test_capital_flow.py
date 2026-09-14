@@ -91,8 +91,26 @@ class TestCapitalFlowFallback(unittest.TestCase):
         self.assertEqual(result["meta"]["error_type"], "stale_data")
         self.assertEqual(result["meta"]["failure_chain"][0], {
             "source": "eastmoney", "reason": "stale_data",
+            "latest_data_date": "2026-08-25",
         })
         self.assertIn("eastmoney", result["meta"]["stale_sources"])
+
+    def test_all_stale_fallbacks_record_each_latest_data_date(self):
+        result, _, _, _ = self._fetch(
+            [{"date": "20260824", "main_net_inflow": 1.0}],
+            [{"date": "20260825", "main_net_inflow": 1.0}],
+            [{"date": "20260823", "main_net_inflow": 1.0}],
+            expected_date="2026-08-26",
+        )
+
+        self.assertEqual(result["meta"]["failure_chain"], [
+            {"source": "eastmoney", "reason": "stale_data",
+             "latest_data_date": "2026-08-24"},
+            {"source": "tushare_fallback", "reason": "stale_data",
+             "latest_data_date": "2026-08-25"},
+            {"source": "kline_estimate", "reason": "stale_data",
+             "latest_data_date": "2026-08-23"},
+        ])
 
     def test_rows_without_valid_dates_fall_back(self):
         invalid = [{"date": "not-a-date", "main_net_inflow": 1.0}]

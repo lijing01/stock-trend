@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "createdAt": "2026-09-14T01:59:55.624Z",
+  "updatedAt": "2026-09-14T02:24:51.729Z",
+  "briefPath": ".omx/ultragoal/brief.md",
+  "goalsPath": ".omx/ultragoal/goals.json",
+  "ledgerPath": ".omx/ultragoal/ledger.jsonl",
+  "codexGoalMode": "aggregate",
+  "goals": [
+    {
+      "id": "G001-single-as-of-and-market-context-vali",
+      "title": "Single as-of and market context validity",
+      "objective": "Implement and verify one authoritative evaluation-date contract plus fail-closed preservation of verified market context.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-14T01:59:55.624Z",
+      "updatedAt": "2026-09-14T02:13:33.855Z",
+      "startedAt": "2026-09-14T01:59:58.319Z",
+      "completedAt": "2026-09-14T02:13:33.855Z",
+      "evidence": "Implemented unified authoritative as_of, fail-closed market context validation/preservation, and regression tests. Targeted suites and mandatory quality gates passed; make check remains blocked only by pre-existing missing pytest dependency."
+    },
+    {
+      "id": "G002-capital-and-ranking-audit-clarity",
+      "title": "Capital and ranking audit clarity",
+      "objective": "Implement and verify source-level stale-data, circuit, scheduler-omission, and ranking provenance diagnostics without loosening gates.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-14T01:59:55.624Z",
+      "updatedAt": "2026-09-14T02:24:51.531Z",
+      "startedAt": "2026-09-14T02:13:34.025Z",
+      "completedAt": "2026-09-14T02:24:51.531Z",
+      "evidence": "Implemented backward-compatible capital stale-data/fallback/circuit/scheduler audit and normalized ranking provenance without changing gates. Targeted suites passed; test_stock_trend 682 passed; golden 21 passed; make check is blocked only by missing pytest dependency."
+    },
+    {
+      "id": "G003-full-quality-verification",
+      "title": "Full quality verification",
+      "objective": "Run targeted tests, mandatory quality gates, review, and final completion audit.",
+      "status": "in_progress",
+      "attempt": 1,
+      "createdAt": "2026-09-14T01:59:55.624Z",
+      "updatedAt": "2026-09-14T02:24:51.729Z",
+      "startedAt": "2026-09-14T02:24:51.729Z"
+    }
+  ],
+  "codexObjective": "Complete the durable ultragoal plan in .omx/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .omx/ultragoal/ledger.jsonl as the audit trail.",
+  "activeGoalId": "G003-full-quality-verification"
+}

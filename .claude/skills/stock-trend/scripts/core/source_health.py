@@ -181,6 +181,7 @@ def _new_source_state() -> dict:
         "state": "healthy",
         "in_flight": 0,
         "consecutive_live_failures": 0,
+        "consecutive_failure_reasons": {},
     }
 
 
@@ -336,6 +337,7 @@ class RunSourceHealth:
                 0, int(evidence.get("provider_attempts", 0) or 0))
             if succeeded:
                 state["consecutive_live_failures"] = 0
+                state["consecutive_failure_reasons"] = {}
                 state["state"] = "healthy"
                 event = "success"
             else:
@@ -344,6 +346,9 @@ class RunSourceHealth:
                 reason = evidence.get("reason") or "unknown"
                 reasons = state["failure_reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
+                consecutive_reasons = state["consecutive_failure_reasons"]
+                consecutive_reasons[reason] = (
+                    consecutive_reasons.get(reason, 0) + 1)
                 crossed_threshold = (
                     state["consecutive_live_failures"]
                     == self.failure_threshold)
@@ -360,6 +365,18 @@ class RunSourceHealth:
                             "event": "circuit_opened",
                             "source": token.source,
                             "reason": "source_unavailable",
+                            "trigger_reason": reason,
+                            "live_requests_started": state[
+                                "logical_live_requests"],
+                            "failure_count": state[
+                                "consecutive_live_failures"],
+                            "failure_reasons": dict(
+                                state["consecutive_failure_reasons"]),
+                            "run_live_requests_started": state[
+                                "logical_live_requests"],
+                            "run_failure_count": state["failures"],
+                            "expected_trading_date": evidence.get(
+                                "expected_trading_date", ""),
                         })
                     state["state"] = "unavailable"
                 else:

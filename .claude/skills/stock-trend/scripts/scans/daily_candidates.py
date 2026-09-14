@@ -17,7 +17,7 @@ import copy
 import math
 from html import escape
 import time
-from datetime import datetime, timedelta, time as datetime_time
+from datetime import date, datetime, timedelta, time as datetime_time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -323,8 +323,95 @@ def _record_failed_batch(metrics, batch, exc):
     _record_degradation(metrics, f"batch_error:{type(exc).__name__}")
 
 
+def _record_stale_sources(stale_sources, failure_chain):
+    for failure in failure_chain:
+        if (not isinstance(failure, dict)
+                or failure.get("reason") != "stale_data"):
+            continue
+        source = str(failure.get("source") or "unknown")
+        detail = stale_sources.setdefault(source, {
+            "count": 0, "latest_data_dates": [],
+            "unknown_date_count": 0,
+        })
+        detail["count"] += 1
+        latest = failure.get("latest_data_date")
+        if latest and latest not in detail["latest_data_dates"]:
+            detail["latest_data_dates"].append(latest)
+        elif not latest:
+            detail["unknown_date_count"] += 1
+
+
+def _capital_diagnostics(statuses, source_health=None):
+    """Summarize provider failures separately from scheduler omissions."""
+    live_failures = {}
+    scheduler_omissions = {}
+    stale_sources = {}
+    for status in statuses:
+        if not isinstance(status, dict):
+            continue
+        if status.get("attempted"):
+            if status.get("status") not in {"live_success", "cache_valid"}:
+                reason = status.get("reason") or status.get("status") or "unknown"
+                live_failures[reason] = live_failures.get(reason, 0) + 1
+            _record_stale_sources(stale_sources, status.get("failure_chain", []))
+        elif status.get("status") and status.get("status") not in {
+                "cache_valid", "cache_miss", "cache_stale"}:
+            reason = status.get("scheduler_reason") \
+                or status.get("reason") or status.get("status") or "unknown"
+            scheduler_omissions[reason] = scheduler_omissions.get(reason, 0) + 1
+
+    circuit = {
+        "opened": False,
+        "breaks": 0,
+        "trigger_reason": "",
+        "live_requests_started": 0,
+        "failure_count": 0,
+        "failure_reasons": {},
+        "run_live_requests_started": 0,
+        "run_failure_count": 0,
+        "expected_trading_date": "",
+    }
+    if isinstance(source_health, RunSourceHealth):
+        capital_state = source_health.snapshot().get("capital", {})
+        circuit["breaks"] = int(capital_state.get("circuit_breaks", 0) or 0)
+        circuit["opened"] = circuit["breaks"] > 0
+        circuit_events = [
+            event for event in source_health.events()
+            if event.get("event") == "circuit_opened"
+            and event.get("source") == "capital"
+        ]
+        if circuit_events:
+            event = circuit_events[-1]
+            circuit.update({
+                "trigger_reason": event.get("trigger_reason", ""),
+                "live_requests_started": int(
+                    event.get("live_requests_started", 0) or 0),
+                "failure_count": int(event.get("failure_count", 0) or 0),
+                "failure_reasons": dict(
+                    event.get("failure_reasons", {}) or {}),
+                "run_live_requests_started": int(event.get(
+                    "run_live_requests_started",
+                    event.get("live_requests_started", 0)) or 0),
+                "run_failure_count": int(event.get(
+                    "run_failure_count", event.get("failure_count", 0)) or 0),
+                "expected_trading_date": event.get(
+                    "expected_trading_date", ""),
+            })
+        live_failures = dict(capital_state.get("failure_reasons", {}))
+        stale_sources = {}
+        for event in source_health.events():
+            if (event.get("event") != "failure"
+                    or event.get("source") != "capital"):
+                continue
+            attempt = event.get("live_attempt", {})
+            _record_stale_sources(
+                stale_sources, attempt.get("failure_chain", []))
+    return live_failures, scheduler_omissions, stale_sources, circuit
+
+
 def _complete_performance(performance, source_health, candidates, buckets,
-                          min_score, total_seconds):
+                          min_score, total_seconds,
+                          capital_audit_population=None):
     """Finalize the additive public performance contract from run evidence."""
     completed = performance
     supplied_fields = set(completed)
@@ -431,9 +518,12 @@ def _complete_performance(performance, source_health, candidates, buckets,
     # Keep a useful audit even for compatibility callers that do not pass the
     # scanner's shared metrics dictionary.  Production runs populate these
     # counters directly in run_phase2; this fallback only fills absent keys.
+    capital_population = (
+        candidates if capital_audit_population is None
+        else capital_audit_population)
     candidate_capital_statuses = [
         (item.get("source_evidence", {}) or {}).get("capital", {})
-        for item in candidates
+        for item in capital_population
     ]
     inferred_capital = {
         "capital_initial_priority_count": sum(
@@ -484,16 +574,11 @@ def _complete_performance(performance, source_health, candidates, buckets,
             }
             for status in candidate_capital_statuses
         ),
-        "capital_enrichment_population": len(candidates),
+        "capital_enrichment_population": len(capital_population),
     }
-    capital_failure_reasons = {}
-    for status in candidate_capital_statuses:
-        if not status.get("attempted") \
-                or status.get("status") in {"live_success", "cache_valid"}:
-            continue
-        reason = status.get("reason") or status.get("status") or "unknown"
-        capital_failure_reasons[reason] = (
-            capital_failure_reasons.get(reason, 0) + 1)
+    (capital_failure_reasons, capital_scheduler_omissions,
+     capital_stale_sources, capital_circuit) = _capital_diagnostics(
+         candidate_capital_statuses, source_health)
     inferred_capital["capital_failure_reasons"] = capital_failure_reasons
     candidate_fundamental_statuses = [
         (item.get("source_evidence", {}) or {}).get("fundamental", {})
@@ -520,6 +605,12 @@ def _complete_performance(performance, source_health, candidates, buckets,
             completed[field] = (
                 dict(value) if field == "capital_failure_reasons"
                 else int(value))
+    completed.setdefault(
+        "capital_live_failure_reasons", dict(capital_failure_reasons))
+    completed.setdefault(
+        "capital_scheduler_omissions", dict(capital_scheduler_omissions))
+    completed.setdefault("capital_stale_sources", capital_stale_sources)
+    completed.setdefault("capital_circuit", capital_circuit)
     completed["total_seconds"] = max(0.0, float(total_seconds))
     completed.setdefault("advisory_reasons", [])
     completed.setdefault("failed_batches", [])
@@ -557,6 +648,8 @@ def _complete_performance(performance, source_health, candidates, buckets,
         capital_state = snapshot.get("capital", {})
         completed["capital_failure_reasons"] = dict(
             capital_state.get("failure_reasons", {}))
+        completed["capital_live_failure_reasons"] = dict(
+            completed["capital_failure_reasons"])
     sources = {}
     for source in SOURCE_HEALTH_NAMES:
         state = snapshot.get(source, {})
@@ -719,6 +812,7 @@ def _performance_markdown(performance):
         f"截止未启动 {performance.get('fundamental_topup_skipped_deadline', 0)}） | "
         f"增强总体 {performance.get('capital_enrichment_population', 0)} | "
         f"接口失败原因 {json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}",
+        _capital_causal_summary(performance),
         "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
         f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
@@ -743,21 +837,66 @@ def _performance_markdown(performance):
     return lines
 
 
+def _capital_causal_summary(performance):
+    circuit = performance.get("capital_circuit", {})
+    omissions = performance.get("capital_scheduler_omissions", {})
+    if not isinstance(circuit, dict) or not circuit.get("opened"):
+        return "**资金熔断因果**: 未触发"
+    reason = circuit.get("trigger_reason") or "unknown"
+    failures = int(circuit.get("failure_count", 0) or 0)
+    failure_reasons = circuit.get("failure_reasons", {})
+    omitted = int(omissions.get("source_unavailable", 0) or 0) \
+        if isinstance(omissions, dict) else 0
+    expected = circuit.get("expected_trading_date") or "未知日期"
+    stale_parts = []
+    stale_sources = performance.get("capital_stale_sources", {})
+    if isinstance(stale_sources, dict):
+        for source, detail in sorted(stale_sources.items()):
+            dates = detail.get("latest_data_dates", []) \
+                if isinstance(detail, dict) else []
+            unknown = int(detail.get("unknown_date_count", 0) or 0) \
+                if isinstance(detail, dict) else 0
+            values = list(dates)
+            if unknown:
+                values.append(f"未知×{unknown}")
+            stale_parts.append(f"{source}={','.join(values) or '未知'}")
+    stale_text = f"；来源截止 {'、'.join(stale_parts)}" if stale_parts else ""
+    if isinstance(failure_reasons, dict) and len(failure_reasons) > 1:
+        reason_text = (
+            f"连续 {failures} 次失败后熔断（原因分布 "
+            f"{json.dumps(failure_reasons, ensure_ascii=False, sort_keys=True)}，"
+            f"最后触发 {reason}）")
+    else:
+        reason_text = f"在 {failures} 次 {reason} 后熔断"
+    return (
+        f"**资金熔断因果**: 资金源{reason_text}；"
+        f"其后 {omitted} 个队列项未调用（目标评价日 {expected}）"
+        f"{stale_text}"
+    )
+
+
 def _ranking_provenance_markdown(performance):
     provenance = performance.get("ranking_provenance", {})
     if not isinstance(provenance, dict):
         provenance = {}
     source = provenance.get("source") or "unknown"
     provider = provenance.get("provider") or "unknown"
-    data_date = provenance.get("data_date") or "未知"
+    requested_as_of = provenance.get("requested_as_of") or "未知"
+    data_date = provenance.get("selected_data_date") \
+        or provenance.get("data_date") or "未知"
     quality = provenance.get("quality") or "unknown"
+    live_failure_reason = provenance.get("live_failure_reason") or ""
     errors = "、".join(str(error) for error in provenance.get("errors", []) if error)
     suffix = f" | 错误 {errors}" if errors else ""
-    return [
+    lines = [
         f"**排行供应商**: {provider} | **获取方式**: {source} | "
-        f"**数据日期**: {data_date} | **质量**: {quality}{suffix}",
+        f"**评价日**: {requested_as_of} | **数据日期**: {data_date} | "
+        f"**缓存质量**: {quality}{suffix}",
         "> ⚠️ 不同供应商的板块范围可能不同，不能直接按生成时间判断准确性。",
     ]
+    if live_failure_reason:
+        lines.insert(1, f"**实时拉取失败**: {live_failure_reason}")
+    return lines
 
 
 def _coverage_text(value):
@@ -775,15 +914,26 @@ def _ranking_provenance_html(performance):
         provenance = {}
     source = escape(str(provenance.get("source") or "unknown"))
     provider = escape(str(provenance.get("provider") or "unknown"))
-    data_date = escape(str(provenance.get("data_date") or "未知"))
+    requested_as_of = escape(str(
+        provenance.get("requested_as_of") or "未知"))
+    data_date = escape(str(provenance.get("selected_data_date")
+                           or provenance.get("data_date") or "未知"))
     quality = escape(str(provenance.get("quality") or "unknown"))
+    live_failure_reason = escape(str(
+        provenance.get("live_failure_reason") or ""))
     errors = "、".join(str(error) for error in provenance.get("errors", []) if error)
     error_html = f" | 错误 {escape(errors)}" if errors else ""
+    live_failure_html = (
+        f"<p class='dt'><strong>实时拉取失败</strong>："
+        f"{live_failure_reason}</p>" if live_failure_reason else ""
+    )
     return (
         f"<p class='dt'><strong>排行供应商</strong>：{provider} | "
         f"<strong>获取方式</strong>：{source} | "
+        f"<strong>评价日</strong>：{requested_as_of} | "
         f"<strong>数据日期</strong>：{data_date} | "
-        f"<strong>质量</strong>：{quality}{error_html}</p>"
+        f"<strong>缓存质量</strong>：{quality}{error_html}</p>"
+        f"{live_failure_html}"
         "<p class='dt' style='color:#b45309'>⚠️ 不同供应商的板块范围可能不同，"
         "不能直接按生成时间判断准确性。</p>"
     )
@@ -908,6 +1058,7 @@ def _performance_html(performance):
         f"<p class='dt'>{escape(membership_text)}</p>"
         f"<p class='dt'>{escape(coverage_text)}</p>"
         f"<p class='dt'>{escape(capital_text)}</p>"
+        f"<p class='dt'>{escape(_capital_causal_summary(performance))}</p>"
         f"<p class='dt'>{escape(budget_text)}</p>"
         f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
         f"<p class='dt'>辅助提示={advisory_reasons}</p>"
@@ -948,7 +1099,9 @@ def _emit_performance_summary(performance):
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
         f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
         f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)} "
-        f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
+        f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)} "
+        f"capital_scheduler_omissions={json.dumps(performance.get('capital_scheduler_omissions', {}), ensure_ascii=False, sort_keys=True)} "
+        f"capital_circuit={json.dumps(performance.get('capital_circuit', {}), ensure_ascii=False, sort_keys=True)}"
     )
     print(
         f"[performance] {phase_text} "
@@ -1032,6 +1185,24 @@ def resolve_recommendation_date(now=None, regime_date="", last_trading_date="",
     if is_recommendation_session(now):
         return today
     return today
+
+
+def resolve_authoritative_as_of(value, regime, trading_dates=None):
+    """Accept an upstream-authorized session only with calendar-backed evidence."""
+    try:
+        resolved = date.fromisoformat(value).isoformat()
+    except (TypeError, ValueError):
+        raise ValueError("as_of_invalid") from None
+    if resolved != (regime or {}).get("data_date"):
+        raise ValueError("as_of_market_context_mismatch")
+    if trading_dates is None:
+        from fetchers.sector_data import _load_authoritative_trading_dates
+        trading_dates = _load_authoritative_trading_dates(datetime.now())
+    if not trading_dates:
+        raise ValueError("as_of_trading_calendar_unavailable")
+    if resolved not in trading_dates:
+        raise ValueError("as_of_not_trading_day")
+    return resolved
 
 
 def _window_average(values, size):
@@ -1531,6 +1702,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         _verified_trading_date,
     )
     ranking_token = None
+    ranking_attempt = live_attempt(attempted=False)
     if isinstance(source_health, RunSourceHealth) \
             and time.monotonic() < source_health.live_deadline:
         ranking_token = source_health.try_acquire_live_permit(
@@ -1713,6 +1885,23 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                     "errors": live_meta.get("errors", [])
                     or live_meta.get("upstream_errors", []),
                 }
+    selected_meta = rankings.get("meta", {}) \
+        if isinstance(rankings, dict) else {}
+    selected_date = ranking_meta.get("data_date", "")
+    live_errors = live_meta.get("errors", []) \
+        or live_meta.get("upstream_errors", [])
+    if not isinstance(live_errors, list):
+        live_errors = [live_errors] if live_errors else []
+    ranking_meta.update({
+        "requested_as_of": as_of_date,
+        "selected_data_date": selected_date,
+        "complete": selected_meta.get("complete") is True,
+        "same_day_verified": (
+            ranking_meta.get("quality") == "same_day_verified"),
+        "live_failure_reason": (
+            ranking_attempt.get("reason")
+            or (str(live_errors[0]) if live_errors else "")),
+    })
     metrics["sector_ranking_selected_source"] = ranking_meta.get("source", "")
     metrics["sector_ranking_selected_provider"] = ranking_meta.get("provider", "")
     metrics["sector_ranking_selected_data_date"] = ranking_meta.get("data_date", "")
@@ -2169,7 +2358,10 @@ def _reason_detail(code, item):
         failure_chain = evidence.get("failure_chain", [])
         if isinstance(failure_chain, list):
             chain_text = "→".join(
-                f"{entry.get('source', 'unknown')}:{entry.get('reason', 'unknown')}"
+                f"{entry.get('source', 'unknown')}:"
+                f"{entry.get('reason', 'unknown')}"
+                + (f"@{entry.get('latest_data_date') or '未知'}"
+                   if entry.get("reason") == "stale_data" else "")
                 for entry in failure_chain
                 if isinstance(entry, dict))
             if chain_text:
@@ -3925,6 +4117,7 @@ def main():
                         help="(默认) 生成 HTML 报告")
     parser.add_argument("--no-html", dest="html", action="store_false",
                         help="不生成 HTML(仅 MD)")
+    parser.add_argument("--as-of", help="权威评价交易日(YYYY-MM-DD)")
     args = parser.parse_args()
 
     start = time.time()
@@ -3950,18 +4143,25 @@ def main():
         else max_sector_expansion)
     style_shadow_state = _load_style_shadow(style_shadow_path, regime)
     style_memberships = _load_style_memberships(memberships_path)
-    from fetchers.sector_data import get_last_trading_day
     current_time = datetime.now()
-    last_trading_date, trading_date_source = get_last_trading_day(
-        now=current_time)
-    is_trading_day = _is_current_trading_day(
-        last_trading_date, trading_date_source, now=current_time)
-    expected_date = resolve_recommendation_date(
-        now=current_time,
-        regime_date=(regime or {}).get("data_date", ""),
-        last_trading_date=last_trading_date or "",
-        is_trading_day=is_trading_day,
-    )
+    requested_as_of = getattr(args, "as_of", None)
+    if requested_as_of:
+        try:
+            expected_date = resolve_authoritative_as_of(requested_as_of, regime)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        from fetchers.sector_data import get_last_trading_day
+        last_trading_date, trading_date_source = get_last_trading_day(
+            now=current_time)
+        is_trading_day = _is_current_trading_day(
+            last_trading_date, trading_date_source, now=current_time)
+        expected_date = resolve_recommendation_date(
+            now=current_time,
+            regime_date=(regime or {}).get("data_date", ""),
+            last_trading_date=last_trading_date or "",
+            is_trading_day=is_trading_day,
+        )
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
     # P4: only an explicitly published, atomically pointed version can alter
@@ -3975,7 +4175,9 @@ def main():
     if args.sectors:
         performance["ranking_provenance"] = {
             "source": "manual", "provider": "unknown", "data_date": "",
-            "quality": "unknown", "errors": [],
+            "requested_as_of": expected_date, "selected_data_date": "",
+            "complete": False, "same_day_verified": False,
+            "quality": "unknown", "errors": [], "live_failure_reason": "",
         }
         sector_codes = [{
             "code": c.strip(),
@@ -4097,7 +4299,8 @@ def main():
     elapsed = time.time() - start
     performance = _complete_performance(
         performance, source_health, candidates, buckets, args.min_score,
-        time.monotonic() - monotonic_start)
+        time.monotonic() - monotonic_start,
+        capital_audit_population=research_population)
     tracking = _save_recommendation_snapshot(
         candidates, sector_codes, policy, buckets, expected_date, performance,
         market_regime=regime)

@@ -32,6 +32,7 @@ from scans.daily_candidates import (
     generate_report,
     is_recommendation_session,
     merge_sector_resonance,
+    resolve_authoritative_as_of,
     resolve_recommendation_date,
 )
 from scans import daily_candidates as dc
@@ -430,8 +431,12 @@ class TestRecommendationPolicy(unittest.TestCase):
         performance = {
             "ranking_provenance": {
                 "source": "cache", "provider": "ths",
-                "data_date": "2026-09-07", "quality": "degraded",
-                "errors": ["timeout"],
+                "data_date": "2026-09-07",
+                "requested_as_of": "2026-09-08",
+                "selected_data_date": "2026-09-07",
+                "complete": True, "same_day_verified": False,
+                "quality": "degraded", "errors": ["timeout"],
+                "live_failure_reason": "timeout",
             },
         }
         report = generate_report([], [], 1.0, policy, buckets, performance=performance)
@@ -445,6 +450,8 @@ class TestRecommendationPolicy(unittest.TestCase):
             self.assertIn("cache", output)
             self.assertIn("2026-09-07", output)
             self.assertIn("degraded", output)
+            self.assertIn("2026-09-08", output)
+            self.assertIn("实时拉取失败", output)
             self.assertIn("不同供应商的板块范围可能不同", output)
 
     def test_stderr_sorts_failure_reasons(self):
@@ -1024,6 +1031,28 @@ class TestRecommendationPolicy(unittest.TestCase):
             last_trading_date="2026-08-07",
         )
         self.assertEqual(result, "2026-08-07")
+
+    def test_authoritative_as_of_requires_valid_matching_market_context(self):
+        regime = {"data_date": "2026-09-11"}
+        self.assertEqual(
+            resolve_authoritative_as_of(
+                "2026-09-11", regime, {"2026-09-11"}),
+            "2026-09-11",
+        )
+        with self.assertRaisesRegex(ValueError, "as_of_invalid"):
+            resolve_authoritative_as_of(
+                "2026-02-30", regime, {"2026-09-11"})
+        with self.assertRaisesRegex(ValueError, "as_of_market_context_mismatch"):
+            resolve_authoritative_as_of(
+                "2026-09-10", regime, {"2026-09-11"})
+
+    def test_authoritative_as_of_rejects_closed_calendar_dates(self):
+        trading_dates = {"2026-09-11", "2026-09-14", "2026-09-30"}
+        for closed_date in ("2026-09-12", "2026-10-01"):
+            with self.subTest(closed_date=closed_date), \
+                 self.assertRaisesRegex(ValueError, "as_of_not_trading_day"):
+                resolve_authoritative_as_of(
+                    closed_date, {"data_date": closed_date}, trading_dates)
 
     def test_weekend_prefers_newer_market_review_close_over_stale_snapshot(self):
         result = resolve_recommendation_date(
@@ -1936,17 +1965,26 @@ class TestRecommendationPolicy(unittest.TestCase):
                     "net_flow": 1e8}]
             for date in ("2026-08-04", "2026-08-05", "2026-08-06")
         }
+        metrics = {}
         with patch("fetchers.sector_data.get_sector_rankings",
                    return_value={
-                       "meta": {"total_sectors": 0}, "sectors": []}), \
+                       "meta": {"total_sectors": 0,
+                                "errors": ["timeout"]}, "sectors": []}), \
              patch("fetchers.sector_data.load_rankings_cache_full",
                    return_value=cached), \
              patch("fetchers.sector_data.load_snapshot_history",
                    return_value=history):
             picked = dc.pick_hot_sectors(
-                min_stocks=1, as_of_date="2026-08-06")
+                min_stocks=1, as_of_date="2026-08-06", metrics=metrics)
 
         self.assertEqual(picked[0]["ranking_quality"], "same_day_verified")
+        self.assertEqual(metrics["ranking_provenance"], {
+            "source": "cache", "provider": "eastmoney",
+            "data_date": "2026-08-06", "quality": "same_day_verified",
+            "errors": ["timeout"], "requested_as_of": "2026-08-06",
+            "selected_data_date": "2026-08-06", "complete": True,
+            "same_day_verified": True, "live_failure_reason": "timeout",
+        })
 
     def test_stale_rankings_cache_is_observation_only(self):
         row = {
@@ -3862,6 +3900,120 @@ class TestRecommendationPolicy(unittest.TestCase):
             performance["capital_failure_reasons"],
             {"eastmoney_empty": 1},
         )
+        self.assertEqual(
+            performance["capital_live_failure_reasons"],
+            {"eastmoney_empty": 1},
+        )
+        self.assertEqual(
+            performance["capital_scheduler_omissions"],
+            {"not_selected_for_enrichment": 1},
+        )
+
+    def test_capital_scheduler_audit_uses_full_enrichment_population(self):
+        selected = candidate("selected")
+        selected["source_evidence"] = {
+            "capital": {"attempted": True, "status": "live_success"},
+        }
+        omitted = []
+        for code in ("omitted-a", "omitted-b"):
+            item = candidate(code, eligible=False)
+            item["source_evidence"] = {"capital": {
+                "attempted": False,
+                "status": "not_selected_for_enrichment",
+                "reason": "not_selected_for_enrichment",
+            }}
+            omitted.append(item)
+
+        performance = _complete_performance(
+            {}, None, [selected],
+            {"actionable": [selected], "waiting_trigger": [],
+             "observation": []},
+            min_score=50, total_seconds=1.0,
+            capital_audit_population=[selected, *omitted])
+
+        self.assertEqual(performance["final_candidate_count"], 1)
+        self.assertEqual(performance["capital_enrichment_population"], 3)
+        self.assertEqual(performance["capital_scheduler_omissions"], {
+            "not_selected_for_enrichment": 2,
+        })
+
+    def test_capital_causal_summary_renders_mixed_streak_distribution(self):
+        performance = {
+            "capital_scheduler_omissions": {"source_unavailable": 2},
+            "capital_circuit": {
+                "opened": True, "trigger_reason": "stale_data",
+                "failure_count": 2,
+                "failure_reasons": {"stale_data": 1, "timeout": 1},
+                "expected_trading_date": "2026-09-11",
+            },
+        }
+
+        summary = dc._capital_causal_summary(performance)
+
+        self.assertIn("连续 2 次失败后熔断", summary)
+        self.assertIn('"stale_data": 1', summary)
+        self.assertIn('"timeout": 1', summary)
+        self.assertIn("最后触发 stale_data", summary)
+
+    def test_capital_audit_preserves_stale_source_dates_and_circuit_cause(self):
+        stale = candidate("stale", eligible=False)
+        stale["source_evidence"] = {"capital": {
+            "attempted": True,
+            "status": "stale_data",
+            "reason": "stale_data",
+            "expected_trading_date": "2026-09-11",
+            "failure_chain": [
+                {"source": "eastmoney", "reason": "stale_data",
+                 "latest_data_date": "2026-09-10"},
+                {"source": "tushare_fallback", "reason": "stale_data",
+                 "latest_data_date": None},
+            ],
+        }}
+        omitted = candidate("omitted", eligible=False)
+        omitted["source_evidence"] = {"capital": {
+            "attempted": False,
+            "status": "source_unavailable",
+            "reason": "source_unavailable",
+            "selection_stage": "initial",
+        }}
+        health = dc.RunSourceHealth(hard_failure_threshold=1)
+        token = health.try_acquire_live_permit("capital")
+        health.mark_started(token)
+        health.complete_failure(token, dc.live_attempt(
+            attempted=True, provider_attempts=1, reason="stale_data",
+            status="stale_data", failure_chain=stale["source_evidence"]
+            ["capital"]["failure_chain"],
+        ) | {"expected_trading_date": "2026-09-11"})
+
+        performance = _complete_performance(
+            {}, health, [stale, omitted],
+            {"actionable": [], "waiting_trigger": [],
+             "observation": [stale, omitted]},
+            min_score=50, total_seconds=1.0)
+
+        self.assertEqual(performance["capital_live_failure_reasons"],
+                         {"stale_data": 1})
+        self.assertEqual(performance["capital_scheduler_omissions"],
+                         {"source_unavailable": 1})
+        self.assertEqual(performance["capital_stale_sources"], {
+            "eastmoney": {"count": 1, "latest_data_dates": ["2026-09-10"],
+                          "unknown_date_count": 0},
+            "tushare_fallback": {"count": 1, "latest_data_dates": [],
+                                 "unknown_date_count": 1},
+        })
+        self.assertEqual(performance["capital_circuit"]["trigger_reason"],
+                         "stale_data")
+        self.assertEqual(performance["capital_circuit"]["expected_trading_date"],
+                         "2026-09-11")
+        report = _attach_performance_audit(generate_report(
+            [stale, omitted], [], 1.0,
+            {"mode": "observation", "max_recommendations": 0, "reasons": []},
+            {"actionable": [], "waiting_trigger": [],
+             "observation": [stale, omitted]}, performance=performance),
+            performance, "markdown")
+        self.assertIn("资金源在 1 次 stale_data 后熔断", report)
+        self.assertIn("其后 1 个队列项未调用", report)
+        self.assertIn("来源截止 eastmoney=2026-09-10", report)
 
     def test_capital_failure_audit_prefers_full_source_health_counts(self):
         health = dc.RunSourceHealth()

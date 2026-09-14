@@ -259,6 +259,49 @@ class TestRunSourceHealthContract(unittest.TestCase):
         self.assertEqual(
             sum(event["event"] == "source_degraded" for event in events), 1)
 
+    def test_circuit_event_records_trigger_counts_and_expected_date(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth(hard_failure_threshold=1)
+        token = health.try_acquire_live_permit("capital")
+        health.mark_started(token)
+        attempt = _attempt(reason="stale_data")
+        attempt["expected_trading_date"] = "2026-09-11"
+        health.complete_failure(token, attempt)
+
+        event = next(
+            event for event in health.events()
+            if event["event"] == "circuit_opened")
+        self.assertEqual(event["reason"], "source_unavailable")
+        self.assertEqual(event["trigger_reason"], "stale_data")
+        self.assertEqual(event["live_requests_started"], 1)
+        self.assertEqual(event["failure_count"], 1)
+        self.assertEqual(event["failure_reasons"], {"stale_data": 1})
+        self.assertEqual(event["run_failure_count"], 1)
+        self.assertEqual(event["expected_trading_date"], "2026-09-11")
+
+    def test_circuit_cause_uses_post_success_failure_streak(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth(hard_failure_threshold=2)
+
+        first = health.try_acquire_live_permit("capital")
+        health.mark_started(first)
+        health.complete_failure(first, _attempt(reason="timeout"))
+        recovered = health.try_acquire_live_permit("capital")
+        health.mark_started(recovered)
+        health.complete_success(recovered, _attempt(reason=""))
+        for _ in range(2):
+            token = health.try_acquire_live_permit("capital")
+            health.mark_started(token)
+            health.complete_failure(token, _attempt(reason="stale_data"))
+
+        event = next(
+            event for event in health.events()
+            if event["event"] == "circuit_opened")
+        self.assertEqual(event["failure_count"], 2)
+        self.assertEqual(event["failure_reasons"], {"stale_data": 2})
+        self.assertEqual(event["run_failure_count"], 3)
+        self.assertEqual(event["live_requests_started"], 4)
+
     def test_membership_empty_cache_wrapper_is_a_cache_miss(self):
         contract = _source_health_contract(self)
         health = contract.RunSourceHealth()

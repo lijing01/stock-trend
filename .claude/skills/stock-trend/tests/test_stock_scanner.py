@@ -320,7 +320,8 @@ class TestMetadata(unittest.TestCase):
                 "error_type": "stale_data",
                 "stale_sources": ["eastmoney"],
                 "failure_chain": [
-                    {"source": "eastmoney", "reason": "stale_data"},
+                    {"source": "eastmoney", "reason": "stale_data",
+                     "latest_data_date": "2026-08-12"},
                     {"source": "tushare_fallback", "reason": "empty"},
                 ],
                 "error": "资金流向获取失败: 东方财富数据过期",
@@ -341,6 +342,8 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(attempt["stale_sources"], ["eastmoney"])
         self.assertEqual(
             attempt["failure_chain"], payload["meta"]["failure_chain"])
+        self.assertEqual(
+            attempt["failure_chain"][0]["latest_data_date"], "2026-08-12")
         self.assertIn("东方财富", attempt["failure_detail"])
 
     def test_invalid_cache_only_payload_is_diagnostic_and_non_actionable(self):
