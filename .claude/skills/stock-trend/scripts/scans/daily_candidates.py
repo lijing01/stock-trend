@@ -112,6 +112,8 @@ REASON_LABELS = {
     "recommendation_limit": "超出当日推荐数量上限",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
+    "wyckoff_lps_follow_through_weakened": "维科夫LPS历史已确认，后续转弱，等待重新确认",
+    "wyckoff_lps_state_unknown": "维科夫当前健康状态未知，等待重新评估",
     "wyckoff_signal_stale": "维科夫信号确认过晚，超过执行时效",
     "first_jac_wait_retest": "首次 JAC 尚未完成 LPS 后再确认，等待回踩",
     "entry_overextended": "价格已显著高于触发位，禁止突破后追高",
@@ -153,11 +155,29 @@ def candidate_quality_score(item):
     )
 
 
+def _wyckoff_current_state(wyckoff):
+    """Read additive event health without inventing state for legacy rows."""
+    if not isinstance(wyckoff, dict):
+        return "not_evaluated"
+    short = wyckoff.get("short_term") or {}
+    signal = wyckoff.get("signal") or {}
+    health = wyckoff.get("event_health") or {}
+    return (
+        short.get("current_state")
+        or signal.get("current_state")
+        or health.get("state")
+        or "not_evaluated"
+    )
+
+
 def apply_buy_point_priority(item, priority_bonuses=None):
     """Materialize an auditable within-bucket execution priority score."""
     wyckoff = item.get("wyckoff") or {}
     has_timing = "entry_timing" in wyckoff
     level = classify_buy_point_level(wyckoff)
+    if _wyckoff_current_state(wyckoff) in {
+            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+        level = None
     timing = classify_entry_timing(wyckoff)
     default_bonus = float(level["priority_bonus"]) if level else 0.0
     # A structural level can remain visible in research, but it must not add
@@ -195,6 +215,10 @@ def buy_point_evidence(wyckoff):
     """
     short = (wyckoff or {}).get("short_term", {}) if isinstance(wyckoff, dict) else {}
     level = classify_buy_point_level(wyckoff)
+    current_state = _wyckoff_current_state(wyckoff)
+    if current_state in {
+            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+        level = None
     timing = classify_entry_timing(wyckoff)
     timing_blocked = (
         isinstance(wyckoff, dict)
@@ -223,6 +247,8 @@ def buy_point_evidence(wyckoff):
         "signal_age_bars": age,
         "age_status": "known" if age is not None else "unknown",
         "current_status": status,
+        "current_state": current_state,
+        "event_health": copy.deepcopy((wyckoff or {}).get("event_health") or {}),
         "confidence": short.get("confidence"),
         "confidence_meaning": "形态识别置信度，非交易胜率",
         "post_lps_reconfirmation": short.get("post_lps_reconfirmation") is True,
@@ -2424,8 +2450,17 @@ def _candidate_diagnostic_text(item):
         parts.append("盘中临时状态：" + "、".join(dict.fromkeys(transient_reasons)))
     wyckoff = item.get("wyckoff", {})
     signal_status = wyckoff.get("signal_status") or wyckoff.get("short_term", {}).get("signal_status", "")
+    current_state = _wyckoff_current_state(wyckoff)
     sub_phase = str(wyckoff.get("sub_phase", "")).lower()
-    if sub_phase == "backup" and signal_status == "candidate":
+    if current_state == "follow_through_weakened":
+        parts.append("维科夫状态：LPS历史已确认；当前后续转弱，待重新确认")
+    elif current_state == "failed_breakout":
+        parts.append("维科夫状态：历史确认保留；当前突破失败，等待重新构筑")
+    elif current_state == "state_unknown":
+        parts.append("维科夫状态：历史确认保留；当前健康状态未知，待重新评估")
+    elif current_state == "confirmed_holding" and sub_phase == "lps":
+        parts.append("维科夫状态：LPS历史已确认；当前维持有效")
+    elif sub_phase == "backup" and signal_status == "candidate":
         parts.append("维科夫状态：BU回踩待确认")
     elif sub_phase == "lps" and signal_status == "confirmed":
         parts.append("维科夫状态：LPS已确认")
@@ -2568,6 +2603,17 @@ def _minor_phase_text(wyckoff):
     minor = wyckoff.get("minor_phase", {})
     name = minor.get("name", "小级别阶段未确认")
     description = minor.get("description", "")
+    current_state = _wyckoff_current_state(wyckoff)
+    short = wyckoff.get("short_term") or {}
+    sub_phase = str(short.get("sub_phase") or wyckoff.get("sub_phase") or "").lower()
+    if sub_phase == "lps" and current_state == "confirmed_holding":
+        name = "阶段D：LPS历史已确认，当前维持有效"
+    elif sub_phase == "lps" and current_state == "follow_through_weakened":
+        name = "阶段D：LPS历史已确认，后续转弱、待重新确认"
+    elif sub_phase == "lps" and current_state == "failed_breakout":
+        name = "阶段D：LPS历史已确认，当前突破失败、等待重新构筑"
+    elif sub_phase == "lps" and current_state == "state_unknown":
+        name = "阶段D：LPS历史已确认，当前状态未知、待评估"
     text = f"{name}（{description}）" if description else name
     trigger = minor.get("trigger")
     if trigger and trigger.get("date"):
@@ -2584,6 +2630,9 @@ def _minor_phase_html(wyckoff):
 
 def _wyckoff_buy_level(wyckoff):
     """Return the confirmed execution level used by the actionable HTML table."""
+    if _wyckoff_current_state(wyckoff) in {
+            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+        return None
     level = classify_buy_point_level(wyckoff)
     if level is None:
         return None
@@ -3178,8 +3227,15 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
 
 
 def _short_term_observation_reason(item):
-    signal_status = item.get("wyckoff", {}).get("short_term", {}).get(
-        "signal_status")
+    wyckoff = item.get("wyckoff") or {}
+    current_state = _wyckoff_current_state(wyckoff)
+    if current_state == "follow_through_weakened":
+        return "wyckoff_lps_follow_through_weakened"
+    if current_state == "state_unknown":
+        return "wyckoff_lps_state_unknown"
+    if current_state == "failed_breakout":
+        return "wyckoff_failed_breakout"
+    signal_status = wyckoff.get("short_term", {}).get("signal_status")
     return {
         "retest_pending": "wyckoff_retest_pending",
         "failed_breakout": "wyckoff_failed_breakout",

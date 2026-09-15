@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "createdAt": "2026-09-15T08:32:59.218Z",
+  "updatedAt": "2026-09-15T09:12:35.813Z",
+  "briefPath": ".omx/ultragoal/brief.md",
+  "goalsPath": ".omx/ultragoal/goals.json",
+  "ledgerPath": ".omx/ultragoal/ledger.jsonl",
+  "codexGoalMode": "aggregate",
+  "goals": [
+    {
+      "id": "G001-state-model",
+      "title": "State model",
+      "objective": "Add immutable confirmed-event history plus current LPS health states, including deterministic range-boundary evaluation and 603517 regression fixtures.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-15T08:32:59.218Z",
+      "updatedAt": "2026-09-15T08:39:25.503Z",
+      "startedAt": "2026-09-15T08:33:06.984Z",
+      "completedAt": "2026-09-15T08:39:25.503Z",
+      "evidence": "wyckoff.py and test_wyckoff.py updated; test_wyckoff.py 77 passed; test_stock_trend.py 695 passed, 1 skipped; test_golden.py --diff 21 passed, 2 warnings; py_compile and git diff --check passed; no golden regenerated"
+    },
+    {
+      "id": "G002-execution-gate",
+      "title": "Execution gate",
+      "objective": "Block buy-point levels and entry timing for weakened, failed, or unknown confirmed LPS health while preserving healthy behavior and structural visibility.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-15T08:32:59.218Z",
+      "updatedAt": "2026-09-15T08:48:52.201Z",
+      "startedAt": "2026-09-15T08:39:30.847Z",
+      "completedAt": "2026-09-15T08:48:52.201Z",
+      "evidence": "Execution gates verified: 79 test_wyckoff passed; 178 test_daily_candidates passed; 96 test_stock_scanner passed; 43 test_wyckoff_backtest passed; healthy LPS remains executable; weakened/failed/unknown block before stale; canonical reason wyckoff_lps_state_unknown; signal/event_health fallback prevents nonhealthy level rewards; git diff --check passed."
+    },
+    {
+      "id": "G003-consumers",
+      "title": "Consumers",
+      "objective": "Propagate current health through scanner, daily candidates, score ledger, report context, and Markdown/HTML display without changing unrelated signals.",
+      "status": "complete",
+      "attempt": 1,
+      "createdAt": "2026-09-15T08:32:59.218Z",
+      "updatedAt": "2026-09-15T08:49:11.909Z",
+      "startedAt": "2026-09-15T08:48:57.327Z",
+      "completedAt": "2026-09-15T08:49:11.909Z",
+      "evidence": "Consumers propagated current_state/event_health through daily_candidates.py, candidate_score_ledger.py, stock_scanner.py and reporting/report.py; Markdown/HTML now show historical event/current health/entry status; 178 candidate tests, 96 scanner tests, 705 full stock-trend tests passed; canonical state_unknown reason verified by rg; no golden regenerated."
+    },
+    {
+      "id": "G004-verification",
+      "title": "Verification",
+      "objective": "Run focused Wyckoff/downstream tests, mandatory stock-trend and golden gates, deterministic 603517 replay, and diff hygiene.",
+      "status": "review_blocked",
+      "attempt": 1,
+      "createdAt": "2026-09-15T08:32:59.218Z",
+      "updatedAt": "2026-09-15T09:12:35.813Z",
+      "startedAt": "2026-09-15T08:49:15.772Z",
+      "reviewBlockedAt": "2026-09-15T09:12:35.813Z",
+      "evidence": "Implementation is complete and all fresh validation gates pass: test_wyckoff.py 82 passed; test_daily_candidates.py 178 passed; test_stock_scanner.py 96 passed; test_wyckoff_backtest.py 43 passed; mandatory test_stock_trend.py 706 passed, 1 skipped; test_golden.py --diff 21 passed with 2 existing warnings; py_compile and git diff --check passed; deterministic 603517 replay shows confirmed_holding on 2026-09-14 and follow_through_weakened with entry blocked on 2026-09-15, while a structural-floor close produces failed_breakout. Architect review was CLEAR. Independent code-reviewer found the previously reported code issues fixed, but could not return APPROVE because lsp_diagnostics was unavailable; a fresh reviewer retry returned no final result. Formal APPROVE+CLEAR quality-gate evidence is therefore unavailable.",
+      "reviewBlockerResolution": {
+        "resolverGoalId": "G005-final-independent-review-unavailable",
+        "status": "pending",
+        "evidence": "Implementation is complete and all fresh validation gates pass: test_wyckoff.py 82 passed; test_daily_candidates.py 178 passed; test_stock_scanner.py 96 passed; test_wyckoff_backtest.py 43 passed; mandatory test_stock_trend.py 706 passed, 1 skipped; test_golden.py --diff 21 passed with 2 existing warnings; py_compile and git diff --check passed; deterministic 603517 replay shows confirmed_holding on 2026-09-14 and follow_through_weakened with entry blocked on 2026-09-15, while a structural-floor close produces failed_breakout. Architect review was CLEAR. Independent code-reviewer found the previously reported code issues fixed, but could not return APPROVE because lsp_diagnostics was unavailable; a fresh reviewer retry returned no final result. Formal APPROVE+CLEAR quality-gate evidence is therefore unavailable."
+      }
+    },
+    {
+      "id": "G005-final-independent-review-unavailable",
+      "title": "Final independent review unavailable",
+      "objective": "Resolve the final independent code-review gate or preserve the explicit review blocker for handoff.",
+      "status": "pending",
+      "attempt": 0,
+      "createdAt": "2026-09-15T09:12:35.813Z",
+      "updatedAt": "2026-09-15T09:12:35.813Z",
+      "evidence": "Implementation is complete and all fresh validation gates pass: test_wyckoff.py 82 passed; test_daily_candidates.py 178 passed; test_stock_scanner.py 96 passed; test_wyckoff_backtest.py 43 passed; mandatory test_stock_trend.py 706 passed, 1 skipped; test_golden.py --diff 21 passed with 2 existing warnings; py_compile and git diff --check passed; deterministic 603517 replay shows confirmed_holding on 2026-09-14 and follow_through_weakened with entry blocked on 2026-09-15, while a structural-floor close produces failed_breakout. Architect review was CLEAR. Independent code-reviewer found the previously reported code issues fixed, but could not return APPROVE because lsp_diagnostics was unavailable; a fresh reviewer retry returned no final result. Formal APPROVE+CLEAR quality-gate evidence is therefore unavailable.",
+      "resolvesReviewBlockedGoalId": "G004-verification"
+    }
+  ],
+  "codexObjective": "Complete the durable ultragoal plan in .omx/ultragoal/goals.json, including later accepted/appended stories, under the original brief constraints; use .omx/ultragoal/ledger.jsonl as the audit trail."
+}

@@ -372,16 +372,76 @@ def _wyckoff_event_chain(wyckoff_data):
     return chain
 
 
+def _wyckoff_current_state(wyckoff_data):
+    short_term = wyckoff_data.get("short_term") or {}
+    signal = wyckoff_data.get("signal") or {}
+    event_health = wyckoff_data.get("event_health") or {}
+    return (
+        short_term.get("current_state")
+        or signal.get("current_state")
+        or event_health.get("state")
+        or "not_evaluated"
+    )
+
+
+def _wyckoff_health_label(state):
+    return {
+        "confirmed_holding": "当前维持有效",
+        "follow_through_weakened": "确认后转弱，待重新确认",
+        "failed_breakout": "突破已硬失效，等待重新构筑",
+        "state_unknown": "当前状态未知，待重新评估",
+        "not_evaluated": "未评估（旧缓存可能缺少当前健康字段）",
+    }.get(state, str(state or "未知"))
+
+
+def _entry_timing_label(timing):
+    status = (timing or {}).get("status") or "not_evaluated"
+    reason = (timing or {}).get("reason_code") or ""
+    reason_label = {
+        "wyckoff_lps_follow_through_weakened": "LPS确认后转弱，等待重新确认",
+        "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
+        "wyckoff_lps_state_unknown": "维科夫当前健康状态未知，等待重新评估",
+        "wyckoff_signal_stale": "维科夫信号已超过执行时效",
+        "entry_overextended": "价格显著高于触发位，禁止追高",
+        "entry_wait_pullback": "等待回踩后再评估",
+        "entry_distance_unknown": "缺少触发位或ATR，无法确认入场距离",
+    }.get(reason, reason or status)
+    executable = (timing or {}).get("executable")
+    if executable is True:
+        return f"可执行 · {reason_label}"
+    if executable is False:
+        return f"不可执行 · {reason_label}"
+    return "未评估（旧缓存可能缺少入场时机字段）"
+
+
 def _wyckoff_next_stage_judgment(wyckoff_data):
     """Describe the engine's reclassification after a JAC retest or failure."""
     phase = wyckoff_data.get("phase") or {}
     short_term = wyckoff_data.get("short_term") or {}
     signal = wyckoff_data.get("signal") or {}
     status = short_term.get("signal_status", signal.get("status", ""))
-    if status not in {"retest_pending", "failed_breakout"}:
+    current_state = _wyckoff_current_state(wyckoff_data)
+    if current_state == "follow_through_weakened":
+        return {
+            "label": "转弱后的下阶段判定",
+            "phase_name": phase.get("primary_name", "未确认"),
+            "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+            "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+            "condition": "历史 LPS 确认保留；需重新站回触发区域并形成新的有效确认，才可恢复执行资格。",
+        }
+    if current_state == "state_unknown":
+        return {
+            "label": "状态未知后的下阶段判定",
+            "phase_name": phase.get("primary_name", "未确认"),
+            "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+            "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+            "condition": "需补齐事件所属箱体与当前价格路径后重新评估，不得沿用历史确认作为执行依据。",
+        }
+    if status not in {"retest_pending", "failed_breakout"} \
+            and current_state != "failed_breakout":
         return {}
 
-    failed = status == "failed_breakout"
+    failed = status == "failed_breakout" or current_state == "failed_breakout"
     return {
         "label": "失效后的下阶段判定" if failed else "回踩后的下阶段判定",
         "phase_name": phase.get("primary_name", "未确认"),
@@ -921,8 +981,47 @@ def build_context(args):
             "sub_phase_name", w_phase.get("sub_phase_name", "未确认"))
         context["wyckoff_short_term_status"] = short_term.get(
             "signal_status", wyckoff_data.get("signal", {}).get("status", "未确认"))
+        confirmed_event = wyckoff_data.get("confirmed_event") or {}
+        historical_status = confirmed_event.get("status")
+        if not historical_status and context["wyckoff_short_term_status"] == "confirmed":
+            historical_status = "confirmed"
+        historical_label = {
+            "confirmed": "历史已确认",
+            "candidate": "历史事件待确认",
+        }.get(historical_status, "历史确认状态未记录")
+        event_date = confirmed_event.get("event_date") or short_term.get("event_date")
+        confirmation_date = (
+            confirmed_event.get("confirmation_date")
+            or confirmed_event.get("detected_date")
+            or short_term.get("confirmation_date")
+        )
+        if event_date:
+            historical_label += f"（事件日 {event_date}"
+            historical_label += f"，确认日 {confirmation_date}）" if confirmation_date else "）"
+        current_state = _wyckoff_current_state(wyckoff_data)
+        event_health = wyckoff_data.get("event_health") or {}
+        health_label = _wyckoff_health_label(current_state)
+        if event_health.get("reason_code"):
+            health_label += f"（{event_health['reason_code']}）"
+        if event_health.get("evaluated_through"):
+            health_label += f"；评估至 {event_health['evaluated_through']}"
+        entry_timing = wyckoff_data.get("entry_timing") or short_term.get(
+            "entry_timing") or {}
+        context["wyckoff_historical_event_status"] = historical_label
+        context["wyckoff_current_state"] = current_state
+        context["wyckoff_current_state_label"] = health_label
+        context["wyckoff_entry_timing_label"] = _entry_timing_label(entry_timing)
         minor_phase = short_term.get("minor_phase") or w_phase.get("minor_phase") or {}
-        context["wyckoff_minor_phase_name"] = minor_phase.get("name", "")
+        minor_phase_name = minor_phase.get("name", "")
+        if w_phase.get("primary_sub_phase") == "lps" and current_state == "confirmed_holding":
+            minor_phase_name = "阶段D：LPS历史已确认，当前维持有效"
+        elif w_phase.get("primary_sub_phase") == "lps" and current_state == "follow_through_weakened":
+            minor_phase_name = "阶段D：LPS历史已确认，后续转弱、待重新确认"
+        elif w_phase.get("primary_sub_phase") == "lps" and current_state == "failed_breakout":
+            minor_phase_name = "阶段D：LPS历史已确认，当前突破失败、等待重新构筑"
+        elif w_phase.get("primary_sub_phase") == "lps" and current_state == "state_unknown":
+            minor_phase_name = "阶段D：LPS历史已确认，当前状态未知、待评估"
+        context["wyckoff_minor_phase_name"] = minor_phase_name
         context["wyckoff_minor_phase_desc"] = minor_phase.get("description", "")
         context["wyckoff_minor_phase_css"] = (
             "wyckoff-lps"

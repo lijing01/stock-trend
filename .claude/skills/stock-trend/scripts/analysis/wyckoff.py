@@ -92,7 +92,8 @@ MINOR_PHASES = {
 }
 
 
-def build_minor_phase(phase: str, sub_phase: str, trigger: dict | None = None) -> dict:
+def build_minor_phase(phase: str, sub_phase: str, trigger: dict | None = None,
+                      current_state: str | None = None) -> dict:
     """Return the display-only A–E label for an existing short-term signal.
 
     When ``trigger`` (a bar dict with date/low/close) is supplied, it is
@@ -103,6 +104,22 @@ def build_minor_phase(phase: str, sub_phase: str, trigger: dict | None = None) -
         ("-", "小级别阶段未确认", "未识别到足以归类 A–E 的小级别结构"),
     )
     minor = {"code": code, "name": name, "description": description}
+    if phase == PHASE_MARKUP and sub_phase == SUB_LPS:
+        if current_state == "follow_through_weakened":
+            minor.update({
+                "name": "阶段D：LPS历史已确认，后续转弱",
+                "description": "确认后跌破触发区域但尚未跌回原箱体，待重新确认",
+            })
+        elif current_state == "failed_breakout":
+            minor.update({
+                "name": "阶段D：LPS历史已确认，突破失败",
+                "description": "确认后收盘跌回原箱体阻力缓冲下方，旧事件不可执行",
+            })
+        elif current_state == "state_unknown":
+            minor.update({
+                "name": "阶段D：LPS历史已确认，当前状态未知",
+                "description": "未找到事件所属交易区间，无法评估当前执行资格",
+            })
     if trigger:
         minor["trigger"] = trigger
     return minor
@@ -165,6 +182,11 @@ ENTRY_WAIT_MAX_ATR = 1.5
 ENTRY_FRESH_MAX_PCT = 0.05
 ENTRY_WAIT_MAX_PCT = 0.08
 ENTRY_TIMING_RULE_VERSION = "daily-candidates/entry-timing-v1"
+LPS_STATE_UNKNOWN_REASON_CODE = "wyckoff_lps_state_unknown"
+PERIOD_ALIGNMENT_RULE_VERSION = "wyckoff/period-alignment-v1"
+LPS_NON_HEALTHY_STATES = frozenset({
+    "follow_through_weakened", "failed_breakout", "state_unknown",
+})
 
 # Strict execution-level metadata.  The level is intentionally separate from
 # the structural Wyckoff score so downstream ranking can audit its effect.
@@ -190,6 +212,24 @@ BUY_POINT_LEVELS = {
 }
 
 
+def read_current_event_state(wyckoff: dict | None) -> str:
+    """Read additive event health from canonical then degraded payloads."""
+    if not isinstance(wyckoff, dict):
+        return ""
+    sources = (
+        (wyckoff.get("short_term"), "current_state"),
+        (wyckoff.get("signal"), "current_state"),
+        (wyckoff.get("event_health"), "state"),
+    )
+    for payload, key in sources:
+        if not isinstance(payload, dict):
+            continue
+        state = str(payload.get(key) or "").strip().lower()
+        if state:
+            return state
+    return ""
+
+
 def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
     """Return a strict, fresh execution level for a short-term payload."""
     if not isinstance(wyckoff, dict):
@@ -197,6 +237,9 @@ def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
     short = wyckoff.get("short_term") or {}
     sub_phase = str(short.get("sub_phase") or "").strip().lower()
     status = str(short.get("signal_status") or "").strip().lower()
+    current_state = read_current_event_state(wyckoff)
+    if current_state in LPS_NON_HEALTHY_STATES:
+        return None
     # An omitted age is not evidence that the event happened today.  Older
     # snapshots remain readable, but cannot receive a new execution bonus.
     if short.get("signal_age_bars") is None or "signal_age_bars" not in short:
@@ -217,7 +260,8 @@ def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
 
 def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
                        post_lps_reconfirmation: bool, current_close,
-                       trigger_close, current_atr) -> dict:
+                       trigger_close, current_atr,
+                       current_state: str | None = None) -> dict:
     """Classify whether a structurally valid signal is still executable.
 
     ``EVENT_MAX_AGE`` remains the research visibility window. This function is
@@ -226,6 +270,7 @@ def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
     """
     sub_phase = str(sub_phase or "").strip().lower()
     status = str(signal_status or "none").strip().lower()
+    health_state = str(current_state or "").strip().lower()
     max_age = EXECUTION_MAX_AGE.get(sub_phase)
     result = {
         "rule_version": ENTRY_TIMING_RULE_VERSION,
@@ -233,6 +278,7 @@ def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
         "reason_code": "entry_distance_unknown",
         "executable": False,
         "sub_phase": sub_phase,
+        "current_state": health_state or "not_evaluated",
         "signal_age_bars": None,
         "execution_max_age": max_age,
         "current_close": None,
@@ -260,6 +306,20 @@ def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
         "trigger_close": round(trigger, 4) if trigger is not None else None,
         "current_atr": round(atr, 4) if atr is not None else None,
     })
+    health_blocks = {
+        "follow_through_weakened": (
+            "entry_follow_through_weakened",
+            "wyckoff_lps_follow_through_weakened",
+        ),
+        "failed_breakout": (
+            "entry_failed_breakout", "wyckoff_failed_breakout"),
+        "state_unknown": (
+            "entry_state_unknown", LPS_STATE_UNKNOWN_REASON_CODE),
+    }
+    if health_state in health_blocks:
+        timing_status, reason_code = health_blocks[health_state]
+        result.update({"status": timing_status, "reason_code": reason_code})
+        return result
     if status != "confirmed":
         result.update({
             "status": "entry_signal_not_confirmed",
@@ -357,6 +417,116 @@ LPS_MAX_RETRACE_ATR = 2.00
 LPS_MAX_SPREAD_ATR = 1.00
 LPS_VOLUME_VS_SOS = 0.85
 LPS_VOLUME_VS_AVERAGE = 0.90
+LPS_EVENT_HEALTH_RULE_VERSION = "wyckoff/lps-event-health-v1"
+
+
+def find_event_trading_range(event: dict | None,
+                             trading_ranges: list[dict]) -> dict | None:
+    """Return the exact trading range that owns an event.
+
+    Price-based range selection is intentionally not used here: lifecycle
+    checks must remain tied to the structure that originally produced the
+    event.
+    """
+    if not isinstance(event, dict):
+        return None
+    range_id = event.get("range_id")
+    if not range_id:
+        return None
+    return next(
+        (item for item in trading_ranges
+         if isinstance(item, dict) and item.get("id") == range_id),
+        None,
+    )
+
+
+def evaluate_confirmed_lps_health(event: dict | None,
+                                  event_range: dict | None,
+                                  ohlcv: dict,
+                                  atr_values: list) -> dict:
+    """Evaluate current health without rewriting the confirmed LPS event.
+
+    A close below the event's own range floor is a sticky hard failure. A
+    close below the LPS trigger low, while still above that structural floor,
+    means follow-through weakened. Intraday lows never cause hard failure.
+    """
+    result = {
+        "rule_version": LPS_EVENT_HEALTH_RULE_VERSION,
+        "state": "state_unknown",
+        "reason_code": LPS_STATE_UNKNOWN_REASON_CODE,
+        "event_range_id": event.get("range_id", "") if isinstance(event, dict) else "",
+        "structural_floor": None,
+        "trigger_low": None,
+        "trigger_close": None,
+        "current_close": None,
+        "current_atr": None,
+        "adverse_move_atr": None,
+        "evaluated_through": "",
+    }
+    if (not isinstance(event, dict)
+            or event.get("type") != "lps"
+            or event.get("status") != "confirmed"
+            or not isinstance(event_range, dict)):
+        return result
+
+    closes = ohlcv.get("close") or []
+    lows = ohlcv.get("low") or []
+    dates = ohlcv.get("date") or []
+    event_index = event.get("event_index")
+    detected_index = event.get("detected_index")
+    if (not closes or not isinstance(event_index, int)
+            or not isinstance(detected_index, int)
+            or event_index < 0 or event_index >= len(closes)
+            or event_index >= len(lows)
+            or detected_index < event_index or detected_index >= len(closes)):
+        return result
+
+    resistance = _safe_float(event_range.get("resistance"))
+    breakout_atr = _safe_float(event.get("breakout_atr"))
+    current_atr = _safe_float(atr_values[-1]) if atr_values else None
+    floor_atr = breakout_atr if breakout_atr and breakout_atr > 0 else current_atr
+    if resistance is None or floor_atr is None or floor_atr <= 0:
+        return result
+
+    trigger_low = _safe_float(lows[event_index])
+    trigger_close = _safe_float(closes[event_index])
+    current_close = _safe_float(closes[-1])
+    if trigger_low is None or trigger_close is None or current_close is None:
+        return result
+
+    structural_floor = resistance - floor_atr * LPS_SUPPORT_CLOSE_ATR
+    adverse_move_atr = ((trigger_close - current_close) / current_atr
+                        if current_atr and current_atr > 0 else None)
+    result.update({
+        "structural_floor": round(structural_floor, 4),
+        "trigger_low": round(trigger_low, 4),
+        "trigger_close": round(trigger_close, 4),
+        "current_close": round(current_close, 4),
+        "current_atr": round(current_atr, 4) if current_atr is not None else None,
+        "adverse_move_atr": round(adverse_move_atr, 4)
+        if adverse_move_atr is not None else None,
+        "evaluated_through": dates[-1] if dates else "",
+    })
+
+    # Scan every observable close after confirmation. Once the original box
+    # has failed, a later wick/close recovery cannot revive this old event.
+    post_confirmation_closes = closes[detected_index + 1:]
+    if any(close < structural_floor for close in post_confirmation_closes):
+        result.update({
+            "state": "failed_breakout",
+            "reason_code": "wyckoff_failed_breakout",
+        })
+    elif current_close < trigger_low:
+        result.update({
+            "state": "follow_through_weakened",
+            "reason_code": "wyckoff_lps_follow_through_weakened",
+        })
+    else:
+        result.update({
+            "state": "confirmed_holding",
+            "reason_code": "",
+        })
+    return result
 
 # Maximum lookback for finding breakout
 FIND_BREAKOUT_MAX_BARS = 60
@@ -728,6 +898,30 @@ def build_period_alignment(short_term: dict, long_term: dict) -> dict:
     """Turn independent structural and tactical views into a recommendation gate."""
     long_phase = long_term.get("phase", PHASE_UNKNOWN)
     short_phase = short_term.get("phase", PHASE_UNKNOWN)
+    current_state = read_current_event_state({"short_term": short_term})
+    health_blocks = {
+        "follow_through_weakened": (
+            "current_health_follow_through_weakened",
+            "LPS历史已确认，但当前后续转弱，仅保留观察",
+        ),
+        "failed_breakout": (
+            "current_health_failed_breakout",
+            "LPS历史已确认，但当前突破失败，仅保留观察",
+        ),
+        "state_unknown": (
+            "current_health_state_unknown",
+            "LPS历史已确认，但当前健康状态未知，仅保留观察",
+        ),
+    }
+    if current_state in health_blocks:
+        status, label = health_blocks[current_state]
+        return {
+            "rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+            "status": status,
+            "recommendation_gate": "observation",
+            "label": label,
+            "current_state": current_state,
+        }
     confirmed_buy = is_buy_point(
         short_phase, short_term.get("sub_phase", ""),
         short_term.get("signal_status", "confirmed"),
@@ -736,20 +930,26 @@ def build_period_alignment(short_term: dict, long_term: dict) -> dict:
     if not long_term.get("eligible") or long_phase == PHASE_UNKNOWN:
         if (short_phase in BUY_PHASES and short_term.get("sub_phase") in BUY_SUB_PHASES
                 and not confirmed_buy):
-            return {"status": "short_term_pending", "recommendation_gate": "observation",
+            return {"rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+                    "status": "short_term_pending", "recommendation_gate": "observation",
                     "label": "短线突破/回踩待确认，暂不推荐"}
-        return {"status": "long_term_unavailable", "recommendation_gate": "short_term_only",
+        return {"rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+                "status": "long_term_unavailable", "recommendation_gate": "short_term_only",
                 "label": "长期结构未确认，按短线信号处理"}
     if long_phase in {PHASE_DISTRIBUTION, PHASE_MARKDOWN} and confirmed_buy:
-        return {"status": "countertrend", "recommendation_gate": "observation",
+        return {"rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+                "status": "countertrend", "recommendation_gate": "observation",
                 "label": "中线偏空，短线买点属逆势反弹"}
     if long_phase in {PHASE_ACCUMULATION, PHASE_MARKUP} and confirmed_buy:
-        return {"status": "aligned_bullish", "recommendation_gate": "actionable",
+        return {"rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+                "status": "aligned_bullish", "recommendation_gate": "actionable",
                 "label": "中线偏多，短线买点确认"}
     if long_phase in {PHASE_ACCUMULATION, PHASE_MARKUP}:
-        return {"status": "waiting_trigger", "recommendation_gate": "waiting_trigger",
+        return {"rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+                "status": "waiting_trigger", "recommendation_gate": "waiting_trigger",
                 "label": "中线偏多，等待短线触发"}
-    return {"status": "aligned_bearish", "recommendation_gate": "observation",
+    return {"rule_version": PERIOD_ALIGNMENT_RULE_VERSION,
+            "status": "aligned_bearish", "recommendation_gate": "observation",
             "label": "中线与短线结构均不支持做多"}
 
 
@@ -1134,6 +1334,8 @@ def is_buy_point(phase: str, sub_phase: str, signal_status: str = "confirmed",
 def is_buy_signal(analysis: dict | None) -> bool:
     """Read confirmation/freshness from an analysis result for downstream gates."""
     if not analysis:
+        return False
+    if read_current_event_state(analysis) in LPS_NON_HEALTHY_STATES:
         return False
     phase_info = analysis.get("phase", {})
     signal = analysis.get("signal", {})
@@ -1674,6 +1876,20 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
     candidate_event = _current_event([
         event for event in event_history if event.get("status") == "candidate"
     ])
+    current_state = "not_evaluated"
+    event_health = {
+        "rule_version": LPS_EVENT_HEALTH_RULE_VERSION,
+        "state": current_state,
+        "reason_code": "",
+    }
+    if (active_event and active_event.get("type") == "lps"
+            and active_event.get("status") == "confirmed"):
+        event_range = find_event_trading_range(active_event, ranges)
+        event_health = evaluate_confirmed_lps_health(
+            active_event, event_range, ohlcv, atr_values,
+        )
+        current_state = event_health["state"]
+        signal["current_state"] = current_state
     tr_state = _tr_state(trading_range, closes, atr_values[-1] or 0.0, event_history)
     # Historical SOS confirmation must not override the current relationship
     # with the box.  A pullback to the former resistance is Phase D territory
@@ -1777,6 +1993,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         closes[-1],
         (trigger or {}).get("close"),
         atr_values[-1],
+        current_state,
     )
     short_term = {
         "phase": phase,
@@ -1789,12 +2006,15 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "event_date": signal.get("event_date", ""),
         "confirmation_date": signal.get("detected_date", ""),
         "event": signal.get("event", ""),
+        "current_state": current_state,
+        "event_health": event_health,
         "post_lps_reconfirmation": _is_post_lps_reconfirmation(
             active_event, event_history),
         "trigger": trigger,
         "entry_timing": entry_timing,
         "range_level": (trading_range or {}).get("level", ""),
-        "minor_phase": build_minor_phase(phase, sub_phase, trigger),
+        "minor_phase": build_minor_phase(
+            phase, sub_phase, trigger, current_state),
     }
 
     timeframe_map = {}
@@ -1843,7 +2063,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "secondary_possibilities": secondary_possibilities,
             "primary_sub_phase": sub_phase,
             "sub_phase_name": SUB_PHASE_NAMES.get(sub_phase, ""),
-            "minor_phase": build_minor_phase(phase, sub_phase, trigger),
+            "minor_phase": build_minor_phase(
+                phase, sub_phase, trigger, current_state),
         },
         "range": trading_range or {"is_clear_range": False},
         "tr_state": tr_state,
@@ -1857,6 +2078,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "structures": structures,
         "event_history": event_history,
         "signal": signal,
+        "event_health": event_health,
         "confirmed_event": confirmed_event,
         "candidate_event": candidate_event,
         "bu_candidate": bu_candidate,

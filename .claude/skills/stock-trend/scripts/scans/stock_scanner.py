@@ -1901,6 +1901,23 @@ def wyckoff_gate_pass(analysis):
     if not analysis:
         return False
     conf = _safe_float(analysis.get("phase", {}).get("confidence"))
+    short = analysis.get("short_term") or {}
+    health = analysis.get("event_health") or {}
+    current_state = (
+        short.get("current_state")
+        or (analysis.get("signal") or {}).get("current_state")
+        or health.get("state")
+    )
+    if current_state in {
+            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+        confirmed_event = analysis.get("confirmed_event") or {}
+        event_type = confirmed_event.get("type") or confirmed_event.get("event")
+        status = confirmed_event.get("status")
+        return bool(
+            event_type == "lps"
+            and status == "confirmed"
+            and conf >= WYCKOFF_MIN_CONFIDENCE
+        )
     return is_buy_signal(analysis) and conf >= WYCKOFF_MIN_CONFIDENCE
 
 
@@ -2476,7 +2493,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
         }
 
         if enable_wyckoff and wk:
-            short_term = wk.get("short_term") or {
+            short_term = copy.deepcopy(wk.get("short_term") or {
                 "phase": wk.get("phase", {}).get("primary", ""),
                 "phase_name": wk.get("phase", {}).get("primary_name", ""),
                 "sub_phase": wk.get("phase", {}).get("primary_sub_phase", ""),
@@ -2484,7 +2501,14 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 "confidence": wk.get("phase", {}).get("confidence", 0),
                 "signal_status": wk.get("signal", {}).get("status", "confirmed"),
                 "signal_age_bars": wk.get("signal", {}).get("age_bars", 0),
-            }
+            })
+            event_health = copy.deepcopy(wk.get("event_health") or {})
+            short_term.setdefault(
+                "current_state",
+                (wk.get("signal") or {}).get("current_state")
+                or event_health.get("state")
+                or "not_evaluated",
+            )
             long_term = wk.get("long_term") or {"eligible": False}
             entry_timing = wk.get("entry_timing") or short_term.get("entry_timing")
             item["wyckoff"] = {
@@ -2498,6 +2522,9 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 "short_term": short_term,
                 "long_term": long_term,
                 "alignment": wk.get("alignment") or build_period_alignment(short_term, long_term),
+                "signal": copy.deepcopy(wk.get("signal") or {}),
+                "confirmed_event": copy.deepcopy(wk.get("confirmed_event") or {}),
+                "event_health": event_health,
             }
             if isinstance(entry_timing, dict) and entry_timing:
                 item["wyckoff"]["entry_timing"] = copy.deepcopy(entry_timing)
@@ -3121,7 +3148,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 "sector_total": len(changes_in_sector),
             }
             if enable_wyckoff and wk:
-                short_term = wk.get("short_term") or {
+                short_term = copy.deepcopy(wk.get("short_term") or {
                     "phase": wk.get("phase", {}).get("primary", ""),
                     "phase_name": wk.get("phase", {}).get("primary_name", ""),
                     "sub_phase": wk.get("phase", {}).get("primary_sub_phase", ""),
@@ -3129,8 +3156,17 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     "confidence": wk.get("phase", {}).get("confidence", 0),
                     "signal_status": wk.get("signal", {}).get("status", "confirmed"),
                     "signal_age_bars": wk.get("signal", {}).get("age_bars", 0),
-                }
+                })
+                event_health = copy.deepcopy(wk.get("event_health") or {})
+                short_term.setdefault(
+                    "current_state",
+                    (wk.get("signal") or {}).get("current_state")
+                    or event_health.get("state")
+                    or "not_evaluated",
+                )
                 long_term = wk.get("long_term") or {"eligible": False}
+                entry_timing = wk.get("entry_timing") or short_term.get(
+                    "entry_timing")
                 item["wyckoff"] = {
                     "phase": wk.get("phase", {}).get("primary_name", ""),
                     "sub_phase": wk.get("phase", {}).get("sub_phase_name", ""),
@@ -3144,7 +3180,14 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     "short_term": short_term, "long_term": long_term,
                     "alignment": wk.get("alignment") or build_period_alignment(
                         short_term, long_term),
+                    "signal": copy.deepcopy(wk.get("signal") or {}),
+                    "confirmed_event": copy.deepcopy(
+                        wk.get("confirmed_event") or {}),
+                    "event_health": event_health,
                 }
+                if isinstance(entry_timing, dict) and entry_timing:
+                    item["wyckoff"]["entry_timing"] = copy.deepcopy(
+                        entry_timing)
             if trade_plan_policy is not None:
                 try:
                     item["trade_plan"] = build_candidate_trade_plan(

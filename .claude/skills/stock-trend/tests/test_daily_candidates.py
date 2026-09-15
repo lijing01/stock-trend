@@ -1617,6 +1617,78 @@ class TestRecommendationPolicy(unittest.TestCase):
             for entry in item["score_ledger"]["entries"]
         ))
 
+    def test_lps_unhealthy_states_are_observation_only_and_audited(self):
+        cases = (
+            ("follow_through_weakened",
+             "wyckoff_lps_follow_through_weakened", "后续转弱"),
+            ("failed_breakout", "wyckoff_failed_breakout", "突破失败"),
+            ("state_unknown", "wyckoff_lps_state_unknown", "健康状态未知"),
+        )
+        for current_state, reason_code, label in cases:
+            with self.subTest(current_state=current_state):
+                item = _set_buy_level(
+                    candidate(current_state, adjusted_score=88.0), "lps")
+                item["wyckoff"]["short_term"]["current_state"] = current_state
+                item["wyckoff"]["event_health"] = {
+                    "state": current_state,
+                    "reason_code": reason_code,
+                    "structural_floor": 10.74,
+                    "evaluated_through": "2026-09-15",
+                }
+                item["wyckoff"]["entry_timing"] = {
+                    "status": current_state,
+                    "reason_code": reason_code,
+                    "executable": False,
+                    "entry_timing_score": 0,
+                }
+
+                dc.apply_buy_point_priority(item)
+                self.assertIsNone(item["buy_point_level"])
+                self.assertEqual(item["buy_point_priority_bonus"], 0.0)
+                for mode in ("actionable", "waiting_trigger"):
+                    buckets = classify_candidates([item], {
+                        "mode": mode, "max_recommendations": 5,
+                        "reasons": [],
+                    })
+                    self.assertEqual(buckets["actionable"], [])
+                    self.assertEqual(buckets["waiting_trigger"], [])
+                    self.assertEqual(buckets["next_day_confirmation"], [])
+                    self.assertEqual(
+                        [row["code"] for row in buckets["observation"]],
+                        [current_state],
+                    )
+                    self.assertIn(
+                        reason_code,
+                        buckets["observation"][0]["observation_reasons"],
+                    )
+                self.assertIn(label, _candidate_diagnostic_text(item))
+                timing_entry = next(
+                    entry for entry in item["score_ledger"]["entries"]
+                    if entry["category"] == "entry_timing"
+                )
+                self.assertEqual(
+                    timing_entry["evidence"]["current_state"], current_state)
+                self.assertEqual(
+                    timing_entry["evidence"]["event_health"]["structural_floor"],
+                    10.74,
+                )
+
+    def test_legacy_lps_without_health_fields_keeps_legacy_eligibility(self):
+        item = candidate("legacy-health")
+        self.assertNotIn("current_state", item["wyckoff"]["short_term"])
+        buckets = classify_candidates([item], {
+            "mode": "actionable", "max_recommendations": 5,
+            "reasons": [],
+        })
+        self.assertEqual(
+            [row["code"] for row in buckets["actionable"]],
+            ["legacy-health"],
+        )
+        self.assertEqual(
+            dc.buy_point_evidence(item["wyckoff"])["current_state"],
+            "not_evaluated",
+        )
+
     def test_buy_level_bonus_cannot_cross_quality_eligibility_gate(self):
         item = _set_buy_level(
             candidate("low", adjusted_score=49.0), "lps")
@@ -3511,6 +3583,34 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("潜在二级 · SOS 后 LPS · 观察｜不可执行", html)
         self.assertNotIn("核心仓", html)
         self.assertNotIn("<tr class='wyckoff-buy-level-2'>", html)
+
+    def test_weakened_lps_shows_history_and_current_health_without_badge(self):
+        item = candidate("weakened-lps")
+        item["wyckoff"]["minor_phase"] = {
+            "code": "D", "name": "阶段D：LPS已确认",
+            "description": "SOS 后回踩缩量、守住原阻力",
+        }
+        item["wyckoff"]["short_term"].update({
+            "sub_phase": "lps",
+            "signal_status": "confirmed",
+            "current_state": "follow_through_weakened",
+        })
+        item["wyckoff"]["event_health"] = {
+            "state": "follow_through_weakened",
+            "reason_code": "wyckoff_lps_follow_through_weakened",
+        }
+        item["wyckoff"]["entry_timing"] = {
+            "status": "follow_through_weakened",
+            "reason_code": "wyckoff_lps_follow_through_weakened",
+            "executable": False,
+        }
+
+        html = dc._html_candidate_rows(
+            [item], buy_level_display="observation")
+
+        self.assertIn("LPS历史已确认，后续转弱、待重新确认", html)
+        self.assertNotIn("阶段D：LPS已确认（", html)
+        self.assertNotIn("wyckoff-observation-buy-level-2", html)
 
     def test_observation_level_three_requires_post_lps_reconfirmation(self):
         first_jac = candidate("first-jac")

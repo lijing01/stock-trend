@@ -132,6 +132,12 @@
 **当前子阶段**: {{wyckoff_sub_phase_name}}
 {{#wyckoff_minor_phase_name}}**细分子阶段**: {{wyckoff_minor_phase_name}} — {{wyckoff_minor_phase_desc}}{{/wyckoff_minor_phase_name}}{{#wyckoff_minor_phase_trigger}}{{wyckoff_minor_phase_trigger}}{{/wyckoff_minor_phase_trigger}}
 
+| 状态层 | 当前结论 |
+|---|---|
+| 历史事件状态 | {{wyckoff_historical_event_status}} |
+| 当前健康状态 | {{wyckoff_current_state_label}} |
+| 入场状态 | {{wyckoff_entry_timing_label}} |
+
 {{#has_wyckoff_event_chain}}
 ### 相关触发日志（突破后事件链）
 

@@ -41,6 +41,24 @@ def _source(item, dimension):
     }
 
 
+def _wyckoff_health_evidence(item):
+    """Return additive health audit fields while keeping old caches readable."""
+    wyckoff = item.get("wyckoff") or {}
+    short = wyckoff.get("short_term") or {}
+    signal = wyckoff.get("signal") or {}
+    health = copy.deepcopy(wyckoff.get("event_health") or {})
+    current_state = (
+        short.get("current_state")
+        or signal.get("current_state")
+        or health.get("state")
+        or "not_evaluated"
+    )
+    return {
+        "current_state": current_state,
+        "event_health": health,
+    }
+
+
 def build_quantitative_ledger(item):
     """Build the immutable quantitative portion before later overlays.
 
@@ -70,7 +88,8 @@ def build_quantitative_ledger(item):
             short = (item.get("wyckoff") or {}).get("short_term") or {}
             entry["evidence"] = {"event_date": _date_or_none(short.get("event_date")),
                                  "confirmation_date": _date_or_none(short.get("confirmation_date")),
-                                 "signal_status": short.get("signal_status") or "unknown"}
+                                 "signal_status": short.get("signal_status") or "unknown",
+                                 **_wyckoff_health_evidence(item)}
         entries.append(entry)
     raw = _number(item.get("raw_composite_score", item.get("composite_score")))
     quality = item.get("data_quality") or {}
@@ -124,6 +143,10 @@ def append_entry_timing(item, timing):
     """Record the entry-timing gate without altering the formal score."""
     ledger = item.setdefault("score_ledger", build_quantitative_ledger(item))
     timing = copy.deepcopy(timing or {})
+    timing.update({
+        key: value for key, value in _wyckoff_health_evidence(item).items()
+        if key not in timing
+    })
     ledger["entries"].append({
         "category": "entry_timing",
         "rule_id": "entry_timing.guard",

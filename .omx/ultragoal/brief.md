@@ -1,0 +1,1 @@
+Execute the committed Wyckoff LPS post-confirmation state repair plan in this repository; preserve historical confirmations, distinguish current health, block unsafe execution, propagate state, and verify 603517.

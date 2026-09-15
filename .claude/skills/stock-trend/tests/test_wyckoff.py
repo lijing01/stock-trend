@@ -21,8 +21,12 @@ from analysis.wyckoff import (
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     _is_lps_pullback, _current_event, _tr_state,
+    find_event_trading_range, evaluate_confirmed_lps_health,
+    LPS_EVENT_HEALTH_RULE_VERSION,
     is_buy_point, is_buy_signal, is_executable_buy_signal,
-    build_entry_timing, classify_entry_timing,
+    build_entry_timing, classify_entry_timing, classify_buy_point_level,
+    read_current_event_state, LPS_STATE_UNKNOWN_REASON_CODE,
+    PERIOD_ALIGNMENT_RULE_VERSION,
     analyze, analyze_kline_dict, build_period_alignment, load_kline,
 )
 
@@ -77,6 +81,219 @@ class TestEntryTiming(unittest.TestCase):
         }
         self.assertTrue(is_executable_buy_signal(analysis))
         self.assertEqual(classify_entry_timing(analysis)["status"], "entry_fresh")
+
+    def test_lps_health_block_precedes_stale_gate(self):
+        timing = build_entry_timing(
+            "lps", "confirmed", 8, False, 11.5, 11.95, 0.4,
+            "follow_through_weakened",
+        )
+        self.assertEqual(
+            timing["reason_code"], "wyckoff_lps_follow_through_weakened")
+        self.assertFalse(timing["executable"])
+
+    def test_old_callers_without_health_state_remain_compatible(self):
+        timing = build_entry_timing("lps", "confirmed", 0, False, 102, 100, 2)
+        self.assertTrue(timing["executable"])
+        self.assertEqual(timing["current_state"], "not_evaluated")
+
+
+class TestConfirmedLpsHealth(unittest.TestCase):
+    @staticmethod
+    def _fixture(current_close=11.95, *, current_low=None,
+                 intervening_closes=None):
+        closes = [11.8, 11.9, 11.95, 12.05, 12.0]
+        if intervening_closes:
+            closes.extend(intervening_closes)
+        closes.append(current_close)
+        lows = [value - 0.08 for value in closes]
+        lows[2] = 11.93
+        if current_low is not None:
+            lows[-1] = current_low
+        ohlcv = {
+            "close": closes,
+            "low": lows,
+            "date": [f"202609{index + 5:02d}" for index in range(len(closes))],
+        }
+        atr = [0.4] * len(closes)
+        event = {
+            "type": "lps", "status": "confirmed",
+            "event_index": 2, "detected_index": 3,
+            "event_date": "20260907", "detected_date": "20260908",
+            "range_id": "minor_191", "breakout_atr": 0.3,
+        }
+        event_range = {
+            "id": "minor_191", "support": 9.8, "resistance": 10.74,
+        }
+        return event, event_range, ohlcv, atr
+
+    def test_healthy_lps_holds_trigger_region(self):
+        args = self._fixture(11.94)
+        health = evaluate_confirmed_lps_health(*args)
+        self.assertEqual(health["state"], "confirmed_holding")
+        self.assertEqual(health["structural_floor"], 10.65)
+
+    def test_close_below_trigger_but_above_range_floor_is_weakened(self):
+        args = self._fixture(11.5)
+        health = evaluate_confirmed_lps_health(*args)
+        self.assertEqual(health["state"], "follow_through_weakened")
+        self.assertEqual(
+            health["reason_code"], "wyckoff_lps_follow_through_weakened")
+
+    def test_close_below_original_range_floor_is_hard_failure(self):
+        args = self._fixture(10.6)
+        health = evaluate_confirmed_lps_health(*args)
+        self.assertEqual(health["state"], "failed_breakout")
+        self.assertEqual(health["reason_code"], "wyckoff_failed_breakout")
+
+    def test_wick_below_range_floor_with_close_recovery_is_not_hard_failure(self):
+        args = self._fixture(11.94, current_low=10.2)
+        health = evaluate_confirmed_lps_health(*args)
+        self.assertEqual(health["state"], "confirmed_holding")
+
+    def test_hard_failure_is_sticky_after_later_close_recovery(self):
+        args = self._fixture(11.94, intervening_closes=[10.6])
+        health = evaluate_confirmed_lps_health(*args)
+        self.assertEqual(health["state"], "failed_breakout")
+
+    def test_missing_event_range_is_unknown_and_not_executable(self):
+        event, _, ohlcv, atr = self._fixture(11.94)
+        ranges = [{"id": "swing_137", "resistance": 12.2}]
+        self.assertIsNone(find_event_trading_range(event, ranges))
+        health = evaluate_confirmed_lps_health(event, None, ohlcv, atr)
+        self.assertEqual(health["state"], "state_unknown")
+        self.assertEqual(
+            health["reason_code"], LPS_STATE_UNKNOWN_REASON_CODE)
+        timing = build_entry_timing(
+            "lps", "confirmed", 1, False, 11.94, 11.95, 0.4,
+            health["state"],
+        )
+        self.assertFalse(timing["executable"])
+        self.assertEqual(
+            timing["reason_code"], LPS_STATE_UNKNOWN_REASON_CODE)
+        self.assertIsNone(classify_buy_point_level({
+            "short_term": {
+                "sub_phase": "lps", "signal_status": "confirmed",
+                "signal_age_bars": 1, "current_state": health["state"],
+            }
+        }))
+
+    def test_buy_level_state_falls_back_to_signal_then_event_health(self):
+        short_term = {
+            "sub_phase": "lps", "signal_status": "confirmed",
+            "signal_age_bars": 1,
+        }
+        signal_only = {
+            "short_term": dict(short_term),
+            "signal": {"current_state": "follow_through_weakened"},
+        }
+        health_only = {
+            "short_term": dict(short_term),
+            "event_health": {"state": "state_unknown"},
+        }
+
+        self.assertEqual(
+            read_current_event_state(signal_only), "follow_through_weakened")
+        self.assertIsNone(classify_buy_point_level(signal_only))
+        self.assertEqual(
+            read_current_event_state(health_only), "state_unknown")
+        self.assertIsNone(classify_buy_point_level(health_only))
+
+    def test_buy_level_state_prefers_short_term_over_fallback_payloads(self):
+        payload = {
+            "short_term": {
+                "sub_phase": "lps", "signal_status": "confirmed",
+                "signal_age_bars": 1, "current_state": "confirmed_holding",
+            },
+            "signal": {"current_state": "failed_breakout"},
+            "event_health": {"state": "state_unknown"},
+        }
+
+        self.assertEqual(
+            read_current_event_state(payload), "confirmed_holding")
+        self.assertEqual(classify_buy_point_level(payload)["number"], 2)
+
+    def test_nonhealthy_lps_is_not_a_shared_buy_signal(self):
+        for current_state in (
+                "follow_through_weakened", "failed_breakout", "state_unknown"):
+            with self.subTest(current_state=current_state):
+                self.assertFalse(is_buy_signal({
+                    "phase": {
+                        "primary": PHASE_MARKUP,
+                        "primary_sub_phase": SUB_LPS,
+                    },
+                    "signal": {"status": "confirmed", "age_bars": 0},
+                    "short_term": {"current_state": current_state},
+                }))
+
+    def test_603517_semantics_keep_history_but_block_weakened_lps(self):
+        rows = [
+            _make_row(11.75, 12.0, 11.6, 11.8, 100.0,
+                      date=f"202607{index + 1:02d}")
+            for index in range(60)
+        ]
+        rows[56] = _make_row(
+            12.0, 12.05, 11.93, 11.95, 80.0, date="20260907")
+        rows[57] = _make_row(
+            11.98, 12.15, 11.96, 12.1, 90.0, date="20260909")
+        rows[59] = _make_row(
+            11.9, 11.92, 11.45, 11.5, 140.0, date="20260915")
+        minor = {
+            "id": "minor_191", "level": "minor", "support": 9.8,
+            "resistance": 10.74, "quality_score": 0.8,
+            "support_idx": 10, "resistance_idx": 50,
+            "duration_bars": 40, "is_clear_range": True,
+        }
+        swing = {
+            "id": "swing_137", "level": "swing", "support": 10.0,
+            "resistance": 12.1, "quality_score": 0.9,
+            "support_idx": 0, "resistance_idx": 55,
+            "duration_bars": 55, "is_clear_range": True,
+        }
+        lps = {
+            "type": "lps", "status": "confirmed",
+            "event_index": 56, "detected_index": 57,
+            "event_date": "20260907", "detected_date": "20260909",
+            "age_bars": 2, "bars_since_event": 3,
+            "structure_level": "minor", "range_id": "minor_191",
+            "confidence": 0.78, "breakout_atr": 0.3,
+        }
+
+        def events_for_range(_ohlcv, _atr, trading_range):
+            return [dict(lps)] if trading_range["id"] == "minor_191" else []
+
+        with patch("analysis.wyckoff.detect_trading_ranges",
+                   return_value=[minor, swing]), \
+                patch("analysis.wyckoff._select_current_range",
+                      return_value=swing), \
+                patch("analysis.wyckoff.detect_wyckoff_events",
+                      side_effect=events_for_range), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=((PHASE_MARKUP, SUB_LPS, 0.7), [])):
+            result = analyze_kline_dict({
+                "meta": {"ts_code": "603517.SH", "end_date": "20260915"},
+                "data": rows,
+            })
+
+        self.assertEqual(result["confirmed_event"]["status"], "confirmed")
+        self.assertEqual(result["confirmed_event"]["event_date"], "20260907")
+        self.assertEqual(result["confirmed_event"]["detected_date"], "20260909")
+        self.assertEqual(result["confirmed_event"]["range_id"], "minor_191")
+        self.assertEqual(
+            result["short_term"]["current_state"], "follow_through_weakened")
+        self.assertEqual(
+            result["event_health"]["rule_version"],
+            LPS_EVENT_HEALTH_RULE_VERSION,
+        )
+        self.assertNotEqual(
+            result["short_term"]["current_state"], "failed_breakout")
+        self.assertFalse(result["entry_timing"]["executable"])
+        self.assertEqual(
+            result["entry_timing"]["reason_code"],
+            "wyckoff_lps_follow_through_weakened",
+        )
+        self.assertIsNone(classify_buy_point_level(result))
+        self.assertIn("历史已确认", result["phase"]["minor_phase"]["name"])
+        self.assertEqual(result["confirmed_event"], lps)
 
 
 class TestComputeMA(unittest.TestCase):
@@ -513,6 +730,22 @@ class TestMinorWyckoffStructure(unittest.TestCase):
         self.assertFalse(is_buy_point(PHASE_MARKUP, SUB_JAC, "candidate", 0))
         self.assertFalse(is_buy_point(PHASE_MARKUP, SUB_JAC, "confirmed", 9))
 
+    def test_is_buy_signal_rejects_all_nonhealthy_lps_states(self):
+        for current_state in (
+                "follow_through_weakened", "failed_breakout", "state_unknown"):
+            with self.subTest(current_state=current_state):
+                analysis = {
+                    "phase": {
+                        "primary": PHASE_MARKUP,
+                        "primary_sub_phase": SUB_LPS,
+                    },
+                    "signal": {"status": "confirmed", "age_bars": 0},
+                    "short_term": {"current_state": current_state},
+                }
+                self.assertTrue(is_buy_point(
+                    PHASE_MARKUP, SUB_LPS, "confirmed", 0))
+                self.assertFalse(is_buy_signal(analysis))
+
     def test_candidate_sos_does_not_become_primary_jac(self):
         ohlcv, _, trading_range = self._event_fixture()
         trading_range["quality_score"] = 1.0
@@ -684,6 +917,37 @@ class TestLongTermWyckoffContext(unittest.TestCase):
 
         self.assertEqual(alignment["status"], "countertrend")
         self.assertEqual(alignment["recommendation_gate"], "observation")
+
+    def test_period_alignment_blocks_all_nonhealthy_lps_states(self):
+        cases = {
+            "follow_through_weakened": (
+                "current_health_follow_through_weakened", "后续转弱"),
+            "failed_breakout": (
+                "current_health_failed_breakout", "突破失败"),
+            "state_unknown": (
+                "current_health_state_unknown", "健康状态未知"),
+        }
+        for current_state, (expected_status, label_fragment) in cases.items():
+            with self.subTest(current_state=current_state):
+                alignment = build_period_alignment(
+                    {
+                        "phase": PHASE_MARKUP, "sub_phase": SUB_LPS,
+                        "signal_status": "confirmed", "signal_age_bars": 0,
+                        "current_state": current_state,
+                    },
+                    {
+                        "eligible": True, "phase": PHASE_MARKUP,
+                        "confidence": 0.8,
+                    },
+                )
+
+                self.assertEqual(
+                    alignment["rule_version"], PERIOD_ALIGNMENT_RULE_VERSION)
+                self.assertEqual(alignment["status"], expected_status)
+                self.assertEqual(
+                    alignment["recommendation_gate"], "observation")
+                self.assertEqual(alignment["current_state"], current_state)
+                self.assertIn(label_fragment, alignment["label"])
 
     def test_long_term_phase_is_classified_from_context_not_short_trigger(self):
         context = {"id": "context_1", "level": "context", "support": 90.0,

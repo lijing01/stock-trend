@@ -1649,6 +1649,54 @@ class TestRunPhase2Funnel(unittest.TestCase):
         # 复合分重配后包含 wyckoff 权重
         self.assertGreater(item["composite_score"], 50.0)
 
+    def test_funnel_passes_through_lps_current_health_audit(self):
+        wk = _wk(phase="markup", sub="lps", conf=0.7, score=2.0)
+        wk.update({
+            "signal": {
+                "status": "confirmed", "event": "lps",
+                "current_state": "follow_through_weakened",
+            },
+            "confirmed_event": {
+                "type": "lps", "status": "confirmed", "event_date": "20260907",
+                "confirmation_date": "20260909", "range_id": "minor_191",
+            },
+            "short_term": {
+                "phase": "markup", "phase_name": "拉升阶段",
+                "sub_phase": "lps", "sub_phase_name": "LPS",
+                "confidence": 0.7, "signal_status": "confirmed",
+                "current_state": "follow_through_weakened",
+            },
+            "event_health": {
+                "state": "follow_through_weakened",
+                "reason_code": "wyckoff_lps_follow_through_weakened",
+                "event_range_id": "minor_191", "structural_floor": 10.74,
+            },
+            "entry_timing": {
+                "status": "follow_through_weakened",
+                "reason_code": "wyckoff_lps_follow_through_weakened",
+                "executable": False,
+            },
+        })
+        sc.analyze_kline_dict = lambda kline: wk
+        sc._fetch_kline = lambda ts, as_of_date="", cache_only=False: _make_kline(
+            60, ts)
+
+        item = sc.run_phase2(
+            [_make_candidate("600001")], enable_wyckoff=True)[0]
+
+        self.assertEqual(
+            item["wyckoff"]["short_term"]["current_state"],
+            "follow_through_weakened",
+        )
+        self.assertEqual(
+            item["wyckoff"]["event_health"]["event_range_id"], "minor_191")
+        self.assertEqual(
+            item["wyckoff"]["confirmed_event"]["status"], "confirmed")
+        self.assertEqual(
+            item["wyckoff"]["entry_timing"]["reason_code"],
+            "wyckoff_lps_follow_through_weakened",
+        )
+
     def test_expensive_dimensions_only_fetch_for_wyckoff_passes(self):
         candidates = [_make_candidate("600001"), _make_candidate("600002")]
         sc._fetch_kline = lambda ts, as_of_date="", cache_only=False: _make_kline(60, ts)

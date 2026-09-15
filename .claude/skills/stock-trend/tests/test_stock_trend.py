@@ -778,6 +778,124 @@ def run_new_script_tests(tmpdir):
     else:
         test("TF-RPT-WY-FAIL-00: 报告生成", False, f"exit_code={rc}, stderr={stderr[:200]}", "report")
 
+    weakened_wyckoff_path = os.path.join(
+        tmpdir, "render_wyckoff_lps_weakened.json")
+    _write_json(weakened_wyckoff_path, {
+        "meta": {},
+        "phase": {
+            "primary": "markup", "primary_name": "拉升阶段",
+            "primary_sub_phase": "lps", "sub_phase_name": "LPS",
+            "confidence": 0.72,
+            "minor_phase": {
+                "code": "D", "name": "阶段D：LPS已确认",
+                "description": "SOS 后回踩缩量、守住原阻力",
+            },
+        },
+        "range": {"is_clear_range": True, "support": 10.10,
+                  "resistance": 10.74, "duration_bars": 18,
+                  "range_height_pct": 6.3},
+        "vsa_signals": [], "cause_effect": {}, "wyckoff_score": 1.5,
+        "wyckoff_signals": {"trading_implication": "等待重新确认。"},
+        "signal": {
+            "status": "confirmed", "event": "lps",
+            "current_state": "follow_through_weakened",
+        },
+        "confirmed_event": {
+            "type": "lps", "status": "confirmed",
+            "event_date": "20260907", "confirmation_date": "20260909",
+            "range_id": "minor_191",
+        },
+        "short_term": {
+            "phase": "markup", "phase_name": "拉升阶段",
+            "sub_phase": "lps", "sub_phase_name": "LPS",
+            "confidence": 0.72, "signal_status": "confirmed",
+            "current_state": "follow_through_weakened",
+            "event_date": "20260907", "confirmation_date": "20260909",
+            "minor_phase": {
+                "code": "D", "name": "阶段D：LPS已确认",
+                "description": "SOS 后回踩缩量、守住原阻力",
+            },
+        },
+        "event_health": {
+            "rule_version": "wyckoff/lps-event-health-v1",
+            "state": "follow_through_weakened",
+            "reason_code": "wyckoff_lps_follow_through_weakened",
+            "event_range_id": "minor_191", "structural_floor": 10.74,
+            "trigger_low": 11.93, "trigger_close": 11.95,
+            "current_close": 11.50, "evaluated_through": "20260915",
+        },
+        "entry_timing": {
+            "status": "follow_through_weakened",
+            "reason_code": "wyckoff_lps_follow_through_weakened",
+            "executable": False,
+        },
+        "long_term": {"eligible": False},
+        "alignment": {
+            "label": "历史LPS已确认，当前后续转弱",
+            "recommendation_gate": "observation",
+        },
+    })
+    with open(weakened_wyckoff_path, "r", encoding="utf-8") as f:
+        weakened_fixture = json.load(f)
+    test(
+        "TF-RPT-WY-WEAK-VERSION: event health规则版本精确匹配核心契约",
+        weakened_fixture.get("event_health", {}).get("rule_version")
+        == "wyckoff/lps-event-health-v1",
+        str(weakened_fixture.get("event_health", {}).get("rule_version")),
+        "report",
+    )
+    weakened_md_path = os.path.join(tmpdir, "test_report_lps_weakened.md")
+    weakened_html_path = os.path.join(tmpdir, "test_report_lps_weakened.html")
+    rc, stdout, stderr = run_script(
+        "reporting/report.py",
+        "--technical", tech_path,
+        "--kline", kline_path,
+        "--scores-file", scores_path,
+        "--wyckoff-data", weakened_wyckoff_path,
+        "--stock-name", "绝味食品",
+        "--date", "2026-09-15",
+        "--output-md", weakened_md_path,
+        "--output-html", weakened_html_path,
+        timeout=15,
+    )
+    if rc == 0:
+        with open(weakened_md_path, "r", encoding="utf-8") as f:
+            weakened_md_content = f.read()
+        with open(weakened_html_path, "r", encoding="utf-8") as f:
+            weakened_html_content = f.read()
+        for label, content in (
+                ("MD", weakened_md_content),
+                ("HTML", weakened_html_content)):
+            test(
+                f"TF-RPT-WY-WEAK-01: {label}同时显示历史确认与当前健康",
+                "历史事件状态" in content
+                and "历史已确认（事件日 20260907，确认日 20260909）" in content
+                and "当前健康状态" in content
+                and "确认后转弱，待重新确认" in content,
+                content[content.find("维科夫"):content.find("维科夫") + 1400],
+                "report",
+            )
+            test(
+                f"TF-RPT-WY-WEAK-02: {label}含中文入场阻断原因",
+                "入场状态" in content
+                and "不可执行 · LPS确认后转弱，等待重新确认" in content,
+                content[content.find("维科夫"):content.find("维科夫") + 1400],
+                "report",
+            )
+            test(
+                f"TF-RPT-WY-WEAK-03: {label}区分转弱与硬失效",
+                "转弱后的下阶段判定" in content
+                and "失效后的下阶段判定" not in content
+                and "阶段D：LPS历史已确认，后续转弱、待重新确认" in content
+                and "阶段D：LPS已确认 —" not in content,
+                content[content.find("维科夫"):content.find("维科夫") + 1600],
+                "report",
+            )
+    else:
+        test(
+            "TF-RPT-WY-WEAK-00: 报告生成", False,
+            f"exit_code={rc}, stderr={stderr[:200]}", "report")
+
     weak_tech_path, weak_kline_path, weak_scores_path = _write_report_fixture(
         tmpdir,
         "render_weak",
