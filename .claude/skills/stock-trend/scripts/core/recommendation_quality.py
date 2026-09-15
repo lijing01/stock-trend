@@ -7,7 +7,7 @@ WEIGHTS = {"kline": 0.55, "capital": 0.25, "fundamental": 0.20}
 MIN_COVERAGE = 0.70
 NON_PROVIDER_STATUSES = frozenset({
     "cache_miss", "cache_stale", "not_selected_for_enrichment",
-    "not_started_deadline", "source_unavailable",
+    "not_started_deadline", "source_unavailable", "source_date_lagging",
 })
 SUCCESS_STATUSES = frozenset({"live_success", "cache_valid"})
 
@@ -141,7 +141,8 @@ def _dimension(name, payload, expected_date="", require_date=False,
 
 
 def assess_candidate_data(kline, capital, fundamental, as_of_date="",
-                          source_evidence=None, capital_evidence=None):
+                          source_evidence=None, capital_evidence=None,
+                          capital_expected_date=""):
     source_evidence = source_evidence if isinstance(source_evidence, dict) else {}
     if capital_evidence is not None:
         source_evidence = {
@@ -149,6 +150,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date="",
             "capital": capital_evidence,
         }
     normalized_as_of = _iso_date(as_of_date)
+    normalized_capital_as_of = _iso_date(capital_expected_date) or normalized_as_of
     kline_date = latest_data_date(kline)
     expected = normalized_as_of or kline_date
     dimensions = {
@@ -156,7 +158,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date="",
             "kline", kline, expected, require_date=True,
             evidence=source_evidence.get("kline")),
         "capital": _dimension(
-            "capital", capital, expected, require_date=True,
+            "capital", capital, normalized_capital_as_of, require_date=True,
             evidence=source_evidence.get("capital")),
         "fundamental": _dimension(
             "fundamental", fundamental, expected,

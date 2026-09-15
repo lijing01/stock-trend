@@ -63,7 +63,7 @@ SOURCE_HARD_FAILURE_THRESHOLD = 8
 SOURCE_EVIDENCE_STATUSES = frozenset({
     "live_success", "cache_valid", "cache_miss", "cache_stale",
     "not_selected_for_enrichment", "not_started_deadline",
-    "source_unavailable",
+    "source_unavailable", "source_date_lagging",
 })
 
 # ──────────────────────── Helpers ────────────────────────
@@ -306,6 +306,17 @@ def _source_unavailable(source_health, source):
         return source_health.unavailable(source)
     state = _source_state(source_health, source)
     return bool(state and state.get("state") == "unavailable")
+
+
+def _source_live_block_reason(source_health, source):
+    """Return a scheduler block reason without mislabeling date lag as outage."""
+    if isinstance(source_health, RunSourceHealth):
+        return source_health.live_block_reason(source)
+    state = _source_state(source_health, source)
+    return {
+        "unavailable": "source_unavailable",
+        "date_lagging": "source_date_lagging",
+    }.get((state or {}).get("state"), "")
 
 
 def _source_succeeded(source_health, source):
@@ -2203,7 +2214,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
 
     def _fetch_one_cap(c):
         ts_code = c["ts_code"]
-        cache_only = _source_unavailable(source_health, "capital")
+        cache_only = bool(_source_live_block_reason(source_health, "capital"))
         fetch_kwargs = {"cache_only": True} if cache_only else {}
         wrapped = _evidenced_fetch(
             _fetch_capital_for_run, ts_code, **fetch_kwargs,
@@ -2269,7 +2280,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
 
     def _fetch_one_fund(c):
         ts_code = c["ts_code"]
-        cache_only = _source_unavailable(source_health, "fundamental")
+        cache_only = bool(_source_live_block_reason(source_health, "fundamental"))
         fetch_kwargs = {}
         if cache_only:
             fetch_kwargs["cache_only"] = True
@@ -2522,7 +2533,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
 def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                as_of_date="", source_health=None, metrics=None,
                trade_plan_policy=None, top=30, min_candidates=20,
-               min_score=50):
+               min_score=50, capital_expected_date=""):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2537,6 +2548,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
     if not candidates:
         return []
+
+    # Daily K-line/sector evidence may be provisional on the current session,
+    # while the stock capital-flow provider is a closing-data source.  Keep a
+    # separate date contract so an intraday scan can use the latest completed
+    # close without weakening the K-line or recommendation-date gates.
+    capital_expected_date = capital_expected_date or as_of_date
 
     metrics_ref = metrics if isinstance(metrics, dict) else {}
     try:
@@ -2671,7 +2688,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     def _fetch_capital_for_run(ts_code, **kwargs):
         result = _call_fetch_compat(
             _fetch_capital_flow, ts_code,
-            {"expected_trading_date": as_of_date, **kwargs})
+            {"expected_trading_date": capital_expected_date, **kwargs})
         if isinstance(result, dict) and "payload" not in result \
                 and isinstance(result.get("data"), list):
             meta = result.get("meta")
@@ -2700,7 +2717,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     def _probe(candidate, source):
         try:
             wrapped = (
-                _probe_capital_cache(candidate["ts_code"], as_of_date)
+                _probe_capital_cache(candidate["ts_code"], capital_expected_date)
                 if source == "capital" else
                 _probe_fundamental_cache(candidate["ts_code"], as_of_date)
             )
@@ -2805,7 +2822,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         priority_inputs, capital_data=capital_data, top=top,
         batch_size=CAPITAL_PREFETCH_BATCH_SIZE,
         prefetch_limit=CAPITAL_PREFETCH_LIMIT,
-        expected_trading_date=as_of_date)
+        expected_trading_date=capital_expected_date)
     priority_queue = queue_info["priority_queue"]
     if isinstance(source_health, RunSourceHealth):
         requested_priority_count = len(priority_queue)
@@ -2891,12 +2908,13 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 max_workers=min(worker_count, MAX_IN_FLIGHT[source]),
                 cache_usable=usable, include_evidence=True,
                 deadline_reason=deadline_reason)
-        if _source_unavailable(source_health, source):
+        block_reason = _source_live_block_reason(source_health, source)
+        if block_reason:
             return [(
                 candidate,
                 source_result(None, live_attempt(
-                    attempted=False, reason="source_unavailable",
-                    status="source_unavailable")),
+                    attempted=False, reason=block_reason,
+                    status=block_reason)),
             ) for candidate in batch]
         results = []
         with ThreadPoolExecutor(
@@ -2929,8 +2947,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     evidence["status"] = "not_started_deadline"
                     evidence["scheduler_reason"] = scheduler_reason
                     evidence["cache_used"] = False
-                elif scheduler_reason == "source_unavailable":
-                    evidence["status"] = "source_unavailable"
+                elif scheduler_reason in {
+                        "source_unavailable", "source_date_lagging"}:
+                    evidence["status"] = scheduler_reason
                     evidence["cache_used"] = False
             evidence["selection_stage"] = stage
             _record_source_evidence(source, ts_code, evidence)
@@ -3028,6 +3047,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             base_data_quality = assess_candidate_data(
                 kline=kline, capital=cap, fundamental=fund,
                 as_of_date=as_of_date,
+                capital_expected_date=capital_expected_date,
                 source_evidence=source_evidence | {
                     "capital": source_evidence["capital"].get(
                         ts_code, {}),
@@ -3321,12 +3341,13 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         for source, (selected, batch) in topup_batches.items():
             if not selected:
                 continue
-            if _source_unavailable(source_health, source):
+            block_reason = _source_live_block_reason(source_health, source)
+            if block_reason:
                 for candidate in selected:
                     evidence = source_evidence[source].setdefault(
                         candidate["ts_code"], live_attempt(attempted=False))
-                    evidence.update({"status": "source_unavailable",
-                                     "reason": "source_unavailable",
+                    evidence.update({"status": block_reason,
+                                     "reason": block_reason,
                                      "attempted": False, "cache_used": False,
                                      "stale": False, "selection_stage": "topup"})
                 continue

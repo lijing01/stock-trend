@@ -131,6 +131,20 @@ class TestRunSourceHealthContract(unittest.TestCase):
         health.release_unstarted(first, "test")
         health.release_unstarted(second, "test")
 
+    def test_stale_data_blocks_as_date_lag_without_opening_outage_circuit(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth()
+        token = health.try_acquire_live_permit("capital")
+        health.mark_started(token)
+        health.complete_failure(token, _attempt(reason="stale_data"))
+
+        state = health.snapshot()["capital"]
+        self.assertEqual(state["state"], "date_lagging")
+        self.assertEqual(state["circuit_breaks"], 0)
+        self.assertEqual(
+            health.live_block_reason("capital"), "source_date_lagging")
+        self.assertIsNone(health.try_acquire_live_permit("capital"))
+
     def test_failure_classifier_distinguishes_required_reason_codes(self):
         contract = _source_health_contract(self)
         classify = contract.classify_failure

@@ -86,6 +86,7 @@ CAPITAL_TOPUP_RESERVE_SECONDS = capital_topup_reserve_seconds()
 # Below that it stays "degraded" and keeps retrying so a transient blip
 # (e.g. 1-2 kline timeouts) never orphans the rest of the run to stale cache.
 HARD_FAILURE_THRESHOLD = 8
+DATE_LAG_FAILURE_REASONS = frozenset({"stale_data"})
 
 
 def classify_failure(error: BaseException | str | None) -> str:
@@ -283,10 +284,11 @@ class RunSourceHealth:
         """Reserve admission capacity; counters change only after start."""
         with self._lock:
             state = self._state(source)
-            if state["state"] == "unavailable":
+            block_reason = self._live_block_reason_locked(source)
+            if block_reason:
                 self._events.append({
                     "event": "live_skipped", "source": source,
-                    "reason": "source_unavailable",
+                    "reason": block_reason,
                 })
                 return None
             if state["in_flight"] >= self._inflight_cap(source):
@@ -347,7 +349,19 @@ class RunSourceHealth:
                 crossed_threshold = (
                     state["consecutive_live_failures"]
                     == self.failure_threshold)
-                if (token.source == "sector_membership" and reason in {
+                if reason in DATE_LAG_FAILURE_REASONS:
+                    # A provider response for an older trading date is a
+                    # freshness/capability mismatch, not a provider outage.
+                    # Stop issuing identical requests for this run while
+                    # preserving a distinct scheduler state and reason.
+                    state["consecutive_live_failures"] = 0
+                    state["state"] = "date_lagging"
+                    self._events.append({
+                        "event": "source_date_lagging",
+                        "source": token.source,
+                        "reason": "source_date_lagging",
+                    })
+                elif (token.source == "sector_membership" and reason in {
                         "sector_mapping_missing", "sector_mapping_ambiguous"}):
                     # A successful directory lookup without an exact match is
                     # an item-level taxonomy issue, not a provider outage.
@@ -419,6 +433,17 @@ class RunSourceHealth:
     def unavailable(self, source: str) -> bool:
         with self._lock:
             return self._state(source)["state"] == "unavailable"
+
+    def live_block_reason(self, source: str) -> str:
+        """Return the scheduler reason for suppressing live work, if any."""
+        with self._lock:
+            return self._live_block_reason_locked(source)
+
+    def _live_block_reason_locked(self, source: str) -> str:
+        return {
+            "unavailable": "source_unavailable",
+            "date_lagging": "source_date_lagging",
+        }.get(self._state(source)["state"], "")
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -570,8 +595,9 @@ def bounded_source_map(
                             "stale", False),
                     })
             results.append((item, fallback))
-        if health.unavailable(source):
-            pending_reason = "source_unavailable"
+        blocked_reason = health.live_block_reason(source)
+        if blocked_reason:
+            pending_reason = blocked_reason
         elif time.monotonic() >= live_deadline:
             pending_reason = deadline_reason or "deadline"
         else:

@@ -32,6 +32,7 @@ from scans.daily_candidates import (
     generate_report,
     is_recommendation_session,
     merge_sector_resonance,
+    resolve_capital_expected_date,
     resolve_recommendation_date,
 )
 from scans import daily_candidates as dc
@@ -1024,6 +1025,24 @@ class TestRecommendationPolicy(unittest.TestCase):
             last_trading_date="2026-08-07",
         )
         self.assertEqual(result, "2026-08-07")
+
+    def test_intraday_capital_uses_previous_completed_session(self):
+        result = resolve_capital_expected_date(
+            now=datetime(2026, 8, 10, 11, 0),
+            recommendation_date="2026-08-10",
+            is_trading_day=True,
+            trading_dates={"2026-08-07", "2026-08-10"},
+        )
+        self.assertEqual(result, "2026-08-07")
+
+    def test_post_close_capital_uses_recommendation_session(self):
+        result = resolve_capital_expected_date(
+            now=datetime(2026, 8, 10, 16, 0),
+            recommendation_date="2026-08-10",
+            is_trading_day=True,
+            trading_dates={"2026-08-07", "2026-08-10"},
+        )
+        self.assertEqual(result, "2026-08-10")
 
     def test_weekend_prefers_newer_market_review_close_over_stale_snapshot(self):
         result = resolve_recommendation_date(
@@ -3831,6 +3850,35 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("未调用", detail)
         self.assertIn("调度原因码source_unavailable", detail)
         self.assertNotIn("抓取原因码source_unavailable", detail)
+
+    def test_source_date_lagging_capital_is_not_rendered_as_outage(self):
+        item = candidate("source-date-lagging", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "reasons": ["source_date_lagging"],
+            "dimensions": {
+                "capital": {
+                    "available": False,
+                    "source_status": "source_date_lagging",
+                    "stale_reason": "source_date_lagging",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "attempted": False,
+                "status": "source_date_lagging",
+                "reason": "source_date_lagging",
+                "selection_stage": "initial",
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("资金增强源日期滞后，本轮未调用", detail)
+        self.assertIn("调度原因码source_date_lagging", detail)
+        self.assertNotIn("资金增强源不可用", detail)
 
     def test_capital_failure_audit_excludes_unrequested_scheduler_states(self):
         provider_failure = candidate("provider-failure", eligible=False)

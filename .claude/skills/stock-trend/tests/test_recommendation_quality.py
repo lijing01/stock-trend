@@ -187,6 +187,17 @@ class TestRecommendationQuality(unittest.TestCase):
         self.assertIn("source_unavailable", result["reasons"])
         self.assertNotIn("capital_error", result["reasons"])
 
+    def test_intraday_capital_can_use_latest_completed_close(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260915"}]),
+            capital=payload([{"trade_date": "20260914", "main_net_inflow": 1}]),
+            fundamental=payload([], fetched_at="20260915-110000"),
+            as_of_date="2026-09-15",
+            capital_expected_date="2026-09-14",
+        )
+        self.assertTrue(result["dimensions"]["capital"]["fresh"])
+        self.assertTrue(result["eligible"])
+
     def test_nominally_successful_empty_capital_is_an_error(self):
         empty_capital = {
             "meta": {"data_source": "eastmoney", "record_count": 0},

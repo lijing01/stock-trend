@@ -89,6 +89,7 @@ REASON_LABELS = {
     "not_selected_for_enrichment": "未进入资金增强优先队列（预算内未选中）",
     "not_started_deadline": "已达到实时请求截止时间，未启动",
     "source_unavailable": "资金增强源不可用，本轮未调用",
+    "source_date_lagging": "资金增强源日期滞后，本轮未调用",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
     "history_insufficient": "板块历史快照不足，尚不能验证持续性",
     "history_unknown": "本板块历史未匹配，持续性未知",
@@ -124,6 +125,7 @@ DATA_REASON_CODES = {
     "not_selected_for_enrichment",
     "not_started_deadline",
     "source_unavailable",
+    "source_date_lagging",
     "stale_cache",
     "partial_realtime",
     "regime_missing",
@@ -1034,6 +1036,25 @@ def resolve_recommendation_date(now=None, regime_date="", last_trading_date="",
     return today
 
 
+def resolve_capital_expected_date(now=None, recommendation_date="",
+                                  is_trading_day=None, trading_dates=None):
+    """Resolve the closing-data date required by stock capital-flow fetchers.
+
+    During a live session, capital-flow providers commonly expose the latest
+    completed close rather than a same-day closing record.  Keep that date
+    contract separate from the provisional recommendation/K-line date.
+    """
+    now = now or datetime.now()
+    recommendation_date = str(recommendation_date or "")
+    if not recommendation_date:
+        return recommendation_date
+    if not (is_trading_day is True and is_recommendation_session(now)):
+        return recommendation_date
+    normalized = sorted({str(value) for value in (trading_dates or set())
+                         if isinstance(value, str) and value < recommendation_date})
+    return normalized[-1] if normalized else recommendation_date
+
+
 def _window_average(values, size):
     if len(values) < size:
         return None
@@ -1841,7 +1862,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
 def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  min_candidates=20, min_score=50, as_of_date="",
                  sector_context=None, source_health=None, metrics=None,
-                 capital_top=30,
+                 capital_top=30, capital_expected_date="",
                  initial_sector_window=DEFAULT_INITIAL_SECTOR_WINDOW,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
@@ -2007,22 +2028,24 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                 scored = run_phase2(
                     new_candidates, enable_wyckoff=True,
                     as_of_date=as_of_date,
+                    capital_expected_date=capital_expected_date,
                     source_health=source_health, metrics=metrics,
                     top=capital_top, min_candidates=min_candidates,
                     min_score=min_score)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
-                        "source_health", "metrics",
+                        "source_health", "metrics", "capital_expected_date",
                         "top", "min_candidates", "min_score")):
                     raise
                 try:
                     scored = run_phase2(
                         new_candidates, enable_wyckoff=True,
                         as_of_date=as_of_date,
+                        capital_expected_date=capital_expected_date,
                         top=capital_top, min_candidates=min_candidates)
                 except TypeError as compat_exc:
                     if not any(name in str(compat_exc) for name in (
-                            "top", "min_candidates")):
+                            "capital_expected_date", "top", "min_candidates")):
                         raise
                     scored = run_phase2(
                         new_candidates, enable_wyckoff=True,
@@ -2129,7 +2152,8 @@ def _reason_detail(code, item):
     }.get(code)
     if dimension_name is None and code in {
         "cache_miss", "cache_stale", "not_selected_for_enrichment",
-        "not_started_deadline", "source_unavailable"}:
+        "not_started_deadline", "source_unavailable",
+        "source_date_lagging"}:
         evidence_by_source = item.get("source_evidence", {})
         for source in ("capital", "fundamental"):
             evidence = evidence_by_source.get(source, {}) \
@@ -3917,7 +3941,9 @@ def main():
         else max_sector_expansion)
     style_shadow_state = _load_style_shadow(style_shadow_path, regime)
     style_memberships = _load_style_memberships(memberships_path)
-    from fetchers.sector_data import get_last_trading_day
+    from fetchers.sector_data import (
+        _load_authoritative_trading_dates, get_last_trading_day,
+    )
     current_time = datetime.now()
     last_trading_date, trading_date_source = get_last_trading_day(
         now=current_time)
@@ -3929,6 +3955,15 @@ def main():
         last_trading_date=last_trading_date or "",
         is_trading_day=is_trading_day,
     )
+    capital_expected_date = resolve_capital_expected_date(
+        now=current_time,
+        recommendation_date=expected_date,
+        is_trading_day=is_trading_day,
+        trading_dates=_load_authoritative_trading_dates(current_time)
+        if is_trading_day is True and is_recommendation_session(current_time)
+        else None,
+    )
+    performance["capital_expected_date"] = capital_expected_date
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
     # P4: only an explicitly published, atomically pointed version can alter
@@ -3986,6 +4021,7 @@ def main():
         min_candidates=args.min_candidates,
         min_score=args.min_score,
         as_of_date=expected_date,
+        capital_expected_date=capital_expected_date,
         sector_context={c["code"]: c for c in sector_codes},
         source_health=source_health,
         metrics=performance,
