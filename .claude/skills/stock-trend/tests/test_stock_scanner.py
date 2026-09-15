@@ -1371,6 +1371,73 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertEqual(sc.build_report_scope_candidates(
             scored, top=10, min_score=50), [])
 
+    def test_enrichment_frontier_buffer_covers_boundary_without_expanding_initial_queue(self):
+        candidates = [
+            _make_candidate(f"616{index:03d}") for index in range(50)
+        ]
+        for candidate in candidates:
+            candidate.update({
+                "membership_source": "realtime",
+                "membership_quality": "good",
+                "membership_data_date": "20260827",
+            })
+        capital_calls = []
+
+        def fetch_capital(ts_code, **_kwargs):
+            capital_calls.append(ts_code)
+            return {
+                "meta": {"data_source": "eastmoney"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+
+        with patch.object(
+                sc, "_fetch_kline",
+                side_effect=lambda ts_code, **_kwargs:
+                _make_dated_kline(60, ts_code, "20260827")), \
+             patch.object(sc, "_fetch_capital_flow",
+                          side_effect=fetch_capital), \
+             patch.object(sc, "_fetch_fundamental", return_value=None):
+            metrics = {}
+            scored = sc.run_phase2(
+                candidates, enable_wyckoff=False, min_candidates=20,
+                top=30, as_of_date="20260827",
+                capital_expected_date="20260827", metrics=metrics)
+
+        self.assertEqual(metrics["report_scope_output_limit"], 30)
+        self.assertEqual(metrics["report_scope_base_limit"], 30)
+        self.assertEqual(
+            metrics["report_scope_enrichment_limit"],
+            30 + sc.CAPITAL_REPORT_FRONTIER_BUFFER,
+        )
+        self.assertEqual(metrics["report_scope_buffer_count"],
+                         sc.CAPITAL_REPORT_FRONTIER_BUFFER)
+        self.assertLessEqual(
+            metrics["capital_initial_priority_count"],
+            sc.CAPITAL_PREFETCH_LIMIT)
+        self.assertEqual(
+            metrics["capital_topup_selected_count"],
+            sc.CAPITAL_REPORT_FRONTIER_BUFFER,
+        )
+        self.assertEqual(
+            metrics["capital_topup_live_started"],
+            sc.CAPITAL_REPORT_FRONTIER_BUFFER,
+        )
+        by_code = {item["code"]: item for item in scored}
+        self.assertTrue(all(
+            by_code[f"616{index:03d}"]["source_evidence"]["capital"].get(
+                "selection_stage") == "topup"
+            for index in range(36, 48)
+        ))
+        self.assertTrue(all(
+            by_code[f"616{index:03d}"]["source_evidence"]["capital"].get(
+                "scheduler_reason") == "outside_report_frontier"
+            for index in range(48, 50)
+        ))
+        self.assertEqual(len(capital_calls), metrics["capital_live_started"])
+        self.assertLessEqual(
+            len(capital_calls),
+            sc.CAPITAL_PREFETCH_LIMIT + sc.CAPITAL_TOPUP_LIMIT)
+
     def test_topup_capacity_requires_a_complete_provider_window(self):
         self.assertEqual(sc._bounded_live_capacity("capital", 24.9, 12), 0)
         self.assertEqual(sc._bounded_live_capacity("capital", 25.0, 12), 4)
@@ -1560,7 +1627,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
             health.release_unstarted(token, "test")
 
     def test_unenriched_candidate_cannot_be_promoted(self):
-        candidates = [_make_candidate(f"611{index:03d}") for index in range(37)]
+        candidates = [_make_candidate(f"611{index:03d}") for index in range(50)]
         capital_calls = []
 
         def fetch_capital(ts_code, **_kwargs):
@@ -1587,10 +1654,16 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertTrue(unselected)
         self.assertTrue(all(
             not item["data_quality"]["eligible"] for item in unselected))
+        self.assertTrue(all(
+            item["source_evidence"]["capital"].get("report_scope_status")
+            == "outside_report_frontier"
+            and item["source_evidence"]["capital"].get("scheduler_reason")
+            == "outside_report_frontier"
+            for item in unselected))
         self.assertLess(len(capital_calls), len(candidates))
 
     def test_failed_capital_calls_stay_within_fixed_queue_budget(self):
-        candidates = [_make_candidate(f"612{index:03d}") for index in range(37)]
+        candidates = [_make_candidate(f"612{index:03d}") for index in range(50)]
         capital_calls = []
 
         def fetch_capital(ts_code, with_evidence=False, **_kwargs):
@@ -1610,7 +1683,9 @@ class TestRunPhase2Funnel(unittest.TestCase):
             scored = sc.run_phase2(
                 candidates, enable_wyckoff=False, min_candidates=20)
 
-        self.assertLessEqual(len(capital_calls), sc.CAPITAL_PREFETCH_LIMIT)
+        self.assertLessEqual(
+            len(capital_calls),
+            sc.CAPITAL_PREFETCH_LIMIT + sc.CAPITAL_TOPUP_LIMIT)
         self.assertTrue(all(
             not item["data_quality"]["eligible"] for item in scored))
 

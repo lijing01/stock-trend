@@ -3207,6 +3207,29 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual([item["code"] for item in buckets["data_rejected"]], ["2"])
         self.assertEqual(buckets["observation"], [])
 
+    def test_budget_omission_outside_report_frontier_is_not_data_rejected(self):
+        regime = {"score": 85, "data_date": "2026-08-06"}
+        policy = build_recommendation_policy(regime, "2026-08-06")
+        item = candidate("budget-omitted", eligible=False)
+        item["source_evidence"] = {"capital": {
+            "status": "not_selected_for_enrichment",
+            "report_scope_status": "outside_report_frontier",
+            "scheduler_reason": "outside_report_frontier",
+            "attempted": False,
+        }}
+
+        buckets = classify_candidates([item], policy)
+
+        self.assertEqual(buckets["data_rejected"], [])
+        self.assertEqual(
+            [row["code"] for row in buckets["unenriched_observation"]],
+            ["budget-omitted"],
+        )
+        self.assertIn(
+            "outside_report_frontier",
+            buckets["unenriched_observation"][0]["observation_reasons"],
+        )
+
     def test_strong_regime_never_promotes_single_day_pulse(self):
         regime = {"score": 85, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(regime, "2026-08-06")

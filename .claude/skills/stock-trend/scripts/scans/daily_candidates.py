@@ -94,6 +94,7 @@ REASON_LABELS = {
     "cache_miss": "未命中有效缓存，尚未完成增强",
     "cache_stale": "缓存存在但已过期或不覆盖目标日期",
     "not_selected_for_enrichment": "未进入资金增强优先队列（预算内未选中）",
+    "outside_report_frontier": "未进入正式候选范围，本轮未请求资金数据",
     "not_started_deadline": "已达到实时请求截止时间，未启动",
     "source_unavailable": "资金增强源不可用，本轮未调用",
     "source_date_lagging": "资金增强源日期滞后，本轮未调用",
@@ -363,7 +364,7 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "sector_expanded_count", "batch_count", "raw_candidate_count",
     "unique_candidate_count", "wyckoff_pass_count", "final_candidate_count",
     "output_candidate_count", "final_valid_count", "data_eligible_count",
-    "data_rejected_count",
+    "data_rejected_count", "unenriched_observation_count",
     "actionable_count",
     "capital_priority_count", "capital_live_started", "capital_valid_count",
     "capital_cache_valid_count", "capital_skipped_by_budget",
@@ -374,6 +375,9 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_topup_executable_count", "capital_topup_budget_insufficient",
     "capital_topup_global_omitted",
     "report_scope_candidate_count", "report_scope_unenhanced_count",
+    "report_scope_output_limit", "report_scope_base_limit",
+    "report_scope_enrichment_limit",
+    "report_scope_buffer_count",
     "report_scope_topup_count",
     "fundamental_topup_selected_count", "fundamental_topup_live_started",
     "fundamental_topup_valid_count", "fundamental_topup_skipped_deadline",
@@ -468,6 +472,8 @@ def _complete_performance(performance, source_health, candidates, buckets,
         for item in candidates)
     completed["data_rejected_count"] = len(
         buckets.get("data_rejected", []))
+    completed["unenriched_observation_count"] = len(
+        buckets.get("unenriched_observation", []))
     expanded_codes = completed.get("sector_expanded_codes") or []
     if expanded_codes:
         completed["sector_expanded_count"] = len(set(expanded_codes))
@@ -794,6 +800,7 @@ def _performance_markdown(performance):
         f"数据合格 {performance.get('data_eligible_count', 0)} → "
         f"有效 {performance.get('final_valid_count', 0)} → "
         f"数据失效 {performance.get('data_rejected_count', 0)} → "
+        f"扩展观察未增强 {performance.get('unenriched_observation_count', 0)} → "
         f"可执行 {performance.get('actionable_count', 0)}",
         "",
         "**运行预算**: "
@@ -804,7 +811,11 @@ def _performance_markdown(performance):
         f"首轮增强截止 {performance.get('budget', {}).get('initial_enrichment_deadline_seconds', '未知')}s",
         "",
         "**资金增强审计**: "
-        f"报告范围 {performance.get('report_scope_candidate_count', 0)} | "
+        f"增强覆盖范围 {performance.get('report_scope_candidate_count', 0)} | "
+        f"最终输出上限 {performance.get('report_scope_output_limit', 0)} | "
+        f"报告基准范围 {performance.get('report_scope_base_limit', 0)} | "
+        f"增强前沿上限 {performance.get('report_scope_enrichment_limit', 0)} | "
+        f"边界缓冲 {performance.get('report_scope_buffer_count', 0)} | "
         f"范围未增强 {performance.get('report_scope_unenhanced_count', 0)} | "
         f"范围二轮覆盖 {performance.get('report_scope_topup_count', 0)} | "
         f"优先队列 {performance.get('capital_priority_count', 0)} → "
@@ -948,6 +959,10 @@ def _performance_html(performance):
     )
     capital_text = (
         f"report_scope={performance.get('report_scope_candidate_count', 0)} "
+        f"report_scope_output_limit={performance.get('report_scope_output_limit', 0)} "
+        f"report_scope_base_limit={performance.get('report_scope_base_limit', 0)} "
+        f"report_scope_enrichment_limit={performance.get('report_scope_enrichment_limit', 0)} "
+        f"report_scope_buffer={performance.get('report_scope_buffer_count', 0)} "
         f"report_scope_unenhanced={performance.get('report_scope_unenhanced_count', 0)} "
         f"report_scope_topup={performance.get('report_scope_topup_count', 0)} "
         f"capital_priority={performance.get('capital_priority_count', 0)} "
@@ -1041,6 +1056,10 @@ def _emit_performance_summary(performance):
         f"{float(performance.get(field, 0)):.3f}s"
         for field in _PERFORMANCE_PHASE_FIELDS)
     capital_text = (
+        f"report_scope_output_limit={performance.get('report_scope_output_limit', 0)} "
+        f"report_scope_base_limit={performance.get('report_scope_base_limit', 0)} "
+        f"report_scope_enrichment_limit={performance.get('report_scope_enrichment_limit', 0)} "
+        f"report_scope_buffer={performance.get('report_scope_buffer_count', 0)} "
         f"capital_priority={performance.get('capital_priority_count', 0)} "
         f"capital_initial_priority={performance.get('capital_initial_priority_count', 0)} "
         f"capital_topup_selected={performance.get('capital_topup_selected_count', 0)} "
@@ -3299,6 +3318,7 @@ def _entry_timing_is_fresh(item):
 
 def classify_candidates(candidates, policy):
     data_rejected = []
+    unenriched_observation = []
     eligible_candidates = []
     for item in candidates:
         quality = item.get("data_quality", {})
@@ -3321,7 +3341,18 @@ def classify_candidates(candidates, policy):
         if timing_reason:
             reasons.append(timing_reason)
         rejected["observation_reasons"] = list(dict.fromkeys(reasons))
-        data_rejected.append(rejected)
+        capital_evidence = (item.get("source_evidence") or {}).get(
+            "capital", {})
+        if (capital_evidence.get("status") == "not_selected_for_enrichment"
+                and capital_evidence.get("report_scope_status")
+                == "outside_report_frontier"):
+            rejected["observation_reasons"].append(
+                "outside_report_frontier")
+            rejected["observation_reasons"] = list(dict.fromkeys(
+                rejected["observation_reasons"]))
+            unenriched_observation.append(rejected)
+        else:
+            data_rejected.append(rejected)
 
     eligible = [
         item for item in eligible_candidates
@@ -3391,6 +3422,7 @@ def classify_candidates(candidates, policy):
         "next_day_confirmation": confirmations,
         "observation": observation,
         "data_rejected": data_rejected,
+        "unenriched_observation": unenriched_observation,
     }
 
 
@@ -3587,6 +3619,10 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     _append_candidate_table(
         lines, "数据失效/待修复", buckets.get("data_rejected", []),
         "无数据失效候选。")
+    _append_candidate_table(
+        lines, "扩展观察（未资金增强，非数据异常）",
+        buckets.get("unenriched_observation", []),
+        "无预算范围外的未增强候选。")
     concentration = (performance or {}).get("candidate_concentration", {})
     if concentration:
         distribution = "、".join(
@@ -3770,6 +3806,7 @@ def _html_tracking_notice(tracking):
 
 def _html_summary_cards(candidates, buckets, regime):
     rejected = buckets.get("data_rejected", [])
+    unenriched = buckets.get("unenriched_observation", [])
     score_text = "未知"
     score_detail = "市场环境缺失"
     if regime and regime.get("score") is not None:
@@ -3794,6 +3831,7 @@ def _html_summary_cards(candidates, buckets, regime):
         ("等待触发", str(len(buckets.get("waiting_trigger", []))), "只", "neutral"),
         ("观察池", str(len(buckets.get("observation", []))), "只", "neutral"),
         ("数据未通过", str(len(rejected)), "只", "warning"),
+        ("扩展观察未增强", str(len(unenriched)), "只", "neutral"),
     ]
     return "<div class='summary-grid'>" + "".join(
         "<div class='summary-card " + tone + "'>"
@@ -3832,6 +3870,10 @@ def _html_decision_notice(buckets, candidates, policy, regime):
         detail += " 市场环境数据不完整，推荐保持观察状态。"
     if rejected:
         detail += f"另有 {len(rejected)} 只数据未通过。"
+    unenriched = buckets.get("unenriched_observation", [])
+    if unenriched:
+        detail += (f"另有 {len(unenriched)} 只扩展观察未进入本轮资金增强范围，"
+                   "非接口失败。")
     rejection_summary = _html_reason_summary(
         rejected, limit=2, exclude=policy.get("reasons", [])
     )
@@ -3858,6 +3900,8 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
     observation_rows = _html_candidate_rows(
         buckets["observation"], buy_level_display="observation")
     rejected_rows = _html_candidate_rows(buckets.get("data_rejected", []))
+    unenriched_rows = _html_candidate_rows(
+        buckets.get("unenriched_observation", []))
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
     sector_qualified = performance.get("sector_qualified_count",
@@ -3947,6 +3991,16 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         + _html_candidate_table(rejected_rows)
         + "</details></section>"
         if rejected_items else ""
+    )
+    unenriched_items = buckets.get("unenriched_observation", [])
+    unenriched_details_html = (
+        "<section class='candidate-section'>"
+        f"<h2>扩展观察（未资金增强，非数据异常） <span class='section-count'>{len(unenriched_items)}</span></h2>"
+        "<p class='reason-summary'>这些标的未进入正式候选范围，因预算保护而未发起资金请求，不能参与推荐。</p>"
+        + "<details class='secondary-panel'><summary>展开候选明细</summary>"
+        + _html_candidate_table(unenriched_rows)
+        + "</details></section>"
+        if unenriched_items else ""
     )
     observation_intro_html = (
         "<div class='observation-buy-level-note' role='note'>"
@@ -4090,6 +4144,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {observation_intro_html}
 {observation_section_html}
 {rejected_details_html}
+{unenriched_details_html}
 {news_shadow_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
@@ -4118,6 +4173,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         "next_day_confirmation": buckets.get("next_day_confirmation", []),
         "observation": buckets["observation"],
         "data_rejected": buckets.get("data_rejected", []),
+        "unenriched_observation": buckets.get("unenriched_observation", []),
     }
     if style_shadow is not None:
         output["style_shadow"] = copy.deepcopy(style_shadow)

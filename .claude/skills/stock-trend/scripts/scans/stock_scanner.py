@@ -57,6 +57,10 @@ from analysis.wyckoff import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
+# Keep a small, fixed enrichment-only buffer beyond the final output limit.
+# The buffer gives borderline candidates one bounded chance to prove their
+# capital dimension without expanding the initial live queue or final output.
+CAPITAL_REPORT_FRONTIER_BUFFER = CAPITAL_TOPUP_LIMIT
 # Match RunSourceHealth semantics: degrade (and keep retrying) after the first
 # failures; only hard-stop after many consecutive failures.
 SOURCE_FAILURE_THRESHOLD = 2
@@ -2607,7 +2611,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     After the first-pass frontier is scored, one bounded top-up batch may
     enrich report-scope candidates that still lack capital evidence. Capital
     remains a hard quality gate even though it is neutral in the provisional
-    queue score.
+    queue score. The second pass uses a fixed enrichment-only buffer beyond
+    the output/minimum-candidate frontier.
     """
     candidates = list(candidates or [])
     print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
@@ -2633,6 +2638,16 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         requested_min_score = float(min_score)
     except (TypeError, ValueError):
         requested_min_score = 50.0
+    try:
+        requested_top = max(0, int(top))
+    except (TypeError, ValueError):
+        requested_top = 30
+    report_output_limit = requested_top
+    report_scope_base_limit = max(requested_top, requested_min_candidates)
+    enrichment_report_top = (
+        report_scope_base_limit + CAPITAL_REPORT_FRONTIER_BUFFER
+        if report_scope_base_limit > 0 else 0
+    )
 
     peer_cohorts = build_sector_peer_cohorts(candidates)
     kline_data = {}
@@ -2884,7 +2899,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         for candidate in eligible_candidates
     ]
     queue_info = rank_capital_enrichment_candidates(
-        priority_inputs, capital_data=capital_data, top=top,
+        priority_inputs, capital_data=capital_data, top=requested_top,
         batch_size=CAPITAL_PREFETCH_BATCH_SIZE,
         prefetch_limit=CAPITAL_PREFETCH_LIMIT,
         expected_trading_date=capital_expected_date)
@@ -3324,11 +3339,20 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     # report scope.  It is intentionally gated by the same source health and
     # absolute deadline as the first pass.
     report_scope_candidates = build_report_scope_candidates(
-        latest_scored, top=max(top, requested_min_candidates),
+        latest_scored, top=enrichment_report_top,
         min_score=requested_min_score)
+    report_scope_codes = {
+        item.get("code") for item in report_scope_candidates
+        if item.get("code")
+    }
     metrics_ref["report_scope_candidate_count"] = (
         metrics_ref.get("report_scope_candidate_count", 0)
         + len(report_scope_candidates))
+    metrics_ref["report_scope_output_limit"] = report_output_limit
+    metrics_ref["report_scope_base_limit"] = report_scope_base_limit
+    metrics_ref["report_scope_enrichment_limit"] = enrichment_report_top
+    metrics_ref["report_scope_buffer_count"] = max(
+        0, enrichment_report_top - report_scope_base_limit)
     report_scope_unenhanced = [
         item for item in report_scope_candidates
         if item.get("ts_code") not in capital_cache_valid_codes
@@ -3341,7 +3365,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         eligible_candidates, provisional_scores,
         processed_codes=capital_processed_codes,
         capital_cache_valid_codes=capital_cache_valid_codes,
-        top=max(top, requested_min_candidates),
+        top=enrichment_report_top,
         limit=CAPITAL_TOPUP_LIMIT,
         ranked_candidates=report_scope_candidates or None)
     if isinstance(source_health, RunSourceHealth):
@@ -3493,6 +3517,13 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         status_changed = status_changed or current_status != status
         evidence["status"] = status
         evidence["reason"] = status
+        if status == "not_selected_for_enrichment":
+            # A scope omission is intentional scheduler evidence, not a
+            # provider failure.  Keep the boundary for report consumers.
+            evidence["report_scope_status"] = (
+                "report_frontier" if candidate["code"] in report_scope_codes
+                else "outside_report_frontier")
+            evidence["scheduler_reason"] = "outside_report_frontier"
         if status == "not_started_deadline" and not deadline_reached:
             evidence["scheduler_reason"] = (
                 "budget_insufficient_for_attempt")
