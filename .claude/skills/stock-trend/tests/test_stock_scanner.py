@@ -1192,6 +1192,22 @@ class TestGatePass(unittest.TestCase):
         stale["signal"] = {"status": "confirmed", "age_bars": 9}
         self.assertFalse(sc.wyckoff_gate_pass(stale))
 
+    def test_confirmed_jac_and_spring_health_failures_remain_observable(self):
+        cases = (
+            ("jac", "retest_pending", "sos"),
+            ("jac", "failed_breakout", "sos"),
+            ("spring", "structure_invalidated", "spring"),
+            ("spring", "state_unknown", "spring"),
+        )
+        for sub_phase, state, event_type in cases:
+            with self.subTest(sub_phase=sub_phase, state=state):
+                analysis = _wk(phase="markup", sub=sub_phase, conf=0.7)
+                analysis["short_term"] = {"current_state": state}
+                analysis["confirmed_event"] = {
+                    "type": event_type, "status": "confirmed",
+                }
+                self.assertTrue(sc.wyckoff_gate_pass(analysis))
+
     def test_none_and_unknown(self):
         self.assertFalse(sc.wyckoff_gate_pass(None))
         self.assertFalse(sc.wyckoff_gate_pass(_wk(phase="phase_unknown", sub="", conf=0.3)))

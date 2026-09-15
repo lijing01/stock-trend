@@ -3370,6 +3370,50 @@ class TestRecommendationPolicy(unittest.TestCase):
                     buckets["observation"][0]["observation_reasons"],
                 )
 
+    def test_confirmed_jac_and_spring_unhealthy_states_are_observation_only(self):
+        cases = (
+            ("jac", "sos", "retest_pending", "wyckoff_jac_retest_pending"),
+            ("jac", "sos", "failed_breakout", "wyckoff_jac_failed_breakout"),
+            ("spring", "spring", "structure_invalidated",
+             "wyckoff_spring_structure_invalidated"),
+            ("spring", "spring", "state_unknown",
+             "wyckoff_spring_state_unknown"),
+        )
+        for sub_phase, event, state, reason in cases:
+            with self.subTest(sub_phase=sub_phase, state=state):
+                item = candidate(f"{sub_phase}-{state}")
+                item["wyckoff"]["short_term"] = {
+                    "sub_phase": sub_phase,
+                    "signal_status": "confirmed",
+                    "signal_age_bars": 0,
+                    "post_lps_reconfirmation": True,
+                    "event": event,
+                    "current_state": state,
+                }
+                item["wyckoff"]["event_health"] = {
+                    "event_type": event, "state": state,
+                    "reason_code": reason,
+                }
+                dc.apply_buy_point_priority(item)
+                self.assertIsNone(item["buy_point_level"])
+                self.assertEqual(item["buy_point_priority_bonus"], 0.0)
+                for mode in ("actionable", "waiting_trigger"):
+                    buckets = classify_candidates([item], {
+                        "mode": mode, "max_recommendations": 5,
+                        "reasons": [],
+                    })
+                    self.assertEqual(buckets["actionable"], [])
+                    self.assertEqual(buckets["waiting_trigger"], [])
+                    self.assertEqual(buckets["next_day_confirmation"], [])
+                    self.assertEqual(
+                        [row["code"] for row in buckets["observation"]],
+                        [f"{sub_phase}-{state}"],
+                    )
+                    self.assertIn(
+                        reason,
+                        buckets["observation"][0]["observation_reasons"],
+                    )
+
     def test_html_renders_all_buckets_and_full_disclaimer(self):
         policy = {
             "mode": "actionable",

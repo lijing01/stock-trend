@@ -183,10 +183,20 @@ ENTRY_FRESH_MAX_PCT = 0.05
 ENTRY_WAIT_MAX_PCT = 0.08
 ENTRY_TIMING_RULE_VERSION = "daily-candidates/entry-timing-v1"
 LPS_STATE_UNKNOWN_REASON_CODE = "wyckoff_lps_state_unknown"
+JAC_STATE_UNKNOWN_REASON_CODE = "wyckoff_jac_state_unknown"
+SPRING_STATE_UNKNOWN_REASON_CODE = "wyckoff_spring_state_unknown"
 PERIOD_ALIGNMENT_RULE_VERSION = "wyckoff/period-alignment-v1"
-LPS_NON_HEALTHY_STATES = frozenset({
-    "follow_through_weakened", "failed_breakout", "state_unknown",
+EVENT_HEALTH_RULE_VERSION = "wyckoff/confirmed-event-health-v1"
+NON_HEALTHY_EVENT_STATES = frozenset({
+    "follow_through_weakened",
+    "retest_pending",
+    "failed_breakout",
+    "structure_invalidated",
+    "state_unknown",
 })
+# Backward-compatible name for downstream callers that imported the old
+# LPS-specific set.  The set is now intentionally shared by all event types.
+LPS_NON_HEALTHY_STATES = NON_HEALTHY_EVENT_STATES
 
 # Strict execution-level metadata.  The level is intentionally separate from
 # the structural Wyckoff score so downstream ranking can audit its effect.
@@ -238,7 +248,7 @@ def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
     sub_phase = str(short.get("sub_phase") or "").strip().lower()
     status = str(short.get("signal_status") or "").strip().lower()
     current_state = read_current_event_state(wyckoff)
-    if current_state in LPS_NON_HEALTHY_STATES:
+    if current_state in NON_HEALTHY_EVENT_STATES:
         return None
     # An omitted age is not evidence that the event happened today.  Older
     # snapshots remain readable, but cannot receive a new execution bonus.
@@ -261,7 +271,8 @@ def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
 def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
                        post_lps_reconfirmation: bool, current_close,
                        trigger_close, current_atr,
-                       current_state: str | None = None) -> dict:
+                       current_state: str | None = None,
+                       event_type: str | None = None) -> dict:
     """Classify whether a structurally valid signal is still executable.
 
     ``EVENT_MAX_AGE`` remains the research visibility window. This function is
@@ -271,6 +282,7 @@ def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
     sub_phase = str(sub_phase or "").strip().lower()
     status = str(signal_status or "none").strip().lower()
     health_state = str(current_state or "").strip().lower()
+    event_type = str(event_type or "").strip().lower()
     max_age = EXECUTION_MAX_AGE.get(sub_phase)
     result = {
         "rule_version": ENTRY_TIMING_RULE_VERSION,
@@ -278,6 +290,7 @@ def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
         "reason_code": "entry_distance_unknown",
         "executable": False,
         "sub_phase": sub_phase,
+        "event_type": event_type or None,
         "current_state": health_state or "not_evaluated",
         "signal_age_bars": None,
         "execution_max_age": max_age,
@@ -311,13 +324,35 @@ def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
             "entry_follow_through_weakened",
             "wyckoff_lps_follow_through_weakened",
         ),
+        "retest_pending": (
+            "entry_jac_retest_pending",
+            "wyckoff_jac_retest_pending",
+        ),
         "failed_breakout": (
-            "entry_failed_breakout", "wyckoff_failed_breakout"),
+            "entry_jac_failed_breakout",
+            "wyckoff_jac_failed_breakout",
+        ),
+        "structure_invalidated": (
+            "entry_spring_structure_invalidated",
+            "wyckoff_spring_structure_invalidated",
+        ),
         "state_unknown": (
-            "entry_state_unknown", LPS_STATE_UNKNOWN_REASON_CODE),
+            "entry_state_unknown",
+            JAC_STATE_UNKNOWN_REASON_CODE,
+        ),
     }
     if health_state in health_blocks:
         timing_status, reason_code = health_blocks[health_state]
+        if health_state == "failed_breakout" and event_type not in {"sos", "jac"}:
+            timing_status, reason_code = (
+                "entry_failed_breakout", "wyckoff_failed_breakout")
+        elif health_state == "state_unknown":
+            if event_type in {"sos", "jac"}:
+                reason_code = JAC_STATE_UNKNOWN_REASON_CODE
+            elif event_type == "spring":
+                reason_code = SPRING_STATE_UNKNOWN_REASON_CODE
+            else:
+                reason_code = LPS_STATE_UNKNOWN_REASON_CODE
         result.update({"status": timing_status, "reason_code": reason_code})
         return result
     if status != "confirmed":
@@ -452,6 +487,7 @@ def evaluate_confirmed_lps_health(event: dict | None,
     """
     result = {
         "rule_version": LPS_EVENT_HEALTH_RULE_VERSION,
+        "event_type": "lps",
         "state": "state_unknown",
         "reason_code": LPS_STATE_UNKNOWN_REASON_CODE,
         "event_range_id": event.get("range_id", "") if isinstance(event, dict) else "",
@@ -461,12 +497,15 @@ def evaluate_confirmed_lps_health(event: dict | None,
         "current_close": None,
         "current_atr": None,
         "adverse_move_atr": None,
+        "breach_index": None,
+        "breach_date": "",
         "evaluated_through": "",
     }
     if (not isinstance(event, dict)
             or event.get("type") != "lps"
             or event.get("status") != "confirmed"
-            or not isinstance(event_range, dict)):
+            or not isinstance(event_range, dict)
+            or not isinstance(ohlcv, dict)):
         return result
 
     closes = ohlcv.get("close") or []
@@ -510,11 +549,19 @@ def evaluate_confirmed_lps_health(event: dict | None,
 
     # Scan every observable close after confirmation. Once the original box
     # has failed, a later wick/close recovery cannot revive this old event.
-    post_confirmation_closes = closes[detected_index + 1:]
-    if any(close < structural_floor for close in post_confirmation_closes):
+    breach_index = next(
+        (index for index, close in enumerate(closes[detected_index + 1:],
+                                              detected_index + 1)
+         if _safe_float(close) is not None and _safe_float(close) < structural_floor),
+        None,
+    )
+    if breach_index is not None:
         result.update({
             "state": "failed_breakout",
             "reason_code": "wyckoff_failed_breakout",
+            "breach_index": breach_index,
+            "breach_date": dates[breach_index]
+            if breach_index < len(dates) else "",
         })
     elif current_close < trigger_low:
         result.update({
@@ -527,6 +574,189 @@ def evaluate_confirmed_lps_health(event: dict | None,
             "reason_code": "",
         })
     return result
+
+
+def _event_health_result(event: dict | None, event_type: str,
+                         unknown_reason_code: str) -> dict:
+    """Create the additive health payload shared by confirmed event evaluators."""
+    return {
+        "rule_version": EVENT_HEALTH_RULE_VERSION,
+        "event_type": event_type,
+        "state": "state_unknown",
+        "reason_code": unknown_reason_code,
+        "event_range_id": event.get("range_id", "")
+        if isinstance(event, dict) else "",
+        "structural_floor": None,
+        "trigger_low": None,
+        "trigger_close": None,
+        "current_close": None,
+        "current_atr": None,
+        "adverse_move_atr": None,
+        "breach_index": None,
+        "breach_date": "",
+        "evaluated_through": "",
+    }
+
+
+def _confirmed_event_inputs(event: dict | None, event_range: dict | None,
+                            ohlcv: dict, atr_values: list,
+                            expected_types: set[str]) -> tuple | None:
+    """Validate common event/range/series inputs for health evaluators."""
+    if (not isinstance(event, dict)
+            or event.get("type") not in expected_types
+            or event.get("status") != "confirmed"
+            or not isinstance(event_range, dict)
+            or not isinstance(ohlcv, dict)
+            or not event.get("range_id")
+            or event_range.get("id") != event.get("range_id")):
+        return None
+    closes = ohlcv.get("close") or []
+    lows = ohlcv.get("low") or []
+    dates = ohlcv.get("date") or []
+    event_index = event.get("event_index")
+    detected_index = event.get("detected_index")
+    if (not closes or not lows
+            or not isinstance(event_index, int)
+            or not isinstance(detected_index, int)
+            or event_index < 0
+            or event_index >= len(closes)
+            or event_index >= len(lows)
+            or detected_index < event_index
+            or detected_index >= len(closes)):
+        return None
+    if not atr_values:
+        return None
+    current_atr = _safe_float(atr_values[-1])
+    if current_atr is None or current_atr <= 0:
+        return None
+    return closes, lows, dates, event_index, detected_index, current_atr
+
+
+def evaluate_confirmed_spring_health(event: dict | None,
+                                     event_range: dict | None,
+                                     ohlcv: dict,
+                                     atr_values: list) -> dict:
+    """Evaluate post-confirmation Spring health against its own event low.
+
+    A close below the confirmed Spring event low is a sticky structural
+    invalidation.  Intraday wicks alone do not invalidate the event.
+    """
+    result = _event_health_result(
+        event, "spring", SPRING_STATE_UNKNOWN_REASON_CODE)
+    inputs = _confirmed_event_inputs(
+        event, event_range, ohlcv, atr_values, {"spring"})
+    if inputs is None:
+        return result
+    closes, lows, dates, event_index, detected_index, current_atr = inputs
+    support = _safe_float(event_range.get("support"))
+    trigger_low = _safe_float(lows[event_index])
+    trigger_close = _safe_float(closes[event_index])
+    current_close = _safe_float(closes[-1])
+    if (support is None or trigger_low is None or trigger_close is None
+            or current_close is None):
+        return result
+
+    result.update({
+        "structural_floor": round(trigger_low, 4),
+        "trigger_low": round(trigger_low, 4),
+        "trigger_close": round(trigger_close, 4),
+        "current_close": round(current_close, 4),
+        "current_atr": round(current_atr, 4),
+        "adverse_move_atr": round(
+            (trigger_close - current_close) / current_atr, 4),
+        "support": round(support, 4),
+        "evaluated_through": dates[-1] if dates else "",
+    })
+    breach_index = next(
+        (index for index, close in enumerate(closes[detected_index + 1:],
+                                              detected_index + 1)
+         if _safe_float(close) is not None and close < trigger_low),
+        None,
+    )
+    if breach_index is not None:
+        result.update({
+            "state": "structure_invalidated",
+            "reason_code": "wyckoff_spring_structure_invalidated",
+            "breach_index": breach_index,
+            "breach_date": dates[breach_index]
+            if breach_index < len(dates) else "",
+        })
+    else:
+        result.update({"state": "confirmed_holding", "reason_code": ""})
+    return result
+
+
+def evaluate_confirmed_jac_health(event: dict | None,
+                                  event_range: dict | None,
+                                  ohlcv: dict,
+                                  atr_values: list) -> dict:
+    """Evaluate post-confirmation JAC/SOS health against its own range.
+
+    The event remains healthy above the original resistance.  A close at or
+    below resistance but above the frozen-ATR failure floor is a retest;
+    any close below that floor permanently fails the historical breakout.
+    """
+    result = _event_health_result(
+        event, "jac", JAC_STATE_UNKNOWN_REASON_CODE)
+    inputs = _confirmed_event_inputs(
+        event, event_range, ohlcv, atr_values, {"sos", "jac"})
+    if inputs is None:
+        return result
+    closes, lows, dates, event_index, detected_index, current_atr = inputs
+    support = _safe_float(event_range.get("support"))
+    resistance = _safe_float(event_range.get("resistance"))
+    breakout_atr = _safe_float(event.get("breakout_atr"))
+    floor_atr = breakout_atr if breakout_atr and breakout_atr > 0 else current_atr
+    trigger_close = _safe_float(closes[event_index])
+    current_close = _safe_float(closes[-1])
+    if (support is None or resistance is None or resistance <= support
+            or floor_atr is None or floor_atr <= 0
+            or trigger_close is None or current_close is None):
+        return result
+
+    height = resistance - support
+    failure_buffer = min(
+        max(floor_atr, resistance * 0.01),
+        max(height * 0.25, 0.0),
+    )
+    if failure_buffer <= 0:
+        return result
+    structural_floor = resistance - failure_buffer
+    result.update({
+        "structural_floor": round(structural_floor, 4),
+        "acceptance_floor": round(structural_floor, 4),
+        "resistance": round(resistance, 4),
+        "trigger_close": round(trigger_close, 4),
+        "current_close": round(current_close, 4),
+        "current_atr": round(current_atr, 4),
+        "breakout_atr": round(floor_atr, 4),
+        "adverse_move_atr": round(
+            (trigger_close - current_close) / current_atr, 4),
+        "evaluated_through": dates[-1] if dates else "",
+    })
+    breach_index = next(
+        (index for index, close in enumerate(closes[detected_index + 1:],
+                                              detected_index + 1)
+         if _safe_float(close) is not None and close < structural_floor),
+        None,
+    )
+    if breach_index is not None:
+        result.update({
+            "state": "failed_breakout",
+            "reason_code": "wyckoff_jac_failed_breakout",
+            "breach_index": breach_index,
+            "breach_date": dates[breach_index]
+            if breach_index < len(dates) else "",
+        })
+    elif current_close <= resistance:
+        result.update({
+            "state": "retest_pending",
+            "reason_code": "wyckoff_jac_retest_pending",
+        })
+    else:
+        result.update({"state": "confirmed_holding", "reason_code": ""})
+    return result
+
 
 # Maximum lookback for finding breakout
 FIND_BREAKOUT_MAX_BARS = 60
@@ -907,6 +1137,14 @@ def build_period_alignment(short_term: dict, long_term: dict) -> dict:
         "failed_breakout": (
             "current_health_failed_breakout",
             "LPS历史已确认，但当前突破失败，仅保留观察",
+        ),
+        "retest_pending": (
+            "current_health_retest_pending",
+            "JAC历史已确认，但当前回踩待确认，仅保留观察",
+        ),
+        "structure_invalidated": (
+            "current_health_structure_invalidated",
+            "Spring历史已确认，但当前结构失效，仅保留观察",
         ),
         "state_unknown": (
             "current_health_state_unknown",
@@ -1335,7 +1573,7 @@ def is_buy_signal(analysis: dict | None) -> bool:
     """Read confirmation/freshness from an analysis result for downstream gates."""
     if not analysis:
         return False
-    if read_current_event_state(analysis) in LPS_NON_HEALTHY_STATES:
+    if read_current_event_state(analysis) in NON_HEALTHY_EVENT_STATES:
         return False
     phase_info = analysis.get("phase", {})
     signal = analysis.get("signal", {})
@@ -1400,6 +1638,7 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
                 trading_range, 0.75 if vol_ratio > 1.2 else 0.62,
             )
             event["variant"] = "shakeout_high_volume" if vol_ratio > 1.2 else "spring_low_volume"
+            event["breakout_atr"] = round(atr, 4)
             events.append(event)
 
         # SOS: breakout, wide spread, volume expansion and high close.
@@ -1882,25 +2121,40 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "state": current_state,
         "reason_code": "",
     }
-    if (active_event and active_event.get("type") == "lps"
-            and active_event.get("status") == "confirmed"):
+    if (active_event
+            and active_event.get("status") == "confirmed"
+            and active_event.get("type") in {"lps", "sos", "spring"}):
         event_range = find_event_trading_range(active_event, ranges)
-        event_health = evaluate_confirmed_lps_health(
-            active_event, event_range, ohlcv, atr_values,
-        )
+        if active_event.get("type") == "lps":
+            event_health = evaluate_confirmed_lps_health(
+                active_event, event_range, ohlcv, atr_values,
+            )
+        elif active_event.get("type") == "sos":
+            event_health = evaluate_confirmed_jac_health(
+                active_event, event_range, ohlcv, atr_values,
+            )
+        else:
+            event_health = evaluate_confirmed_spring_health(
+                active_event, event_range, ohlcv, atr_values,
+            )
         current_state = event_health["state"]
         signal["current_state"] = current_state
+        signal["state"] = current_state
     tr_state = _tr_state(trading_range, closes, atr_values[-1] or 0.0, event_history)
     # Historical SOS confirmation must not override the current relationship
     # with the box.  A pullback to the former resistance is Phase D territory
     # until a low-volume LPS/BU or renewed acceptance is observed.
     if signal.get("event") == "sos" and signal.get("status") == "confirmed":
-        if tr_state.get("state") == "retest":
+        if (current_state == "retest_pending"
+                or (current_state == "not_evaluated"
+                    and tr_state.get("state") == "retest")):
             phase, sub_phase = PHASE_ACCUMULATION, SUB_PRE_MARKUP
             signal["status"] = "retest_pending"
             signal["state"] = "retest_pending"
             confidence = min(confidence, 0.65)
-        elif tr_state.get("state") == "failed_breakout":
+        elif (current_state == "failed_breakout"
+              or (current_state == "not_evaluated"
+                  and tr_state.get("state") == "failed_breakout")):
             phase, sub_phase = PHASE_ACCUMULATION, SUB_ST
             signal["status"] = "failed_breakout"
             signal["state"] = "failed_breakout"
@@ -1994,6 +2248,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         (trigger or {}).get("close"),
         atr_values[-1],
         current_state,
+        signal.get("event"),
     )
     short_term = {
         "phase": phase,

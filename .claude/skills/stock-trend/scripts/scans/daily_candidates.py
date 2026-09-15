@@ -38,7 +38,11 @@ from scans.stock_scanner import (
     score_sector_membership,
     select_primary_sector_membership,
 )
-from analysis.wyckoff import classify_buy_point_level, classify_entry_timing
+from analysis.wyckoff import (
+    NON_HEALTHY_EVENT_STATES,
+    classify_buy_point_level,
+    classify_entry_timing,
+)
 from analysis.market_explanation import build_market_explanation
 from analysis.market_regime import compute_regime
 from analysis.market_style import annotate_candidates_for_shadow
@@ -112,6 +116,11 @@ REASON_LABELS = {
     "recommendation_limit": "超出当日推荐数量上限",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
+    "wyckoff_jac_retest_pending": "维科夫JAC确认后回踩，等待重新站稳箱顶",
+    "wyckoff_jac_failed_breakout": "维科夫JAC确认后突破失败，等待新结构",
+    "wyckoff_jac_state_unknown": "维科夫JAC当前健康状态未知，等待重新评估",
+    "wyckoff_spring_structure_invalidated": "维科夫Spring确认后结构失效，等待新结构",
+    "wyckoff_spring_state_unknown": "维科夫Spring当前健康状态未知，等待重新评估",
     "wyckoff_lps_follow_through_weakened": "维科夫LPS历史已确认，后续转弱，等待重新确认",
     "wyckoff_lps_state_unknown": "维科夫当前健康状态未知，等待重新评估",
     "wyckoff_signal_stale": "维科夫信号确认过晚，超过执行时效",
@@ -175,8 +184,7 @@ def apply_buy_point_priority(item, priority_bonuses=None):
     wyckoff = item.get("wyckoff") or {}
     has_timing = "entry_timing" in wyckoff
     level = classify_buy_point_level(wyckoff)
-    if _wyckoff_current_state(wyckoff) in {
-            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+    if _wyckoff_current_state(wyckoff) in NON_HEALTHY_EVENT_STATES:
         level = None
     timing = classify_entry_timing(wyckoff)
     default_bonus = float(level["priority_bonus"]) if level else 0.0
@@ -216,8 +224,7 @@ def buy_point_evidence(wyckoff):
     short = (wyckoff or {}).get("short_term", {}) if isinstance(wyckoff, dict) else {}
     level = classify_buy_point_level(wyckoff)
     current_state = _wyckoff_current_state(wyckoff)
-    if current_state in {
-            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+    if current_state in NON_HEALTHY_EVENT_STATES:
         level = None
     timing = classify_entry_timing(wyckoff)
     timing_blocked = (
@@ -2630,8 +2637,7 @@ def _minor_phase_html(wyckoff):
 
 def _wyckoff_buy_level(wyckoff):
     """Return the confirmed execution level used by the actionable HTML table."""
-    if _wyckoff_current_state(wyckoff) in {
-            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+    if _wyckoff_current_state(wyckoff) in NON_HEALTHY_EVENT_STATES:
         return None
     level = classify_buy_point_level(wyckoff)
     if level is None:
@@ -3229,12 +3235,37 @@ def build_recommendation_policy(regime, expected_date, market_open=False):
 def _short_term_observation_reason(item):
     wyckoff = item.get("wyckoff") or {}
     current_state = _wyckoff_current_state(wyckoff)
+    short = wyckoff.get("short_term") or {}
+    signal = wyckoff.get("signal") or {}
+    event_health = wyckoff.get("event_health") or {}
+    event = str(
+        short.get("event") or signal.get("event")
+        or event_health.get("event_type") or ""
+    ).strip().lower()
+    sub_phase = str(
+        short.get("sub_phase") or wyckoff.get("sub_phase") or ""
+    ).strip().lower()
+    event_kind = (
+        "spring" if event == "spring" or sub_phase == "spring"
+        else "jac" if event in {"sos", "jac"} or sub_phase == "jac"
+        else "lps"
+    )
     if current_state == "follow_through_weakened":
         return "wyckoff_lps_follow_through_weakened"
     if current_state == "state_unknown":
+        if event_kind == "spring":
+            return "wyckoff_spring_state_unknown"
+        if event_kind == "jac":
+            return "wyckoff_jac_state_unknown"
         return "wyckoff_lps_state_unknown"
     if current_state == "failed_breakout":
+        if event_kind == "jac":
+            return "wyckoff_jac_failed_breakout"
         return "wyckoff_failed_breakout"
+    if current_state == "structure_invalidated":
+        return "wyckoff_spring_structure_invalidated"
+    if current_state == "retest_pending" and event_kind == "jac":
+        return "wyckoff_jac_retest_pending"
     signal_status = wyckoff.get("short_term", {}).get("signal_status")
     return {
         "retest_pending": "wyckoff_retest_pending",

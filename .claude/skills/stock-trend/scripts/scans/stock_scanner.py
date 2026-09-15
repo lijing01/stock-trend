@@ -52,7 +52,8 @@ from core.candidate_trade_plan import (
 from core.candidate_score_ledger import ensure_score_ledger
 from analysis.wyckoff import (
     analyze_kline_dict,
-    BUY_PHASES, BUY_SUB_PHASES, build_period_alignment, is_buy_signal, normalize_score_100,
+    BUY_PHASES, BUY_SUB_PHASES, NON_HEALTHY_EVENT_STATES,
+    build_period_alignment, is_buy_signal, normalize_score_100,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -1908,13 +1909,12 @@ def wyckoff_gate_pass(analysis):
         or (analysis.get("signal") or {}).get("current_state")
         or health.get("state")
     )
-    if current_state in {
-            "follow_through_weakened", "failed_breakout", "state_unknown"}:
+    if current_state in NON_HEALTHY_EVENT_STATES:
         confirmed_event = analysis.get("confirmed_event") or {}
         event_type = confirmed_event.get("type") or confirmed_event.get("event")
         status = confirmed_event.get("status")
         return bool(
-            event_type == "lps"
+            event_type in {"lps", "sos", "spring"}
             and status == "confirmed"
             and conf >= WYCKOFF_MIN_CONFIDENCE
         )

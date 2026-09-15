@@ -22,6 +22,7 @@ from analysis.wyckoff import (
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     _is_lps_pullback, _current_event, _tr_state,
     find_event_trading_range, evaluate_confirmed_lps_health,
+    evaluate_confirmed_spring_health, evaluate_confirmed_jac_health,
     LPS_EVENT_HEALTH_RULE_VERSION,
     is_buy_point, is_buy_signal, is_executable_buy_signal,
     build_entry_timing, classify_entry_timing, classify_buy_point_level,
@@ -154,6 +155,7 @@ class TestConfirmedLpsHealth(unittest.TestCase):
         args = self._fixture(11.94, intervening_closes=[10.6])
         health = evaluate_confirmed_lps_health(*args)
         self.assertEqual(health["state"], "failed_breakout")
+        self.assertEqual(health["breach_index"], 5)
 
     def test_missing_event_range_is_unknown_and_not_executable(self):
         event, _, ohlcv, atr = self._fixture(11.94)
@@ -294,6 +296,153 @@ class TestConfirmedLpsHealth(unittest.TestCase):
         self.assertIsNone(classify_buy_point_level(result))
         self.assertIn("历史已确认", result["phase"]["minor_phase"]["name"])
         self.assertEqual(result["confirmed_event"], lps)
+
+
+class TestConfirmedSpringJacHealth(unittest.TestCase):
+    @staticmethod
+    def _spring_fixture(current_close=10.5, *, current_low=None,
+                        intervening_closes=None):
+        closes = [10.0, 10.2, 9.2, 10.3, 10.4]
+        if intervening_closes:
+            closes.extend(intervening_closes)
+        closes.append(current_close)
+        lows = [value - 0.1 for value in closes]
+        lows[2] = 8.8
+        if current_low is not None:
+            lows[-1] = current_low
+        ohlcv = {
+            "close": closes,
+            "low": lows,
+            "date": [f"202609{index + 5:02d}" for index in range(len(closes))],
+        }
+        atr = [0.5] * len(closes)
+        event = {
+            "type": "spring", "status": "confirmed",
+            "event_index": 2, "detected_index": 3,
+            "event_date": "20260907", "detected_date": "20260908",
+            "range_id": "minor_spring", "breakout_atr": 0.5,
+        }
+        event_range = {
+            "id": "minor_spring", "support": 10.0, "resistance": 12.0,
+        }
+        return event, event_range, ohlcv, atr
+
+    @staticmethod
+    def _jac_fixture(current_close=12.2, *, intervening_closes=None):
+        closes = [10.0, 10.2, 12.4, 12.3]
+        if intervening_closes:
+            closes.extend(intervening_closes)
+        closes.append(current_close)
+        ohlcv = {
+            "close": closes,
+            "low": [value - 0.1 for value in closes],
+            "date": [f"202609{index + 5:02d}" for index in range(len(closes))],
+        }
+        atr = [0.5] * len(closes)
+        event = {
+            "type": "sos", "status": "confirmed",
+            "event_index": 2, "detected_index": 3,
+            "event_date": "20260907", "detected_date": "20260908",
+            "range_id": "minor_jac", "breakout_atr": 0.5,
+        }
+        event_range = {
+            "id": "minor_jac", "support": 10.0, "resistance": 12.0,
+        }
+        return event, event_range, ohlcv, atr
+
+    def test_confirmed_spring_holds_and_wick_is_tolerated(self):
+        args = self._spring_fixture(current_close=10.5, current_low=8.5)
+        health = evaluate_confirmed_spring_health(*args)
+        self.assertEqual(health["state"], "confirmed_holding")
+        self.assertEqual(health["structural_floor"], 8.8)
+
+    def test_spring_close_below_event_low_is_invalidated(self):
+        args = self._spring_fixture(current_close=8.7)
+        health = evaluate_confirmed_spring_health(*args)
+        self.assertEqual(health["state"], "structure_invalidated")
+        self.assertEqual(
+            health["reason_code"], "wyckoff_spring_structure_invalidated")
+
+    def test_spring_invalidation_is_sticky_after_recovery(self):
+        args = self._spring_fixture(
+            current_close=10.5, intervening_closes=[8.7])
+        health = evaluate_confirmed_spring_health(*args)
+        self.assertEqual(health["state"], "structure_invalidated")
+        self.assertEqual(health["breach_index"], 5)
+
+    def test_spring_missing_event_range_is_unknown(self):
+        event, _, ohlcv, atr = self._spring_fixture()
+        health = evaluate_confirmed_spring_health(event, None, ohlcv, atr)
+        self.assertEqual(health["state"], "state_unknown")
+        self.assertEqual(
+            health["reason_code"], "wyckoff_spring_state_unknown")
+
+    def test_confirmed_jac_holds_above_original_resistance(self):
+        args = self._jac_fixture(current_close=12.2)
+        health = evaluate_confirmed_jac_health(*args)
+        self.assertEqual(health["state"], "confirmed_holding")
+        self.assertEqual(health["structural_floor"], 11.5)
+
+    def test_jac_return_to_box_top_is_retest_pending(self):
+        args = self._jac_fixture(current_close=11.8)
+        health = evaluate_confirmed_jac_health(*args)
+        self.assertEqual(health["state"], "retest_pending")
+        self.assertEqual(
+            health["reason_code"], "wyckoff_jac_retest_pending")
+
+    def test_jac_deep_return_to_box_is_failed(self):
+        args = self._jac_fixture(current_close=11.4)
+        health = evaluate_confirmed_jac_health(*args)
+        self.assertEqual(health["state"], "failed_breakout")
+        self.assertEqual(
+            health["reason_code"], "wyckoff_jac_failed_breakout")
+
+    def test_jac_failure_is_sticky_after_recovery(self):
+        args = self._jac_fixture(
+            current_close=12.2, intervening_closes=[11.4])
+        health = evaluate_confirmed_jac_health(*args)
+        self.assertEqual(health["state"], "failed_breakout")
+        self.assertEqual(health["breach_index"], 4)
+
+    def test_jac_missing_event_range_is_unknown(self):
+        event, _, ohlcv, atr = self._jac_fixture()
+        health = evaluate_confirmed_jac_health(event, None, ohlcv, atr)
+        self.assertEqual(health["state"], "state_unknown")
+        self.assertEqual(
+            health["reason_code"], "wyckoff_jac_state_unknown")
+
+    def test_nonhealthy_spring_and_jac_states_fail_closed(self):
+        cases = (
+            ("spring", "structure_invalidated", "spring"),
+            ("jac", "retest_pending", "sos"),
+            ("jac", "failed_breakout", "sos"),
+            ("jac", "state_unknown", "sos"),
+        )
+        for sub_phase, state, event_type in cases:
+            with self.subTest(sub_phase=sub_phase, state=state):
+                payload = {
+                    "short_term": {
+                        "sub_phase": sub_phase,
+                        "signal_status": "confirmed",
+                        "signal_age_bars": 0,
+                        "post_lps_reconfirmation": True,
+                        "current_state": state,
+                    },
+                }
+                self.assertIsNone(classify_buy_point_level(payload))
+                self.assertFalse(is_buy_signal({
+                    "phase": {
+                        "primary": PHASE_MARKUP,
+                        "primary_sub_phase": sub_phase,
+                    },
+                    "signal": {"status": "confirmed", "age_bars": 0},
+                    "short_term": {"current_state": state},
+                }))
+                timing = build_entry_timing(
+                    sub_phase, "confirmed", 0, True,
+                    12.0, 12.0, 0.5, state, event_type,
+                )
+                self.assertFalse(timing["executable"])
 
 
 class TestComputeMA(unittest.TestCase):
@@ -830,6 +979,95 @@ class TestMinorWyckoffStructure(unittest.TestCase):
         self.assertEqual(result["signal"]["status"], "retest_pending")
         self.assertFalse(is_buy_signal(result))
 
+    @staticmethod
+    def _rows_from_ohlcv(ohlcv):
+        return [
+            {
+                "open": ohlcv["open"][index],
+                "high": ohlcv["high"][index],
+                "low": ohlcv["low"][index],
+                "close": ohlcv["close"][index],
+                "vol": ohlcv["volume"][index],
+                "date": ohlcv["date"][index],
+            }
+            for index in range(len(ohlcv["close"]))
+        ]
+
+    def test_confirmed_spring_health_is_propagated_into_analysis_gates(self):
+        ohlcv, _, trading_range = self._event_fixture()
+        ohlcv["low"][38], ohlcv["close"][38] = 97.0, 98.0
+        ohlcv["close"][41] = 96.5
+        trading_range.update({"support": 99.0, "resistance": 103.0,
+                              "quality_score": 1.0})
+        spring = {
+            "type": "spring", "event_index": 38, "detected_index": 39,
+            "event_date": ohlcv["date"][38], "detected_date": ohlcv["date"][39],
+            "status": "confirmed", "age_bars": 2,
+            "structure_level": "minor", "range_id": "minor_10",
+            "confidence": 0.8,
+        }
+        with patch("analysis.wyckoff.detect_trading_ranges",
+                   return_value=[trading_range]), \
+                patch("analysis.wyckoff.detect_wyckoff_events",
+                      return_value=[spring]), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=((PHASE_ACCUMULATION, SUB_SPRING, 0.8), [])):
+            result = analyze_kline_dict({
+                "meta": {"ts_code": "TEST"},
+                "data": self._rows_from_ohlcv(ohlcv),
+            })
+
+        self.assertEqual(result["event_health"]["event_type"], "spring")
+        self.assertEqual(
+            result["short_term"]["current_state"], "structure_invalidated")
+        self.assertEqual(result["signal"]["current_state"], "structure_invalidated")
+        self.assertFalse(result["entry_timing"]["executable"])
+        self.assertIsNone(classify_buy_point_level(result))
+        self.assertFalse(is_buy_signal(result))
+
+    def test_confirmed_jac_health_drives_retest_and_sticky_failure(self):
+        cases = (
+            (11.8, [], "retest_pending", "wyckoff_jac_retest_pending"),
+            (12.2, [(40, 11.4)], "failed_breakout", "wyckoff_jac_failed_breakout"),
+        )
+        for latest_close, intervening, expected_state, expected_reason in cases:
+            with self.subTest(expected_state=expected_state):
+                ohlcv, _, trading_range = self._event_fixture()
+                ohlcv["close"][38] = 12.4
+                ohlcv["close"][41] = latest_close
+                for index, close in intervening:
+                    ohlcv["close"][index] = close
+                trading_range.update({"support": 10.0, "resistance": 12.0,
+                                      "quality_score": 1.0})
+                sos = {
+                    "type": "sos", "event_index": 38, "detected_index": 39,
+                    "event_date": ohlcv["date"][38],
+                    "detected_date": ohlcv["date"][39],
+                    "status": "confirmed", "age_bars": 2,
+                    "structure_level": "minor", "range_id": "minor_10",
+                    "confidence": 0.8, "breakout_atr": 0.5,
+                }
+                with patch("analysis.wyckoff.detect_trading_ranges",
+                           return_value=[trading_range]), \
+                        patch("analysis.wyckoff.detect_wyckoff_events",
+                              return_value=[sos]), \
+                        patch("analysis.wyckoff._classify_range_phase",
+                              return_value=((PHASE_MARKUP, SUB_JAC, 0.8), [])):
+                    result = analyze_kline_dict({
+                        "meta": {"ts_code": "TEST"},
+                        "data": self._rows_from_ohlcv(ohlcv),
+                    })
+
+                self.assertEqual(result["event_health"]["event_type"], "jac")
+                self.assertEqual(
+                    result["short_term"]["current_state"], expected_state)
+                self.assertEqual(result["signal"]["current_state"], expected_state)
+                self.assertEqual(
+                    result["event_health"]["reason_code"], expected_reason)
+                self.assertFalse(result["entry_timing"]["executable"])
+                self.assertIsNone(classify_buy_point_level(result))
+                self.assertFalse(is_buy_signal(result))
+
 
 class TestLongTermWyckoffContext(unittest.TestCase):
     @staticmethod
@@ -948,6 +1186,26 @@ class TestLongTermWyckoffContext(unittest.TestCase):
                     alignment["recommendation_gate"], "observation")
                 self.assertEqual(alignment["current_state"], current_state)
                 self.assertIn(label_fragment, alignment["label"])
+
+    def test_period_alignment_blocks_jac_and_spring_unhealthy_states(self):
+        cases = (
+            (SUB_JAC, "retest_pending", "current_health_retest_pending"),
+            (SUB_JAC, "failed_breakout", "current_health_failed_breakout"),
+            (SUB_SPRING, "structure_invalidated",
+             "current_health_structure_invalidated"),
+        )
+        for sub_phase, current_state, expected_status in cases:
+            with self.subTest(sub_phase=sub_phase, current_state=current_state):
+                alignment = build_period_alignment(
+                    {
+                        "phase": PHASE_MARKUP, "sub_phase": sub_phase,
+                        "signal_status": "confirmed", "signal_age_bars": 0,
+                        "current_state": current_state,
+                    },
+                    {"eligible": True, "phase": PHASE_MARKUP, "confidence": 0.8},
+                )
+                self.assertEqual(alignment["status"], expected_status)
+                self.assertEqual(alignment["recommendation_gate"], "observation")
 
     def test_long_term_phase_is_classified_from_context_not_short_trigger(self):
         context = {"id": "context_1", "level": "context", "support": 90.0,
