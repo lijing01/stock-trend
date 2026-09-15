@@ -143,6 +143,68 @@
 - 旧缓存行为突变：明确区分旧协议缺失和新协议数据不完整；只有前者保留旧兼容。
 - golden 掩盖逻辑回归：先跑纯逻辑定向测试，再跑集成与 golden diff；逐项审查任何预期快照变化。
 
+## 两步执行拆分
+
+建议按“先形成安全闭环，再补齐展示与证据链”拆分，不按 JAC/Spring 各拆一步；两者共用健康状态协议和下游资格门。
+
+### 第一步：安全闭环
+
+范围：
+
+- .claude/skills/stock-trend/scripts/analysis/wyckoff.py
+- .claude/skills/stock-trend/scripts/scans/stock_scanner.py
+- .claude/skills/stock-trend/scripts/scans/daily_candidates.py
+- .claude/skills/stock-trend/tests/test_wyckoff.py
+- .claude/skills/stock-trend/tests/test_stock_scanner.py
+- .claude/skills/stock-trend/tests/test_daily_candidates.py
+
+执行内容：
+
+1. 先补 Spring/JAC 确认后健康、粘性失效和 fail-closed 测试。
+2. 实现通用健康协议、Spring/JAC 专属评估器、原箱体绑定和完整 close path 扫描。
+3. 将非健康状态接入 is_buy_signal、is_executable_buy_signal、classify_buy_point_level 和 build_entry_timing。
+4. 让候选扫描至少完成硬阻断：失效事件只能进入 observation，不得进入 actionable 或 waiting-trigger。
+5. 保持新增字段 additive，旧缓存兼容；报告暂时允许使用通用 fallback 文案，但不能误显示为可执行买点。
+
+第一步出口条件：
+
+- Spring/JAC 失效后没有买点等级、奖励或执行资格。
+- JAC 回踩输出 retest_pending，深回箱输出粘性 failed_breakout。
+- 中间跌破、最后收回仍保持失效。
+- LPS 现有 82 项回归和新增生命周期测试全部通过。
+
+建议提交：fix(wyckoff): add confirmed event health gates
+
+### 第二步：完整交付
+
+范围：
+
+- .claude/skills/stock-trend/scripts/reporting/report.py
+- .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py
+- .claude/skills/stock-trend/tests/test_wyckoff_backtest.py
+- 报告、候选分桶和集成测试
+- .claude/specs/stock-trend-skill.md
+- docs/wyckoff-analysis-design.md
+- 必要时 .claude/skills/stock-trend/SKILL.md
+
+执行内容：
+
+1. 增加 JAC/Spring 专属 reason code、中文状态文案和首次失效日期展示。
+2. 验证失效事件保留 confirmed_event 历史，但不占推荐名额、不获得奖励。
+3. 回测确认失效的 JAC/Spring 不进入 signal_pairs，同时保留审计字段。
+4. 增加报告 badge、候选 observation、回测和旧缓存兼容的集成断言。
+5. 更新规格/设计文档；逐项确认预期输出变化后再运行 golden diff。
+
+第二步出口条件：
+
+- 引擎、扫描、候选、报告和回测对健康状态的解释一致。
+- 失效信号不会被误标为 LPS 转弱或仍显示可执行买点。
+- 定向测试、test_stock_trend.py 和 test_golden.py --diff 全部通过。
+
+建议提交：docs(test): complete Wyckoff lifecycle integration
+
+两步必须按顺序执行。第一步完成后系统已经具备安全阻断能力；第二步主要补齐可观测性、统计证据和文档合同，独立回滚边界清晰。
+
 ## 完成标志
 
 - JAC、Spring、LPS 三类 confirmed 事件都有显式当前健康结果。
