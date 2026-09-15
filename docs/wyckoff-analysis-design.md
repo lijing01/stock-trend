@@ -218,6 +218,16 @@ Climax 标记条件：
 
 Spring 允许高量 Shakeout 与缩量供应枯竭两种变体；其发生日、确认日和当前年龄由事件模型给出。SOS 复用既有 `jac` 子阶段以保持兼容：突破日可以输出 `markup/jac + signal.status=candidate`，后续持稳才成为可交易确认信号。
 
+确认后的生命周期由统一 `event_health` 协议维护，历史 `confirmed_event` 不被改写：
+
+- JAC/SOS 绑定事件发生时的 `range_id`、箱顶和冻结 ATR；回到箱顶接纳区为
+  `retest_pending`，深入原箱体失效区为粘性 `failed_breakout`。
+- Spring 绑定事件 K 线低点；确认后收盘再次跌破该结构底为粘性
+  `structure_invalidated`，仅影线跌破不触发。
+- 三类事件的非健康状态都取消严格买点与执行资格；报告同时展示历史确认、当前状态、
+  reason code 和首次失效日期。回测将这些事件保留在健康门审计中，但排除出
+  `signal_pairs` 与收益统计。
+
 ### 4.6 突破后 BU / LPS 事件链与报告展示
 
 突破后的回踩按行为和结果分开记录：

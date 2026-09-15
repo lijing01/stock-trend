@@ -42,6 +42,9 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 .advice-list li::before{content:counter(advice) ".";color:#1d4ed8;font-weight:600;position:absolute;left:0}
 .wyckoff-section{}
 .wyckoff-lps{background:#fef3c7;color:#92400e;padding:2px 6px;border-radius:4px}
+.wyckoff-health-ok{background:#dcfce7;color:#166534;padding:2px 6px;border-radius:4px}
+.wyckoff-health-blocked{background:#fee2e2;color:#991b1b;padding:2px 6px;border-radius:4px}
+.wyckoff-health-unknown{background:#f3f4f6;color:#4b5563;padding:2px 6px;border-radius:4px}
 </style>
 </head>
 <body>
@@ -171,8 +174,10 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 
     <table>
         <tr><th>状态层</th><th>当前结论</th></tr>
+        <tr><td>事件类型</td><td>{{wyckoff_event_type_label}}</td></tr>
         <tr><td>历史事件状态</td><td>{{wyckoff_historical_event_status}}</td></tr>
-        <tr><td>当前健康状态</td><td>{{wyckoff_current_state_label}}</td></tr>
+        <tr><td>当前健康状态</td><td><span class="{{wyckoff_health_css}}">{{wyckoff_current_state_label}}</span></td></tr>
+        <tr><td>首次失效日期</td><td>{{wyckoff_first_breach_date}}</td></tr>
         <tr><td>入场状态</td><td>{{wyckoff_entry_timing_label}}</td></tr>
     </table>
 

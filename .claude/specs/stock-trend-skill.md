@@ -91,6 +91,11 @@
 候选输出必须同时说明事件日、确认日、信号年龄和当前状态，并明确“置信度”为形态识别
 置信度，不是交易胜率。
 
+历史事件确认与当前健康状态是两个独立字段。confirmed 的 LPS、JAC（SOS）和 Spring
+必须通过确认后健康门才可保留严格买点等级；`retest_pending`、`follow_through_weakened`、
+`failed_breakout`、`structure_invalidated` 和 `state_unknown` 均只能进入观察池。健康门
+扫描确认后的完整收盘路径，硬失效需保留首次失效日期且不得因后续收回而复活旧事件。
+
 买点优先分只能改变已通过资格检查的候选在同一分桶内的顺序，不能越过市场环境、
 数据质量、板块持续性、资金背离、`retest_pending`、`failed_breakout` 或最低质量分
 门槛。`quality_adjusted_score` 保持原义，不包含买点奖励；旧快照缺失新增字段时按
@@ -109,7 +114,9 @@
 维科夫等级回测必须同时输出 5/10/20 日收益、`MAE`、`MFE`、样本数和
 `evidence.status`。当 `evidence.status != ready` 时，`+1/+3/+2` 仅是保守先验，
 不得自动放大；后续每个等级至少累计 100 个信号后，才可依据分级收益和路径风险将
-奖励缩小、归零或调整。
+奖励缩小、归零或调整。回测还必须输出确认事件健康门排除审计：失效的 JAC/Spring
+保留 `confirmed_event`、`event_health`、所属箱体和首次失效日期，但不得进入
+`signal_pairs`、收益统计或买点奖励。
 
 市场环境的盘中混合只覆盖锚分与盘中外推分，不得丢失由五项实际组件计算出的
 `data_quality`、`missing_components`、`partial_components` 及归一化审计字段。

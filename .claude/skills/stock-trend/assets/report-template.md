@@ -134,8 +134,10 @@
 
 | 状态层 | 当前结论 |
 |---|---|
+| 事件类型 | {{wyckoff_event_type_label}} |
 | 历史事件状态 | {{wyckoff_historical_event_status}} |
 | 当前健康状态 | {{wyckoff_current_state_label}} |
+| 首次失效日期 | {{wyckoff_first_breach_date}} |
 | 入场状态 | {{wyckoff_entry_timing_label}} |
 
 {{#has_wyckoff_event_chain}}

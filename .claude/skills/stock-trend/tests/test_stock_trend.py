@@ -896,6 +896,136 @@ def run_new_script_tests(tmpdir):
             "TF-RPT-WY-WEAK-00: 报告生成", False,
             f"exit_code={rc}, stderr={stderr[:200]}", "report")
 
+    # TF-RPT-WY-HEALTH: JAC/Spring use event-specific health wording and
+    # expose the first sticky invalidation date without borrowing LPS copy.
+    health_fixtures = {
+        "jac_failed": {
+            "stock_name": "JAC测试",
+            "phase": {"primary": "markup", "primary_name": "拉升阶段",
+                       "primary_sub_phase": "jac", "sub_phase_name": "跃过小溪（JAC）",
+                       "confidence": 0.78},
+            "signal": {"status": "confirmed", "event": "sos",
+                       "current_state": "failed_breakout"},
+            "short_term": {"phase_name": "拉升阶段", "sub_phase_name": "跃过小溪（JAC）",
+                           "sub_phase": "jac", "event": "sos", "signal_status": "confirmed",
+                           "current_state": "failed_breakout", "signal_age_bars": 1},
+            "confirmed_event": {"type": "sos", "status": "confirmed",
+                                 "event_date": "20260908", "confirmation_date": "20260909",
+                                 "range_id": "minor_jac"},
+            "event_health": {"rule_version": "wyckoff/confirmed-event-health-v1",
+                             "event_type": "jac", "state": "failed_breakout",
+                             "reason_code": "wyckoff_jac_failed_breakout",
+                             "event_range_id": "minor_jac", "breach_date": "20260912",
+                             "evaluated_through": "20260915"},
+            "entry_timing": {"status": "entry_jac_failed_breakout",
+                             "reason_code": "wyckoff_jac_failed_breakout", "executable": False},
+        },
+        "spring_invalid": {
+            "stock_name": "Spring测试",
+            "phase": {"primary": "accumulation", "primary_name": "吸筹阶段",
+                       "primary_sub_phase": "spring", "sub_phase_name": "Spring（弹簧效应/震仓）",
+                       "confidence": 0.74},
+            "signal": {"status": "confirmed", "event": "spring",
+                       "current_state": "structure_invalidated"},
+            "short_term": {"phase_name": "吸筹阶段", "sub_phase_name": "Spring（弹簧效应/震仓）",
+                           "sub_phase": "spring", "event": "spring", "signal_status": "confirmed",
+                           "current_state": "structure_invalidated", "signal_age_bars": 1},
+            "confirmed_event": {"type": "spring", "status": "confirmed",
+                                 "event_date": "20260908", "confirmation_date": "20260909",
+                                 "range_id": "minor_spring"},
+            "event_health": {"rule_version": "wyckoff/confirmed-event-health-v1",
+                             "event_type": "spring", "state": "structure_invalidated",
+                             "reason_code": "wyckoff_spring_structure_invalidated",
+                             "event_range_id": "minor_spring", "breach_date": "20260912",
+                             "evaluated_through": "20260915"},
+            "entry_timing": {"status": "entry_spring_structure_invalidated",
+                             "reason_code": "wyckoff_spring_structure_invalidated", "executable": False},
+        },
+        "jac_retest": {
+            "stock_name": "JAC回踩测试",
+            "phase": {"primary": "markup", "primary_name": "拉升阶段",
+                       "primary_sub_phase": "jac", "sub_phase_name": "跃过小溪（JAC）",
+                       "confidence": 0.72},
+            "signal": {"status": "confirmed", "event": "sos",
+                       "current_state": "retest_pending"},
+            "short_term": {"phase_name": "拉升阶段", "sub_phase_name": "跃过小溪（JAC）",
+                           "sub_phase": "jac", "event": "sos", "signal_status": "confirmed",
+                           "current_state": "retest_pending", "signal_age_bars": 1},
+            "confirmed_event": {"type": "sos", "status": "confirmed",
+                                 "event_date": "20260908", "confirmation_date": "20260909",
+                                 "range_id": "minor_jac_retest"},
+            "event_health": {"rule_version": "wyckoff/confirmed-event-health-v1",
+                             "event_type": "jac", "state": "retest_pending",
+                             "reason_code": "wyckoff_jac_retest_pending",
+                             "event_range_id": "minor_jac_retest", "evaluated_through": "20260915"},
+            "entry_timing": {"status": "entry_jac_retest_pending",
+                             "reason_code": "wyckoff_jac_retest_pending", "executable": False},
+        },
+    }
+    for suffix, fixture in health_fixtures.items():
+        health_wyckoff_path = os.path.join(tmpdir, f"render_wyckoff_{suffix}.json")
+        _write_json(health_wyckoff_path, {
+            "meta": {}, "phase": fixture["phase"], "range": {"is_clear_range": True},
+            "vsa_signals": [], "cause_effect": {}, "wyckoff_score": 1.0,
+            "wyckoff_signals": {"trading_implication": "等待新结构。"},
+            "signal": fixture["signal"], "short_term": fixture["short_term"],
+            "confirmed_event": fixture["confirmed_event"],
+            "event_health": fixture["event_health"],
+            "entry_timing": fixture["entry_timing"],
+            "long_term": {"eligible": False},
+            "alignment": {"label": "历史事件已确认，当前健康失效", "recommendation_gate": "observation"},
+        })
+        health_md_path = os.path.join(tmpdir, f"test_report_{suffix}.md")
+        health_html_path = os.path.join(tmpdir, f"test_report_{suffix}.html")
+        rc, stdout, stderr = run_script(
+            "reporting/report.py", "--technical", tech_path, "--kline", kline_path,
+            "--scores-file", scores_path, "--wyckoff-data", health_wyckoff_path,
+            "--stock-name", fixture["stock_name"], "--date", "2026-09-15",
+            "--output-md", health_md_path, "--output-html", health_html_path,
+            timeout=15,
+        )
+        if rc != 0:
+            test(f"TF-RPT-WY-HEALTH-{suffix}: 报告生成", False,
+                 f"exit_code={rc}, stderr={stderr[:200]}", "report")
+            continue
+        with open(health_md_path, "r", encoding="utf-8") as f:
+            health_md = f.read()
+        with open(health_html_path, "r", encoding="utf-8") as f:
+            health_html = f.read()
+        expected_label = {
+            "jac_failed": "JAC确认后突破失败，等待新结构",
+            "jac_retest": "JAC确认后回踩，等待重新站稳箱顶",
+            "spring_invalid": "Spring确认后结构失效，等待新结构",
+        }[suffix]
+        expected_event = "Spring" if suffix == "spring_invalid" else "JAC"
+        expected_next_stage = {
+            "jac_failed": "JAC失效后的下阶段判定",
+            "jac_retest": "JAC回踩后的下阶段判定",
+            "spring_invalid": "Spring失效后的下阶段判定",
+        }[suffix]
+        for label, content in (("MD", health_md), ("HTML", health_html)):
+            expected_breach = (
+                "首次失效日 20260912" if suffix != "jac_retest"
+                else "首次失效日期 | —" if label == "MD"
+                else "<td>首次失效日期</td><td>—</td>"
+            )
+            test(
+                f"TF-RPT-WY-HEALTH-{suffix}-01: {label}使用事件专属健康文案",
+                f"事件类型" in content and expected_event in content
+                and expected_label in content
+                and expected_next_stage in content
+                and expected_breach in content
+                and "LPS确认后转弱" not in content,
+                content[content.find("维科夫"):content.find("维科夫") + 1800],
+                "report",
+            )
+        test(
+            f"TF-RPT-WY-HEALTH-{suffix}-02: HTML带健康阻断badge",
+            "wyckoff-health-blocked" in health_html,
+            health_html[health_html.find("当前健康状态"):health_html.find("当前健康状态") + 300],
+            "report",
+        )
+
     weak_tech_path, weak_kline_path, weak_scores_path = _write_report_fixture(
         tmpdir,
         "render_weak",

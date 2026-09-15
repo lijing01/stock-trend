@@ -141,6 +141,33 @@ def test_classify_signal_keeps_strict_buy_level():
          signal is not None and signal["buy_point_level"] is None)
 
 
+def test_classify_signal_keeps_health_audit_fields():
+    analysis = _analysis("markup", "jac", 0.8, 2.0)
+    analysis.update({
+        "signal": {"status": "confirmed", "age_bars": 1, "event": "sos"},
+        "short_term": {
+            "sub_phase": "jac", "signal_status": "confirmed",
+            "signal_age_bars": 1, "post_lps_reconfirmation": True,
+            "current_state": "failed_breakout",
+        },
+        "event_health": {
+            "event_type": "jac", "state": "failed_breakout",
+            "reason_code": "wyckoff_jac_failed_breakout",
+            "event_range_id": "minor_1", "breach_date": "20260912",
+        },
+        "confirmed_event": {
+            "type": "sos", "status": "confirmed", "range_id": "minor_1",
+        },
+    })
+    signal = _classify_signal(analysis, 0.3)
+    test("WBT-08f: health audit fields preserved",
+         signal is not None
+         and signal["event_type"] == "jac"
+         and signal["current_state"] == "failed_breakout"
+         and signal["event_health"]["breach_date"] == "20260912"
+         and signal["confirmed_event"]["range_id"] == "minor_1")
+
+
 def test_forward_excursion():
     rows = [
         {"date": "20260101", "close": 10.0, "high": 10.0, "low": 10.0},
@@ -224,6 +251,46 @@ def test_level_aggregation_and_evidence_status():
          result["evidence"]["status"] == "evidence_insufficient")
 
 
+def test_health_exclusions_stay_out_of_signal_pairs():
+    excluded = [{
+        "code": "600001", "ts_code": "600001.SH", "name": "test",
+        "date": "20260912", "phase": "markup", "sub_phase": "jac",
+        "confidence": 0.8, "event_type": "jac",
+        "current_state": "failed_breakout",
+        "reason_code": "wyckoff_jac_failed_breakout",
+        "breach_date": "20260912", "event_range_id": "minor_1",
+        "confirmed_event": {"type": "sos", "status": "confirmed"},
+        "event_health": {"state": "failed_breakout", "breach_date": "20260912"},
+    }, {
+        "code": "000001", "ts_code": "000001.SZ", "name": "spring-test",
+        "date": "20260913", "phase": "accumulation", "sub_phase": "spring",
+        "confidence": 0.75, "event_type": "spring",
+        "current_state": "structure_invalidated",
+        "reason_code": "wyckoff_spring_structure_invalidated",
+        "breach_date": "20260913", "event_range_id": "minor_2",
+        "confirmed_event": {"type": "spring", "status": "confirmed"},
+        "event_health": {"state": "structure_invalidated", "breach_date": "20260913"},
+    }]
+    result = _build_result(
+        [{"ts_code": "600001.SH"}, {"ts_code": "000001.SZ"}],
+        [], {"5": [0.01]}, (5,),
+        {"lookback_days": 80, "sample_interval": 5, "min_confidence": 0.3,
+         "min_gap": 10, "sample_dates": 2},
+        health_exclusions=excluded,
+    )
+    audit = result["health_audit"]
+    test("WBT-19: unhealthy events excluded from signal pairs",
+         result["meta"]["signal_count"] == 0
+         and audit["excluded_from_signal_pairs"] == 2
+         and audit["by_event_type"] == {"jac": 1, "spring": 1}
+         and audit["by_state"]["failed_breakout"] == 1
+         and audit["samples"][0]["event_health"]["breach_date"] == "20260912")
+    md = _render_md(result)
+    html = _generate_html(result, "ts")
+    test("WBT-20: health audit is rendered",
+         "确认事件健康门排除审计" in md and "健康门排除审计" in html)
+
+
 # ── Integration tests ──────────────────────────────────
 
 
@@ -270,6 +337,41 @@ def test_baseline_does_not_depend_on_phase_detection():
          f"baseline={baseline}")
     test("WBT-I09: zero classifications produce zero signals",
          result["meta"]["signal_count"] == 0)
+
+
+def test_run_backtest_excludes_unhealthy_confirmed_events():
+    km = {
+        "600519.SH": {"data": _mk_kline(1, 100.0)},
+        "000001.SZ": {"data": _mk_kline(2, 50.0)},
+    }
+    stocks = [
+        {"code": "600519", "ts_code": "600519.SH", "name": "jac-test"},
+        {"code": "000001", "ts_code": "000001.SZ", "name": "spring-test"},
+    ]
+
+    def unhealthy_analysis(payload):
+        return {
+            "meta": {},
+            "phase": {"primary": "markup", "primary_sub_phase": "jac", "confidence": 0.8},
+            "signal": {"status": "confirmed", "age_bars": 1, "event": "sos"},
+            "short_term": {"sub_phase": "jac", "signal_status": "confirmed",
+                           "signal_age_bars": 1, "post_lps_reconfirmation": True,
+                           "current_state": "failed_breakout"},
+            "event_health": {"event_type": "jac", "state": "failed_breakout",
+                             "reason_code": "wyckoff_jac_failed_breakout",
+                             "event_range_id": "minor_1", "breach_date": "20250180"},
+            "confirmed_event": {"type": "sos", "status": "confirmed", "range_id": "minor_1"},
+            "wyckoff_score": 2.0,
+        }
+
+    with patch("backtesting.wyckoff_backtest.analyze_kline_dict", side_effect=unhealthy_analysis):
+        result = run_backtest(stocks, km, lookback_days=80, eval_windows=(5,), sample_interval=5)
+    audit = result.get("health_audit") or {}
+    test("WBT-I10: unhealthy confirmed events never become signals",
+         result["meta"]["signal_count"] == 0
+         and audit.get("excluded_from_signal_pairs", 0) > 0
+         and audit.get("by_event_type", {}).get("jac", 0) > 0
+         and audit.get("samples", [{}])[0].get("breach_date") == "20250180")
 
 
 def test_run_backtest_error_path():
@@ -336,6 +438,7 @@ def run_wyckoff_backtest_tests():
     test_forward_return()
     test_forward_return_beyond()
     test_classify_signal_keeps_strict_buy_level()
+    test_classify_signal_keeps_health_audit_fields()
     test_forward_excursion()
     test_forward_return_20_and_60_days()
     test_select_signals_dedup()
@@ -343,8 +446,10 @@ def run_wyckoff_backtest_tests():
     test_stats_empty()
     test_bands()
     test_level_aggregation_and_evidence_status()
+    test_health_exclusions_stay_out_of_signal_pairs()
     test_run_backtest_synthetic()
     test_baseline_does_not_depend_on_phase_detection()
+    test_run_backtest_excludes_unhealthy_confirmed_events()
     test_run_backtest_error_path()
     test_renderers()
     test_render_zero_signals()

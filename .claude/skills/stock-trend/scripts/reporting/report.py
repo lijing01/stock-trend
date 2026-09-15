@@ -375,7 +375,7 @@ def _wyckoff_event_chain(wyckoff_data):
 def _wyckoff_current_state(wyckoff_data):
     short_term = wyckoff_data.get("short_term") or {}
     signal = wyckoff_data.get("signal") or {}
-    event_health = wyckoff_data.get("event_health") or {}
+    event_health = wyckoff_data.get("event_health") or short_term.get("event_health") or signal.get("event_health") or {}
     return (
         short_term.get("current_state")
         or signal.get("current_state")
@@ -384,14 +384,56 @@ def _wyckoff_current_state(wyckoff_data):
     )
 
 
-def _wyckoff_health_label(state):
-    return {
+def _wyckoff_event_type(wyckoff_data):
+    """Return the canonical event kind for health/report wording."""
+    if not isinstance(wyckoff_data, dict):
+        return ""
+    short_term = wyckoff_data.get("short_term") or {}
+    signal = wyckoff_data.get("signal") or {}
+    event_health = wyckoff_data.get("event_health") or short_term.get("event_health") or {}
+    confirmed_event = wyckoff_data.get("confirmed_event") or {}
+    raw = (
+        event_health.get("event_type")
+        or short_term.get("event")
+        or signal.get("event")
+        or confirmed_event.get("type")
+        or short_term.get("sub_phase")
+        or ""
+    )
+    raw = str(raw).strip().lower()
+    return {"sos": "jac", "jac": "jac", "spring": "spring", "lps": "lps"}.get(raw, raw)
+
+
+def _wyckoff_event_label(event_type):
+    return {"jac": "JAC", "spring": "Spring", "lps": "LPS"}.get(
+        str(event_type or "").strip().lower(), "维科夫事件")
+
+
+def _wyckoff_health_label(state, event_type=""):
+    event_type = str(event_type or "").strip().lower()
+    labels = {
         "confirmed_holding": "当前维持有效",
         "follow_through_weakened": "确认后转弱，待重新确认",
         "failed_breakout": "突破已硬失效，等待重新构筑",
         "state_unknown": "当前状态未知，待重新评估",
         "not_evaluated": "未评估（旧缓存可能缺少当前健康字段）",
-    }.get(state, str(state or "未知"))
+    }
+    # Preserve LPS wording while allowing JAC/Spring to use their own
+    # vocabulary for the same health states.
+    event_labels = {
+        "jac": {
+            "retest_pending": "JAC确认后回踩，等待重新站稳箱顶",
+            "failed_breakout": "JAC确认后突破失败，等待新结构",
+            "state_unknown": "JAC当前健康状态未知，等待重新评估",
+        },
+        "spring": {
+            "structure_invalidated": "Spring确认后结构失效，等待新结构",
+            "state_unknown": "Spring当前健康状态未知，等待重新评估",
+        },
+    }
+    if state in event_labels.get(event_type, {}):
+        return event_labels[event_type][state]
+    return labels.get(state, str(state or "未知"))
 
 
 def _entry_timing_label(timing):
@@ -401,6 +443,11 @@ def _entry_timing_label(timing):
         "wyckoff_lps_follow_through_weakened": "LPS确认后转弱，等待重新确认",
         "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
         "wyckoff_lps_state_unknown": "维科夫当前健康状态未知，等待重新评估",
+        "wyckoff_jac_retest_pending": "JAC确认后回踩，等待重新站稳箱顶",
+        "wyckoff_jac_failed_breakout": "JAC确认后突破失败，等待新结构",
+        "wyckoff_jac_state_unknown": "JAC当前健康状态未知，等待重新评估",
+        "wyckoff_spring_structure_invalidated": "Spring确认后结构失效，等待新结构",
+        "wyckoff_spring_state_unknown": "Spring当前健康状态未知，等待重新评估",
         "wyckoff_signal_stale": "维科夫信号已超过执行时效",
         "entry_overextended": "价格显著高于触发位，禁止追高",
         "entry_wait_pullback": "等待回踩后再评估",
@@ -421,6 +468,7 @@ def _wyckoff_next_stage_judgment(wyckoff_data):
     signal = wyckoff_data.get("signal") or {}
     status = short_term.get("signal_status", signal.get("status", ""))
     current_state = _wyckoff_current_state(wyckoff_data)
+    event_type = _wyckoff_event_type(wyckoff_data)
     if current_state == "follow_through_weakened":
         return {
             "label": "转弱后的下阶段判定",
@@ -429,6 +477,15 @@ def _wyckoff_next_stage_judgment(wyckoff_data):
             "sub_phase_name": phase.get("sub_phase_name", "未确认"),
             "condition": "历史 LPS 确认保留；需重新站回触发区域并形成新的有效确认，才可恢复执行资格。",
         }
+    if current_state == "state_unknown" and event_type in {"jac", "spring"}:
+        event_label = _wyckoff_event_label(event_type)
+        return {
+            "label": f"{event_label}状态未知后的下阶段判定",
+            "phase_name": phase.get("primary_name", "未确认"),
+            "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+            "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+            "condition": f"需补齐{event_label}所属箱体与当前价格路径后重新评估，旧事件不得恢复执行资格。",
+        }
     if current_state == "state_unknown":
         return {
             "label": "状态未知后的下阶段判定",
@@ -436,6 +493,30 @@ def _wyckoff_next_stage_judgment(wyckoff_data):
             "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
             "sub_phase_name": phase.get("sub_phase_name", "未确认"),
             "condition": "需补齐事件所属箱体与当前价格路径后重新评估，不得沿用历史确认作为执行依据。",
+        }
+    if current_state == "structure_invalidated" and event_type == "spring":
+        return {
+            "label": "Spring失效后的下阶段判定",
+            "phase_name": phase.get("primary_name", "未确认"),
+            "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+            "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+            "condition": "等待新的 Spring/Test 或其他结构重新确认，旧 Spring 不恢复执行资格。",
+        }
+    if current_state == "failed_breakout" and event_type == "jac":
+        return {
+            "label": "JAC失效后的下阶段判定",
+            "phase_name": phase.get("primary_name", "未确认"),
+            "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+            "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+            "condition": "需重新站回原箱体阻力并形成新的有效突破，旧 JAC 不恢复执行资格。",
+        }
+    if current_state == "retest_pending" and event_type == "jac":
+        return {
+            "label": "JAC回踩后的下阶段判定",
+            "phase_name": phase.get("primary_name", "未确认"),
+            "confidence": f"{phase.get('confidence', 0) * 100:.0f}%",
+            "sub_phase_name": phase.get("sub_phase_name", "未确认"),
+            "condition": "回踩守住原箱顶并重新转强后，再确认 LPS 或新的 JAC。",
         }
     if status not in {"retest_pending", "failed_breakout"} \
             and current_state != "failed_breakout":
@@ -999,28 +1080,51 @@ def build_context(args):
             historical_label += f"（事件日 {event_date}"
             historical_label += f"，确认日 {confirmation_date}）" if confirmation_date else "）"
         current_state = _wyckoff_current_state(wyckoff_data)
-        event_health = wyckoff_data.get("event_health") or {}
-        health_label = _wyckoff_health_label(current_state)
+        event_health = wyckoff_data.get("event_health") or short_term.get("event_health") or {}
+        event_type = _wyckoff_event_type(wyckoff_data)
+        health_label = _wyckoff_health_label(current_state, event_type)
         if event_health.get("reason_code"):
             health_label += f"（{event_health['reason_code']}）"
         if event_health.get("evaluated_through"):
             health_label += f"；评估至 {event_health['evaluated_through']}"
+        breach_date = event_health.get("breach_date") or event_health.get("first_breach_date") or ""
+        if breach_date:
+            health_label += f"；首次失效日 {breach_date}"
         entry_timing = wyckoff_data.get("entry_timing") or short_term.get(
             "entry_timing") or {}
         context["wyckoff_historical_event_status"] = historical_label
+        context["wyckoff_event_type_label"] = _wyckoff_event_label(event_type)
         context["wyckoff_current_state"] = current_state
         context["wyckoff_current_state_label"] = health_label
+        context["wyckoff_health_css"] = (
+            "wyckoff-health-ok" if current_state == "confirmed_holding"
+            else "wyckoff-health-blocked" if current_state in {
+                "follow_through_weakened", "retest_pending", "failed_breakout",
+                "structure_invalidated",
+            } else "wyckoff-health-unknown" if current_state == "state_unknown" else ""
+        )
+        context["wyckoff_first_breach_date"] = breach_date or "—"
         context["wyckoff_entry_timing_label"] = _entry_timing_label(entry_timing)
         minor_phase = short_term.get("minor_phase") or w_phase.get("minor_phase") or {}
         minor_phase_name = minor_phase.get("name", "")
-        if w_phase.get("primary_sub_phase") == "lps" and current_state == "confirmed_holding":
+        if event_type == "lps" and current_state == "confirmed_holding":
             minor_phase_name = "阶段D：LPS历史已确认，当前维持有效"
-        elif w_phase.get("primary_sub_phase") == "lps" and current_state == "follow_through_weakened":
+        elif event_type == "lps" and current_state == "follow_through_weakened":
             minor_phase_name = "阶段D：LPS历史已确认，后续转弱、待重新确认"
-        elif w_phase.get("primary_sub_phase") == "lps" and current_state == "failed_breakout":
+        elif event_type == "lps" and current_state == "failed_breakout":
             minor_phase_name = "阶段D：LPS历史已确认，当前突破失败、等待重新构筑"
-        elif w_phase.get("primary_sub_phase") == "lps" and current_state == "state_unknown":
+        elif event_type == "lps" and current_state == "state_unknown":
             minor_phase_name = "阶段D：LPS历史已确认，当前状态未知、待评估"
+        elif event_type == "jac" and current_state == "retest_pending":
+            minor_phase_name = "阶段E：JAC历史已确认，当前回踩待重新站稳"
+        elif event_type == "jac" and current_state == "failed_breakout":
+            minor_phase_name = "阶段E：JAC历史已确认，当前突破失败、等待新结构"
+        elif event_type == "jac" and current_state == "state_unknown":
+            minor_phase_name = "阶段E：JAC历史已确认，当前状态未知、待评估"
+        elif event_type == "spring" and current_state == "structure_invalidated":
+            minor_phase_name = "阶段C：Spring历史已确认，当前结构失效、等待新结构"
+        elif event_type == "spring" and current_state == "state_unknown":
+            minor_phase_name = "阶段C：Spring历史已确认，当前状态未知、待评估"
         context["wyckoff_minor_phase_name"] = minor_phase_name
         context["wyckoff_minor_phase_desc"] = minor_phase.get("description", "")
         context["wyckoff_minor_phase_css"] = (

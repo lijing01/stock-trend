@@ -207,7 +207,7 @@ python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --sec
 
 2. 默认 120 天 / 窗口 5,10,20 / 采样间隔 5 / 置信度≥0.3(与漏斗一致) / 同标的信号去重间隔 10 天。
 
-3. 输出 JSON(stdout)：`summary`(信号vs基线 胜率/均收益/α)、`by_sub_phase`/`by_buy_level`/`by_confidence`/`by_phase`/`by_score_100`(分桶胜率)、`risk_by_buy_level`(各等级 MAE/MFE)、`evidence`(各等级样本数及是否达到最低证据门槛)、`ic`(置信度/100分→前向收益)、`strategy_stats`(主窗口,供凯利)、`signals` 明细。`--output-html` 生成 `reports/lists/wyckoff-backtest-*.html`。
+3. 输出 JSON(stdout)：`summary`(信号vs基线 胜率/均收益/α)、`by_sub_phase`/`by_buy_level`/`by_confidence`/`by_phase`/`by_score_100`(分桶胜率)、`risk_by_buy_level`(各等级 MAE/MFE)、`evidence`(各等级样本数及是否达到最低证据门槛)、`health_audit`(确认事件健康门排除计数、状态/事件类型分桶及审计样本)、`ic`(置信度/100分→前向收益)、`strategy_stats`(主窗口,供凯利)、`signals` 明细。`--output-html` 生成 `reports/lists/wyckoff-backtest-*.html`。失效 JAC/Spring 虽保留 `confirmed_event` 与 `event_health` 供审计，但不进入 `signals`、`signal_pairs`、收益统计或买点奖励。
 
 4. 判读：信号胜率显著高于基线=买点有 edge；某子阶段/置信度档位胜率突出=漏斗参数可据此收紧。`evidence.status != ready` 时，分级奖励只视为保守先验，不得据此放大；至少积累每级 100 个信号后，才可据 5/10/20 日收益与 MAE/MFE 调整或归零奖励。
 

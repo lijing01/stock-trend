@@ -48,6 +48,7 @@ from analysis.wyckoff import (
     classify_buy_point_level,
     classify_entry_timing,
     is_buy_signal,
+    NON_HEALTHY_EVENT_STATES,
     normalize_score_100,
 )
 
@@ -146,6 +147,32 @@ def _classify_signal(analysis, min_confidence):
         return None
     level = classify_buy_point_level(analysis)
     timing = classify_entry_timing(analysis)
+    short_term = analysis.get("short_term") or {}
+    signal_payload = analysis.get("signal") or {}
+    event_health = (
+        analysis.get("event_health")
+        or short_term.get("event_health")
+        or signal_payload.get("event_health")
+        or {}
+    )
+    confirmed_event = analysis.get("confirmed_event") or {}
+    event_type = (
+        event_health.get("event_type")
+        or short_term.get("event")
+        or signal_payload.get("event")
+        or confirmed_event.get("type")
+        or sub
+    )
+    event_type = {"sos": "jac", "jac": "jac"}.get(
+        str(event_type or "").strip().lower(),
+        str(event_type or "").strip().lower(),
+    )
+    current_state = (
+        short_term.get("current_state")
+        or signal_payload.get("current_state")
+        or event_health.get("state")
+        or "not_evaluated"
+    )
     return {
         "phase": phase,
         "sub_phase": sub,
@@ -157,6 +184,12 @@ def _classify_signal(analysis, min_confidence):
         "trigger_extension_atr": timing.get("trigger_extension_atr"),
         "trigger_extension_pct": timing.get("trigger_extension_pct"),
         "entry_timing_reason": timing.get("reason_code", ""),
+        # Keep the health evidence alongside every accepted signal so the
+        # backtest output remains auditable without rewriting event history.
+        "event_type": event_type,
+        "current_state": str(current_state).strip().lower(),
+        "event_health": dict(event_health) if isinstance(event_health, dict) else {},
+        "confirmed_event": dict(confirmed_event) if isinstance(confirmed_event, dict) else {},
     }
 
 
@@ -337,6 +370,7 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
 
     baseline = defaultdict(list)          # {w: [ret, ...]} all stock-days
     per_stock_raw = defaultdict(list)     # {ts_code: [(sidx, date, sig_dict, fwd), ...]}
+    health_exclusions = []               # confirmed events blocked from signals
 
     for sidx in sample_indices:
         date = all_dates[sidx]
@@ -362,7 +396,28 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
             sig = _classify_signal(analysis, min_confidence)
             if sig is None:
                 continue
-            if is_buy_signal(analysis) and sig["confidence"] >= min_confidence:
+            buy_signal = is_buy_signal(analysis)
+            if (not buy_signal
+                    and sig.get("current_state") in NON_HEALTHY_EVENT_STATES):
+                health = sig.get("event_health") or {}
+                health_exclusions.append({
+                    "code": s["code"],
+                    "ts_code": s["ts_code"],
+                    "name": s.get("name", ""),
+                    "date": date,
+                    "phase": sig["phase"],
+                    "sub_phase": sig["sub_phase"],
+                    "confidence": sig["confidence"],
+                    "event_type": sig.get("event_type", ""),
+                    "current_state": sig.get("current_state", ""),
+                    "reason_code": health.get("reason_code") or sig.get("entry_timing_reason", ""),
+                    "breach_date": health.get("breach_date") or health.get("first_breach_date", ""),
+                    "event_range_id": health.get("event_range_id", ""),
+                    "confirmed_event": sig.get("confirmed_event") or {},
+                    "event_health": health,
+                })
+                continue
+            if buy_signal and sig["confidence"] >= min_confidence:
                 excursions = {}
                 for w in eval_windows:
                     wk = str(w)
@@ -389,6 +444,10 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
                 "confidence": sig["confidence"],
                 "score_100": sig["score_100"],
                 "buy_point_level": sig["buy_point_level"],
+                "event_type": sig.get("event_type", ""),
+                "current_state": sig.get("current_state", "not_evaluated"),
+                "event_health": sig.get("event_health") or {},
+                "confirmed_event": sig.get("confirmed_event") or {},
                 "returns": fwd,
                 "excursions": excursions,
             })
@@ -396,10 +455,12 @@ def run_backtest(stocks, kline_map, lookback_days=120, eval_windows=(5, 10, 20),
     return _build_result(valid, signals, baseline, eval_windows,
                          {"lookback_days": lookback_days, "sample_interval": sample_interval,
                           "min_confidence": min_confidence, "min_gap": min_gap,
-                          "sample_dates": len(sample_indices)})
+                          "sample_dates": len(sample_indices)},
+                         health_exclusions=health_exclusions)
 
 
-def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
+def _build_result(valid, signals, baseline, eval_windows, params,
+                  health_exclusions=None) -> dict:
     """Aggregate signals + baseline into the final result dict."""
     signal_rets = {str(w): [s["returns"][str(w)] for s in signals if str(w) in s["returns"]]
                    for w in eval_windows}
@@ -444,6 +505,20 @@ def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
             timing_counts.get("entry_fresh", 0) / len(signals), 4
         ) if signals else None,
         "note": "历史切片使用与每日推荐相同的触发距离、ATR和执行时效规则；仅统计，不改变原始结构信号样本。",
+    }
+
+    health_exclusions = list(health_exclusions or [])
+    health_by_state = defaultdict(int)
+    health_by_event = defaultdict(int)
+    for item in health_exclusions:
+        health_by_state[item.get("current_state", "unknown")] += 1
+        health_by_event[item.get("event_type", "unknown")] += 1
+    health_audit = {
+        "excluded_from_signal_pairs": len(health_exclusions),
+        "by_state": dict(sorted(health_by_state.items())),
+        "by_event_type": dict(sorted(health_by_event.items())),
+        "samples": health_exclusions[:200],
+        "note": "确认事件仍保留 event_health/confirmed_event 审计字段；非健康状态不进入 signal_pairs、收益统计或买点奖励。",
     }
 
     level_counts = {
@@ -526,6 +601,7 @@ def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
         "by_entry_timing": by_entry_timing,
         "risk_by_entry_timing": risk_by_entry_timing,
         "timing_audit": timing_audit,
+        "health_audit": health_audit,
         "ic": ic,
         "strategy_stats": strategy_stats,
         "signals": signals[:200],
@@ -608,10 +684,10 @@ def _render_md(result) -> str:
         b = sw.get("baseline") or {}
         a = sw.get("alpha") or {}
         lines.append(
-            f"| {w}日 | {s.get('count', 0)} | {s.get('win_rate', 0)*100:.1f}% | "
-            f"{s.get('avg', 0)*100:+.2f}% | {b.get('win_rate', 0)*100:.1f}% | "
-            f"{b.get('avg', 0)*100:+.2f}% | {a.get('win_rate', 0)*100:+.1f}% | "
-            f"{a.get('avg', 0)*100:+.2f}% |"
+            f"| {w}日 | {s.get('count', 0)} | {(s.get('win_rate') or 0)*100:.1f}% | "
+            f"{(s.get('avg') or 0)*100:+.2f}% | {(b.get('win_rate') or 0)*100:.1f}% | "
+            f"{(b.get('avg') or 0)*100:+.2f}% | {(a.get('win_rate') or 0)*100:+.1f}% | "
+            f"{(a.get('avg') or 0)*100:+.2f}% |"
         )
     lines.append("")
     lines.append("## 按置信度档位胜率 (5日)")
@@ -661,6 +737,20 @@ def _render_md(result) -> str:
         f"一级 {counts.get('level_1', 0)} / 二级 {counts.get('level_2', 0)} / "
         f"三级 {counts.get('level_3', 0)}。"
     )
+    health_audit = result.get("health_audit") or {}
+    lines.append("")
+    lines.append("## 确认事件健康门排除审计")
+    lines.append("")
+    lines.append(
+        f"> 排除出 signal_pairs 的确认事件 {health_audit.get('excluded_from_signal_pairs', 0)} 次；"
+        "历史 confirmed_event 与 event_health 仍保留，非健康状态不计入收益与奖励。"
+    )
+    if health_audit.get("by_state"):
+        lines.append("")
+        lines.append("| 当前状态 | 事件数 |")
+        lines.append("|---|---|")
+        for state, count in health_audit["by_state"].items():
+            lines.append(f"| {state} | {count} |")
     lines.append("")
     lines.append("## IC (置信度/100分 对前向收益)")
     lines.append("")
@@ -690,9 +780,9 @@ def _generate_html(result, ts) -> str:
 
     # win rate by window: signals vs baseline
     windows = meta.get("eval_windows", [])
-    sw_rates = [(summary.get(str(w), {}).get("signals") or {}).get("win_rate", 0) * 100 for w in windows]
-    bs_rates = [(summary.get(str(w), {}).get("baseline") or {}).get("win_rate", 0) * 100 for w in windows]
-    sg_avgs = [(summary.get(str(w), {}).get("signals") or {}).get("avg", 0) * 100 for w in windows]
+    sw_rates = [((summary.get(str(w), {}).get("signals") or {}).get("win_rate") or 0) * 100 for w in windows]
+    bs_rates = [((summary.get(str(w), {}).get("baseline") or {}).get("win_rate") or 0) * 100 for w in windows]
+    sg_avgs = [((summary.get(str(w), {}).get("signals") or {}).get("avg") or 0) * 100 for w in windows]
 
     # confidence bands (5d)
     conf_rows = ""
@@ -741,6 +831,11 @@ def _generate_html(result, ts) -> str:
         f"一级 {evidence_counts.get('level_1', 0)} / 二级 {evidence_counts.get('level_2', 0)} / "
         f"三级 {evidence_counts.get('level_3', 0)}"
     )
+    health_audit = result.get("health_audit") or {}
+    health_rows = "".join(
+        f"<tr><td>{state}</td><td>{count}</td></tr>"
+        for state, count in (health_audit.get("by_state") or {}).items()
+    ) or '<tr><td colspan="2">无健康门排除</td></tr>'
 
     ic_rows = ""
     for w in windows:
@@ -759,6 +854,7 @@ def _generate_html(result, ts) -> str:
         sig_rows += (f"<tr><td>{s['date']}</td><td><strong>{s['name']}</strong><br>"
                      f"<span style='color:#86868b;font-size:12px'>{s['code']}</span></td>"
                      f"<td>{s['phase']}</td><td>{s['sub_phase']}</td>"
+                     f"<td>{s.get('event_type', '')}</td><td>{s.get('current_state', '')}</td>"
                      f"<td>{s['confidence']:.2f}</td><td>{s['score_100']:.0f}</td>"
                      f"<td class='{dc}'>{_win(r5) if r5 is not None else '-'}</td></tr>")
 
@@ -798,8 +894,8 @@ th{{background:#1d4ed8;color:#fff;font-size:12px}}
 <div class="summary">
 <div class="card"><div class="num">{meta.get('stocks_tested',0)}</div><div class="lbl">标的数</div></div>
 <div class="card"><div class="num">{meta.get('signal_count',0)}</div><div class="lbl">信号次数</div></div>
-<div class="card"><div class="num">{(summary.get('5',{}).get('signals') or {}).get('win_rate',0)*100:.0f}%</div><div class="lbl">5日信号胜率</div></div>
-<div class="card"><div class="num">{(summary.get('5',{}).get('baseline') or {}).get('win_rate',0)*100:.0f}%</div><div class="lbl">5日基线胜率</div></div>
+<div class="card"><div class="num">{((summary.get('5',{}).get('signals') or {}).get('win_rate') or 0)*100:.0f}%</div><div class="lbl">5日信号胜率</div></div>
+<div class="card"><div class="num">{((summary.get('5',{}).get('baseline') or {}).get('win_rate') or 0)*100:.0f}%</div><div class="lbl">5日基线胜率</div></div>
 </div>
 
 <div class="sec"><h2>📊 胜率 vs 基线</h2><div id="winChart" class="chart-box"></div></div>
@@ -811,10 +907,13 @@ th{{background:#1d4ed8;color:#fff;font-size:12px}}
 <div class="sec"><h2>🏷 按买点等级表现与风险 (5日)</h2>
 <table><thead><tr><th>买点</th><th>信号数</th><th>胜率</th><th>均收益</th><th>平均MAE</th><th>平均MFE</th></tr></thead><tbody>{level_rows or '<tr><td colspan="6">无信号</td></tr>'}</tbody></table>
 <p class="dt">{evidence_note}</p></div>
+<div class="sec"><h2>🛡 确认事件健康门排除审计</h2>
+<p class="dt">排除出 signal_pairs 的确认事件 {health_audit.get('excluded_from_signal_pairs', 0)} 次；历史 confirmed_event 与 event_health 仍保留。</p>
+<table><thead><tr><th>当前状态</th><th>事件数</th></tr></thead><tbody>{health_rows}</tbody></table></div>
 <div class="sec"><h2>📐 IC (置信度/100分 → 前向收益)</h2>
 <table><thead><tr><th>窗口</th><th>IC置信度</th><th>IC100分</th></tr></thead><tbody>{ic_rows or '<tr><td colspan="3">样本不足</td></tr>'}</tbody></table></div>
 <div class="sec"><h2>📋 信号明细 (Top 50)</h2>
-<table><thead><tr><th>日期</th><th>标的</th><th>阶段</th><th>子阶段</th><th>置信</th><th>100分</th><th>5日收益</th></tr></thead><tbody>{sig_rows or '<tr><td colspan="7">无信号</td></tr>'}</tbody></table></div>
+<table><thead><tr><th>日期</th><th>标的</th><th>阶段</th><th>子阶段</th><th>事件</th><th>健康状态</th><th>置信</th><th>100分</th><th>5日收益</th></tr></thead><tbody>{sig_rows or '<tr><td colspan="9">无信号</td></tr>'}</tbody></table></div>
 <footer><p class="disc">仅供学习参考,不构成投资建议。数据: 东方财富K线。</p></footer></div>
 <script>
 var cd = {chart_data};
