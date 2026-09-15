@@ -4132,6 +4132,8 @@ def main():
     parser.add_argument("--no-html", dest="html", action="store_false",
                         help="不生成 HTML(仅 MD)")
     parser.add_argument("--as-of", help="权威评价交易日(YYYY-MM-DD)")
+    parser.add_argument("--provisional", action="store_true",
+                        help="当日交易日盘中计划；标记临时结果并跳过正式快照")
     args = parser.parse_args()
 
     start = time.time()
@@ -4151,6 +4153,7 @@ def main():
     max_sector_expansion = getattr(
         args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION)
     post_close_final = bool(getattr(args, "post_close_final", False))
+    provisional_plan = bool(getattr(args, "provisional", False))
     scan_mode = "post_close_final" if post_close_final else "exploratory"
     scan_expansion_limit = (
         DEFAULT_MAX_SECTOR_EXPANSION if post_close_final
@@ -4177,7 +4180,8 @@ def main():
             is_trading_day=is_trading_day,
         )
     policy = build_recommendation_policy(
-        regime, expected_date, market_open=is_recommendation_session())
+        regime, expected_date,
+        market_open=provisional_plan or is_recommendation_session())
     # P4: only an explicitly published, atomically pointed version can alter
     # formal same-bucket ranking.  Missing/corrupt pointers fail closed here.
     active_policy = load_active_policy()

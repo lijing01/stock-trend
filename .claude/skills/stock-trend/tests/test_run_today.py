@@ -124,11 +124,36 @@ class TodayTests(unittest.TestCase):
         self.assertIn("--no-news", self.candidate_arguments[0])
         self.assertNotIn("--news", self.candidate_arguments[0])
 
-    def test_intraday_evaluates_only_previous_close(self):
+    def test_intraday_plans_today_but_keeps_previous_close_for_evaluation(self):
         result = self.run_job(hour=11)
-        self.assertEqual(result["workflow"]["as_of"], "2026-09-08")
-        self.assertIn("close:2026-09-08", self.calls)
-        self.assertEqual(self.candidate_arguments[0][-2:], ["--as-of", "2026-09-08"])
+        workflow = result["workflow"]
+        self.assertEqual(workflow["as_of"], "2026-09-09")
+        self.assertEqual(workflow["session_mode"], "intraday_provisional")
+        self.assertTrue(workflow["provisional"])
+        self.assertEqual(workflow["evaluation_as_of"], "2026-09-08")
+        self.assertEqual(workflow["postprocess"]["status"], "deferred_until_close")
+        self.assertEqual(self.calls,
+                         ["analysis/market_regime.py", "scans/daily_candidates.py"])
+        self.assertEqual(self.candidate_arguments[0][-2:], ["--as-of", "2026-09-09"])
+        self.assertIn("--provisional", self.candidate_arguments[0])
+
+    def test_first_trading_day_intraday_can_plan_without_completed_session(self):
+        with patch.object(job, "_load_authoritative_trading_dates",
+                          return_value={"2026-09-09"}):
+            result = self.run_job(hour=11)
+        workflow = result["workflow"]
+        self.assertEqual(workflow["calendar"]["status"], "ready")
+        self.assertEqual(workflow["as_of"], "2026-09-09")
+        self.assertIsNone(workflow["evaluation_as_of"])
+        self.assertEqual(workflow["completed_sessions"], [])
+
+    def test_intraday_does_not_launch_background_postprocess(self):
+        with patch.object(job, "_launch_background") as launch:
+            result = self.run_job(hour=11)
+        launch.assert_not_called()
+        self.assertEqual(result["workflow"]["close"]["reason"], "intraday_provisional")
+        self.assertEqual(result["workflow"]["weekly"]["reason"], "intraday_provisional")
+        self.assertEqual(result["workflow"]["monitor"]["reason"], "intraday_provisional")
 
     def test_caller_as_of_is_replaced_by_authoritative_calendar_date(self):
         job.run_today(["--as-of", "2025-01-01", "--top", "3"],

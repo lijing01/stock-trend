@@ -4267,7 +4267,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                    return_value=("2026-08-06", "snapshot")), \
              patch.object(dc, "resolve_recommendation_date",
                           return_value="2026-08-06"), \
-             patch.object(dc, "is_recommendation_session", return_value=True), \
+             patch.object(dc, "is_recommendation_session", return_value=False), \
              patch.object(dc, "pick_hot_sectors", return_value=[{
                  "code": "BK1", "name": "测试板块", "sector_score": 60,
              }]), \
@@ -4282,7 +4282,7 @@ class TestRecommendationPolicy(unittest.TestCase):
              ), \
              patch.object(dc, "REPORTS_DIR", Path(report_dir)), \
              patch.object(sys, "argv", ["daily_candidates.py", "--top", "1",
-                                          "--min-candidates", "1"]):
+                                          "--min-candidates", "1", "--provisional"]):
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 dc.main()

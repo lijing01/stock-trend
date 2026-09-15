@@ -95,6 +95,33 @@ def _completed_sessions(now):
              (day == today and now.time() >= time(15, 10))], dates[-1] if dates else None)
 
 
+def _resolve_session_scope(now):
+    """Separate today's provisional plan date from completed evaluation dates."""
+    dates = sorted(date.fromisoformat(value).isoformat()
+                   for value in _load_authoritative_trading_dates(now))
+    today = now.date().isoformat()
+    completed = [day for day in dates if day < today or
+                 (day == today and now.time() >= time(15, 10))]
+    intraday = today in dates and now.time() < time(15, 10)
+    if intraday:
+        return {
+            "plan_as_of": today,
+            "evaluation_as_of": completed[-1] if completed else None,
+            "completed_sessions": completed,
+            "coverage_end": dates[-1] if dates else None,
+            "session_mode": "intraday_provisional",
+            "provisional": True,
+        }
+    return {
+        "plan_as_of": completed[-1] if completed else None,
+        "evaluation_as_of": completed[-1] if completed else None,
+        "completed_sessions": completed,
+        "coverage_end": dates[-1] if dates else None,
+        "session_mode": "post_close_formal",
+        "provisional": False,
+    }
+
+
 def _should_use_post_close_final(now):
     """Use the immutable scan scope once the current session is closed."""
     return now.weekday() >= 5 or now.time() >= time(15, 10)
@@ -238,18 +265,34 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
     if notice:
         output["notifications"].append(notice)
 
+    scope = None
     try:
-        sessions, coverage_end = _completed_sessions(now)
+        scope = _resolve_session_scope(now)
+        sessions = scope["completed_sessions"]
+        coverage_end = scope["coverage_end"]
         workflow["calendar"] = {
-            "status": ("unavailable" if not sessions else
-                       "historical_only" if coverage_end < now.date().isoformat() else "ready"),
+            "status": ("unavailable" if coverage_end is None else
+                       "historical_only" if coverage_end < now.date().isoformat()
+                       and scope["plan_as_of"] != now.date().isoformat() else "ready"),
             "coverage_end": coverage_end,
             "requested_date": now.date().isoformat(),
         }
+        workflow.update({
+            "session_mode": scope["session_mode"],
+            "provisional": scope["provisional"],
+            "evaluation_as_of": scope["evaluation_as_of"],
+            "completed_sessions": sessions,
+        })
     except Exception as exc:
         sessions = []
         workflow["calendar"] = {"status": "unavailable", "reason": type(exc).__name__}
-    as_of = sessions[-1] if sessions else None
+        workflow.update({
+            "session_mode": "unavailable",
+            "provisional": False,
+            "evaluation_as_of": None,
+            "completed_sessions": [],
+        })
+    as_of = scope["plan_as_of"] if scope else None
     workflow["as_of"] = as_of
 
     if not as_of:
@@ -270,6 +313,8 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
             workflow["market"] = {"status": "failed", "reason": reason}
     if workflow["market"]["status"] == "completed":
         try:
+            if workflow.get("provisional") and "--provisional" not in candidate_args:
+                candidate_args.append("--provisional")
             candidate_args = _with_authoritative_as_of(candidate_args, as_of)
             workflow["candidate_args"] = candidate_args
             candidates = _run_script("scans/daily_candidates.py", candidate_args)
@@ -282,7 +327,17 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         workflow["candidates"] = {"status": "skipped", "reason": reason}
     if as_of:
         workflow["report"] = {"status": "ready" if "recommendations" in output else "degraded"}
-        if postprocess == "background" and "recommendations" in output:
+        if workflow.get("provisional"):
+            workflow["postprocess"] = {
+                "status": "deferred_until_close",
+                "reason": "intraday_provisional",
+            }
+            for stage in ("close", "weekly", "monitor"):
+                workflow[stage] = {
+                    "status": "deferred",
+                    "reason": "intraday_provisional",
+                }
+        elif postprocess == "background" and "recommendations" in output:
             task = _launch_background(
                 output, now=now, as_of=as_of, sessions=sessions,
                 state_root=state_root,
@@ -352,7 +407,10 @@ def render_summary(result):
         lines.append(notice["message"])
         for key, change in notice.get("parameter_changes", {}).items():
             lines.append(f"  {key}：{change['before']} → {change['after']}")
-    lines.append(f"今日推荐：{labels.get(workflow['status'], workflow['status'])}；评价日期：{workflow.get('as_of') or '待确定'}")
+    mode = workflow.get("session_mode")
+    mode_label = {"intraday_provisional": "盘中临时计划，收盘后需重新确认",
+                  "post_close_formal": "收盘正式结果"}.get(mode, mode or "状态未知")
+    lines.append(f"今日推荐：{labels.get(workflow['status'], workflow['status'])}；计划日期：{workflow.get('as_of') or '待确定'}；评价日期：{workflow.get('evaluation_as_of') or '待确定'}；{mode_label}")
     if workflow.get("postprocess", {}).get("task_id"):
         lines.append(f"后台任务：{workflow['postprocess']['task_id']}（可用 --status 查询）")
     if workflow.get("calendar", {}).get("status") == "historical_only":
