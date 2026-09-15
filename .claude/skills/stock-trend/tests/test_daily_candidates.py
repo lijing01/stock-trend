@@ -1764,13 +1764,25 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("优先分", markdown)
         self.assertIn("81.0", markdown)
         self.assertIn("原始 / 质量 / 优先", markdown)
-        self.assertIn("原始 80.0；质量 78.0；优先 81.0", markdown)
-        self.assertIn("新闻 +0.00（disabled）；影子 81.0", markdown)
+        self.assertIn(
+            "**优先 81.0**<br>原始 80.0 · 质量 78.0",
+            markdown,
+        )
+        self.assertIn(
+            "**影子 81.0**<br>新闻 +0.00 · disabled",
+            markdown,
+        )
         self.assertIn("优先分", html)
-        self.assertIn("<strong>原始 80.0</strong>", html)
-        self.assertIn("质量 78.0 · 优先 81.0", html)
-        self.assertIn("<strong>新闻 +0.00</strong>", html)
-        self.assertIn("影子 81.0 · disabled", html)
+        self.assertIn(
+            "<strong>优先 81.0</strong><br>"
+            "<small>原始 80.0 · 质量 78.0</small>",
+            html,
+        )
+        self.assertIn(
+            "<strong>影子 81.0</strong><br>"
+            "<small>新闻 +0.00 · disabled</small>",
+            html,
+        )
         self.assertIn("质量分 + 严格买点奖励", html)
 
     def test_pick_hot_sectors_uses_absolute_threshold(self):
