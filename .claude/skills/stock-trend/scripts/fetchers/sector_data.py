@@ -161,9 +161,11 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
         dict with meta and sectors list (code, name, change_pct, amount,
         up_count, down_count, total_count, type).
     """
+    snapshot_date = datetime.now().strftime("%Y-%m-%d")
     result = {
         "meta": {
             "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "data_date": snapshot_date,
             "sources": {},
             "errors": [],
             "complete": False,
@@ -298,6 +300,8 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                         "eastmoney_incomplete" if result["meta"]["errors"]
                         else "eastmoney_zero_active")
                     result = akshare_result
+                    result.setdefault("meta", {}).setdefault(
+                        "data_date", snapshot_date)
                     active = akshare_active
         except Exception as e:
             print(f"  [AKShare] 备选数据源失败: {e}", file=sys.stderr)

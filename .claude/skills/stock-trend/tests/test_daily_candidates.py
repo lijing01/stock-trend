@@ -2025,6 +2025,36 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(picked[0]["ranking_data_date"], "2026-09-11")
         self.assertEqual(picked[0]["ranking_quality"], "same_day_verified")
 
+    def test_same_day_live_ranking_is_verified_and_persisted(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        row = {
+            "code": "BK1", "name": "今日实时板块", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        rankings = {
+            "meta": {
+                "complete": True, "data_date": today,
+                "provider": "eastmoney", "total_sectors": 1,
+            },
+            "sectors": [row],
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=rankings), \
+             patch("fetchers.sector_data.save_rankings_cache") as save_cache, \
+             patch("fetchers.sector_data.append_daily_snapshot") as append_snapshot, \
+             patch("fetchers.sector_data.commit_candidate_sector_snapshot") as commit_snapshot, \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value={}):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date=today)
+
+        self.assertTrue(picked)
+        self.assertEqual(picked[0]["ranking_quality"], "good")
+        save_cache.assert_called_once_with(rankings, data_date=today)
+        append_snapshot.assert_called_once_with(rankings, override_date=today)
+        commit_snapshot.assert_called_once_with(
+            rankings, data_date=today, min_stocks=1, min_up_ratio=0.15)
+
     def test_stale_rankings_cache_is_observation_only(self):
         row = {
             "code": "BK1", "name": "过期缓存板块", "change_pct": 2.0,

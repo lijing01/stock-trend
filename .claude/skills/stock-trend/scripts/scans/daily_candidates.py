@@ -1742,7 +1742,6 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             ranking_token = None
     live_meta = rankings.get("meta", {})
     today = datetime.now().strftime("%Y-%m-%d")
-    historical_request = bool(as_of_date and as_of_date < today)
     live_data_date = live_meta.get("data_date", "")
     live_date_verified = not as_of_date or live_data_date == as_of_date
     live_complete = (
