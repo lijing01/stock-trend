@@ -65,6 +65,74 @@ class CandidateNewsTests(unittest.TestCase):
         self.assertFalse(result["shadow_veto"])
         self.assertEqual(result["risk_level"], "none")
 
+    def test_standalone_continuous_limit_up_is_medium_risk(self):
+        result = evaluate_candidate_news([{
+            "title": "公司连续涨停公告",
+            "published_at": "2026-09-09 09:00:00", "source": "财经媒体",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "medium")
+        self.assertFalse(result["shadow_veto"])
+
+    def test_risk_warning_combined_with_business_not_started_is_high(self):
+        result = evaluate_candidate_news([{
+            "title": "风险提示：公司相关业务尚未开展",
+            "published_at": "2026-09-09 09:00:00", "source": "财经媒体",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "high")
+        self.assertFalse(result["shadow_veto"])
+
+    def test_media_major_risk_is_not_critical(self):
+        result = evaluate_candidate_news([{
+            "title": "媒体称公司涉嫌违法，谨防相关传闻",
+            "published_at": "2026-09-09 09:00:00", "source": "财经媒体",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "medium")
+        self.assertFalse(result["shadow_veto"])
+
+    def test_abnormal_move_and_unstarted_business_needs_official_confirmation(self):
+        result = evaluate_candidate_news([{
+            "title": "股价异常波动，相关业务尚未开展",
+            "published_at": "2026-09-09 09:00:00", "source": "财经媒体",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "high")
+        self.assertTrue(result["needs_official_confirmation"])
+        self.assertIn("event_plus_risk_disclosure", result["matched_rules"])
+        self.assertIn("needs_official_confirmation", result["articles"][0]["matched_rules"])
+
+    def test_report_style_limit_up_risk_headline_is_high_not_veto(self):
+        result = evaluate_candidate_news([{
+            "title": "连续4个涨停后紧急提示风险：热门业务均未开展",
+            "published_at": "2026-09-09 09:00:00", "source": "财经媒体",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "high")
+        self.assertFalse(result["shadow_veto"])
+        self.assertTrue(result["needs_official_confirmation"])
+
+    def test_official_business_risk_combo_is_critical_veto(self):
+        result = evaluate_candidate_news([{
+            "title": "风险提示：公司相关业务尚未开展的公告",
+            "published_at": "2026-09-09 09:00:00", "source": "公司公告",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "critical")
+        self.assertTrue(result["shadow_veto"])
+        self.assertEqual(result["score"], -3.0)
+
+    def test_ordinary_abnormal_volatility_notice_is_not_critical(self):
+        result = evaluate_candidate_news([{
+            "title": "股票交易异常波动公告",
+            "published_at": "2026-09-09 09:00:00", "source": "公司公告",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "medium")
+        self.assertFalse(result["shadow_veto"])
+
+    def test_negated_business_warning_does_not_escalate(self):
+        result = evaluate_candidate_news([{
+            "title": "连续涨停，相关业务并非未开展",
+            "published_at": "2026-09-09 09:00:00", "source": "财经媒体",
+        }], cutoff=self.cutoff)
+        self.assertEqual(result["risk_level"], "medium")
+        self.assertFalse(result["needs_official_confirmation"])
+
     def test_overlay_is_shadow_only_and_preserves_hard_gates(self):
         original = [_candidate("A", 80), _candidate("B", 79),
                     _candidate("C", 99, eligible=False)]
@@ -199,6 +267,36 @@ class CandidateNewsTests(unittest.TestCase):
             self.assertIn("公司中标重大合同", rendered)
             self.assertIn("巨潮资讯", rendered)
             self.assertIn("新闻净调整", rendered)
+
+    def test_reports_show_shadow_risk_rules_and_confirmation(self):
+        item = _candidate("A", 80)
+        item.update({"name": "测试A", "sector_name": "测试", "composite_score": 80,
+                     "wyckoff": {"confidence": 0.6, "short_term": {"signal_status": "confirmed"}}})
+        item["news_analysis"] = {
+            "status": "ready", "lookback_days": 14, "article_count": 1,
+            "score": -0.9, "risk_level": "high", "articles": [{
+                "title": "连续涨停后提示风险，相关业务均未开展",
+                "published_at": "2026-09-09T09:00:00+08:00",
+                "label": "negative", "risk_level": "high",
+                "matched_rules": ["event_plus_risk_disclosure"],
+                "needs_official_confirmation": True,
+                "source": "财经媒体",
+            }],
+        }
+        policy = {"mode": "observation", "max_recommendations": 0, "reasons": []}
+        buckets = {"actionable": [], "waiting_trigger": [],
+                   "next_day_confirmation": [], "observation": [item],
+                   "data_rejected": []}
+        shadow = {"status": "ready", "lookback_days": 14, "cutoff": self.cutoff,
+                  "baseline_order": ["A"], "shadow_order": ["A"]}
+        markdown = daily.generate_report([item], [], 0.1, policy, buckets,
+                                         news_shadow=shadow)
+        html = daily._generate_html([item], [], 0.1, "20260909-150000", policy,
+                                    buckets, news_shadow=shadow)
+        for rendered in (markdown, html):
+            self.assertIn("high", rendered)
+            self.assertIn("event_plus_risk_disclosure", rendered)
+            self.assertIn("待官方公告核验", rendered)
 
 
 def run_candidate_news_tests():

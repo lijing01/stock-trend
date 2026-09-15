@@ -1039,7 +1039,17 @@ def collect_context(now=None) -> dict:
         calculation_anchor_score = anchor_score if anchor_score is not None else 50.0
         blended = round((1 - w) * _safe_float(calculation_anchor_score) + w * ext_regime["score"], 1)
         label, advice = _regime_gate(blended)
-        regime = {"score": blended, "label": label, "advice": advice, "intraday": True}
+        # Keep the quality/audit contract calculated from the actual intraday
+        # components.  Only the displayed score and its gate are blended with
+        # the prior-close anchor; rebuilding a short dict here would silently
+        # turn complete/partial/missing data into ``unknown`` downstream.
+        regime = dict(ext_regime)
+        regime.update({
+            "score": blended,
+            "label": label,
+            "advice": advice,
+            "intraday": True,
+        })
         components = ext_components
         intraday_evidence = {
             "anchor_score": anchor_score,

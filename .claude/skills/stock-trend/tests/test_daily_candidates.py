@@ -2771,6 +2771,29 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(policy["max_recommendations"], 0)
         self.assertIn("regime_data_partial", policy["reasons"])
 
+    def test_same_day_intraday_legacy_cache_derives_quality_read_only(self):
+        today = datetime.now().date().isoformat()
+        components = {
+            key: {"score": 50.0, "data_status": status}
+            for key, status in {
+                "index_trend": "good", "volume": "good",
+                "breadth": "good", "zt_emotion": "good", "capital": "good",
+            }.items()
+        }
+        context = {"data_date": today, "intraday": True,
+                   "regime": {"score": 50.0}, "components": components}
+        original = json.dumps(context, ensure_ascii=False, sort_keys=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            path = cache_dir / "market_regime.json"
+            path.write_text(original, encoding="utf-8")
+            with patch.object(dc, "CACHE_DIR", cache_dir):
+                loaded = dc.load_regime_context()
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+        self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(loaded["missing_components"], [])
+        self.assertEqual(loaded["partial_components"], [])
+
     def test_weak_regime_allows_observation_only(self):
         regime = {"score": 59, "data_date": "2026-08-06"}
         policy = build_recommendation_policy(regime, "2026-08-06")

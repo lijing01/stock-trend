@@ -40,6 +40,7 @@ from scans.stock_scanner import (
 )
 from analysis.wyckoff import classify_buy_point_level
 from analysis.market_explanation import build_market_explanation
+from analysis.market_regime import compute_regime
 from analysis.market_style import annotate_candidates_for_shadow
 from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
@@ -2521,6 +2522,15 @@ def _markdown_cell(value):
     return str(value).replace("|", r"\|").replace("\n", " ")
 
 
+def _news_risk_display(article):
+    """Render the shadow risk plus its auditable follow-up state."""
+    risk = str(article.get("risk_level") or "none")
+    details = list(article.get("matched_rules") or [])
+    if article.get("needs_official_confirmation"):
+        details.append("待官方公告核验")
+    return risk if not details else f"{risk}（{'、'.join(details)}）"
+
+
 def _append_candidate_table(lines, title, items, empty_text):
     lines.extend(["", f"## {title}", ""])
     if not items:
@@ -2588,6 +2598,39 @@ def _normalize_legacy_northbound_partial(context):
     return context
 
 
+def _normalize_legacy_intraday_quality(context):
+    """Derive missing intraday quality fields in memory only.
+
+    A short-lived cache format briefly replaced the full intraday regime with
+    only blended score/label/advice.  Rebuild only the quality/audit fields
+    from today's frozen components; retain the cached blended score and never
+    write the migration back to disk.
+    """
+    if not isinstance(context, dict):
+        return context
+    regime = context.get("regime") or {}
+    data_date = context.get("data_date")
+    if (regime.get("data_quality") is not None
+            or not (regime.get("intraday") is True
+                    or context.get("intraday") is True)
+            or data_date != datetime.now().date().isoformat()):
+        return context
+    components = context.get("components")
+    if not isinstance(components, dict) or not components:
+        return context
+    derived = compute_regime(components)
+    normalized = copy.deepcopy(context)
+    normalized_regime = normalized.setdefault("regime", {})
+    for key in (
+        "data_quality", "missing_components", "partial_components",
+        "score_lower", "score_upper", "normalization_denominator",
+        "raw_weighted_total",
+    ):
+        if key in derived:
+            normalized_regime[key] = copy.deepcopy(derived[key])
+    return normalized
+
+
 def load_regime_context():
     """Return market-regime summary line if today's context exists."""
     try:
@@ -2597,6 +2640,7 @@ def load_regime_context():
         with open(p, "r", encoding="utf-8") as f:
             raw_context = json.load(f)
         d = _normalize_legacy_northbound_partial(raw_context)
+        d = _normalize_legacy_intraday_quality(d)
         r = d.get("regime", {})
         # A legacy explanation carries the retired partial/alternative status;
         # rebuild it from the normalized context instead of exposing stale
@@ -3372,7 +3416,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                 news_rows.append(
                     f"| {candidate.get('name', '')}({candidate.get('code', '')}) | "
                     f"{article.get('published_at') or '—'} | {article.get('label') or 'neutral'} | "
-                    f"{article.get('risk_level') or 'none'} | {title_cell} | {source} |"
+                    f"{_markdown_cell(_news_risk_display(article))} | {title_cell} | {source} |"
                 )
         lines.extend(["", "### 可核验新闻证据", ""])
         if news_rows:
@@ -3661,7 +3705,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                     f"<td>{escape(str(candidate.get('name') or candidate.get('code') or ''))}</td>"
                     f"<td>{escape(str(article.get('published_at') or '—'))}</td>"
                     f"<td>{escape(str(article.get('label') or 'neutral'))}</td>"
-                    f"<td>{escape(str(article.get('risk_level') or 'none'))}</td>"
+                    f"<td>{escape(_news_risk_display(article))}</td>"
                     f"<td>{title}</td><td>{escape(str(article.get('source') or 'unknown'))}</td>"
                     "</tr>"
                 )

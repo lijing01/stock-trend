@@ -63,6 +63,15 @@ class TestMarketExplanationReporting(unittest.TestCase):
             self.assertIn("贡献", text)
         self.assertIn("000300.SH", markdown)
 
+    def test_unknown_source_timestamp_is_clear_audit_note(self):
+        explanation = build_market_explanation(
+            explanation_context(), "2026-09-07")
+        markdown = render_market_explanation(explanation, "markdown")
+        html = render_market_explanation(explanation, "html")
+        for rendered in (markdown, html):
+            self.assertIn("来源采集时间未记录", rendered)
+            self.assertIn("完整度与评分资格按冻结组件状态判定", rendered)
+
     def test_html_escapes_untrusted_detail(self):
         ctx = explanation_context()
         ctx["components"]["volume"]["detail"] = "<script>alert(1)</script>"

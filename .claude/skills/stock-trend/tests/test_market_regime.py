@@ -333,6 +333,26 @@ def test_regime():
     test("正式权重归一化分母保持1", r["normalization_denominator"] == 1.0, str(r))
     test("正式加权贡献保持53.43", r["raw_weighted_total"] == 53.43, str(r))
 
+    complete = {key: {"score": 50.0, "data_status": "good"}
+                for key in mr.REGIME_COMPONENT_ORDER}
+    complete_result = mr.compute_regime(complete)
+    test("完整组件质量为good", complete_result["data_quality"] == "good",
+         str(complete_result))
+    partial_result = mr.compute_regime({
+        **complete, "volume": {"score": 50.0, "data_status": "partial"},
+    })
+    test("partial组件不升级为good",
+         partial_result["data_quality"] == "partial"
+         and partial_result["partial_components"] == ["volume"],
+         str(partial_result))
+    missing_result = mr.compute_regime({
+        **complete, "volume": {"score": None, "data_status": "missing"},
+    })
+    test("missing组件不升级为good",
+         missing_result["data_quality"] == "missing"
+         and missing_result["missing_components"] == ["volume"],
+         str(missing_result))
+
 
 # ──────────────── build_plan ────────────────
 
@@ -611,11 +631,16 @@ def test_collect_context_intraday_blend_not_weak():
         return rows
 
     history = {
-        "2026-08-17": {
-            "regime_score": 83.8, "label": "强势",
-            "components": {"index_trend": 100.0, "volume": 80.0, "breadth": 83.3,
-                           "zt_emotion": 100.0, "capital": 79.9},
-            "amount_yi": 23875.0, "zt": {"count": 106, "streak_count": 15, "max_streak": 4},
+        **{
+            f"2026-08-{day:02d}": {
+                "regime_score": 83.8, "label": "强势",
+                "components": {"index_trend": 100.0, "volume": 80.0,
+                               "breadth": 83.3, "zt_emotion": 100.0,
+                               "capital": 79.9},
+                "amount_yi": 23875.0,
+                "zt": {"count": 106, "streak_count": 15, "max_streak": 4},
+            }
+            for day in range(12, 18)
         },
         # 已污染 partial 条目(不应成为基线/锚)
         "2026-08-18": {"regime_score": 46.3, "amount_yi": 9914.0,
@@ -636,6 +661,11 @@ def test_collect_context_intraday_blend_not_weak():
     # 10:15 — 有外推: 评分不误判弱势(锚昨收强势)
     ctx = run(datetime(2026, 8, 18, 10, 15))
     test("10:15 标记盘中", ctx["intraday"] is True)
+    test("10:15 保留盘中数据质量", ctx["regime"].get("data_quality") == "partial",
+         str(ctx["regime"]))
+    test("10:15 保留盘中部分组件", ctx["regime"].get("missing_components") == []
+         and ctx["regime"].get("partial_components") == ["zt_emotion"],
+         str(ctx["regime"]))
     test("10:15 不误判弱势", ctx["regime"]["score"] > 60.0,
          f"score {ctx['regime']['score']} label {ctx['regime']['label']}")
     test("10:15 成交额外推为全天额", (ctx["amount_yi"] or 0) > 20000,

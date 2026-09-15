@@ -360,6 +360,18 @@ publish 使用通过 `scripts/core/evolution_registry.py` 中 `verify_release_ev
 
 ---
 
+### 今日推荐质量契约
+
+市场环境盘中混合只替换锚分与外推分，必须保留五项组件计算出的
+`data_quality`、缺失/部分组件和归一化审计字段；同日旧盘中缓存缺字段时仅允许从冻结
+组件在内存中补齐，不得回写。`completeness` 与 `freshness` 独立，时间戳未知只能显示
+`freshness=unknown`/来源时间未记录，不能冒充 fresh 或组件缺失。
+
+新闻影子风险按四级聚合 `critical > high > medium > none`：单独连续涨停或异常波动
+为 medium；与风险提示、业务未开展、不存在相关业务等组合至少为 high，媒体证据需
+官方公告核验；只有受信官方明确重大风险可 critical 并触发 shadow veto。否定/解除
+表达保持不升级，新闻层始终不影响正式推荐。
+
 ## /daily-review [--no-refresh] [--json] [--no-html]
 
 今日复盘 + 市场环境评分 — 整合全市场上下文(大盘/成交额/涨跌家数/涨停/资金/板块排行),输出 0-100 市场环境评分 + 每日复盘报告,并持久化 `market_regime.json` 上下文供 `/stock-trend` 做大盘/板块对比。

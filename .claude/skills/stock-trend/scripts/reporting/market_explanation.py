@@ -3,6 +3,20 @@
 from html import escape
 
 
+_QUALITY_NOTE_LABELS = {
+    "source_timestamp_unknown": (
+        "来源采集时间未记录（完整度与评分资格按冻结组件状态判定）"
+    ),
+    "legacy_context_evidence_unknown": "旧缓存缺少来源证据",
+    "legacy_evidence_unknown": "旧缓存来源证据未知",
+    "intraday_anchor_missing": "盘中锚点缺失，无法复算混合分",
+}
+
+
+def _quality_note_label(value):
+    return _QUALITY_NOTE_LABELS.get(str(value), str(value))
+
+
 def _cell(value):
     return str(value if value not in (None, "") else "—").replace("|", r"\|").replace("\n", " ")
 
@@ -52,7 +66,9 @@ def _render_markdown(explanation):
     lines.extend([
         "",
         "- 限制原因：" + ("、".join(_cell(item) for item in reasons) or "无"),
-        "- 数据质量说明：" + ("、".join(_cell(item) for item in notes) or "无"),
+        "- 数据质量说明：" + (
+            "、".join(_cell(_quality_note_label(item)) for item in notes) or "无"
+        ),
     ])
     intraday = explanation.get("intraday")
     if intraday:
@@ -85,7 +101,10 @@ def _render_html(explanation):
             "</tr>"
         )
     reasons = "、".join(h(item) for item in explanation.get("blocking_reasons", [])) or "无"
-    notes = "、".join(h(item) for item in explanation.get("quality_notes", [])) or "无"
+    notes = "、".join(
+        h(_quality_note_label(item))
+        for item in explanation.get("quality_notes", [])
+    ) or "无"
     intraday = explanation.get("intraday")
     intraday_html = ""
     if intraday:

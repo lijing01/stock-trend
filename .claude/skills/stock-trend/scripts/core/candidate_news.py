@@ -26,6 +26,12 @@ _NEGATIVE = (
     "处罚", "警示函", "监管函", "问询函", "诉讼", "仲裁", "停产",
     "事故", "召回", "解禁", "商誉减值", "控制权变更风险", "风险提示",
 )
+_LIMIT_UP = ("连续涨停", "连板", "涨停")
+_BUSINESS_NOT_STARTED = (
+    "业务未开展", "业务均未开展", "尚未开展业务", "相关业务尚未开展",
+    "相关业务均未开展", "不存在相关业务", "不涉及相关业务",
+)
+_ABNORMAL = ("异常波动",)
 _POSITIVE = (
     "业绩预增", "净利润增长", "扭亏为盈", "增持", "回购", "中标",
     "签订合同", "重大合同", "分红", "订单", "获得批准", "产能投产",
@@ -38,6 +44,7 @@ _OFFICIAL_PROVIDER_LABELS = frozenset({
 _NEGATIVE_NEGATIONS = (
     "撤销退市风险警示", "申请撤销退市风险警示", "解除质押",
     "不减持", "终止减持计划", "减持计划实施完毕",
+    "业务并非未开展", "相关业务并非未开展", "不存在相关业务的说法不实",
 )
 
 
@@ -104,10 +111,35 @@ def classify_article(item):
         risk_text = risk_text.replace(phrase, "")
     critical = _term_hits(risk_text, _CRITICAL)
     negative = _term_hits(risk_text, _NEGATIVE)
+    limit_up = _term_hits(text, _LIMIT_UP)
+    business_not_started = _term_hits(risk_text, _BUSINESS_NOT_STARTED)
+    abnormal = _term_hits(text, _ABNORMAL)
     positive = _term_hits(text, _POSITIVE)
     uncertain = _term_hits(text, _UNCERTAIN)
-    if critical:
+    risk_warning = "风险提示" in negative or "提示风险" in text
+    # Critical is reserved for an explicit, trusted official disclosure.  A
+    # media mention remains a warning and cannot create a shadow veto.
+    matched_rules = []
+    official_major_combo = tier == "official" and (
+        bool(critical)
+        or (bool(business_not_started) and risk_warning)
+    )
+    if official_major_combo:
         label, score, risk = "critical_negative", -3.0, "critical"
+        matched_rules.append(
+            "official_explicit_critical" if critical
+            else "official_business_risk_combo")
+    elif critical:
+        label, score, risk = "negative", -1.5, "medium"
+        matched_rules.append("unverified_critical_media")
+    elif ((limit_up or abnormal) and (risk_warning or business_not_started)) \
+            or (risk_warning and business_not_started):
+        label, score, risk = "negative", -1.5, "high"
+        matched_rules.append("event_plus_risk_disclosure")
+    elif (limit_up or abnormal) and not critical and not negative:
+        label, score, risk = "neutral", 0.0, "medium"
+        matched_rules.append(
+            "standalone_limit_up" if limit_up else "standalone_abnormal_volatility")
     elif negative and not positive:
         label, score, risk = "negative", -1.5, "high" if tier == "official" else "medium"
     elif positive and not negative:
@@ -121,6 +153,9 @@ def classify_article(item):
         label = "uncertain_positive"
     if tier != "official":
         score *= 0.6
+    needs_official_confirmation = risk in ("high", "critical") and tier != "official"
+    if needs_official_confirmation:
+        matched_rules.append("needs_official_confirmation")
     return {
         "title": title,
         "published_at": item.get("published_at") or item.get("发布时间") or item.get("公告时间"),
@@ -132,8 +167,12 @@ def classify_article(item):
         "source_factor": 1.0 if tier == "official" else 0.6,
         "score": round(score, 2),
         "risk_level": risk,
+        "matched_rules": matched_rules,
+        "needs_official_confirmation": needs_official_confirmation,
         "matched_terms": {"critical": critical, "negative": negative,
-                          "positive": positive, "uncertain": uncertain},
+                          "positive": positive, "uncertain": uncertain,
+                          "limit_up": limit_up, "abnormal": abnormal,
+                          "business_not_started": business_not_started},
     }
 
 
@@ -178,10 +217,13 @@ def evaluate_candidate_news(items, *, cutoff, lookback_days=14):
         eligible.append(article)
     eligible.sort(key=lambda row: row["published_at"], reverse=True)
     score = sum(row["decayed_score"] for row in eligible)
-    critical = any(row["risk_level"] == "critical" for row in eligible)
-    high = any(row["risk_level"] == "high" for row in eligible)
     # A recent formal critical disclosure is a categorical shadow veto; time
     # decay must not make the same event appear less severe within the window.
+    critical = any(row["risk_level"] == "critical" for row in eligible)
+    high = any(row["risk_level"] == "high" for row in eligible)
+    medium = any(row["risk_level"] == "medium" for row in eligible)
+    needs_official_confirmation = any(
+        row.get("needs_official_confirmation") for row in eligible)
     score = -3.0 if critical else round(max(-3.0, min(1.0, score)), 2)
     status = "ready" if eligible else "no_recent_news"
     return {
@@ -190,8 +232,12 @@ def evaluate_candidate_news(items, *, cutoff, lookback_days=14):
         "lookback_days": lookback_days,
         "article_count": len(eligible),
         "score": score,
-        "risk_level": "critical" if critical else "high" if high else "none",
+        "risk_level": "critical" if critical else "high" if high else "medium" if medium else "none",
         "shadow_veto": critical,
+        "needs_official_confirmation": needs_official_confirmation,
+        "matched_rules": sorted({
+            rule for row in eligible for rule in row.get("matched_rules", [])
+        }),
         "excluded": excluded,
         # Rendering may show a compact subset; the ledger must retain every
         # eligible item that participated in the capped score.
