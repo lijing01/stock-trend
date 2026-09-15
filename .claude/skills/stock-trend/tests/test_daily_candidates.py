@@ -1986,6 +1986,45 @@ class TestRecommendationPolicy(unittest.TestCase):
             "same_day_verified": True, "live_failure_reason": "timeout",
         })
 
+    def test_historical_as_of_rejects_undated_live_ranking(self):
+        row = {
+            "code": "BK1", "name": "历史同日缓存板块", "change_pct": 2.0,
+            "main_force_net": 1e8, "up_count": 9, "down_count": 1,
+        }
+        undated_live = {
+            "meta": {"complete": True, "total_sectors": 1},
+            "sectors": [row],
+        }
+        cached = {
+            "cached_at": "2026-09-11T15:10:00",
+            "data_date": "2026-09-11",
+            "rankings": {
+                "meta": {
+                    "complete": True, "provider": "eastmoney",
+                    "total_sectors": 1,
+                },
+                "sectors": [row],
+            },
+        }
+        with patch("fetchers.sector_data.get_sector_rankings",
+                   return_value=undated_live), \
+             patch("fetchers.sector_data.load_rankings_cache_full",
+                   return_value=cached), \
+             patch("fetchers.sector_data.save_rankings_cache") as save_cache, \
+             patch("fetchers.sector_data.append_daily_snapshot") as append_snapshot, \
+             patch("fetchers.sector_data.commit_candidate_sector_snapshot") as commit_snapshot, \
+             patch("fetchers.sector_data.load_snapshot_history",
+                   return_value={}):
+            picked = dc.pick_hot_sectors(
+                min_stocks=1, as_of_date="2026-09-11")
+
+        save_cache.assert_not_called()
+        append_snapshot.assert_not_called()
+        commit_snapshot.assert_not_called()
+        self.assertEqual(picked[0]["ranking_source"], "cache")
+        self.assertEqual(picked[0]["ranking_data_date"], "2026-09-11")
+        self.assertEqual(picked[0]["ranking_quality"], "same_day_verified")
+
     def test_stale_rankings_cache_is_observation_only(self):
         row = {
             "code": "BK1", "name": "过期缓存板块", "change_pct": 2.0,

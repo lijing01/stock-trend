@@ -1741,6 +1741,22 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                     ranking_token, "live_deadline")
             ranking_token = None
     live_meta = rankings.get("meta", {})
+    today = datetime.now().strftime("%Y-%m-%d")
+    historical_request = bool(as_of_date and as_of_date < today)
+    live_data_date = live_meta.get("data_date", "")
+    live_date_verified = not as_of_date or live_data_date == as_of_date
+    live_complete = (
+        bool(live_meta.get("complete", False))
+        and live_date_verified
+    )
+    if (as_of_date and live_meta.get("complete", False)
+            and not live_date_verified):
+        live_meta = {
+            **live_meta,
+            "errors": list(live_meta.get("errors", [])
+                           or live_meta.get("upstream_errors", [])
+                           or []) + ["ranking_data_date_unverified"],
+        }
     active = sum(
         1 for sector in rankings.get("sectors", [])
         if (sector.get("up_count", 0) or 0) > 0
@@ -1764,7 +1780,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         # Prefer a date supplied by the upstream ranking payload.  ``as_of``
         # is an explicit caller contract; never invent a date from the local
         # wall clock at this boundary.
-        "data_date": live_meta.get("data_date", "") or as_of_date,
+        "data_date": live_data_date,
         "quality": "good",
         "errors": live_meta.get("errors", [])
         or live_meta.get("upstream_errors", []),
@@ -1773,10 +1789,9 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     # cache TTL (for example, a multi-day holiday).  Keep that extension
     # scoped to closed-day fallback only; never loosen live-session freshness.
     closed_cache_age_hours = None
-    today = datetime.now().strftime("%Y-%m-%d")
     if as_of_date and as_of_date < today:
         closed_cache_age_hours = 24 * 14
-    if active and live_meta.get("complete", False):
+    if active and live_complete:
         if as_of_date:
             try:
                 save_rankings_cache(rankings, data_date=as_of_date)
@@ -1939,7 +1954,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
             "ranking_quality": ranking_meta["quality"],
             "ranking_errors": ranking_meta["errors"],
         })
-    if active and live_meta.get("complete", False) and as_of_date:
+    if active and live_complete and as_of_date:
         try:
             commit_candidate_sector_snapshot(
                 rankings,
