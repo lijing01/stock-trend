@@ -1345,6 +1345,32 @@ class TestRunPhase2Funnel(unittest.TestCase):
              candidates[5]["code"]],
         )
 
+    def test_report_scope_is_stable_and_keeps_quality_frontier_first(self):
+        scored = [
+            {"code": "600003", "composite_score": 96,
+             "quality_adjusted_score": 96,
+             "data_quality": {"eligible": True},
+             "sector_actionable": True},
+            {"code": "600001", "composite_score": 99,
+             "quality_adjusted_score": 55,
+             "data_quality": {"eligible": False},
+             "sector_actionable": True},
+            {"code": "600002", "composite_score": 96,
+             "quality_adjusted_score": 96,
+             "data_quality": {"eligible": True},
+             "sector_actionable": True},
+        ]
+        scope = sc.build_report_scope_candidates(scored, top=2, min_score=50)
+        self.assertEqual([item["code"] for item in scope],
+                         ["600002", "600003"])
+
+    def test_report_scope_excludes_below_raw_score(self):
+        scored = [{"code": "600001", "composite_score": 49,
+                   "quality_adjusted_score": 100,
+                   "data_quality": {"eligible": True}}]
+        self.assertEqual(sc.build_report_scope_candidates(
+            scored, top=10, min_score=50), [])
+
     def test_topup_capacity_requires_a_complete_provider_window(self):
         self.assertEqual(sc._bounded_live_capacity("capital", 24.9, 12), 0)
         self.assertEqual(sc._bounded_live_capacity("capital", 25.0, 12), 4)

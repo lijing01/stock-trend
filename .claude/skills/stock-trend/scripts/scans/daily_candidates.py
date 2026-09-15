@@ -373,6 +373,8 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_topup_valid_count", "capital_topup_skipped_deadline",
     "capital_topup_executable_count", "capital_topup_budget_insufficient",
     "capital_topup_global_omitted",
+    "report_scope_candidate_count", "report_scope_unenhanced_count",
+    "report_scope_topup_count",
     "fundamental_topup_selected_count", "fundamental_topup_live_started",
     "fundamental_topup_valid_count", "fundamental_topup_skipped_deadline",
     "fundamental_topup_executable_count", "fundamental_topup_budget_insufficient",
@@ -802,6 +804,9 @@ def _performance_markdown(performance):
         f"首轮增强截止 {performance.get('budget', {}).get('initial_enrichment_deadline_seconds', '未知')}s",
         "",
         "**资金增强审计**: "
+        f"报告范围 {performance.get('report_scope_candidate_count', 0)} | "
+        f"范围未增强 {performance.get('report_scope_unenhanced_count', 0)} | "
+        f"范围二轮覆盖 {performance.get('report_scope_topup_count', 0)} | "
         f"优先队列 {performance.get('capital_priority_count', 0)} → "
         f"二轮补齐 {performance.get('capital_topup_selected_count', 0)}"
         f"（启动 {performance.get('capital_topup_live_started', 0)}，"
@@ -942,6 +947,9 @@ def _performance_html(performance):
         f"market_cap_missing={performance.get('market_cap_missing_count', 0)}"
     )
     capital_text = (
+        f"report_scope={performance.get('report_scope_candidate_count', 0)} "
+        f"report_scope_unenhanced={performance.get('report_scope_unenhanced_count', 0)} "
+        f"report_scope_topup={performance.get('report_scope_topup_count', 0)} "
         f"capital_priority={performance.get('capital_priority_count', 0)} "
         f"capital_initial_priority={performance.get('capital_initial_priority_count', 0)} "
         f"capital_topup_selected={performance.get('capital_topup_selected_count', 0)} "

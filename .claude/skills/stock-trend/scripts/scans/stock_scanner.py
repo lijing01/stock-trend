@@ -2061,6 +2061,41 @@ def select_capital_topup_candidates(
     ][:limit]
 
 
+def build_report_scope_candidates(scored, top=30, min_score=50):
+    """Build the bounded candidate frontier consumed by the report selector."""
+    try:
+        top = max(0, int(top))
+    except (TypeError, ValueError):
+        top = 30
+    try:
+        min_score = float(min_score)
+    except (TypeError, ValueError):
+        min_score = 50.0
+    if top <= 0:
+        return []
+
+    def report_key(item):
+        raw = _safe_float(item.get("composite_score"), 0.0)
+        if raw < min_score:
+            return (1, 1, 0.0, 0.0, str(item.get("code", "")))
+        quality = item.get("data_quality", {})
+        adjusted = _safe_float(item.get("quality_adjusted_score"), raw)
+        promotable = bool(
+            adjusted >= min_score
+            and quality.get("eligible", False)
+            and item.get("sector_actionable", True)
+        )
+        return (0, 0 if promotable else 1, -adjusted, -raw,
+                str(item.get("code", "")))
+
+    ordered = sorted(
+        (item for item in (scored or [])
+         if isinstance(item, dict)
+         and _safe_float(item.get("composite_score"), 0.0) >= min_score),
+        key=report_key)
+    return ordered[:top]
+
+
 def _bounded_live_capacity(source, remaining_time, requested):
     """Return work that fits in complete provider timeout windows."""
     try:
@@ -3288,27 +3323,20 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     # completed first-pass frontier.  Use one bounded second pass for that
     # report scope.  It is intentionally gated by the same source health and
     # absolute deadline as the first pass.
-    report_scope_candidates = []
-    if latest_scored:
-        report_scope_candidates = [
-            item for item in latest_scored
-            if _safe_float(item.get("composite_score"), 0.0)
-            >= requested_min_score
-        ]
-
-        def report_key(item):
-            adjusted = _safe_float(
-                item.get("quality_adjusted_score"),
-                _safe_float(item.get("composite_score"), 0.0))
-            raw = _safe_float(item.get("composite_score"), 0.0)
-            promotable = (
-                adjusted >= requested_min_score
-                and item.get("data_quality", {}).get("eligible", False)
-                and item.get("sector_actionable", True)
-            )
-            return not promotable, -adjusted, -raw, str(item.get("code", ""))
-
-        report_scope_candidates.sort(key=report_key)
+    report_scope_candidates = build_report_scope_candidates(
+        latest_scored, top=max(top, requested_min_candidates),
+        min_score=requested_min_score)
+    metrics_ref["report_scope_candidate_count"] = (
+        metrics_ref.get("report_scope_candidate_count", 0)
+        + len(report_scope_candidates))
+    report_scope_unenhanced = [
+        item for item in report_scope_candidates
+        if item.get("ts_code") not in capital_cache_valid_codes
+        and item.get("code") not in capital_processed_codes
+    ]
+    metrics_ref["report_scope_unenhanced_count"] = (
+        metrics_ref.get("report_scope_unenhanced_count", 0)
+        + len(report_scope_unenhanced))
     topup_candidates = select_capital_topup_candidates(
         eligible_candidates, provisional_scores,
         processed_codes=capital_processed_codes,
@@ -3365,6 +3393,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         _set_selection_stage(topup_candidates, "topup")
         metrics_ref["capital_topup_selected_count"] = (
             metrics_ref.get("capital_topup_selected_count", 0)
+            + len(topup_candidates))
+        metrics_ref["report_scope_topup_count"] = (
+            metrics_ref.get("report_scope_topup_count", 0)
             + len(topup_candidates))
         # Fundamental work is a distinct dimension: it may need fewer (or
         # zero) provider calls because a verified membership quote is enough.
