@@ -2486,6 +2486,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 "signal_age_bars": wk.get("signal", {}).get("age_bars", 0),
             }
             long_term = wk.get("long_term") or {"eligible": False}
+            entry_timing = wk.get("entry_timing") or short_term.get("entry_timing")
             item["wyckoff"] = {
                 "phase": wk.get("phase", {}).get("primary_name", ""),
                 "sub_phase": wk.get("phase", {}).get("sub_phase_name", ""),
@@ -2498,6 +2499,8 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 "long_term": long_term,
                 "alignment": wk.get("alignment") or build_period_alignment(short_term, long_term),
             }
+            if isinstance(entry_timing, dict) and entry_timing:
+                item["wyckoff"]["entry_timing"] = copy.deepcopy(entry_timing)
 
         # K-lines are already prefetched above; attach an additive plan without
         # introducing another network request.  Policy is optional for legacy callers.

@@ -21,7 +21,8 @@ from analysis.wyckoff import (
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     _is_lps_pullback, _current_event, _tr_state,
-    is_buy_point, is_buy_signal,
+    is_buy_point, is_buy_signal, is_executable_buy_signal,
+    build_entry_timing, classify_entry_timing,
     analyze, analyze_kline_dict, build_period_alignment, load_kline,
 )
 
@@ -39,6 +40,43 @@ class TestSafeFloat(unittest.TestCase):
     def test_invalid(self):
         self.assertIsNone(_safe_float(None))
         self.assertIsNone(_safe_float(""))
+
+
+class TestEntryTiming(unittest.TestCase):
+    def test_fresh_lps_is_executable(self):
+        timing = build_entry_timing("lps", "confirmed", 0, False, 102, 100, 2)
+        self.assertEqual(timing["status"], "entry_fresh")
+        self.assertTrue(timing["executable"])
+        self.assertAlmostEqual(timing["trigger_extension_atr"], 1.0)
+
+    def test_late_confirmation_is_stale(self):
+        timing = build_entry_timing("lps", "confirmed", 4, False, 102, 100, 2)
+        self.assertEqual(timing["reason_code"], "wyckoff_signal_stale")
+        self.assertFalse(timing["executable"])
+
+    def test_breakout_chasing_is_overextended(self):
+        timing = build_entry_timing("lps", "confirmed", 0, False, 110, 100, 2)
+        self.assertEqual(timing["status"], "entry_overextended")
+        self.assertEqual(timing["reason_code"], "entry_overextended")
+
+    def test_first_jac_waits_for_retest(self):
+        timing = build_entry_timing("jac", "confirmed", 0, False, 101, 100, 2)
+        self.assertEqual(timing["reason_code"], "first_jac_wait_retest")
+        self.assertFalse(timing["executable"])
+
+    def test_missing_trigger_distance_is_unknown(self):
+        timing = build_entry_timing("lps", "confirmed", 0, False, 102, None, 2)
+        self.assertEqual(timing["status"], "entry_distance_unknown")
+        self.assertFalse(timing["executable"])
+
+    def test_analysis_executable_gate_reads_additive_timing(self):
+        analysis = {
+            "phase": {"primary": PHASE_MARKUP, "primary_sub_phase": SUB_LPS},
+            "signal": {"status": "confirmed", "age_bars": 0},
+            "entry_timing": {"status": "entry_fresh", "executable": True},
+        }
+        self.assertTrue(is_executable_buy_signal(analysis))
+        self.assertEqual(classify_entry_timing(analysis)["status"], "entry_fresh")
 
 
 class TestComputeMA(unittest.TestCase):
@@ -707,6 +745,7 @@ class TestLongTermWyckoffContext(unittest.TestCase):
             classify(payload("jac", reconfirmed=True))["number"], 3)
         self.assertIsNone(classify(payload("jac", reconfirmed=False)))
         self.assertIsNone(classify(payload("lps", status="candidate")))
+        self.assertIsNone(classify(payload("lps", age=4)))
         self.assertIsNone(classify(payload("spring", age=9)))
         self.assertIsNone(classify(payload("lps", age=11)))
         self.assertIsNone(

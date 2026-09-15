@@ -46,6 +46,7 @@ from scans.stock_scanner import _resolve_ts_code, _fetch_kline, gather_candidate
 from analysis.wyckoff import (
     analyze_kline_dict,
     classify_buy_point_level,
+    classify_entry_timing,
     is_buy_signal,
     normalize_score_100,
 )
@@ -144,12 +145,18 @@ def _classify_signal(analysis, min_confidence):
     if not phase or not sub:
         return None
     level = classify_buy_point_level(analysis)
+    timing = classify_entry_timing(analysis)
     return {
         "phase": phase,
         "sub_phase": sub,
         "confidence": round(float(conf), 3),
         "score_100": round(normalize_score_100(float(analysis.get("wyckoff_score", 0))), 1),
         "buy_point_level": level["number"] if level else None,
+        "entry_timing_status": timing.get("status", "unknown"),
+        "entry_timing_score": timing.get("entry_timing_score"),
+        "trigger_extension_atr": timing.get("trigger_extension_atr"),
+        "trigger_extension_pct": timing.get("trigger_extension_pct"),
+        "entry_timing_reason": timing.get("reason_code", ""),
     }
 
 
@@ -422,6 +429,22 @@ def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
     by_phase = _bucket_stats(signal_pairs, lambda s: "吸筹" if s["phase"] == "accumulation"
                              else ("拉升" if s["phase"] == "markup" else s["phase"]))
     by_score = _bucket_stats(signal_pairs, _score_band)
+    by_entry_timing = _bucket_stats(
+        signal_pairs, lambda s: s.get("entry_timing_status", "unknown"))
+    risk_by_entry_timing = _risk_bucket_stats(
+        signal_pairs, lambda s: s.get("entry_timing_status", "unknown"))
+    timing_counts = defaultdict(int)
+    for signal in signals:
+        timing_counts[signal.get("entry_timing_status", "unknown")] += 1
+    timing_audit = {
+        "structural_signal_count": len(signals),
+        "by_status": dict(sorted(timing_counts.items())),
+        "executable_signal_count": timing_counts.get("entry_fresh", 0),
+        "retained_ratio": round(
+            timing_counts.get("entry_fresh", 0) / len(signals), 4
+        ) if signals else None,
+        "note": "历史切片使用与每日推荐相同的触发距离、ATR和执行时效规则；仅统计，不改变原始结构信号样本。",
+    }
 
     level_counts = {
         level: sum(1 for signal in signals if _level_key(signal) == level)
@@ -500,6 +523,9 @@ def _build_result(valid, signals, baseline, eval_windows, params) -> dict:
         "by_confidence": by_conf,
         "by_phase": by_phase,
         "by_score_100": by_score,
+        "by_entry_timing": by_entry_timing,
+        "risk_by_entry_timing": risk_by_entry_timing,
+        "timing_audit": timing_audit,
         "ic": ic,
         "strategy_stats": strategy_stats,
         "signals": signals[:200],

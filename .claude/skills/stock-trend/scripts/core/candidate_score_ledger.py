@@ -7,6 +7,7 @@ SCHEMA_VERSION = "candidate-score-ledger/v1"
 QUANT_RULE_VERSION = "stock-scanner/composite-v1"
 WYCKOFF_RULE_VERSION = "daily-candidates/strict-buy-point-v1"
 NEWS_RULE_VERSION = "candidate-news-overlay/v1"
+ENTRY_TIMING_RULE_VERSION = "daily-candidates/entry-timing-v1"
 
 
 def _number(value, default=0.0):
@@ -116,6 +117,30 @@ def append_wyckoff_bonus(item, bonus, evidence):
     })
     ledger["formal_score"] = base
     ledger["formal_priority_score"] = formal
+    return ledger
+
+
+def append_entry_timing(item, timing):
+    """Record the entry-timing gate without altering the formal score."""
+    ledger = item.setdefault("score_ledger", build_quantitative_ledger(item))
+    timing = copy.deepcopy(timing or {})
+    ledger["entries"].append({
+        "category": "entry_timing",
+        "rule_id": "entry_timing.guard",
+        "rule_version": ENTRY_TIMING_RULE_VERSION,
+        "input_value": timing.get("status", "unknown"),
+        "before": _number(item.get("execution_priority_score", item.get("quality_adjusted_score"))),
+        "after": _number(item.get("execution_priority_score", item.get("quality_adjusted_score"))),
+        "contribution": 0.0,
+        "affects_formal_score": False,
+        "data_provider": "kline",
+        "data_date": _date_or_none(
+            (item.get("wyckoff") or {}).get("short_term", {}).get("confirmation_date")
+        ),
+        "fetched_at": "unknown",
+        "quality": "strategy_gate",
+        "evidence": timing,
+    })
     return ledger
 
 

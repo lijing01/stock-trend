@@ -38,7 +38,7 @@ from scans.stock_scanner import (
     score_sector_membership,
     select_primary_sector_membership,
 )
-from analysis.wyckoff import classify_buy_point_level
+from analysis.wyckoff import classify_buy_point_level, classify_entry_timing
 from analysis.market_explanation import build_market_explanation
 from analysis.market_regime import compute_regime
 from analysis.market_style import annotate_candidates_for_shadow
@@ -69,7 +69,9 @@ from core.evolution_registry import validate_experiment_definition, load_active_
 from core.candidate_news import (
     apply_news_overlay, decision_cutoff, load_news_evidence,
 )
-from core.candidate_score_ledger import append_wyckoff_bonus, ensure_score_ledger
+from core.candidate_score_ledger import (
+    append_entry_timing, append_wyckoff_bonus, ensure_score_ledger,
+)
 from reporting.market_explanation import render_market_explanation
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
 DEFAULT_SECTOR_EXPANSION_STEP = 20
@@ -110,6 +112,13 @@ REASON_LABELS = {
     "recommendation_limit": "超出当日推荐数量上限",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
     "wyckoff_failed_breakout": "维科夫突破失败，等待重新构筑",
+    "wyckoff_signal_stale": "维科夫信号确认过晚，超过执行时效",
+    "first_jac_wait_retest": "首次 JAC 尚未完成 LPS 后再确认，等待回踩",
+    "entry_overextended": "价格已显著高于触发位，禁止突破后追高",
+    "entry_distance_unknown": "缺少触发位或 ATR，无法确认入场距离",
+    "entry_wait_pullback": "入场距离偏高，等待回踩后再评估",
+    "wyckoff_signal_not_confirmed": "维科夫信号尚未确认",
+    "wyckoff_confirmation_missing": "结构尚未达到可执行确认条件",
     "data_quality_ineligible": "关键数据质量不合格",
     "sector_membership_cross_source_unverified": "跨源板块成分未验证，不能继承排行资格",
     "sector_membership_stale": "板块成分数据日期晚于评价日",
@@ -146,11 +155,26 @@ def candidate_quality_score(item):
 
 def apply_buy_point_priority(item, priority_bonuses=None):
     """Materialize an auditable within-bucket execution priority score."""
-    level = classify_buy_point_level(item.get("wyckoff"))
+    wyckoff = item.get("wyckoff") or {}
+    has_timing = "entry_timing" in wyckoff
+    level = classify_buy_point_level(wyckoff)
+    timing = classify_entry_timing(wyckoff)
     default_bonus = float(level["priority_bonus"]) if level else 0.0
+    # A structural level can remain visible in research, but it must not add
+    # priority once the entry is stale, unknown, waiting for a pullback, or
+    # otherwise blocked by the execution timing layer.
+    if has_timing and timing.get("executable") is not True:
+        default_bonus = 0.0
     bonus = float((priority_bonuses or {}).get(
         f"strict_level_{level['number']}" if level else "", default_bonus))
+    if has_timing and timing.get("executable") is not True:
+        bonus = 0.0
     quality = candidate_quality_score(item)
+    item["entry_timing_status"] = timing.get("status", "unknown")
+    item["entry_timing_score"] = timing.get("entry_timing_score")
+    item["signal_age_penalty"] = timing.get("signal_age_penalty", 0.0)
+    item["trigger_extension_penalty"] = timing.get(
+        "trigger_extension_penalty", 0.0)
     item["buy_point_level"] = level["number"] if level else None
     item["buy_point_level_name"] = level["name"] if level else ""
     item["buy_point_priority_bonus"] = bonus
@@ -159,6 +183,7 @@ def apply_buy_point_priority(item, priority_bonuses=None):
     # from the structural Wyckoff dimension already embedded in raw composite.
     ensure_score_ledger(item)
     append_wyckoff_bonus(item, bonus, buy_point_evidence(item.get("wyckoff")))
+    append_entry_timing(item, timing)
     return item
 
 
@@ -170,6 +195,12 @@ def buy_point_evidence(wyckoff):
     """
     short = (wyckoff or {}).get("short_term", {}) if isinstance(wyckoff, dict) else {}
     level = classify_buy_point_level(wyckoff)
+    timing = classify_entry_timing(wyckoff)
+    timing_blocked = (
+        isinstance(wyckoff, dict)
+        and "entry_timing" in wyckoff
+        and timing.get("executable") is not True
+    )
     age = short.get("signal_age_bars")
     try:
         age = int(age) if age is not None else None
@@ -179,8 +210,14 @@ def buy_point_evidence(wyckoff):
     return {
         "strict_level": level["number"] if level else None,
         "strict_level_name": level["name"] if level else "",
-        "priority_bonus": float(level["priority_bonus"]) if level else 0.0,
-        "reward_reason": level["label"] if level else "不满足严格等级或证据未知",
+        "priority_bonus": (
+            0.0 if timing_blocked
+            else float(level["priority_bonus"]) if level else 0.0
+        ),
+        "reward_reason": (
+            f"{level['label']}（时机门禁阻断）" if timing_blocked and level
+            else level["label"] if level else "不满足严格等级或证据未知"
+        ),
         "event_date": short.get("event_date") or "unknown",
         "confirmation_date": short.get("confirmation_date") or "unknown",
         "signal_age_bars": age,
@@ -189,6 +226,7 @@ def buy_point_evidence(wyckoff):
         "confidence": short.get("confidence"),
         "confidence_meaning": "形态识别置信度，非交易胜率",
         "post_lps_reconfirmation": short.get("post_lps_reconfirmation") is True,
+        "entry_timing": timing,
     }
 
 
@@ -247,7 +285,34 @@ def _candidate_gate_pass(item, min_score, policy=None):
     if policy and policy.get("requires_sector_capital_proof") \
             and item.get("sector_capital_evidence") != "positive_verified":
         return False
-    return _short_term_observation_reason(item) is None
+    if _short_term_observation_reason(item) is not None:
+        return False
+    timing = classify_entry_timing(item.get("wyckoff"))
+    if "entry_timing" not in (item.get("wyckoff") or {}):
+        return True
+    if timing.get("status") == "entry_wait_pullback":
+        return (policy or {}).get("mode") == "waiting_trigger"
+    return timing.get("executable") is True
+
+
+def _entry_timing_reason(item):
+    """Return the machine-readable reason for a non-fresh entry."""
+    wyckoff = item.get("wyckoff") or {}
+    if "entry_timing" not in wyckoff:
+        return None
+    timing = classify_entry_timing(wyckoff)
+    reason = timing.get("reason_code")
+    return reason or None
+
+
+def _entry_timing_bucket(item):
+    """Sort fresh entries before pullback waits, then hard blockers."""
+    timing = classify_entry_timing(item.get("wyckoff"))
+    return {
+        "entry_fresh": 2,
+        "entry_wait_pullback": 1,
+        "not_evaluated": 1,
+    }.get(timing.get("status"), 0)
 
 
 def _is_final_valid_candidate(item, min_score, policy=None):
@@ -2120,7 +2185,8 @@ def select_candidate_pool(scored, top, min_score, policy=None,
 
     def selection_key(item):
         promotable = _candidate_gate_pass(item, min_score, policy)
-        return promotable, candidate_rank_score(item), str(item.get("code", ""))
+        return (promotable, _entry_timing_bucket(item),
+                candidate_rank_score(item), str(item.get("code", "")))
 
     candidates.sort(key=selection_key, reverse=True)
     return candidates[:top]
@@ -2367,6 +2433,16 @@ def _candidate_diagnostic_text(item):
         parts.append("维科夫状态：突破后回踩待确认")
     elif signal_status == "failed_breakout":
         parts.append("维科夫状态：突破失败")
+    timing = classify_entry_timing(wyckoff)
+    if timing.get("status") != "not_evaluated":
+        timing_label = REASON_LABELS.get(
+            timing.get("reason_code"), timing.get("status", "unknown"))
+        distance = ""
+        if timing.get("trigger_extension_atr") is not None:
+            distance += f"；距触发 {timing['trigger_extension_atr']:+.2f} ATR"
+        if timing.get("trigger_extension_pct") is not None:
+            distance += f" / {timing['trigger_extension_pct']:+.1%}"
+        parts.append(f"入场时机：{timing_label}{distance}")
     style_shadow = item.get("style_shadow")
     if isinstance(style_shadow, dict):
         style_state = style_shadow.get("matched_style_state", "unknown")
@@ -2546,10 +2622,14 @@ def _append_candidate_table(lines, title, items, empty_text):
         detail = _markdown_cell(_candidate_diagnostic_text(item))
         evidence = buy_point_evidence(wyckoff)
         news = item.get("news_analysis") or {}
+        timing = evidence["entry_timing"]
+        timing_text = f"时机 {timing.get('status', 'unknown')}"
+        if timing.get("trigger_extension_atr") is not None:
+            timing_text += f"；距触发 {timing['trigger_extension_atr']:+.2f}ATR"
         buy_text = (f"{wyckoff.get('sub_phase', '-')}；{evidence['reward_reason']}；"
                     f"事件 {evidence['event_date']}；确认 {evidence['confirmation_date']}；"
                     f"年龄 {evidence['signal_age_bars'] if evidence['age_status'] == 'known' else '未知'}；"
-                    f"{evidence['current_status']}")
+                    f"{evidence['current_status']}；{timing_text}")
         lines.append(
             f"| {index} | {item['name']}({item['code']}) | "
             f"{_sector_text(item)} | {_minor_phase_text(wyckoff)} | "
@@ -3106,6 +3186,22 @@ def _short_term_observation_reason(item):
     }.get(signal_status)
 
 
+def _entry_timing_is_visible(item):
+    """Keep timing-blocked rows in observation, not in promotable slots."""
+    wyckoff = item.get("wyckoff") or {}
+    if "entry_timing" not in wyckoff:
+        return True
+    status = classify_entry_timing(wyckoff).get("status")
+    return status in {"entry_fresh", "entry_wait_pullback", "not_evaluated"}
+
+
+def _entry_timing_is_fresh(item):
+    wyckoff = item.get("wyckoff") or {}
+    if "entry_timing" not in wyckoff:
+        return True
+    return classify_entry_timing(wyckoff).get("executable") is True
+
+
 def classify_candidates(candidates, policy):
     data_rejected = []
     eligible_candidates = []
@@ -3126,6 +3222,9 @@ def classify_candidates(candidates, policy):
         short_term_reason = _short_term_observation_reason(item)
         if short_term_reason:
             reasons.append(short_term_reason)
+        timing_reason = _entry_timing_reason(item)
+        if timing_reason:
+            reasons.append(timing_reason)
         rejected["observation_reasons"] = list(dict.fromkeys(reasons))
         data_rejected.append(rejected)
 
@@ -3136,10 +3235,16 @@ def classify_candidates(candidates, policy):
         and (not policy.get("requires_sector_capital_proof", False)
              or item.get("sector_capital_evidence") == "positive_verified")
         and _short_term_observation_reason(item) is None
+        and _entry_timing_is_visible(item)
     ]
     limit = policy.get("max_recommendations", 0)
-    actionable = eligible[:limit] if policy.get("mode") == "actionable" else []
-    waiting = eligible[:limit] if policy.get("mode") == "waiting_trigger" else []
+    fresh = [item for item in eligible if _entry_timing_is_fresh(item)]
+    waiting_pool = [item for item in eligible
+                    if _entry_timing_is_fresh(item)
+                    or classify_entry_timing(item.get("wyckoff")).get("status")
+                    == "entry_wait_pullback"]
+    actionable = fresh[:limit] if policy.get("mode") == "actionable" else []
+    waiting = waiting_pool[:limit] if policy.get("mode") == "waiting_trigger" else []
     promoted = {item["code"] for item in actionable + waiting}
     confirmations = []
     if policy.get("mode") == "waiting_trigger":
@@ -3148,6 +3253,7 @@ def classify_candidates(candidates, policy):
                          and item.get("score_eligible", True)
                          and item.get("wyckoff")
                          and _short_term_observation_reason(item) is None
+                         and _entry_timing_is_visible(item)
                          and item.get("code") not in promoted][:2]
         confirmations = [
             dict(item, confirmation_conditions=(
@@ -3173,6 +3279,9 @@ def classify_candidates(candidates, policy):
         short_term_reason = _short_term_observation_reason(item)
         if short_term_reason:
             reasons.append(short_term_reason)
+        timing_reason = _entry_timing_reason(item)
+        if timing_reason:
+            reasons.append(timing_reason)
         if not reasons and policy.get("reasons"):
             reasons.extend(policy["reasons"])
         if not reasons:

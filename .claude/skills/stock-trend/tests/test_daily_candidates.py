@@ -1553,6 +1553,70 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(level_three["execution_priority_score"], 80.0)
         self.assertEqual(level_one["execution_priority_score"], 79.0)
 
+    def test_entry_timing_blocks_stale_candidate_and_preserves_reason(self):
+        stale = _set_buy_level(
+            candidate("stale-timing", adjusted_score=90.0), "lps")
+        stale["wyckoff"]["entry_timing"] = {
+            "status": "entry_stale", "reason_code": "wyckoff_signal_stale",
+            "executable": False, "entry_timing_score": 0,
+        }
+        fresh = _set_buy_level(
+            candidate("fresh-timing", adjusted_score=80.0), "lps")
+        fresh["wyckoff"]["entry_timing"] = {
+            "status": "entry_fresh", "reason_code": "",
+            "executable": True, "entry_timing_score": 90,
+        }
+        picked = dc.select_candidate_pool(
+            [stale, fresh], top=1, min_score=50,
+            policy={"mode": "actionable", "max_recommendations": 5})
+        self.assertEqual([row["code"] for row in picked], ["fresh-timing"])
+        buckets = classify_candidates(
+            [stale, fresh],
+            {"mode": "actionable", "max_recommendations": 5, "reasons": []},
+        )
+        self.assertEqual([row["code"] for row in buckets["observation"]],
+                         ["stale-timing"])
+        self.assertIn("wyckoff_signal_stale",
+                      buckets["observation"][0]["observation_reasons"])
+        self.assertIn("确认过晚",
+                      _candidate_diagnostic_text(buckets["observation"][0]))
+
+    def test_entry_timing_wait_is_waiting_not_actionable(self):
+        item = _set_buy_level(
+            candidate("wait-timing", adjusted_score=90.0), "lps")
+        item["wyckoff"]["entry_timing"] = {
+            "status": "entry_wait_pullback", "reason_code": "entry_wait_pullback",
+            "executable": False, "entry_timing_score": 60,
+        }
+        actionable = classify_candidates(
+            [item], {"mode": "actionable", "max_recommendations": 5,
+                     "reasons": []})
+        self.assertEqual(actionable["actionable"], [])
+        self.assertIn("entry_wait_pullback",
+                      actionable["observation"][0]["observation_reasons"])
+        waiting = classify_candidates(
+            [item], {"mode": "waiting_trigger", "max_recommendations": 2,
+                     "reasons": []})
+        self.assertEqual([row["code"] for row in waiting["waiting_trigger"]],
+                         ["wait-timing"])
+
+    def test_entry_timing_suppresses_buy_point_bonus_and_audits_gate(self):
+        item = _set_buy_level(
+            candidate("overextended", adjusted_score=78.0), "lps")
+        item["wyckoff"]["entry_timing"] = {
+            "status": "entry_overextended", "reason_code": "entry_overextended",
+            "executable": False, "entry_timing_score": 0,
+        }
+        dc.apply_buy_point_priority(item)
+        self.assertEqual(item["buy_point_priority_bonus"], 0.0)
+        self.assertEqual(dc.buy_point_evidence(item["wyckoff"])["priority_bonus"], 0.0)
+        self.assertIn("时机门禁阻断",
+                      dc.buy_point_evidence(item["wyckoff"])["reward_reason"])
+        self.assertTrue(any(
+            entry["category"] == "entry_timing"
+            for entry in item["score_ledger"]["entries"]
+        ))
+
     def test_buy_level_bonus_cannot_cross_quality_eligibility_gate(self):
         item = _set_buy_level(
             candidate("low", adjusted_score=49.0), "lps")

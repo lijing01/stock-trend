@@ -149,6 +149,23 @@ EVENT_MAX_AGE = {
     SUB_BC: 8, SUB_UTAD: 8,
 }
 
+# Structural freshness is deliberately wider than executable-entry freshness.
+# The former keeps a useful event visible in the research pool; the latter is
+# the anti-chasing guard used by daily recommendations.
+EXECUTION_MAX_AGE = {
+    SUB_SPRING: 2,
+    SUB_ST: 2,
+    SUB_PRE_MARKUP: 1,
+    SUB_JAC: 2,
+    SUB_BU: 3,
+    SUB_LPS: 3,
+}
+ENTRY_FRESH_MAX_ATR = 1.0
+ENTRY_WAIT_MAX_ATR = 1.5
+ENTRY_FRESH_MAX_PCT = 0.05
+ENTRY_WAIT_MAX_PCT = 0.08
+ENTRY_TIMING_RULE_VERSION = "daily-candidates/entry-timing-v1"
+
 # Strict execution-level metadata.  The level is intentionally separate from
 # the structural Wyckoff score so downstream ranking can audit its effect.
 BUY_POINT_LEVELS = {
@@ -191,11 +208,144 @@ def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
     level = BUY_POINT_LEVELS.get(sub_phase)
     if level is None or status != "confirmed":
         return None
-    if age < 0 or age > EVENT_MAX_AGE.get(sub_phase, 0):
+    if age < 0 or age > EXECUTION_MAX_AGE.get(sub_phase, 0):
         return None
     if sub_phase == SUB_JAC and short.get("post_lps_reconfirmation") is not True:
         return None
     return dict(level)
+
+
+def build_entry_timing(sub_phase: str, signal_status: str, signal_age_bars,
+                       post_lps_reconfirmation: bool, current_close,
+                       trigger_close, current_atr) -> dict:
+    """Classify whether a structurally valid signal is still executable.
+
+    ``EVENT_MAX_AGE`` remains the research visibility window. This function is
+    the separate execution layer that prevents a late confirmation or a price
+    already far above its trigger from becoming a fresh recommendation.
+    """
+    sub_phase = str(sub_phase or "").strip().lower()
+    status = str(signal_status or "none").strip().lower()
+    max_age = EXECUTION_MAX_AGE.get(sub_phase)
+    result = {
+        "rule_version": ENTRY_TIMING_RULE_VERSION,
+        "status": "entry_distance_unknown",
+        "reason_code": "entry_distance_unknown",
+        "executable": False,
+        "sub_phase": sub_phase,
+        "signal_age_bars": None,
+        "execution_max_age": max_age,
+        "current_close": None,
+        "trigger_close": None,
+        "current_atr": None,
+        "trigger_extension_pct": None,
+        "trigger_extension_atr": None,
+        "signal_age_penalty": 0.0,
+        "trigger_extension_penalty": 0.0,
+        "entry_timing_score": 0.0,
+    }
+    try:
+        age = int(signal_age_bars)
+    except (TypeError, ValueError):
+        age = None
+    try:
+        close = float(current_close)
+        trigger = float(trigger_close)
+        atr = float(current_atr)
+    except (TypeError, ValueError):
+        close = trigger = atr = None
+    result.update({
+        "signal_age_bars": age,
+        "current_close": round(close, 4) if close is not None else None,
+        "trigger_close": round(trigger, 4) if trigger is not None else None,
+        "current_atr": round(atr, 4) if atr is not None else None,
+    })
+    if status != "confirmed":
+        result.update({
+            "status": "entry_signal_not_confirmed",
+            "reason_code": "wyckoff_signal_not_confirmed",
+        })
+        return result
+    if age is None or age < 0 or max_age is None or age > max_age:
+        result.update({
+            "status": "entry_stale",
+            "reason_code": "wyckoff_signal_stale",
+            "signal_age_penalty": 100.0,
+        })
+        return result
+    if close is None or trigger is None or atr is None or trigger <= 0 or atr <= 0:
+        return result
+
+    extension_pct = close / trigger - 1.0
+    extension_atr = (close - trigger) / atr
+    age_penalty = min(40.0, age / max(max_age, 1) * 40.0)
+    extension_penalty = min(60.0, max(0.0, extension_atr) / ENTRY_WAIT_MAX_ATR * 60.0)
+    result.update({
+        "trigger_extension_pct": round(extension_pct, 4),
+        "trigger_extension_atr": round(extension_atr, 4),
+        "signal_age_penalty": round(age_penalty, 2),
+        "trigger_extension_penalty": round(extension_penalty, 2),
+        "entry_timing_score": round(max(0.0, 100.0 - age_penalty - extension_penalty), 2),
+    })
+    if extension_atr > ENTRY_WAIT_MAX_ATR or extension_pct > ENTRY_WAIT_MAX_PCT:
+        result.update({
+            "status": "entry_overextended",
+            "reason_code": "entry_overextended",
+        })
+        return result
+    if (sub_phase == SUB_JAC and post_lps_reconfirmation is not True):
+        result.update({
+            "status": "entry_wait_pullback",
+            "reason_code": "first_jac_wait_retest",
+        })
+        return result
+    if extension_atr > ENTRY_FRESH_MAX_ATR or extension_pct > ENTRY_FRESH_MAX_PCT:
+        result.update({
+            "status": "entry_wait_pullback",
+            "reason_code": "entry_wait_pullback",
+        })
+        return result
+
+    executable = sub_phase in {SUB_SPRING, SUB_ST, SUB_LPS, SUB_BU} or (
+        sub_phase == SUB_JAC and post_lps_reconfirmation is True)
+    result.update({
+        "status": "entry_fresh" if executable else "entry_wait_pullback",
+        "reason_code": "" if executable else "wyckoff_confirmation_missing",
+        "executable": executable,
+    })
+    return result
+
+
+def classify_entry_timing(wyckoff: dict | None) -> dict:
+    """Read the execution timing payload from an analysis or candidate row.
+
+    Older test fixtures and cached candidate rows may not carry the additive
+    field. They retain legacy behavior until a fresh scan writes the field.
+    """
+    if not isinstance(wyckoff, dict) or "entry_timing" not in wyckoff:
+        return {
+            "rule_version": ENTRY_TIMING_RULE_VERSION,
+            "status": "not_evaluated",
+            "reason_code": "",
+            "executable": True,
+            "entry_timing_score": None,
+        }
+    timing = wyckoff.get("entry_timing")
+    if not isinstance(timing, dict):
+        return {
+            "rule_version": ENTRY_TIMING_RULE_VERSION,
+            "status": "entry_distance_unknown",
+            "reason_code": "entry_distance_unknown",
+            "executable": False,
+            "entry_timing_score": 0.0,
+        }
+    return dict(timing)
+
+
+def is_executable_buy_signal(analysis: dict | None) -> bool:
+    """Return whether a structural buy signal also passes entry timing."""
+    return bool(is_buy_signal(analysis)
+                and classify_entry_timing(analysis).get("executable") is True)
 
 # Post-breakout BU/LPS confirmation contract.  These values are deliberately
 # named constants so later backtests can tune them without scattering rules.
@@ -1619,6 +1769,15 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "low": round(ohlcv["low"][trigger_idx], 2),
             "close": round(ohlcv["close"][trigger_idx], 2),
         }
+    entry_timing = build_entry_timing(
+        sub_phase,
+        signal.get("status", "none"),
+        signal.get("age_bars"),
+        _is_post_lps_reconfirmation(active_event, event_history),
+        closes[-1],
+        (trigger or {}).get("close"),
+        atr_values[-1],
+    )
     short_term = {
         "phase": phase,
         "phase_name": PHASE_NAMES.get(phase, "未知阶段"),
@@ -1632,6 +1791,8 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "event": signal.get("event", ""),
         "post_lps_reconfirmation": _is_post_lps_reconfirmation(
             active_event, event_history),
+        "trigger": trigger,
+        "entry_timing": entry_timing,
         "range_level": (trading_range or {}).get("level", ""),
         "minor_phase": build_minor_phase(phase, sub_phase, trigger),
     }
@@ -1689,6 +1850,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "ranges": ranges,
         "timeframes": timeframe_map,
         "short_term": short_term,
+        "entry_timing": entry_timing,
         "long_term": long_term,
         "alignment": build_period_alignment(short_term, long_term),
         "trend_context": trend_context,
