@@ -2644,7 +2644,8 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
 def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                as_of_date="", source_health=None, metrics=None,
                trade_plan_policy=None, top=30, min_candidates=20,
-               min_score=50, capital_expected_date=""):
+               min_score=50, capital_expected_date="",
+               defer_enrichment=False, disable_early_stop=False):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2654,7 +2655,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     enrich report-scope candidates that still lack capital evidence. Capital
     remains a hard quality gate even though it is neutral in the provisional
     queue score. The second pass uses a fixed enrichment-only buffer beyond
-    the output/minimum-candidate frontier.
+    the output/minimum-candidate frontier. ``defer_enrichment`` is for
+    sector-window scans that leave live slots for a single global report queue.
     """
     candidates = list(candidates or [])
     print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
@@ -2946,7 +2948,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         prefetch_limit=CAPITAL_PREFETCH_LIMIT,
         expected_trading_date=capital_expected_date)
     priority_queue = queue_info["priority_queue"]
-    if isinstance(source_health, RunSourceHealth):
+    if defer_enrichment:
+        priority_queue = []
+        metrics_ref["enrichment_deferred_candidate_count"] = (
+            metrics_ref.get("enrichment_deferred_candidate_count", 0)
+            + len(eligible_candidates))
+    elif isinstance(source_health, RunSourceHealth):
         requested_priority_count = len(priority_queue)
         admitted_priority_count = source_health.admit_enrichment_slots(
             "capital", "initial", requested_priority_count,
@@ -3323,6 +3330,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 if item.get("data_quality", {}).get("eligible", False)]
 
     def _can_stop(scored, remaining):
+        if disable_early_stop:
+            return False
         if requested_min_candidates <= 0:
             return True
         valid = _quality_valid(scored)
@@ -3346,7 +3355,10 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     processed_codes = set()
     capital_processed_codes = set()
     initial_budget_cutoff_codes = set()
-    batches = queue_info["batches"]
+    batches = [
+        priority_queue[index:index + CAPITAL_PREFETCH_BATCH_SIZE]
+        for index in range(0, len(priority_queue), CAPITAL_PREFETCH_BATCH_SIZE)
+    ]
     # Queue ordering uses the provisional score; defer full output assembly
     # until a live/cache enrichment batch has completed.  This avoids doing
     # trade-plan work twice for the first batch while retaining the required
@@ -3418,13 +3430,14 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     metrics_ref["report_scope_unenhanced_count"] = (
         metrics_ref.get("report_scope_unenhanced_count", 0)
         + len(report_scope_unenhanced))
-    topup_candidates = select_capital_topup_candidates(
-        eligible_candidates, provisional_scores,
-        processed_codes=capital_processed_codes,
-        capital_cache_valid_codes=capital_cache_valid_codes,
-        top=enrichment_report_top,
-        limit=CAPITAL_TOPUP_LIMIT,
-        ranked_candidates=report_scope_candidates or None)
+    topup_candidates = (
+        [] if defer_enrichment else select_capital_topup_candidates(
+            eligible_candidates, provisional_scores,
+            processed_codes=capital_processed_codes,
+            capital_cache_valid_codes=capital_cache_valid_codes,
+            top=enrichment_report_top,
+            limit=CAPITAL_TOPUP_LIMIT,
+            ranked_candidates=report_scope_candidates or None))
     if isinstance(source_health, RunSourceHealth):
         requested_topup_count = len(topup_candidates)
         admitted_topup_count = source_health.admit_enrichment_slots(
@@ -3565,7 +3578,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             "not_started_deadline" if (
                 deadline_reached or initial_budget_reached
                 or candidate["code"] in initial_budget_cutoff_codes)
-            and candidate["code"] in queue_by_code
+            and (candidate["code"] in queue_by_code
+                 or candidate["code"] in report_scope_codes)
             else "not_selected_for_enrichment")
         if candidate["code"] in topup_deadline_codes["capital"]:
             status = "not_started_deadline"

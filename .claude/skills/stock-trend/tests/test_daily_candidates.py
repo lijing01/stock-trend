@@ -2271,6 +2271,73 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(cached_item["ranking_source"], "cache")
         self.assertEqual(cached_item["ranking_data_date"], "2026-08-05")
 
+    def test_scan_can_defer_enrichment_to_the_global_report_scope(self):
+        phase2_kwargs = []
+
+        def fake_gather(batch, **_kwargs):
+            return {"candidates": [{
+                "code": "600001", "name": "测试", "sector_code": batch[0],
+            }]}
+
+        def fake_phase2(candidates, **kwargs):
+            phase2_kwargs.append(kwargs)
+            return [{
+                **item, "composite_score": 80,
+                "quality_adjusted_score": 60,
+                "data_quality": {"eligible": False, "reasons": ["cache_miss"]},
+            } for item in candidates]
+
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+             patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            result = dc.scan_sectors(
+                ["BK1"], min_candidates=1,
+                sector_context={"BK1": {"sector_actionable": True}},
+                defer_enrichment=True)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(phase2_kwargs), 1)
+        self.assertTrue(phase2_kwargs[0]["defer_enrichment"])
+
+    def test_global_enrichment_covers_report_scope_and_buffer(self):
+        scored = []
+        for index in range(50):
+            item = candidate(f"{600000 + index:06d}")
+            item["ts_code"] = f"{item['code']}.SH"
+            scored.append(item)
+        calls = []
+
+        def fake_phase2(candidates, **kwargs):
+            calls.append((list(candidates), kwargs))
+            return [{
+                **item,
+                "source_evidence": {
+                    "capital": {"status": "live_success", "attempted": True},
+                },
+            } for item in candidates]
+
+        metrics = {}
+        with patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            enriched, scope_codes = dc.enrich_global_report_scope(
+                scored, top=30, min_candidates=20, min_score=50,
+                as_of_date="2026-08-06",
+                capital_expected_date="2026-08-06", metrics=metrics)
+
+        self.assertEqual(len(calls), 1)
+        candidates, kwargs = calls[0]
+        self.assertEqual(len(candidates), 30 + dc.CAPITAL_TOPUP_LIMIT)
+        self.assertEqual(kwargs["top"], 30)
+        self.assertEqual(kwargs["min_candidates"], 20)
+        self.assertTrue(kwargs["disable_early_stop"])
+        self.assertEqual(metrics["global_enrichment_scope_count"], 42)
+        selected_codes = {item["code"] for item in candidates}
+        self.assertEqual(scope_codes, selected_codes)
+        by_code = {item["code"]: item for item in enriched}
+        self.assertTrue(all(
+            by_code[code]["source_evidence"]["capital"]["status"]
+            == "live_success" for code in selected_codes))
+        self.assertEqual(sum(
+            "source_evidence" in item for item in enriched), 42)
+
     def test_scan_expands_when_first_batch_lacks_required_capital_proof(self):
         calls = []
 

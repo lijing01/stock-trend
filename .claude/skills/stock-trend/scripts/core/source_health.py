@@ -18,7 +18,7 @@ SOURCES = (
 )
 # The scan has a hard end-to-end cap.  Live provider work stops early enough
 # to retain the final report reserve.
-SCAN_DEADLINE_SECONDS = 330
+SCAN_DEADLINE_SECONDS = 450
 FINALIZATION_RESERVE_SECONDS = 10
 KLINE_PHASE_SECONDS = 110
 CAPITAL_PREFETCH_LIMIT = 36

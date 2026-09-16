@@ -1374,6 +1374,34 @@ class TestRunPhase2Funnel(unittest.TestCase):
             "cache_valid")
         self.assertEqual(health.snapshot()["capital"]["cache_hits"], 1)
 
+    def test_deferred_enrichment_leaves_global_live_slots_unused(self):
+        candidate = _make_candidate("610997")
+        capital_calls = []
+        health = sc.RunSourceHealth()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(
+                    sc, "_fetch_kline",
+                    side_effect=lambda ts_code, **_kwargs:
+                    _make_dated_kline(60, ts_code, "20260827")), \
+                patch.object(sc, "_fetch_capital_flow",
+                             side_effect=lambda ts_code, **_kwargs:
+                             capital_calls.append(ts_code)), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            metrics = {}
+            scored = sc.run_phase2(
+                [candidate], source_health=health,
+                as_of_date="20260827", capital_expected_date="20260827",
+                min_candidates=0, top=1, defer_enrichment=True,
+                metrics=metrics)
+
+        self.assertEqual(capital_calls, [])
+        self.assertEqual(health.enrichment_admitted("capital", "initial"), 0)
+        self.assertEqual(metrics["enrichment_deferred_candidate_count"], 1)
+        self.assertEqual(
+            scored[0]["source_evidence"]["capital"]["status"],
+            "not_selected_for_enrichment")
+
     def test_priority_queue_batches_are_stable_and_exclude_valid_cache(self):
         candidates = []
         for index in range(40):
@@ -1608,6 +1636,52 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertTrue(all(
             item["data_quality"]["eligible"] for item in topup_items
         ))
+
+    def test_global_scope_with_disabled_early_stop_enriches_all_42_once(self):
+        candidates = [
+            _make_candidate(f"617{index:03d}") for index in range(42)
+        ]
+        for candidate in candidates:
+            candidate.update({
+                "membership_source": "realtime",
+                "membership_quality": "good",
+                "membership_data_date": "20260827",
+            })
+        capital_calls = []
+        fundamental = {
+            "meta": {
+                "data_source": "akshare",
+                "fetch_time": "20260827-160000",
+            },
+            "summary": {"data_quality": "good", "roe": 12},
+            "data": {"pe_ttm": 20},
+        }
+
+        def fetch_capital(ts_code, **_kwargs):
+            capital_calls.append(ts_code)
+            return {
+                "meta": {"data_source": "eastmoney"},
+                "data": [{"date": "20260827", "main_net_inflow": 1}],
+            }
+
+        with patch.object(
+                sc, "_fetch_kline",
+                side_effect=lambda ts_code, **_kwargs:
+                _make_dated_kline(60, ts_code, "20260827")), \
+                patch.object(sc, "_fetch_capital_flow",
+                             side_effect=fetch_capital), \
+                patch.object(sc, "_fetch_fundamental", return_value=fundamental):
+            scored = sc.run_phase2(
+                candidates, enable_wyckoff=False, max_workers=4,
+                min_candidates=20, top=30, as_of_date="20260827",
+                capital_expected_date="20260827", disable_early_stop=True)
+
+        self.assertEqual(len(capital_calls), 42)
+        self.assertEqual(len(set(capital_calls)), 42)
+        self.assertEqual(len(scored), 42)
+        self.assertTrue(all(
+            item["source_evidence"]["capital"]["status"] == "live_success"
+            for item in scored))
 
     def test_capital_topup_is_not_started_when_deadline_is_near(self):
         candidates = [

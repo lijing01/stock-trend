@@ -461,11 +461,11 @@ class TestRunSourceHealthContract(unittest.TestCase):
 class TestProductionPerformanceContract(unittest.TestCase):
     def test_production_deadline_and_budget_constants_bound_critical_path(self):
         contract = _source_health_contract(self)
-        # The 330-second cap keeps 10 seconds for finalization and derives a
-        # protected three-wave top-up window from the source configuration.
-        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 330)
+        # The expanded cap leaves room for the observed scan duration plus
+        # nine initial waves and the protected top-up window for 42 candidates.
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS, 450)
         self.assertEqual(contract.FINALIZATION_RESERVE_SECONDS, 10)
-        self.assertEqual(contract.SCAN_DEADLINE_SECONDS - contract.FINALIZATION_RESERVE_SECONDS, 320)
+        self.assertEqual(contract.SCAN_DEADLINE_SECONDS - contract.FINALIZATION_RESERVE_SECONDS, 440)
         self.assertEqual(contract.KLINE_PHASE_SECONDS, 110)
         self.assertEqual(contract.CAPITAL_PREFETCH_LIMIT, 36)
         self.assertEqual(contract.CAPITAL_PREFETCH_BATCH_SIZE, 12)
@@ -475,7 +475,7 @@ class TestProductionPerformanceContract(unittest.TestCase):
         self.assertEqual(contract.CAPITAL_TOPUP_RESERVE_SECONDS, 77)
         health = contract.RunSourceHealth()
         self.assertEqual(
-            round(health.capital_initial_deadline - health.started_at), 243)
+            round(health.capital_initial_deadline - health.started_at), 363)
         self.assertEqual(contract.capital_topup_reserve_seconds(
             topup_limit=12,
             max_in_flight={"capital": 4, "fundamental": 2},

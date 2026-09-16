@@ -50,6 +50,7 @@ from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
 )
 from core.source_health import (
+    CAPITAL_TOPUP_LIMIT,
     CAPITAL_TOPUP_RESERVE_SECONDS,
     FINALIZATION_RESERVE_SECONDS,
     LIVE_ATTEMPT_TIMEOUT_SECONDS,
@@ -2023,7 +2024,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
                  policy=None, return_research_population=False,
-                 scan_mode="exploratory"):
+                 scan_mode="exploratory", defer_enrichment=False):
     """Scan the bounded sector universe, optionally completing a fixed scope."""
     metrics = metrics if metrics is not None else {}
     formal_scope = scan_mode == "post_close_final"
@@ -2187,11 +2188,13 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     capital_expected_date=capital_expected_date,
                     source_health=source_health, metrics=metrics,
                     top=capital_top, min_candidates=min_candidates,
-                    min_score=min_score)
+                    min_score=min_score,
+                    defer_enrichment=defer_enrichment)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
                         "source_health", "metrics", "capital_expected_date",
-                        "top", "min_candidates", "min_score")):
+                        "top", "min_candidates", "min_score",
+                        "defer_enrichment")):
                     raise
                 try:
                     scored = run_phase2(
@@ -2280,6 +2283,53 @@ def select_candidate_pool(scored, top, min_score, policy=None,
 
     candidates.sort(key=selection_key, reverse=True)
     return candidates[:top]
+
+
+def enrich_global_report_scope(scored, top=30, min_candidates=20,
+                               min_score=50, as_of_date="",
+                               capital_expected_date="", policy=None,
+                               priority_bonuses=None, source_health=None,
+                               metrics=None):
+    """Run one enrichment queue over the global report scope plus buffer."""
+    scored = list(scored or [])
+    metrics = metrics if isinstance(metrics, dict) else {}
+    scope_limit = max(0, int(top or 0)) + CAPITAL_TOPUP_LIMIT
+    scope = select_candidate_pool(
+        scored, scope_limit, min_score, policy=policy,
+        priority_bonuses=priority_bonuses)
+    # Production phase-2 rows always carry ts_code. Compatibility callers may
+    # inject report-only fixtures that cannot be passed to the stock scanner.
+    scope = [item for item in scope if item.get("ts_code")]
+    metrics["global_enrichment_scope_limit"] = scope_limit
+    metrics["global_enrichment_scope_count"] = len(scope)
+    if not scope:
+        return scored, None
+
+    enriched = run_phase2(
+        scope, max_workers=4, enable_wyckoff=True,
+        as_of_date=as_of_date,
+        capital_expected_date=capital_expected_date,
+        source_health=source_health, metrics=metrics,
+        top=top, min_candidates=min_candidates, min_score=min_score,
+        disable_early_stop=True)
+    original_by_code = {
+        item.get("code"): item for item in scored if item.get("code")
+    }
+    peer_cohorts = build_sector_peer_cohorts(scored)
+    enriched_by_code = {}
+    for item in enriched or []:
+        code = item.get("code")
+        original = original_by_code.get(code, {})
+        item["sector_memberships"] = merge_sector_memberships(
+            item.get("sector_memberships", []),
+            original.get("sector_memberships", []))
+        enriched_by_code[code] = _rebind_primary_sector(
+            item, peer_cohorts=peer_cohorts, as_of_date=as_of_date)
+    metrics["global_enrichment_result_count"] = len(enriched_by_code)
+    return (
+        [enriched_by_code.get(item.get("code"), item) for item in scored],
+        {item.get("code") for item in scope if item.get("code")},
+    )
 
 
 def _signal_text(signals):
@@ -4394,6 +4444,7 @@ def main():
         max_sector_expansion=scan_expansion_limit,
         scan_mode=scan_mode,
         return_research_population=True,
+        defer_enrichment=True,
     )
     # Compatibility for injected legacy scanner stubs in downstream callers.
     if isinstance(scan_result, tuple):
@@ -4402,9 +4453,28 @@ def main():
         scored = scan_result
         research_population = scan_result
 
+    scored, global_scope_codes = enrich_global_report_scope(
+        scored, top=args.top, min_candidates=args.min_candidates,
+        min_score=args.min_score, as_of_date=expected_date,
+        capital_expected_date=capital_expected_date, policy=policy,
+        priority_bonuses=active_policy["priority_bonuses"],
+        source_health=source_health, metrics=performance)
+    enriched_by_code = {
+        item.get("code"): item for item in scored if item.get("code")
+    }
+    research_population = [
+        enriched_by_code.get(item.get("code"), item)
+        for item in research_population
+    ]
+
     # 过滤 + 排序 + 归一化到 top
+    output_population = (
+        [item for item in scored
+         if item.get("code") in global_scope_codes]
+        if global_scope_codes is not None else scored
+    )
     candidates = select_candidate_pool(
-        scored, args.top, args.min_score, policy=policy,
+        output_population, args.top, args.min_score, policy=policy,
         priority_bonuses=active_policy["priority_bonuses"])
     buckets = classify_candidates(candidates, policy)
     # News is intentionally evaluated only after the existing selector has
