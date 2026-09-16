@@ -1145,11 +1145,15 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
             stale=status == "cache_stale", status=status))
         return result if with_evidence else cached
 
-    # Fetch via subprocess. Transient EM/Tencent failures under concurrency
-    # are common, so retry once before giving up to a stale cache.
+    # Keep the complete in-process fallback chain below the 25-second source
+    # budget: one fast EastMoney attempt (including its direct fallbacks), then
+    # Tencent.  This prevents a slow EM host from consuming the subprocess
+    # deadline before an independent provider can run.
     cmd = [
         sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"),
         ts_code, "--asset", "E", "--freq", "D",
+        "--em-timeout", "4", "--em-fallback-timeout", "2",
+        "--em-host-retries", "1", "--fallback-timeout", "8",
         "-o", str(cache_path),
     ]
     if as_of_date:

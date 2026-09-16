@@ -79,14 +79,17 @@ def reject_stale_payload(result, expected_date):
     return {"meta": meta, "data": []}
 
 
-def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com"):
+def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com",
+                    timeout=15, fallback_timeout=None):
     """Fetch K-line data from East Money API.
 
     Returns a list of parsed records or raises on error.
     """
     url = build_em_kline_url(host, secid, freq=freq, lmt=lmt)
     try:
-        raw = fetch_url(url, headers=EM_HEADERS, timeout=15)
+        raw = fetch_url(
+            url, headers=EM_HEADERS, timeout=timeout,
+            fallback_timeout=fallback_timeout)
         result = json.loads(raw)
     except Exception as e:
         raise RuntimeError(f"东方财富API请求失败({host}): {e}")
@@ -222,7 +225,7 @@ def fetch_hk_stock(ts_code, freq, lmt=250):
     return records, name
 
 
-def fetch_tencent_a_stock(ts_code, freq):
+def fetch_tencent_a_stock(ts_code, freq, timeout=15):
     """Fetch A-share K-line data from Tencent Finance API.
 
     Tencent Finance provides free A-share data without authentication.
@@ -269,7 +272,7 @@ def fetch_tencent_a_stock(ts_code, freq):
 
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
     except Exception as e:
         raise RuntimeError(f"腾讯A股K线API请求失败: {e}")
@@ -363,6 +366,14 @@ def main():
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
     parser.add_argument("--expected-date", help="YYYY-MM-DD trading day the bars must cover; stale-by-date cache is ignored")
+    parser.add_argument("--em-timeout", type=float, default=15,
+                        help="Per-node EastMoney primary request timeout")
+    parser.add_argument("--em-fallback-timeout", type=float,
+                        help="Per-node proxyless/IPv4 fallback timeout")
+    parser.add_argument("--em-host-retries", type=int, default=3,
+                        help="Maximum EastMoney hosts to try")
+    parser.add_argument("--fallback-timeout", type=float, default=15,
+                        help="Tencent K-line fallback timeout")
 
     args = parser.parse_args()
 
@@ -460,14 +471,20 @@ def main():
 
     from core.eastmoney_utils import rotate_em_host
     try:
-        (records, name), used_host = rotate_em_host(lambda h: fetch_eastmoney(secid, args.freq, args.lmt, host=h))
+        (records, name), used_host = rotate_em_host(
+            lambda h: fetch_eastmoney(
+                secid, args.freq, args.lmt, host=h,
+                timeout=args.em_timeout,
+                fallback_timeout=args.em_fallback_timeout),
+            max_retries=max(1, args.em_host_retries))
     except RuntimeError as e:
         error_msg = str(e)
 
     # Fallback to Tencent Finance (A-shares) if EastMoney failed
     if records is None and not args.ts_code.endswith(".HK"):
         try:
-            records, name = fetch_tencent_a_stock(args.ts_code, args.freq)
+            records, name = fetch_tencent_a_stock(
+                args.ts_code, args.freq, timeout=args.fallback_timeout)
             used_host = "tencent_a"
         except Exception:
             pass

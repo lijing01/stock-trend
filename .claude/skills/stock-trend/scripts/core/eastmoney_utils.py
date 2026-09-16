@@ -161,13 +161,15 @@ def rotate_em_host(fetch_fn, max_retries=3):
     raise RuntimeError(f"East Money全节点失败: {last_error}")
 
 
-def fetch_url(url, headers=None, timeout=15):
+def fetch_url(url, headers=None, timeout=15, fallback_timeout=None):
     """Fetch URL via HTTP GET. Falls back to proxyless if proxy fails.
 
     Args:
         url: Full URL string.
         headers: Request headers dict (default EM_HEADERS).
-        timeout: Request timeout in seconds.
+        timeout: Primary request timeout in seconds.
+        fallback_timeout: Timeout for the proxyless and IPv4 fallbacks.  When
+            omitted, preserve the primary timeout for backward compatibility.
 
     Returns:
         Response body as UTF-8 string.
@@ -175,6 +177,9 @@ def fetch_url(url, headers=None, timeout=15):
     Raises:
         Exception from first attempt if both proxy and proxyless fail.
     """
+    if fallback_timeout is None:
+        fallback_timeout = timeout
+    fallback_timeout = max(1, float(fallback_timeout))
     req = urllib.request.Request(url, headers=headers or EM_HEADERS)
     first_error = None
     try:
@@ -185,7 +190,7 @@ def fetch_url(url, headers=None, timeout=15):
         try:
             proxyless = urllib.request.ProxyHandler({})
             opener = urllib.request.build_opener(proxyless)
-            with opener.open(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=fallback_timeout) as resp:
                 return resp.read().decode("utf-8")
         except Exception:
             pass
@@ -194,7 +199,7 @@ def fetch_url(url, headers=None, timeout=15):
     hostname = _extract_host(url)
     if hostname:
         try:
-            return _fetch_via_curl(url, hostname, headers, timeout)
+            return _fetch_via_curl(url, hostname, headers, fallback_timeout)
         except Exception:
             raise first_error
     raise first_error

@@ -284,6 +284,23 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(result, cached)
         run.assert_not_called()
 
+    def test_stale_kline_uses_bounded_provider_budget(self):
+        stale = self._valid_kline("20260812")
+        refreshed = self._valid_kline("20260813")
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[stale, refreshed]), \
+             patch.object(sc, "run_script", return_value={"success": True}) as run:
+            result = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13")
+
+        self.assertEqual(result, refreshed)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--em-timeout") + 1], "4")
+        self.assertEqual(cmd[cmd.index("--em-fallback-timeout") + 1], "2")
+        self.assertEqual(cmd[cmd.index("--em-host-retries") + 1], "1")
+        self.assertEqual(cmd[cmd.index("--fallback-timeout") + 1], "8")
+
     def test_wrong_date_capital_cache_invokes_fetcher(self):
         cached = self._valid_capital("20260812")
         refreshed = self._valid_capital("20260813")
