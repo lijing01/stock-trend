@@ -4127,6 +4127,8 @@ class TestRecommendationPolicy(unittest.TestCase):
                 "capital": {
                     "available": False,
                     "source_status": "source_date_lagging",
+                    "expected_date": "2026-09-16",
+                    "data_date": "2026-09-15",
                     "stale_reason": "source_date_lagging",
                 },
             },
@@ -4137,6 +4139,16 @@ class TestRecommendationPolicy(unittest.TestCase):
                 "status": "source_date_lagging",
                 "reason": "source_date_lagging",
                 "selection_stage": "initial",
+                "expected_date": "2026-09-16",
+                "latest_date": "2026-09-15",
+                "scope": "source",
+                "evidence_source": "eastmoney",
+                "affected_scope": "all_requested_symbols",
+                "date_lag_evidence": [{
+                    "source": "eastmoney", "reason": "stale_data",
+                    "expected_date": "2026-09-16",
+                    "latest_date": "2026-09-15", "scope": "source",
+                }],
             },
         }
 
@@ -4144,7 +4156,49 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         self.assertIn("资金增强源日期滞后，本轮未调用", detail)
         self.assertIn("调度原因码source_date_lagging", detail)
+        self.assertIn("资金要求日期2026-09-16", detail)
+        self.assertIn("实际最新日期2026-09-15", detail)
+        self.assertIn("全源阻断证据范围all_requested_symbols", detail)
+        self.assertIn("证据源eastmoney", detail)
         self.assertNotIn("资金增强源不可用", detail)
+
+    def test_item_capital_date_lagging_shows_required_and_actual_dates(self):
+        item = candidate("item-date-lagging", eligible=False)
+        item["data_quality"] = {
+            "eligible": False, "coverage": 0.75,
+            "as_of_date": "2026-09-16",
+            "capital_expected_date": "2026-09-16",
+            "reasons": ["capital_date_lagging"],
+            "dimensions": {"capital": {
+                "available": False, "fresh": False,
+                "source_status": "item_date_lagging",
+                "expected_date": "2026-09-16",
+                "data_date": "2026-09-15",
+                "source": "eastmoney,tushare_fallback",
+                "stale_reason": "capital_date_lagging",
+            }},
+        }
+        item["source_evidence"] = {"capital": {
+            "attempted": True, "status": "item_date_lagging",
+            "reason": "stale_data", "scope": "item",
+            "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+            "provider": "eastmoney,tushare_fallback",
+            "selection_stage": "initial",
+            "failure_chain": [{
+                "source": "eastmoney", "reason": "stale_data",
+                "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+                "scope": "item",
+            }],
+        }}
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("资金数据日期落后，候选不合格", detail)
+        self.assertIn("资金要求日期2026-09-16", detail)
+        self.assertIn("实际最新日期2026-09-15", detail)
+        self.assertIn("来源eastmoney,tushare_fallback", detail)
+        self.assertIn("接口已调用", detail)
+        self.assertIn("失败链路eastmoney:stale_data@2026-09-15", detail)
 
     def test_capital_failure_audit_excludes_unrequested_scheduler_states(self):
         provider_failure = candidate("provider-failure", eligible=False)

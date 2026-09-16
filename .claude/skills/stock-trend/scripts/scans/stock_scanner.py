@@ -68,7 +68,7 @@ SOURCE_HARD_FAILURE_THRESHOLD = 8
 SOURCE_EVIDENCE_STATUSES = frozenset({
     "live_success", "cache_valid", "cache_miss", "cache_stale",
     "not_selected_for_enrichment", "not_started_deadline",
-    "source_unavailable", "source_date_lagging",
+    "source_unavailable", "source_date_lagging", "item_date_lagging",
 })
 
 # ──────────────────────── Helpers ────────────────────────
@@ -318,6 +318,18 @@ def _source_live_block_reason(source_health, source):
     if isinstance(source_health, RunSourceHealth):
         return source_health.live_block_reason(source)
     state = _source_state(source_health, source)
+    if (state or {}).get("state") == "date_lagging":
+        expected = str(state.get("expected_date") or "").replace("-", "")
+        latest = str(state.get("latest_date") or "").replace("-", "")
+        proven = bool(
+            len(expected) == 8 and expected.isdigit()
+            and len(latest) == 8 and latest.isdigit()
+            and latest < expected
+            and state.get("date_lag_scope")
+            and state.get("date_lag_evidence_source")
+            and state.get("date_lag_evidence"))
+        if not proven:
+            return ""
     return {
         "unavailable": "source_unavailable",
         "date_lagging": "source_date_lagging",
@@ -454,6 +466,19 @@ def _normalize_source_evidence(source, payload, attempt, *, cache_probe=False,
         meta = payload.get("meta", {})
         if isinstance(meta, dict) and meta.get("data_source"):
             evidence["data_source"] = str(meta["data_source"])
+    if source == "capital" and isinstance(payload, dict):
+        meta = payload.get("meta", {})
+        if isinstance(meta, dict):
+            evidence.setdefault(
+                "expected_date", meta.get("expected_date", ""))
+            evidence.setdefault("latest_date", meta.get("latest_date", ""))
+            evidence.setdefault(
+                "date_lag_evidence", meta.get("date_lag_evidence", []))
+            evidence.setdefault("failure_chain", meta.get("failure_chain", []))
+            evidence.setdefault("provider", meta.get("data_source", ""))
+    if source == "capital" and evidence.get("reason") == "stale_data":
+        evidence.setdefault("scope", "item")
+        evidence["status"] = "item_date_lagging"
     return evidence
 
 
@@ -1403,9 +1428,14 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
                 if isinstance(payload, dict) else {}
             meta = meta if isinstance(meta, dict) else {}
             reason = _capital_failure_reason(payload, refreshed_verdict)
+            stale_sources = meta.get("stale_sources", [])
+            stale_sources = (stale_sources if isinstance(stale_sources, list)
+                             else [])
             attempt.update({
                 "reason": reason,
-                "status": reason,
+                "status": (
+                    "item_date_lagging" if reason == "stale_data"
+                    else reason),
                 "failure_chain": meta.get("failure_chain", []),
                 "error_type": meta.get("error_type", ""),
                 "stale_sources": meta.get("stale_sources", []),
@@ -1414,8 +1444,15 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
                 # fields describe what the provider returned, not whether the
                 # request was admitted by the budget scheduler.
                 "expected_trading_date": expected_trading_date,
+                "expected_date": meta.get(
+                    "expected_date", expected_trading_date),
+                "latest_date": meta.get("latest_date", ""),
+                "scope": "item" if reason == "stale_data" else "",
+                "date_lag_evidence": meta.get("date_lag_evidence", []),
+                "provider": ",".join(str(value) for value in stale_sources)
+                if reason == "stale_data" else (
+                    meta.get("data_source") or meta.get("provider", "")),
                 "returned_data_date": latest_data_date(payload),
-                "provider": meta.get("data_source") or meta.get("provider", ""),
                 "fetched_at": meta.get("fetch_time") or meta.get("fetched_at", ""),
                 "cache_timestamp": datetime.fromtimestamp(
                     cache_path.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
@@ -1425,7 +1462,12 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
             })
             payload = _with_cache_verdict(payload, refreshed_verdict)
         else:
-            attempt["status"] = "live_success"
+            attempt.update({
+                "status": "live_success",
+                "expected_date": expected_trading_date,
+                "latest_date": latest_data_date(payload),
+                "scope": "item",
+            })
         wrapped = source_result(payload, attempt)
         return wrapped if with_evidence else payload
     attempt["reason"] = classify_failure(
@@ -2990,11 +3032,20 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 deadline_reason=deadline_reason)
         block_reason = _source_live_block_reason(source_health, source)
         if block_reason:
+            block_state = _source_state(source_health, source) or {}
             return [(
                 candidate,
                 source_result(None, live_attempt(
                     attempted=False, reason=block_reason,
-                    status=block_reason)),
+                    status=block_reason,
+                    expected_date=block_state.get("expected_date", ""),
+                    latest_date=block_state.get("latest_date", ""),
+                    scope="source",
+                    evidence_source=block_state.get(
+                        "date_lag_evidence_source", ""),
+                    affected_scope=block_state.get("date_lag_scope", ""),
+                    date_lag_evidence=block_state.get(
+                        "date_lag_evidence", []))),
             ) for candidate in batch]
         results = []
         with ThreadPoolExecutor(
@@ -3040,6 +3091,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                                            "cache_stale"):
                     metrics_ref["capital_live_started"] = (
                         metrics_ref.get("capital_live_started", 0) + 1)
+                if evidence.get("status") == "item_date_lagging":
+                    metrics_ref["capital_item_date_lag_count"] = (
+                        metrics_ref.get("capital_item_date_lag_count", 0) + 1)
+                elif evidence.get("status") == "source_date_lagging":
+                    metrics_ref["capital_source_block_count"] = (
+                        metrics_ref.get("capital_source_block_count", 0) + 1)
                 if evidence.get("status") == "live_success":
                     metrics_ref["capital_live_success_count"] = (
                         metrics_ref.get("capital_live_success_count", 0) + 1)

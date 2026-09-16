@@ -318,10 +318,21 @@ class TestMetadata(unittest.TestCase):
             "meta": {
                 "data_source": "error",
                 "error_type": "stale_data",
+                "expected_date": "2026-08-13",
+                "latest_date": "2026-08-12",
                 "stale_sources": ["eastmoney"],
+                "date_lag_evidence": [{
+                    "source": "eastmoney", "reason": "stale_data",
+                    "expected_date": "2026-08-13",
+                    "latest_date": "2026-08-12", "scope": "item",
+                }],
                 "failure_chain": [
-                    {"source": "eastmoney", "reason": "stale_data"},
-                    {"source": "tushare_fallback", "reason": "empty"},
+                    {"source": "eastmoney", "reason": "stale_data",
+                     "expected_date": "2026-08-13",
+                     "latest_date": "2026-08-12", "scope": "item"},
+                    {"source": "tushare_fallback", "reason": "empty",
+                     "expected_date": "2026-08-13", "latest_date": "",
+                     "scope": "item"},
                 ],
                 "error": "资金流向获取失败: 东方财富数据过期",
             },
@@ -337,8 +348,11 @@ class TestMetadata(unittest.TestCase):
 
         attempt = wrapped["live_attempt"]
         self.assertEqual(attempt["reason"], "stale_data")
-        self.assertEqual(attempt["status"], "stale_data")
+        self.assertEqual(attempt["status"], "item_date_lagging")
         self.assertEqual(attempt["stale_sources"], ["eastmoney"])
+        self.assertEqual(attempt["expected_date"], "2026-08-13")
+        self.assertEqual(attempt["latest_date"], "2026-08-12")
+        self.assertEqual(attempt["scope"], "item")
         self.assertEqual(
             attempt["failure_chain"], payload["meta"]["failure_chain"])
         self.assertIn("东方财富", attempt["failure_detail"])
@@ -1237,6 +1251,98 @@ class TestScoreWyckoff(unittest.TestCase):
 
 
 class TestRunPhase2Funnel(unittest.TestCase):
+    def test_one_stale_stock_does_not_prevent_fresh_capital_for_next_stock(self):
+        candidates = [_make_candidate("600001"), _make_candidate("600002")]
+        for candidate in candidates:
+            candidate.update({
+                "membership_source": "realtime",
+                "membership_quality": "good",
+                "membership_data_date": "2026-09-16",
+            })
+        health = sc.RunSourceHealth()
+        calls = []
+        failure_chain = [
+            {"source": "eastmoney", "reason": "stale_data",
+             "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+             "scope": "item"},
+            {"source": "tushare_fallback", "reason": "stale_data",
+             "expected_date": "2026-09-16", "latest_date": "2026-09-14",
+             "scope": "item"},
+        ]
+        stale_payload = {
+            "meta": {
+                "data_source": "error", "error_type": "stale_data",
+                "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+                "stale_sources": ["eastmoney", "tushare_fallback"],
+                "date_lag_evidence": failure_chain,
+                "failure_chain": failure_chain,
+            },
+            "data": [],
+        }
+        fresh_payload = {
+            "meta": {"data_source": "eastmoney"},
+            "data": [{"date": "20260916", "main_net_inflow": 1}],
+        }
+        fundamental = {
+            "meta": {"data_source": "fixture",
+                     "fetch_time": "20260916-160000"},
+            "summary": {"data_quality": "good"},
+            "data": {},
+        }
+
+        def fetch_capital(ts_code, **_kwargs):
+            calls.append(ts_code)
+            if ts_code == "600001.SH":
+                attempt = sc.live_attempt(
+                    attempted=True, provider_attempts=1,
+                    reason="stale_data", status="item_date_lagging",
+                    expected_date="2026-09-16", latest_date="2026-09-15",
+                    scope="item", failure_chain=failure_chain,
+                    stale_sources=stale_payload["meta"]["stale_sources"],
+                    date_lag_evidence=failure_chain)
+                return sc.source_result(stale_payload, attempt)
+            return sc.source_result(fresh_payload, sc.live_attempt(
+                attempted=True, provider_attempts=1, status="live_success"))
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(
+                    sc, "_fetch_kline",
+                    side_effect=lambda ts_code, **_kwargs:
+                    _make_dated_kline(60, ts_code, "20260916")), \
+                patch.object(sc, "_fetch_capital_flow",
+                             side_effect=fetch_capital), \
+                patch.object(sc, "_fetch_fundamental",
+                             return_value=fundamental):
+            metrics = {}
+            scored = sc.run_phase2(
+                candidates, max_workers=1, source_health=health,
+                as_of_date="2026-09-16",
+                capital_expected_date="2026-09-16",
+                min_candidates=2, top=2, metrics=metrics)
+
+        by_code = {item["code"]: item for item in scored}
+        stale = by_code["600001"]
+        fresh = by_code["600002"]
+        self.assertEqual(set(calls), {"600001.SH", "600002.SH"})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            stale["source_evidence"]["capital"]["status"],
+            "item_date_lagging")
+        self.assertEqual(
+            stale["data_quality"]["dimensions"]["capital"]["expected_date"],
+            "2026-09-16")
+        self.assertEqual(
+            stale["data_quality"]["dimensions"]["capital"]["data_date"],
+            "2026-09-15")
+        self.assertFalse(stale["data_quality"]["eligible"])
+        self.assertTrue(fresh["data_quality"]["dimensions"]["capital"]["fresh"])
+        self.assertTrue(fresh["data_quality"]["eligible"],
+                        fresh["data_quality"])
+        self.assertEqual(metrics["capital_item_date_lag_count"], 1)
+        self.assertEqual(metrics["capital_valid_count"], 1)
+        self.assertEqual(health.live_block_reason("capital"), "")
+
     def test_valid_cache_probe_is_reported_as_cache_valid_evidence(self):
         candidate = _make_candidate("610998")
         kline = _make_dated_kline(60, candidate["ts_code"], "20260827")

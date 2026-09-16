@@ -282,8 +282,14 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
     stale_sources = []
     failure_chain = []
 
-    def append_failure(source, reason):
-        failure_chain.append({"source": source, "reason": reason})
+    def append_failure(source, reason, latest_date=""):
+        failure_chain.append({
+            "source": source,
+            "reason": reason,
+            "expected_date": expected_date or "",
+            "latest_date": latest_date or "",
+            "scope": "item",
+        })
 
     def provider_failure_reason(error, default="empty"):
         reason = classify_failure(error)
@@ -304,7 +310,8 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
         if is_valid_capital_result(candidate, min_date=expected_date):
             return candidate
         stale_sources.append("eastmoney")
-        append_failure("eastmoney", "stale_data")
+        append_failure(
+            "eastmoney", "stale_data", latest_capital_date(candidate))
         raise RuntimeError(
             f"东方财富最新数据日期{latest_capital_date(candidate) or '未知'}"
             f"早于预期交易日{expected_date}")
@@ -333,7 +340,9 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
             if is_valid_capital_result(candidate, min_date=expected_date):
                 return candidate
             stale_sources.append("tushare_fallback")
-            append_failure("tushare_fallback", "stale_data")
+            append_failure(
+                "tushare_fallback", "stale_data",
+                latest_capital_date(candidate))
             errors.append(
                 f"Tushare最新数据日期{latest_capital_date(candidate) or '未知'}"
                 f"早于预期交易日{expected_date}")
@@ -343,11 +352,13 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
             errors.append("Tushare不可用或未返回有效日期记录")
 
         print(f"Trying K-line estimation for {ts_code}", file=sys.stderr)
+        kline_error_reason = ""
         try:
             flows = estimate_capital_flow_from_kline(code)
         except Exception as exc:
             flows = None
             errors.append(str(exc))
+            kline_error_reason = provider_failure_reason(exc, default="error")
         if _valid_flows(flows):
             candidate = {
                 "meta": {
@@ -359,24 +370,40 @@ def fetch_stock_capital_flow_with_fallbacks(ts_code, secid, code, expected_date=
             }
             if not is_valid_capital_result(candidate, min_date=expected_date):
                 stale_sources.append("kline_estimate")
-                append_failure("kline_estimate", "stale_data")
+                append_failure(
+                    "kline_estimate", "stale_data",
+                    latest_capital_date(candidate))
                 errors.append(
                     f"K线估算最新数据日期早于预期交易日{expected_date}")
             else:
                 return candidate
         else:
-            append_failure("kline_estimate", "missing")
+            append_failure(
+                "kline_estimate", kline_error_reason or "missing")
             errors.append("K线估算不可用或未返回有效日期记录")
 
     meta = {
         "ts_code": ts_code, "asset": "E", "data_source": "error",
         "error": f"资金流向获取失败: {'; '.join(filter(None, errors)) or '未知错误'}",
+        "expected_date": expected_date or "",
     }
     if stale_sources:
         meta["error_type"] = "stale_data"
         meta["stale_sources"] = stale_sources
     if failure_chain:
         meta["failure_chain"] = failure_chain
+    lag_evidence = [
+        failure for failure in failure_chain
+        if failure.get("reason") == "stale_data"
+    ]
+    if lag_evidence:
+        meta["date_lag_evidence"] = lag_evidence
+        meta["latest_date"] = max(
+            (failure.get("latest_date", "") for failure in lag_evidence),
+            default="",
+        )
+    else:
+        meta["latest_date"] = ""
     return {"meta": meta, "data": []}
 
 

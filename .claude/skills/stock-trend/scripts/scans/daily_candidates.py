@@ -90,6 +90,7 @@ REASON_LABELS = {
     "coverage_below_70pct": "数据覆盖率低于70%",
     "secondary_data_missing": "资金面和基本面数据均缺失",
     "capital_error": "资金面数据返回错误",
+    "capital_date_lagging": "资金数据日期落后，候选不合格",
     "fundamental_error": "基本面数据返回错误",
     "cache_miss": "未命中有效缓存，尚未完成增强",
     "cache_stale": "缓存存在但已过期或不覆盖目标日期",
@@ -141,6 +142,7 @@ DATA_REASON_CODES = {
     "coverage_below_70pct",
     "secondary_data_missing",
     "capital_error",
+    "capital_date_lagging",
     "fundamental_error",
     "cache_miss",
     "cache_stale",
@@ -370,6 +372,7 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_cache_valid_count", "capital_skipped_by_budget",
     "capital_enrichment_population", "capital_initial_priority_count",
     "capital_initial_budget_cutoff", "capital_global_queue_omitted",
+    "capital_item_date_lag_count", "capital_source_block_count",
     "capital_topup_selected_count", "capital_topup_live_started",
     "capital_topup_valid_count", "capital_topup_skipped_deadline",
     "capital_topup_executable_count", "capital_topup_budget_insufficient",
@@ -403,7 +406,9 @@ _PERFORMANCE_FUNNEL_FIELDS = (
 )
 _SOURCE_AUDIT_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
-    "circuit_breaks", "failure_reasons", "state",
+    "circuit_breaks", "failure_reasons", "state", "expected_date",
+    "latest_date", "date_lag_scope", "date_lag_evidence_source",
+    "date_lag_evidence", "date_coverage_successes",
 )
 
 
@@ -585,6 +590,15 @@ def _complete_performance(performance, source_health, candidates, buckets,
         ),
         "capital_cache_valid_count": sum(
             status.get("status") == "cache_valid"
+            for status in candidate_capital_statuses
+        ),
+        "capital_item_date_lag_count": sum(
+            status.get("status") == "item_date_lagging"
+            for status in candidate_capital_statuses
+        ),
+        "capital_source_block_count": sum(
+            status.get("status") == "source_date_lagging"
+            and not status.get("attempted")
             for status in candidate_capital_statuses
         ),
         "capital_skipped_by_budget": sum(
@@ -836,6 +850,7 @@ def _performance_markdown(performance):
         f"截止未启动 {performance.get('fundamental_topup_skipped_deadline', 0)}） | "
         f"增强总体 {performance.get('capital_enrichment_population', 0)} | "
         f"接口失败原因 {json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}",
+        f"资金日期异常 候选级 {performance.get('capital_item_date_lag_count', 0)} / 源级未调用 {performance.get('capital_source_block_count', 0)}",
         "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
         f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
@@ -843,20 +858,27 @@ def _performance_markdown(performance):
         f"**辅助提示**: "
         f"{'、'.join(performance.get('advisory_reasons', [])) or '无'}",
         "",
-        "| 数据源 | 逻辑请求 | Provider尝试 | 缓存命中 | 失败 | 熔断 | 状态 | 失败原因 |",
-        "|---|---:|---:|---:|---:|---:|---|---|",
+        "| 数据源 | 逻辑请求 | Provider尝试 | 缓存命中 | 失败 | 熔断 | 状态 | 日期证据 | 失败原因 |",
+        "|---|---:|---:|---:|---:|---:|---|---|---|",
     ])
     for source in SOURCE_HEALTH_NAMES:
         state = performance.get("sources", {}).get(source, {})
         reasons = json.dumps(
             state.get("failure_reasons", {}), ensure_ascii=False,
             sort_keys=True, separators=(",", ":"))
+        date_evidence = ""
+        if state.get("expected_date") or state.get("latest_date"):
+            date_evidence = (
+                f"要求{state.get('expected_date') or '未知'}"
+                f"/最新{state.get('latest_date') or '未知'}"
+                f"/范围{state.get('date_lag_scope') or '未知'}"
+                f"/证据源{state.get('date_lag_evidence_source') or '未知'}")
         lines.append(
             f"| {source} | {state.get('logical_live_requests', 0)} | "
             f"{state.get('provider_attempts', 0)} | "
             f"{state.get('cache_hits', 0)} | {state.get('failures', 0)} | "
             f"{state.get('circuit_breaks', 0)} | "
-            f"{state.get('state', 'healthy')} | {reasons} |")
+            f"{state.get('state', 'healthy')} | {date_evidence} | {reasons} |")
     return lines
 
 
@@ -927,7 +949,11 @@ def _performance_html(performance):
             f"<td>{state.get('cache_hits', 0)}</td>"
             f"<td>{state.get('failures', 0)}</td>"
             f"<td>{state.get('circuit_breaks', 0)}</td>"
-            f"<td>{state.get('state', 'healthy')}</td><td>{reasons}</td></tr>")
+            f"<td>{state.get('state', 'healthy')}</td>"
+            f"<td>{state.get('expected_date', '')}/{state.get('latest_date', '')}"
+            f" {state.get('date_lag_scope', '')}/"
+            f"{state.get('date_lag_evidence_source', '')}</td>"
+            f"<td>{reasons}</td></tr>")
     phase_text = " | ".join(
         f"{field.removesuffix('_seconds')}={float(performance.get(field, 0)):.3f}s"
         for field in _PERFORMANCE_PHASE_FIELDS)
@@ -985,6 +1011,8 @@ def _performance_html(performance):
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
         f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
         f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)} "
+        f"capital_item_date_lag={performance.get('capital_item_date_lag_count', 0)} "
+        f"capital_source_block={performance.get('capital_source_block_count', 0)} "
         f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
     )
     budget = performance.get("budget", {})
@@ -1037,7 +1065,7 @@ def _performance_html(performance):
         f"<p class='dt'>辅助提示={advisory_reasons}</p>"
         "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
         "<th>Provider尝试</th><th>缓存</th><th>失败</th><th>熔断</th>"
-        "<th>状态</th><th>失败原因</th></tr></thead><tbody>"
+        "<th>状态</th><th>日期证据</th><th>失败原因</th></tr></thead><tbody>"
         f"{''.join(rows)}</tbody></table></section>")
 
 
@@ -1076,6 +1104,8 @@ def _emit_performance_summary(performance):
         f"capital_cache_valid={performance.get('capital_cache_valid_count', 0)} "
         f"capital_skipped_by_budget={performance.get('capital_skipped_by_budget', 0)} "
         f"capital_enrichment_population={performance.get('capital_enrichment_population', 0)} "
+        f"capital_item_date_lag={performance.get('capital_item_date_lag_count', 0)} "
+        f"capital_source_block={performance.get('capital_source_block_count', 0)} "
         f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
     )
     print(
@@ -2275,6 +2305,7 @@ def _reason_detail(code, item):
     dimension_name = {
         "kline_stale": "kline",
         "capital_error": "capital",
+        "capital_date_lagging": "capital",
         "fundamental_error": "fundamental",
     }.get(code)
     if dimension_name is None and code in {
@@ -2292,18 +2323,41 @@ def _reason_detail(code, item):
                 break
     if dimension_name:
         dimension = dimensions.get(dimension_name, {})
+        evidence = item.get("source_evidence", {})
+        evidence = evidence.get(dimension_name, {}) \
+            if isinstance(evidence, dict) else {}
         details = []
         if dimension.get("data_date"):
             details.append(f"数据日期{dimension['data_date']}")
         if code == "kline_stale":
             details.append(f"要求覆盖至{expected}")
-        if dimension.get("source"):
-            details.append(f"来源{dimension['source']}")
+        if dimension_name == "capital" and code in {
+                "capital_date_lagging", "source_date_lagging"}:
+            capital_expected = (
+                dimension.get("expected_date")
+                or quality.get("capital_expected_date")
+                or evidence.get("expected_date")
+                or evidence.get("expected_trading_date")
+                or "未知")
+            actual_date = (
+                (evidence.get("latest_date")
+                 if code == "source_date_lagging" else None)
+                or dimension.get("data_date") or evidence.get("latest_date")
+                or evidence.get("returned_data_date") or "未知")
+            details.append(f"资金要求日期{capital_expected}")
+            details.append(f"实际最新日期{actual_date}")
+            if code == "capital_date_lagging":
+                details.append(
+                    f"资金数据最新至{actual_date}，早于要求{capital_expected}")
+            elif code == "source_date_lagging":
+                details.append(
+                    f"前序证据确认资金源最新至{actual_date}，本候选未调用")
+        provider = (dimension.get("source") or evidence.get("provider")
+                    or evidence.get("evidence_source"))
+        if provider:
+            details.append(f"来源{provider}")
         if dimension.get("stale_reason"):
             details.append(f"原因码{dimension['stale_reason']}")
-        evidence = item.get("source_evidence", {})
-        evidence = evidence.get(dimension_name, {}) \
-            if isinstance(evidence, dict) else {}
         selection_stage = evidence.get("selection_stage")
         if selection_stage:
             stage_label = {
@@ -2317,14 +2371,20 @@ def _reason_detail(code, item):
         elif code in NON_PROVIDER_ENRICHMENT_STATUSES \
                 and evidence.get("attempted") is False:
             details.append("未调用")
-        failure_chain = evidence.get("failure_chain", [])
+        failure_chain = (evidence.get("failure_chain")
+                         or evidence.get("date_lag_evidence", []))
         if isinstance(failure_chain, list):
             chain_text = "→".join(
                 f"{entry.get('source', 'unknown')}:{entry.get('reason', 'unknown')}"
+                + (f"@{entry.get('latest_date')}" if entry.get("latest_date") else "")
                 for entry in failure_chain
                 if isinstance(entry, dict))
             if chain_text:
                 details.append(f"失败链路{chain_text}")
+        if code == "source_date_lagging" and evidence.get("scope") == "source":
+            details.append(
+                f"全源阻断证据范围{evidence.get('affected_scope', '未知')}"
+                f"/证据源{evidence.get('evidence_source', '未知')}")
         if evidence.get("reason"):
             reason_label = (
                 "调度原因码" if code in NON_PROVIDER_ENRICHMENT_STATUSES

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import socket
 import threading
 import time
@@ -130,7 +131,10 @@ def live_attempt(*, attempted: bool, provider_attempts: int = 0,
                  stale: bool = False, subprocess_started: bool = False,
                  status: str = "", failure_chain: list | None = None,
                  error_type: str = "", stale_sources: list | None = None,
-                 failure_detail: str = "") -> dict:
+                 failure_detail: str = "", expected_date: str = "",
+                 latest_date: str = "", scope: str = "",
+                 evidence_source: str = "", affected_scope: str = "",
+                 date_lag_evidence: list | None = None) -> dict:
     """Build the common evidence record used by every source adapter."""
     evidence = {
         "attempted": bool(attempted),
@@ -151,6 +155,14 @@ def live_attempt(*, attempted: bool, provider_attempts: int = 0,
         evidence["stale_sources"] = list(stale_sources)
     if failure_detail:
         evidence["failure_detail"] = str(failure_detail)
+    for key, value in (
+            ("expected_date", expected_date), ("latest_date", latest_date),
+            ("scope", scope), ("evidence_source", evidence_source),
+            ("affected_scope", affected_scope)):
+        if value:
+            evidence[key] = str(value)
+    if date_lag_evidence:
+        evidence["date_lag_evidence"] = copy.deepcopy(date_lag_evidence)
     return evidence
 
 
@@ -160,6 +172,45 @@ def source_result(payload: Any, attempt: dict | None = None) -> dict:
         "payload": payload,
         "live_attempt": attempt or live_attempt(attempted=False),
     }
+
+
+def _has_source_date_lag_proof(evidence: dict) -> bool:
+    """Accept run-wide date blocking only with explicit dated source proof."""
+    expected = str(evidence.get("expected_date") or "").replace("-", "")
+    latest = str(evidence.get("latest_date") or "").replace("-", "")
+    samples = evidence.get("date_lag_evidence")
+
+    def sample_proves_lag(sample):
+        if not isinstance(sample, dict) or not sample.get("source") \
+                or sample.get("reason") != "stale_data":
+            return False
+        sample_expected = str(sample.get("expected_date") or "").replace(
+            "-", "")
+        sample_latest = str(sample.get("latest_date") or "").replace(
+            "-", "")
+        return bool(
+            sample_expected == expected
+            and len(sample_latest) == 8 and sample_latest.isdigit()
+            and sample_latest < expected)
+
+    sample_proof = (
+        isinstance(samples, list) and bool(samples)
+        and all(sample_proves_lag(sample) for sample in samples)
+    )
+    return bool(
+        evidence.get("scope") == "source"
+        and len(expected) == 8 and expected.isdigit()
+        and len(latest) == 8 and latest.isdigit()
+        and latest < expected
+        and evidence.get("evidence_source")
+        and evidence.get("affected_scope")
+        and sample_proof
+    )
+
+
+def _date_key(value: Any) -> str:
+    text = str(value or "").replace("-", "")
+    return text if len(text) == 8 and text.isdigit() else ""
 
 
 @dataclass
@@ -182,6 +233,12 @@ def _new_source_state() -> dict:
         "state": "healthy",
         "in_flight": 0,
         "consecutive_live_failures": 0,
+        "expected_date": "",
+        "latest_date": "",
+        "date_lag_scope": "",
+        "date_lag_evidence_source": "",
+        "date_lag_evidence": [],
+        "date_coverage_successes": {},
     }
 
 
@@ -339,49 +396,104 @@ class RunSourceHealth:
             if succeeded:
                 state["consecutive_live_failures"] = 0
                 state["state"] = "healthy"
+                expected = _date_key(evidence.get("expected_date"))
+                latest = _date_key(evidence.get("latest_date"))
+                if expected and latest and latest >= expected:
+                    successes = state["date_coverage_successes"]
+                    successes[expected] = successes.get(expected, 0) + 1
+                state["expected_date"] = ""
+                state["latest_date"] = ""
+                state["date_lag_scope"] = ""
+                state["date_lag_evidence_source"] = ""
+                state["date_lag_evidence"] = []
                 event = "success"
             else:
                 state["failures"] += 1
-                state["consecutive_live_failures"] += 1
                 reason = evidence.get("reason") or "unknown"
                 reasons = state["failure_reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
-                crossed_threshold = (
-                    state["consecutive_live_failures"]
-                    == self.failure_threshold)
                 if reason in DATE_LAG_FAILURE_REASONS:
-                    # A provider response for an older trading date is a
-                    # freshness/capability mismatch, not a provider outage.
-                    # Stop issuing identical requests for this run while
-                    # preserving a distinct scheduler state and reason.
+                    # A stale result is scoped to the fetched item unless the
+                    # adapter explicitly proves that the source is stale as a
+                    # whole. Neither kind contributes to outage/circuit counts.
                     state["consecutive_live_failures"] = 0
-                    state["state"] = "date_lagging"
-                    self._events.append({
-                        "event": "source_date_lagging",
-                        "source": token.source,
-                        "reason": "source_date_lagging",
-                    })
+                    expected_key = _date_key(evidence.get("expected_date"))
+                    source_lag_proven = _has_source_date_lag_proof(evidence)
+                    mixed_target_date_success = bool(
+                        expected_key
+                        and state["date_coverage_successes"].get(
+                            expected_key, 0))
+                    if source_lag_proven and not mixed_target_date_success:
+                        state.update({
+                            "state": "date_lagging",
+                            "expected_date": str(evidence["expected_date"]),
+                            "latest_date": str(evidence["latest_date"]),
+                            "date_lag_scope": str(evidence["affected_scope"]),
+                            "date_lag_evidence_source": str(
+                                evidence["evidence_source"]),
+                            "date_lag_evidence": copy.deepcopy(
+                                evidence["date_lag_evidence"]),
+                        })
+                        self._events.append({
+                            "event": "source_date_lagging",
+                            "source": token.source,
+                            "reason": "source_date_lagging",
+                            "expected_date": state["expected_date"],
+                            "latest_date": state["latest_date"],
+                            "scope": state["date_lag_scope"],
+                            "evidence_source": state[
+                                "date_lag_evidence_source"],
+                            "date_lag_evidence": copy.deepcopy(
+                                state["date_lag_evidence"]),
+                        })
+                    else:
+                        if (state["state"] != "date_lagging"
+                                or mixed_target_date_success):
+                            state["state"] = "degraded"
+                        self._events.append({
+                            "event": (
+                                "source_date_lagging_rejected_mixed_success"
+                                if source_lag_proven and mixed_target_date_success
+                                else "item_date_lagging"),
+                            "source": token.source,
+                            "reason": reason,
+                            "token": token.sequence,
+                            "expected_date": evidence.get("expected_date", ""),
+                            "latest_date": evidence.get("latest_date", ""),
+                            "scope": evidence.get("scope") or "item",
+                            "target_date_successes": (
+                                state["date_coverage_successes"].get(
+                                    expected_key, 0)
+                                if expected_key else 0),
+                        })
                 elif (token.source == "sector_membership" and reason in {
                         "sector_mapping_missing", "sector_mapping_ambiguous"}):
                     # A successful directory lookup without an exact match is
                     # an item-level taxonomy issue, not a provider outage.
                     state["consecutive_live_failures"] = 0
                     state["state"] = "healthy"
-                elif state["consecutive_live_failures"] >= self.hard_failure_threshold:
-                    if state["state"] != "unavailable":
-                        state["circuit_breaks"] += 1
-                        self._events.append({
-                            "event": "circuit_opened",
-                            "source": token.source,
-                            "reason": "source_unavailable",
-                        })
-                    state["state"] = "unavailable"
                 else:
-                    # Degrade (throttle concurrency) but keep retrying: a
-                    # transient blip must not hard-stop the source for the
-                    # rest of the run.
-                    state["state"] = "degraded"
-                    if crossed_threshold:
+                    source_date_blocked = state["state"] == "date_lagging"
+                    state["consecutive_live_failures"] += 1
+                    crossed_threshold = (
+                        state["consecutive_live_failures"]
+                        == self.failure_threshold)
+                    if (not source_date_blocked
+                            and state["consecutive_live_failures"]
+                            >= self.hard_failure_threshold):
+                        if state["state"] != "unavailable":
+                            state["circuit_breaks"] += 1
+                            self._events.append({
+                                "event": "circuit_opened",
+                                "source": token.source,
+                                "reason": "source_unavailable",
+                            })
+                        state["state"] = "unavailable"
+                    elif not source_date_blocked:
+                        # Degrade (throttle concurrency) but keep retrying: a
+                        # transient blip must not hard-stop the rest of the run.
+                        state["state"] = "degraded"
+                    if crossed_threshold and not source_date_blocked:
                         self._events.append({
                             "event": "source_degraded",
                             "source": token.source,
@@ -447,17 +559,11 @@ class RunSourceHealth:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {
-                source: {
-                    key: (dict(value) if isinstance(value, dict) else value)
-                    for key, value in state.items()
-                }
-                for source, state in self._states.items()
-            }
+            return copy.deepcopy(self._states)
 
     def events(self) -> list[dict]:
         with self._lock:
-            return [dict(event) for event in self._events]
+            return copy.deepcopy(self._events)
 
 
 def bounded_source_map(
@@ -498,10 +604,25 @@ def bounded_source_map(
             reason="cache_only")
         if not include_evidence:
             return payload
+        blocked_evidence = {}
+        if evidence_reason == "source_date_lagging":
+            blocked_state = health.snapshot().get(source, {})
+            blocked_evidence = {
+                "expected_date": blocked_state.get("expected_date", ""),
+                "latest_date": blocked_state.get("latest_date", ""),
+                "scope": "source",
+                "evidence_source": blocked_state.get(
+                    "date_lag_evidence_source", ""),
+                "affected_scope": blocked_state.get("date_lag_scope", ""),
+                "date_lag_evidence": blocked_state.get(
+                    "date_lag_evidence", []),
+            }
         return source_result(payload, live_attempt(
             attempted=False, cache_used=usable, stale=usable,
             reason=evidence_reason if evidence_reason else (
-                "cache_only" if usable else "")))
+                "cache_only" if usable else ""),
+            status=evidence_reason if evidence_reason else "",
+            **blocked_evidence))
 
     try:
         while not exhausted or futures:

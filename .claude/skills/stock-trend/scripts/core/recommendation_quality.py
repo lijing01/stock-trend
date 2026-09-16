@@ -10,6 +10,7 @@ NON_PROVIDER_STATUSES = frozenset({
     "not_started_deadline", "source_unavailable", "source_date_lagging",
 })
 SUCCESS_STATUSES = frozenset({"live_success", "cache_valid"})
+ITEM_DATE_LAG_STATUS = "item_date_lagging"
 
 
 def _iso_date(value):
@@ -90,14 +91,24 @@ def _dimension(name, payload, expected_date="", require_date=False,
         # so it can never promote a candidate through a diagnostic wrapper.
         available = False
         quality = "stale" if source_status == "cache_stale" else "missing"
+    elif source_status == ITEM_DATE_LAG_STATUS:
+        available = False
+        quality = "stale"
     elif source_status and source_status not in SUCCESS_STATUSES:
         # A live attempt that returned an invalid payload or failed outright
         # remains a genuine source error even when a stale fallback object is
         # attached for diagnostics.
         available = False
         quality = "error" if returned or name == "capital" else "missing"
-    data_date = latest_data_date(payload)
-    source = meta.get("data_source") or meta.get("source")
+    data_date = (latest_data_date(payload)
+                 or _iso_date(evidence.get("latest_date")
+                              or evidence.get("returned_data_date")))
+    if source_status == "source_date_lagging" and evidence.get("latest_date"):
+        data_date = _iso_date(evidence.get("latest_date")) or data_date
+    source = (
+        (meta.get("data_source") if meta.get("data_source") != "error" else "")
+        or meta.get("source") or evidence.get("provider")
+        or evidence.get("evidence_source"))
     fetched_at = meta.get("fetch_time") or meta.get("fetched_at")
     if isinstance(payload, dict):
         source = source or payload.get("source", "")
@@ -111,7 +122,9 @@ def _dimension(name, payload, expected_date="", require_date=False,
         fetched_date = _iso_date(str(fetched_at)[:8])
         fresh = available and bool(fetched_date) and fetched_date >= expected_date
     stale_reason = ""
-    if source_status in NON_PROVIDER_STATUSES:
+    if source_status == ITEM_DATE_LAG_STATUS:
+        stale_reason = "capital_date_lagging"
+    elif source_status in NON_PROVIDER_STATUSES:
         stale_reason = (
             f"{name}_stale" if source_status == "cache_stale"
             else source_status
@@ -131,6 +144,7 @@ def _dimension(name, payload, expected_date="", require_date=False,
         "returned": returned,
         "available": available,
         "fresh": fresh,
+        "expected_date": _iso_date(expected_date),
         "data_date": data_date,
         "fetched_at": fetched_at,
         "source": source,
@@ -181,7 +195,9 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date="",
         reasons.append("secondary_data_missing")
     capital_status = dimensions["capital"].get("source_status", "")
     if not dimensions["capital"]["fresh"]:
-        if capital_status in NON_PROVIDER_STATUSES:
+        if capital_status == ITEM_DATE_LAG_STATUS:
+            reasons.append("capital_date_lagging")
+        elif capital_status in NON_PROVIDER_STATUSES:
             reasons.append(capital_status)
         elif capital_status:
             reasons.append("capital_error")
@@ -190,6 +206,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date="",
     returned_errors = [
         f"{name}_error" for name in ("capital", "fundamental")
         if dimensions[name]["returned"] and dimensions[name]["quality"] == "error"
+        and dimensions[name].get("source_status") != ITEM_DATE_LAG_STATUS
     ]
     reasons.extend(returned_errors)
     returned_stale = [
@@ -202,7 +219,8 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date="",
         f"{name}_error" for name in ("capital", "fundamental")
         if dimensions[name].get("source_status")
         and dimensions[name].get("source_status") not in (
-            *NON_PROVIDER_STATUSES, *SUCCESS_STATUSES)
+            *NON_PROVIDER_STATUSES, *SUCCESS_STATUSES,
+            ITEM_DATE_LAG_STATUS)
     ]
     reasons.extend(evidence_errors)
     reasons = list(dict.fromkeys(reasons))
@@ -213,6 +231,7 @@ def assess_candidate_data(kline, capital, fundamental, as_of_date="",
     coverage_factor = coverage
     return {
         "as_of_date": expected,
+        "capital_expected_date": normalized_capital_as_of,
         "coverage": coverage,
         "coverage_factor": coverage_factor,
         "freshness_factor": freshness_factor,

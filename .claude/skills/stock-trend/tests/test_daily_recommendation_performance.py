@@ -31,10 +31,13 @@ PERFORMANCE_FUNNEL_FIELDS = (
     "batch_count", "raw_candidate_count", "unique_candidate_count",
     "wyckoff_pass_count", "final_candidate_count", "final_valid_count",
     "actionable_count",
+    "capital_item_date_lag_count", "capital_source_block_count",
 )
 SOURCE_FIELDS = (
     "logical_live_requests", "provider_attempts", "cache_hits", "failures",
-    "circuit_breaks", "failure_reasons", "state",
+    "circuit_breaks", "failure_reasons", "state", "expected_date",
+    "latest_date", "date_lag_scope", "date_lag_evidence_source",
+    "date_lag_evidence", "date_coverage_successes",
 )
 
 
@@ -131,19 +134,105 @@ class TestRunSourceHealthContract(unittest.TestCase):
         health.release_unstarted(first, "test")
         health.release_unstarted(second, "test")
 
-    def test_stale_data_blocks_as_date_lag_without_opening_outage_circuit(self):
+    def test_item_stale_data_does_not_block_following_live_candidates(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth()
+        calls = []
+
+        def live(item):
+            calls.append(item)
+            if item == "stale":
+                attempt = contract.live_attempt(
+                    attempted=True, provider_attempts=1,
+                    reason="stale_data", status="item_date_lagging",
+                    expected_date="2026-09-16", latest_date="2026-09-15",
+                    scope="item")
+                return contract.source_result(item, attempt)
+            return contract.source_result(item, contract.live_attempt(
+                attempted=True, provider_attempts=1, status="live_success"))
+
+        results = contract.bounded_source_map(
+            "capital", ["stale", "fresh-1", "fresh-2"], health,
+            live, lambda item: None, time.monotonic() + 2,
+            max_workers=1, include_evidence=True)
+
+        state = health.snapshot()["capital"]
+        self.assertEqual(calls, ["stale", "fresh-1", "fresh-2"])
+        self.assertEqual(state["state"], "healthy")
+        self.assertEqual(state["circuit_breaks"], 0)
+        self.assertEqual(health.live_block_reason("capital"), "")
+        self.assertEqual(len(results), 3)
+        self.assertIn("item_date_lagging", [
+            result[1]["live_attempt"]["status"] for result in results
+        ])
+
+    def test_explicit_source_date_lag_proof_blocks_and_reaches_skipped_items(self):
         contract = _source_health_contract(self)
         health = contract.RunSourceHealth()
         token = health.try_acquire_live_permit("capital")
         health.mark_started(token)
-        health.complete_failure(token, _attempt(reason="stale_data"))
+        evidence = [{
+            "source": "eastmoney", "reason": "stale_data",
+            "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+            "scope": "source",
+        }]
+        health.complete_failure(token, contract.live_attempt(
+            attempted=True, provider_attempts=1, reason="stale_data",
+            expected_date="2026-09-16", latest_date="2026-09-15",
+            scope="source", evidence_source="eastmoney",
+            affected_scope="all_requested_symbols",
+            date_lag_evidence=evidence))
 
         state = health.snapshot()["capital"]
         self.assertEqual(state["state"], "date_lagging")
-        self.assertEqual(state["circuit_breaks"], 0)
+        self.assertEqual(state["expected_date"], "2026-09-16")
+        self.assertEqual(state["latest_date"], "2026-09-15")
+        self.assertEqual(state["date_lag_scope"], "all_requested_symbols")
         self.assertEqual(
             health.live_block_reason("capital"), "source_date_lagging")
-        self.assertIsNone(health.try_acquire_live_permit("capital"))
+        skipped = contract.bounded_source_map(
+            "capital", ["later"], health,
+            lambda item: self.fail("source-level block should skip live fetch"),
+            lambda item: None, time.monotonic() + 2,
+            max_workers=1, include_evidence=True)
+        skipped_attempt = skipped[0][1]["live_attempt"]
+        self.assertFalse(skipped_attempt["attempted"])
+        self.assertEqual(skipped_attempt["status"], "source_date_lagging")
+        self.assertEqual(skipped_attempt["expected_date"], "2026-09-16")
+        self.assertEqual(skipped_attempt["latest_date"], "2026-09-15")
+        self.assertEqual(skipped_attempt["date_lag_evidence"], evidence)
+
+    def test_target_date_success_keeps_mixed_results_out_of_source_block(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth()
+        successful = health.try_acquire_live_permit("capital")
+        health.mark_started(successful)
+        health.complete_success(successful, contract.live_attempt(
+            attempted=True, provider_attempts=1, status="live_success",
+            expected_date="2026-09-16", latest_date="2026-09-16",
+            scope="item"))
+
+        stale = health.try_acquire_live_permit("capital")
+        health.mark_started(stale)
+        evidence = [{
+            "source": "eastmoney", "reason": "stale_data",
+            "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+            "scope": "source",
+        }]
+        health.complete_failure(stale, contract.live_attempt(
+            attempted=True, provider_attempts=1, reason="stale_data",
+            expected_date="2026-09-16", latest_date="2026-09-15",
+            scope="source", evidence_source="eastmoney",
+            affected_scope="all_requested_symbols",
+            date_lag_evidence=evidence))
+
+        state = health.snapshot()["capital"]
+        self.assertEqual(state["date_coverage_successes"], {"20260916": 1})
+        self.assertEqual(state["state"], "degraded")
+        self.assertEqual(health.live_block_reason("capital"), "")
+        self.assertIn(
+            "source_date_lagging_rejected_mixed_success",
+            [event.get("event") for event in health.events()])
 
     def test_failure_classifier_distinguishes_required_reason_codes(self):
         contract = _source_health_contract(self)
@@ -442,6 +531,9 @@ class TestProductionPerformanceContract(unittest.TestCase):
                 "logical_live_requests": 1, "provider_attempts": 1,
                 "cache_hits": 0, "failures": 0, "circuit_breaks": 0,
                 "failure_reasons": {}, "state": "healthy",
+                "expected_date": "", "latest_date": "",
+                "date_lag_scope": "", "date_lag_evidence_source": "",
+                "date_lag_evidence": [], "date_coverage_successes": {},
             }
             for source in SOURCES
         }

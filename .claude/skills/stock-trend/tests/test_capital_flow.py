@@ -50,10 +50,10 @@ class TestCapitalFlowFallback(unittest.TestCase):
             result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
                 "600519.SH", "1.600519", "600519")
 
-        self.assertEqual(
-            result["meta"]["failure_chain"][1],
-            {"source": "tushare_fallback", "reason": "timeout"},
-        )
+        failure = result["meta"]["failure_chain"][1]
+        self.assertEqual(failure["source"], "tushare_fallback")
+        self.assertEqual(failure["reason"], "timeout")
+        self.assertEqual(failure["scope"], "item")
 
     def test_nonempty_eastmoney_result_skips_fallbacks(self):
         result, _, ts, kl = self._fetch([VALID_FLOW], None, None)
@@ -75,24 +75,46 @@ class TestCapitalFlowFallback(unittest.TestCase):
         result, _, _, _ = self._fetch([], [], [])
         self.assertEqual(result["meta"]["data_source"], "error")
         self.assertEqual(result["data"], [])
+        chain = result["meta"]["failure_chain"]
         self.assertEqual(
-            result["meta"]["failure_chain"],
-            [
-                {"source": "eastmoney", "reason": "empty"},
-                {"source": "tushare_fallback", "reason": "empty"},
-                {"source": "kline_estimate", "reason": "missing"},
-            ],
+            [(entry["source"], entry["reason"]) for entry in chain],
+            [("eastmoney", "empty"), ("tushare_fallback", "empty"),
+             ("kline_estimate", "missing")],
         )
+        self.assertTrue(all(entry["scope"] == "item" for entry in chain))
 
     def test_stale_primary_records_chain_without_losing_stale_marker(self):
         stale = [{"date": "20260825", "main_net_inflow": 1.0}]
         result, _, _, _ = self._fetch(
             stale, [], [], expected_date="2026-08-26")
         self.assertEqual(result["meta"]["error_type"], "stale_data")
-        self.assertEqual(result["meta"]["failure_chain"][0], {
-            "source": "eastmoney", "reason": "stale_data",
-        })
+        self.assertEqual(result["meta"]["failure_chain"][0]["source"],
+                         "eastmoney")
+        self.assertEqual(result["meta"]["failure_chain"][0]["reason"],
+                         "stale_data")
+        self.assertEqual(result["meta"]["failure_chain"][0]["expected_date"],
+                         "2026-08-26")
+        self.assertEqual(result["meta"]["failure_chain"][0]["latest_date"],
+                         "2026-08-25")
         self.assertIn("eastmoney", result["meta"]["stale_sources"])
+
+    def test_each_stale_fallback_retains_its_own_date_evidence(self):
+        eastmoney = [{"date": "20260825", "main_net_inflow": 1.0}]
+        tushare = [{"date": "20260824", "main_net_inflow": 1.0}]
+        estimate = [{"date": "20260823", "main_net_inflow": 1.0}]
+        result, _, _, _ = self._fetch(
+            eastmoney, tushare, estimate, expected_date="2026-08-26")
+
+        evidence = result["meta"]["date_lag_evidence"]
+        self.assertEqual(
+            [(entry["source"], entry["expected_date"], entry["latest_date"])
+             for entry in evidence],
+            [("eastmoney", "2026-08-26", "2026-08-25"),
+             ("tushare_fallback", "2026-08-26", "2026-08-24"),
+             ("kline_estimate", "2026-08-26", "2026-08-23")],
+        )
+        self.assertEqual(result["meta"]["expected_date"], "2026-08-26")
+        self.assertEqual(result["meta"]["latest_date"], "2026-08-25")
 
     def test_rows_without_valid_dates_fall_back(self):
         invalid = [{"date": "not-a-date", "main_net_inflow": 1.0}]
@@ -266,6 +288,10 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
         self.assertEqual(result["meta"]["data_source"], "error")
         self.assertEqual(result["meta"]["error_type"], "stale_data")
         self.assertIn("eastmoney", result["meta"]["stale_sources"])
+        self.assertEqual(result["meta"]["expected_date"], "2026-08-26")
+        self.assertEqual(result["meta"]["latest_date"], "2026-08-25")
+        self.assertEqual(result["meta"]["date_lag_evidence"][0]["scope"],
+                         "item")
         save.assert_not_called()
 
     def test_invalid_larger_date_cannot_make_stale_eastmoney_result_fresh(self):

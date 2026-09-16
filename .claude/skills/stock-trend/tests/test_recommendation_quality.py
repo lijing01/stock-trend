@@ -198,6 +198,45 @@ class TestRecommendationQuality(unittest.TestCase):
         self.assertTrue(result["dimensions"]["capital"]["fresh"])
         self.assertTrue(result["eligible"])
 
+    def test_item_stale_capital_retains_dates_but_remains_ineligible(self):
+        stale_error = {
+            "meta": {
+                "data_source": "error", "error_type": "stale_data",
+                "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+            },
+            "data": [],
+        }
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260916"}]),
+            capital=stale_error,
+            fundamental=payload([], fetched_at="20260916-160000"),
+            as_of_date="2026-09-16",
+            capital_expected_date="2026-09-16",
+            source_evidence={"capital": {
+                "attempted": True, "status": "item_date_lagging",
+                "reason": "stale_data", "scope": "item",
+                "expected_date": "2026-09-16", "latest_date": "2026-09-15",
+                "provider": "eastmoney,tushare_fallback",
+                "date_lag_evidence": [{
+                    "source": "eastmoney", "reason": "stale_data",
+                    "expected_date": "2026-09-16",
+                    "latest_date": "2026-09-15", "scope": "item",
+                }],
+            }},
+        )
+
+        capital = result["dimensions"]["capital"]
+        self.assertFalse(capital["available"])
+        self.assertFalse(capital["fresh"])
+        self.assertFalse(result["eligible"])
+        self.assertEqual(capital["expected_date"], "2026-09-16")
+        self.assertEqual(capital["data_date"], "2026-09-15")
+        self.assertEqual(capital["source"], "eastmoney,tushare_fallback")
+        self.assertEqual(capital["stale_reason"], "capital_date_lagging")
+        self.assertEqual(result["freshness_factor"], 0.5)
+        self.assertIn("capital_date_lagging", result["reasons"])
+        self.assertNotIn("capital_error", result["reasons"])
+
     def test_nominally_successful_empty_capital_is_an_error(self):
         empty_capital = {
             "meta": {"data_source": "eastmoney", "record_count": 0},
