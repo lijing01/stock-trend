@@ -15,12 +15,11 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 - [3. 市场主线 `/market-theme`](#3-市场主线-market-theme)
 - [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
 - [4. 涨停热力 `/ths-theme`](#4-涨停热力-ths-theme)
-- [5. 龙虎榜跟踪 `/lhb-tracker`](#5-龙虎榜跟踪-lhb-tracker)
-- [6. 周主线报告 `/weekly`](#6-周主线报告-weekly)
-- [7. 持仓管理 `/portfolio`](#7-持仓管理-portfolio)
-- [8. 龙头扫描 `/longtou`](#8-龙头扫描-longtou)
-- [9. 整合扫描 `/integrated-scan`](#9-整合扫描-integrated-scan)
-- [10. 回测 `/etf-backtest`](#10-回测-etf-backtest)
+- [5. 周主线报告 `/weekly`](#5-周主线报告-weekly)
+- [6. 持仓管理 `/portfolio`](#6-持仓管理-portfolio)
+- [7. 龙头扫描 `/longtou`](#7-龙头扫描-longtou)
+- [8. 整合扫描 `/integrated-scan`](#8-整合扫描-integrated-scan)
+- [9. 回测 `/etf-backtest`](#9-回测-etf-backtest)
 
 ---
 
@@ -190,34 +189,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--mi
 
 ---
 
-## 5. 龙虎榜跟踪 `/lhb-tracker`
-
-每日记录龙虎榜机构净买板块快照，验证后续 3/5/10 日表现。
-
-```bash
-# 保存今日快照 + 查看历史
-/lhb-tracker
-
-# 仅保存快照
-/lhb-tracker --snapshot-only
-
-# 生成报告
-/lhb-tracker --report
-/lhb-tracker --html       # 含 Plotly 图表
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/lhb_tracker.py [--history 30] [--report] [--html] [--snapshot-only]
-```
-
-**数据存储**：`.cache/stock-trend/lhb_snapshots/YYYY-MM-DD.json`
-
-**信号验证**：胜率 > 60% 视为有效信号；买入/卖出分开统计
-
----
-
-## 6. 周主线报告 `/weekly`
+## 5. 周主线报告 `/weekly`
 
 聚合一周数据（行业热力 + 持续性 + 龙虎榜机构信号），识别中期主线方向。
 
@@ -249,11 +221,11 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 | 👀 关注方向 | 45-64 | 温和走强，跟踪观察 |
 | ❄️ 退潮方向 | <30 | 趋势走弱，规避 |
 
-**数据依赖**：需要市场持续性快照（`/market-theme` 每日运行积累）和 LHB 快照（`/lhb-tracker` 每日运行积累）。
+**数据依赖**：需要市场持续性快照（`/market-theme` 每日运行积累）；若存在历史 LHB 快照，周报会附加机构资金验证。
 
 ---
 
-## 7. 持仓管理 `/portfolio`
+## 6. 持仓管理 `/portfolio`
 
 浮动盈亏、止损预警、凯利分析。
 
@@ -290,7 +262,7 @@ python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [optio
 
 ---
 
-## 8. 龙头扫描 `/longtou`
+## 7. 龙头扫描 `/longtou`
 
 扫描热点板块 → 识别龙头/中军 → pipeline 深度分析。
 
@@ -322,7 +294,7 @@ python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--s
 
 ---
 
-## 9. 整合扫描 `/integrated-scan`
+## 8. 整合扫描 `/integrated-scan`
 
 ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块做龙头扫描，输出整合报告。
 
@@ -370,7 +342,7 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [
 
 ---
 
-## 10. 回测 `/etf-backtest`
+## 9. 回测 `/etf-backtest`
 
 回测 ETF Phase 1 速评分模型预测力。
 

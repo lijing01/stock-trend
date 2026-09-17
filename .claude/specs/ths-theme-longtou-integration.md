@@ -251,5 +251,4 @@ lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不
 
 - weekly_report 吸收融合评分
 - 双分类体系自动映射（AI匹配）
-- 龙虎榜追踪器（lhb_tracker）验证"双强板块 predict 龙头收益"
 - signal_strength 时序衰减
