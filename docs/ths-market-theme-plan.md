@@ -33,14 +33,14 @@
 | 功能 | `fetch_ddx_data(codes)` 按 code 查询 + `fetch_ddx_ranking(top_n=100)` 无目标扫描 |
 | 用途 | 获取 top N 个股的 DDX/DDY/DDZ + 连续红柱天数 + 超级大单占比 |
 
-### 2.2 龙虎榜（已有，待增强）
+### 2.2 龙虎榜机构板块聚合（已实现 ✅）
 
 | 项 | 说明 |
 |----|------|
 | URL | `https://data.10jqka.com.cn/financial/longhubang/` |
-| 脚本 | `fetchers/longhubang.py` |
-| 当前功能 | 按 code 列表查询龙虎榜机构买入/卖出 |
-| 待改造 | 无目标扫描 + 按板块聚合机构净额 |
+| 脚本 | `fetchers/longhubang_agg.py` |
+| 当前功能 | 获取龙虎榜机构买卖明细并按板块聚合机构净额 |
+| 评分 | 机构净买额、上榜家数、机构参与度、净买一致性 |
 
 ### 2.3 涨停复盘（已实现 ✅）
 
@@ -274,7 +274,6 @@ scripts/
 │   └── ths_utils.py                 # 同花顺反爬工具(header/retry/parse)
 ├── fetchers/
 │   ├── ddx.py                       # DDX排行: fetch_ddx_data + fetch_ddx_ranking
-│   ├── longhubang.py                # 龙虎榜(按code查询)
 │   ├── longhubang_agg.py            # 龙虎榜板块聚合(AKShare+P4)
 │   ├── zt_replay.py                 # 涨停复盘爬虫 + 按概念聚合
 │   └── sector_mapper.py             # 股票→板块映射构建 + DDX板块聚合

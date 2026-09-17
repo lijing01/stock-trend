@@ -1,7 +1,7 @@
 """同花顺 (10jqka) 通用请求工具。
 
 提供 browser-like headers, retry + backoff, HTML parser helpers.
-被 ddx.py, longhubang.py, zt_replay.py 共用。
+保留为同花顺页面抓取的通用工具。
 """
 
 import random

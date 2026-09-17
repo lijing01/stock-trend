@@ -950,49 +950,6 @@ def test_rescore_leaders_with_ddx():
     test("RS-05: 部分DDX覆盖正常工作", len(partial) == 2, f"count={len(partial)}")
 
 
-def test_longhubang_risk_analysis():
-    """Test 龙虎榜 risk level classification."""
-    from fetch_longhubang import _classify_risk_level
-
-    inst_buy = {
-        "is_on_board": True, "has_institution_buy": True,
-        "has_institution_sell": False, "retail_dominated": False,
-        "has_floating_capital": False,
-    }
-    test("LHB-01: 机构净买入->low",
-         _classify_risk_level(inst_buy) == "low",
-         f"risk={_classify_risk_level(inst_buy)}")
-
-    retail = {
-        "is_on_board": True, "has_institution_buy": False,
-        "has_institution_sell": False, "retail_dominated": True,
-        "has_floating_capital": False,
-    }
-    test("LHB-02: 散户主导->high",
-         _classify_risk_level(retail) == "high")
-
-    mixed = {
-        "is_on_board": True, "has_institution_buy": True,
-        "has_institution_sell": True, "retail_dominated": False,
-        "has_floating_capital": True, "floating_capital_net_buy": False,
-    }
-    test("LHB-03: 机构+游资分歧->medium",
-         _classify_risk_level(mixed) == "medium")
-
-    youzi = {
-        "is_on_board": True, "has_institution_buy": False,
-        "has_institution_sell": False, "retail_dominated": False,
-        "has_floating_capital": True, "floating_capital_net_buy": True,
-    }
-    test("LHB-04: 纯游资->medium",
-         _classify_risk_level(youzi) == "medium")
-
-    test("LHB-05: 未上榜->low",
-         _classify_risk_level({"is_on_board": False}) == "low")
-    test("LHB-06: 空数据->low",
-         _classify_risk_level({}) == "low")
-
-
 def test_ddx_degradation():
     """Test graceful degradation when DDX fetch fails."""
     from fetch_ddx import fetch_ddx_data, compute_ddx_score, compute_super_order_score
@@ -1002,16 +959,6 @@ def test_ddx_degradation():
 
     test("DG-02: DDX空数据分=50", compute_ddx_score({}) == 50)
     test("DG-03: 超级资金空数据分=50", compute_super_order_score({}) == 50)
-
-
-def test_longhubang_degradation():
-    """Test graceful degradation when 龙虎榜 fetch fails."""
-    from fetch_longhubang import fetch_longhubang_data, _classify_risk_level
-
-    empty = fetch_longhubang_data([])
-    test("LHG-01: 龙虎榜空列表返回空", len(empty) == 0)
-
-    test("LHG-02: 龙虎榜空数据风险=low", _classify_risk_level({}) == "low")
 
 
 def test_sector_dedup():
@@ -1131,14 +1078,9 @@ def main():
     print("=" * 40)
     test_rescore_leaders_with_ddx()
 
-    print("\n📋 龙虎榜风险分类测试")
-    print("=" * 40)
-    test_longhubang_risk_analysis()
-
     print("\n🛡️ 降级测试")
     print("=" * 40)
     test_ddx_degradation()
-    test_longhubang_degradation()
 
     print("\n⭐ 星级转换测试")
     print("=" * 40)

@@ -752,39 +752,6 @@ def main():
                                "sector": sec.get("name","")})
             roles.append("core")
 
-    # ── 龙虎榜 Enhancement: fetch and cache per-stock ──
-    try:
-        from fetchers.longhubang import fetch_longhubang_data
-
-        all_codes = [c["code"] for c in candidates]
-        if all_codes:
-            print(f"[LHB] Fetching 龙虎榜 data for {len(all_codes)} candidates...")
-            lhb_data = fetch_longhubang_data(all_codes)
-            if lhb_data:
-                print(f"  Found 龙虎榜 data for {len(lhb_data)} stocks")
-                for code, lhb in lhb_data.items():
-                    code_cache = CACHE_DIR / code
-                    code_cache.mkdir(parents=True, exist_ok=True)
-                    (code_cache / "longhubang.json").write_text(
-                        json.dumps(lhb, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-                for code, lhb in lhb_data.items():
-                    if lhb.get("risk_level") == "high":
-                        name = ""
-                        for sec in sectors_analyzed:
-                            for s in sec.get("leaders", []) + sec.get("core_stocks", []):
-                                if s["code"] == code:
-                                    name = s.get("name", "")
-                                    break
-                        tip = f"{name}({code}): 龙虎榜风险 — 散户主导买入"
-                        if tip not in output["risk_tips"]:
-                            output["risk_tips"].append(tip)
-            else:
-                print("  No 龙虎榜 data available (degraded)")
-    except Exception as e:
-        print(f"  [LHB] Enhancement skipped: {e}")
-
     output["meta"]["total_candidates"] = len(candidates)
 
     pipeline_results = {}

@@ -94,7 +94,6 @@ scripts/
 │   ├── sector_data.py       # 原 fetch_sector_data.py
 │   ├── sector_kline.py      # 原 fetch_sector_kline.py
 │   ├── ddx.py               # 原 fetch_ddx.py
-│   └── longhubang.py        # 原 fetch_longhubang.py
 ├── analysis/
 │   ├── __init__.py
 │   ├── technical.py         # 原 analyze_technical.py
