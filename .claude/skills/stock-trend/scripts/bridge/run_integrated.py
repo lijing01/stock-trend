@@ -53,7 +53,6 @@ def main():
     parser.add_argument("--compact", action="store_true", help="精简输出")
     parser.add_argument("--output-html", action="store_true", help="生成 HTML 报告")
     parser.add_argument("--lhb-date", type=str, help="龙虎榜日期 YYYYMMDD")
-    parser.add_argument("--zt-date", type=str, help="涨停日期 YYYY-MM-DD")
     args = parser.parse_args()
 
     start = time.time()
@@ -70,9 +69,6 @@ def main():
     ]
     if args.lhb_date:
         ths_cmd.extend(["--lhb-date", args.lhb_date])
-    if args.zt_date:
-        ths_cmd.extend(["--zt-date", args.zt_date])
-
     rc1, ths_stdout = run_step(ths_cmd, "Step 1/3: 板块热力分析 (ths-theme)")
     ths_report = ths_stdout
     has_qualified = QUALIFIED_PATH.exists()
@@ -107,7 +103,7 @@ def main():
             rc2, leader_stdout = run_step(leader_cmd, "Step 2/3: 龙头扫描 (longtou)")
             leader_report = leader_stdout
         else:
-            print("\n⚠️ 无满足双强条件的板块，跳过龙头扫描")
+            print("\n⚠️ 无满足热度条件的板块，跳过龙头扫描")
     else:
         print("\n⚠️ 无 qualified_sectors.json，跳过龙头扫描")
         print("  (ths-theme --export-sectors 未产生输出)")
@@ -135,7 +131,6 @@ def main():
         overview = build_sector_overview(
             total_hot=overview_data.get("total_hot_sectors", 0),
             leaders=leader_count,
-            dual=overview_data.get("total_hot_sectors", 0),
             lhb=0,
             top=overview_data.get("top_sectors", []),
         )

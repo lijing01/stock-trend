@@ -19,17 +19,16 @@ SAMPLE_THS = """
 
 SAMPLE_MARKET_LEADER = """
 ### 半导体 (热度:78 涨幅:3.2%)
-> 行业热力:78/100 涨停概念:82/100
+> 行业热力:78/100
 
 **龙头**
 - 北方华创(002371) +10.0% ↑偏多 ★★★
-  板块加成:+0.72
+  板块加成:+0.35
 """
 
 SAMPLE_OVERVIEW = {
     "total_hot_sectors": 2,
     "total_leaders": 3,
-    "dual_confirmed": 2,
     "lhb_strong": 1,
     "top_sectors": ["半导体", "人形机器人"],
 }
@@ -38,11 +37,10 @@ SAMPLE_OVERVIEW = {
 def test_build_sector_overview():
     """Overview dict has correct structure."""
     overview = build_sector_overview(
-        total_hot=2, leaders=3, dual=2, lhb=1, top=["A", "B"]
+        total_hot=2, leaders=3, lhb=1, top=["A", "B"]
     )
     assert overview["total_hot_sectors"] == 2
     assert overview["total_leaders"] == 3
-    assert overview["dual_confirmed"] == 2
     assert overview["top_sectors"] == ["A", "B"]
 
 
@@ -66,10 +64,10 @@ def test_generate_integrated_md_empty_leader():
         ths_report="仅热力报告",
         leader_report="",
         overview={"total_hot_sectors": 0, "total_leaders": 0,
-                  "dual_confirmed": 0, "lhb_strong": 0, "top_sectors": []},
+                  "lhb_strong": 0, "top_sectors": []},
     )
     assert "市场热力 · 龙头整合报告" in md
-    assert "无满足双强条件" in md
+    assert "无满足热度条件" in md
 
 
 def test_generate_integrated_html_basic():
@@ -82,4 +80,4 @@ def test_generate_integrated_html_basic():
     )
     assert "<html" in html
     assert "市场热力" in html
-    assert "双强热力板块" in html
+    assert "热力板块" in html

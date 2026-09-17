@@ -156,19 +156,19 @@ dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
 
 ---
 
-## 4. 涨停热力 `/ths-theme`
+## 4. 板块热力 `/ths-theme`
 
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分。**默认同时执行涨停概念评分 + 龙虎榜分析**。
+基于 AKShare 同花顺数据，对行业/概念板块做热力评分，默认同时执行龙虎榜分析。
 
 ```bash
-# 全量（行业 + 涨停 + 龙虎榜）
+# 全量（行业 + 龙虎榜）
 /ths-theme
 
-# 仅行业热力（跳过涨停和龙虎榜）
-/ths-theme --no-zt --no-lhb
+# 仅行业热力（跳过龙虎榜）
+/ths-theme --no-lhb
 
-# 指定日期
-/ths-theme --zt-date 2026-05-29 --lhb-date 20260529
+# 指定龙虎榜日期
+/ths-theme --lhb-date 20260529
 
 # JSON 输出
 /ths-theme --json
@@ -176,16 +176,14 @@ dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
 
 **后台脚本**：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-lhb] [--lhb-date YYYYMMDD]
 ```
 
 **行业评分**：涨跌幅 35% + 主力净流入 35% + 上涨比率 30%
 
-**涨停评分**（默认开启）：涨停数 30% + 连板强度 25% + 早盘强度 20% + 封单强度 15% - 炸板惩罚 10%
-
 **龙虎榜评分**（默认开启）：机构净买额 40% + 上榜家数 25% + 机构参与度 20% + 净买一致性 15%
 
-**数据源**：AKShare 同花顺行业排行 + 东方财富涨停池 + 东方财富龙虎榜
+**数据源**：AKShare 同花顺行业排行 + 东方财富龙虎榜
 
 ---
 
@@ -290,7 +288,7 @@ python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--s
 2. 龙头筛选（涨幅 50%+成交额 30%+排行 20%）/ 中军筛选（市值 40%+PE 合理性 40%+走势稳定性 20%）
 3. Pipeline 深度分析
 
-**板块热力加成**：使用 `--sectors-from` 导入 ths-theme 热板块数据后，龙头评分增加板块热力加成：`composite = 原评分×70% + heat_score×15% + zt_score×15%`。
+**板块热力加成**：使用 `--sectors-from` 导入 ths-theme 热板块数据后，龙头评分增加板块热力加成。
 
 ---
 
@@ -312,28 +310,18 @@ ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块�
 **Pipeline 流程**：
 
 ```
-Step 1: ths_theme.py --export-sectors        → 全市场板块热力 + 涨停概念评分
-Step 2: 筛选 heat_score≥50 & zt_score≥50 的板块
+Step 1: ths_theme.py --export-sectors        → 导出热度达标的行业板块
+Step 2: 筛选 heat_score≥50 的板块
 Step 3: market_leader.py --sectors-from      → 只扫热板块内的龙头/中军
 Step 4: 拼接为整合报告                         → 板块热力 + 龙头清单 + 综合信号标签
 ```
 
 **后台脚本**：
 ```bash
-python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
+python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD]
 ```
 
-**信号标签**：
-
-| heat≥50+zt≥50 | 龙头评分 | 标签 | 含义 |
-|:---:|:---:|------|------|
-| ✅ | ≥ 1.0 | 🟢 双强·龙头确认 | 首选，可建仓 |
-| ✅ | 0 ~ 1.0 | 🔵 双强·关注中 | 板块有力，个股待确认 |
-| ✅ | < 0 | ⚪ 双强·无龙头 | 板块热但群龙无首，观望 |
-| ❌ | ≥ 1.0 | 🟡 龙头·板块待确认 | 个股强但板块不一致，严设止损 |
-| ❌ | < 0 | ⚫ 弱势区 | 不参与 |
-
-**龙头评分融合**：板块热力（heat_score × 15% + zt_score × 15%）叠加到龙头 composite_score 上，板块越热龙头得分越高。
+**龙头评分融合**：行业板块热力叠加到龙头 composite_score 上，板块越热龙头得分越高。
 
 **边界行为**：
 - 无热板块 → 不跑 longtou，仅输出 ths-theme 热力报告 + 提示无强信号

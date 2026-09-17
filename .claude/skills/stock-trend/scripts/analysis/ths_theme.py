@@ -21,11 +21,9 @@ import argparse
 import json
 import sys
 import time
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
@@ -269,133 +267,6 @@ def market_summary(industries: list[dict]) -> dict:
         "max_net_in": [(s["name"], round(s["net_flow"] / 1e8, 1)) for s in max_net_in],
         "max_net_out": [(s["name"], round(s["net_flow"] / 1e8, 1)) for s in max_net_out],
     }
-
-
-# ──────────────── 涨停概念评分 ────────────────
-
-
-def fetch_zt_limitup_data(date_str: Optional[str] = None) -> list[dict]:
-    """Fetch limit-up stock data via zt_replay."""
-    try:
-        from fetchers.zt_replay import fetch_limitup_stocks
-        stocks = fetch_limitup_stocks(date_str)
-        return stocks or []
-    except Exception:
-        return []
-
-
-def score_zt_concepts(stocks: list[dict]) -> list[dict]:
-    """Score concepts by limit-up metrics.
-
-    zt_score = stock_count×30% + cont_score×25% + morning_score×20%
-               + seal_score×15% - blown_penalty×10%
-    """
-    if not stocks:
-        return []
-    from fetchers.zt_replay import aggregate_by_concept
-    raw = aggregate_by_concept(stocks)
-    if not raw:
-        return []
-
-    counts = [c["stock_count"] for c in raw]
-    seal_amounts = [c["seal_amount_total"] for c in raw]
-    max_count = max(counts) if counts else 1
-    max_seal = max(seal_amounts) if seal_amounts else 1
-
-    concept_blown = defaultdict(int)
-    concept_total = defaultdict(int)
-    for s in stocks:
-        for c in s.get("concepts", []):
-            concept_total[c] += 1
-            if s.get("limit_type") in ("blown",):
-                concept_blown[c] += 1
-
-    results = []
-    for c in raw:
-        name = c["concept"]
-        sc = c["stock_count"]
-        cont_rate = c["continuous_count"] / max(sc, 1)
-        morning_rate = c["early_morning_count"] / max(sc, 1)
-        blown_rate = concept_blown.get(name, 0) / max(concept_total.get(name, 1), 1)
-        count_score = sc / max_count * 100
-        zt = (count_score * 0.30 + cont_rate * 100 * 0.25
-              + morning_rate * 100 * 0.20
-              + (c["seal_amount_total"] / max_seal * 100 if max_seal > 0 else 0) * 0.15
-              - blown_rate * 100 * 0.10)
-        results.append({
-            "concept": name, "zt_score": round(max(0, min(100, zt)), 1),
-            "stock_count": sc, "continuous_count": c["continuous_count"],
-            "max_streak": c["max_streak"],
-            "early_morning_count": c["early_morning_count"],
-            "seal_amount_total": c["seal_amount_total"],
-            "blown_rate": round(blown_rate, 2),
-            "members": c["members"][:3],
-        })
-    results.sort(key=lambda r: r["zt_score"], reverse=True)
-    return results
-
-
-def match_zt_to_industries(zt_scored: list[dict],
-                           industry_scored: list[dict]) -> list[dict]:
-    """Cross-reference zt concepts with industry names."""
-    ind_map = {s["name"]: s["hot_score"] for s in industry_scored}
-    for zc in zt_scored:
-        n = zc["concept"]
-        if n in ind_map:
-            zc["matched_industry"] = n; zc["industry_score"] = ind_map[n]
-            continue
-        matched = False
-        for iname, iscore in ind_map.items():
-            if len(n) >= 3 and (n in iname or iname in n):
-                zc["matched_industry"] = iname; zc["industry_score"] = iscore
-                matched = True; break
-        if not matched:
-            zc["matched_industry"] = None; zc["industry_score"] = None
-    return zt_scored
-
-
-def generate_zt_md_section(zt_scored: list[dict], top_n: int = 10) -> str:
-    """Generate MD section for limit-up concept scoring."""
-    if not zt_scored:
-        return ""
-    lines = ["\n### 🚀 涨停概念热度", "",
-             "| 排名 | 概念 | 涨停分 | 涨停数 | 连板 | 最高板 | 早盘 | 封单(亿) | 关联行业 | 行业热度 |",
-             "|------|------|--------|--------|------|-------|------|---------|---------|---------|"]
-    for zc in zt_scored[:top_n]:
-        ind = zc.get("matched_industry") or "-"
-        isc = f"{zc['industry_score']:.0f}" if zc.get("industry_score") is not None else "-"
-        seal = zc["seal_amount_total"] / 1e8
-        lines.append(
-            f"| {zt_scored.index(zc)+1} | {zc['concept']} | {zc['zt_score']:.0f} | "
-            f"{zc['stock_count']} | {zc['continuous_count']} | {zc['max_streak']} | "
-            f"{zc['early_morning_count']} | {seal:.1f} | {ind} | {isc} |")
-    confirmed = [zc for zc in zt_scored
-                 if zc.get("industry_score") and zc["industry_score"] >= 60 and zc["zt_score"] >= 50]
-    if confirmed:
-        lines += ["", "**🔥 双引擎确认**（涨停+行业共振）:"]
-        for zc in confirmed[:5]:
-            lines.append(f"- {zc['concept']} 涨停分{zc['zt_score']:.0f} 行业热{zc['industry_score']:.0f}")
-    dark = [zc for zc in zt_scored
-            if zc["zt_score"] >= 50
-            and (zc.get("industry_score") is None or zc["industry_score"] < 50)]
-    if dark:
-        lines += ["", "**⚡ 涨停独立方向**（涨停强但行业尚未跟上）:"]
-        for zc in dark[:3]:
-            lines.append(f"- {zc['concept']} 涨停分{zc['zt_score']:.0f} 涨停{zc['stock_count']}只 最高{zc['max_streak']}连板")
-    return "\n".join(lines)
-
-
-def generate_zt_html_section(zt_scored: list[dict], top_n: int = 10) -> str:
-    if not zt_scored:
-        return ""
-    rows = ""
-    for zc in zt_scored[:top_n]:
-        ind = zc.get("matched_industry") or "-"
-        isc = f"{zc['industry_score']:.0f}" if zc.get("industry_score") is not None else "-"
-        seal = zc["seal_amount_total"] / 1e8
-        cls = "s-strong" if zc["zt_score"] >= 70 else "s-active" if zc["zt_score"] >= 50 else ""
-        rows += f"<tr><td>{zt_scored.index(zc)+1}</td><td><strong>{zc['concept']}</strong></td><td class=\"{cls}\">{zc['zt_score']:.0f}</td><td>{zc['stock_count']}</td><td>{zc['continuous_count']}</td><td>{zc['max_streak']}</td><td>{zc['early_morning_count']}</td><td>{seal:.1f}</td><td>{ind}</td><td>{isc}</td></tr>"
-    return f"""<div class="sec" style="border-left:4px solid #f59e0b"><h2 style="color:#f59e0b">🚀 涨停概念热度</h2><table><thead><tr><th>#</th><th>概念</th><th>涨停分</th><th>涨停数</th><th>连板</th><th>最高板</th><th>早盘</th><th>封单(亿)</th><th>关联行业</th><th>行业热</th></tr></thead><tbody>{rows}</tbody></table></div>"""
 
 
 # ──────────────── MD 报告 ────────────────
@@ -769,14 +640,11 @@ def main():
     parser.add_argument("--min-score", type=float, default=0, help="最低热力分")
     parser.add_argument("-j", "--json", action="store_true", help="JSON 输出")
     parser.add_argument("--no-html", action="store_true", help="跳过 HTML")
-    parser.add_argument("--no-zt", action="store_true", default=False,
-                        help="跳过涨停概念热度评分")
     parser.add_argument("--no-longhubang", "--no-lhb", action="store_true", default=False,
                         help="跳过龙虎榜机构板块聚合分析")
     parser.add_argument("--export-sectors", action="store_true", default=False,
                         help="导出热板块列表到 qualified_sectors.json")
     parser.add_argument("--lhb-date", type=str, help="龙虎榜日期 YYYYMMDD")
-    parser.add_argument("--zt-date", type=str, help="涨停日期 YYYY-MM-DD")
     args = parser.parse_args()
 
     start = time.time()
@@ -805,18 +673,6 @@ def main():
     classified = classify_industries(scored)
     summary = market_summary(scored)
 
-    # 涨停概念数据
-    zt_scored = []
-    if not args.no_zt:
-        print("\n[Phase 4/4] 涨停概念热度评分...")
-        zt_stocks = fetch_zt_limitup_data(args.zt_date)
-        if zt_stocks:
-            zt_raw = score_zt_concepts(zt_stocks)
-            zt_scored = match_zt_to_industries(zt_raw, scored)
-            print(f"  Got {len(zt_stocks)} limit-up stocks, {len(zt_scored)} concepts scored")
-        else:
-            print("  ⚠️ 无涨停数据")
-
     # 龙虎榜数据
     lhb_sectors = []
     if not args.no_longhubang:
@@ -839,47 +695,33 @@ def main():
 
     # ── 热板块导出（用于 longtou 消费） ──
     if args.export_sectors:
-        if args.no_zt:
-            print("  ⚠️ --export-sectors 需要涨停数据 (去掉 --no-zt)")
+        qualified = []
+        for s in scored:
+            heat = s["hot_score"]
+            if heat < 50:
+                continue
+            name = s["name"]
+            lhb_info = {"score": 0, "direction": ""}
+            for lhb_sec in lhb_sectors:
+                if lhb_sec.get("name", "") == name or name in lhb_sec.get("member_names", []):
+                    lhb_info = {"score": lhb_sec.get("lhb_score", 0),
+                                "direction": lhb_sec.get("direction", "")}
+                    break
+            qualified.append({
+                "name": name,
+                "heat_score": round(heat, 1),
+                "lhb_score": round(lhb_info["score"], 1),
+                "lhb_direction": lhb_info["direction"],
+            })
+        if qualified:
+            try:
+                from bridge.sector_feeder import export_qualified_sectors
+                export_qualified_sectors(qualified, heat_min=50)
+                print(f"\n[export] 热板块导出: {len(qualified)} 个板块 → .cache/stock-trend/qualified_sectors.json")
+            except Exception as e:
+                print(f"\n⚠️ 热板块导出失败: {e}")
         else:
-            qualified = []
-            # Build a set of sectors that pass dual confirmation
-            zt_sectors_with_score = {}
-            for zc in zt_scored:
-                if zc.get("zt_score", 0) >= 50:
-                    name = zc.get("matched_industry") or zc["concept"]
-                    zt_sectors_with_score[name] = max(
-                        zt_sectors_with_score.get(name, 0),
-                        zc["zt_score"]
-                    )
-            for s in scored:
-                heat = s["hot_score"]
-                name = s["name"]
-                zt_val = zt_sectors_with_score.get(name, 0)
-                if heat >= 50 and zt_val >= 50:
-                    # Find matching lhb data
-                    lhb_info = {"score": 0, "direction": ""}
-                    for lhb_sec in lhb_sectors:
-                        if lhb_sec.get("name", "") == name or name in lhb_sec.get("member_names", []):
-                            lhb_info = {"score": lhb_sec.get("lhb_score", 0),
-                                        "direction": lhb_sec.get("direction", "")}
-                            break
-                    qualified.append({
-                        "name": name,
-                        "heat_score": round(heat, 1),
-                        "zt_score": round(zt_val, 1),
-                        "lhb_score": round(lhb_info["score"], 1),
-                        "lhb_direction": lhb_info["direction"],
-                    })
-            if qualified:
-                try:
-                    from bridge.sector_feeder import export_qualified_sectors
-                    export_qualified_sectors(qualified, heat_min=50, zt_min=50)
-                    print(f"\n[export] 热板块导出: {len(qualified)} 个板块 → .cache/stock-trend/qualified_sectors.json")
-                except Exception as e:
-                    print(f"\n⚠️ 热板块导出失败: {e}")
-            else:
-                print(f"\n[export] 无满足 heat≥50 & zt≥50 的板块，跳过导出")
+            print(f"\n[export] 无满足 heat≥50 的板块，跳过导出")
 
     elapsed = time.time() - start
     meta = {
@@ -903,22 +745,11 @@ def main():
             "active": [s["name"] for s in classified["active"]],
             "concepts": concepts[:10] if concepts else [],
             "longhubang": lhb_sectors[:args.top] if lhb_sectors else [],
-            "zt_concepts": [{"concept": z["concept"], "zt_score": z["zt_score"],
-                             "stock_count": z["stock_count"],
-                             "max_streak": z["max_streak"],
-                             "matched_industry": z.get("matched_industry"),
-                             "industry_score": z.get("industry_score")}
-                            for z in zt_scored[:args.top]] if zt_scored else [],
         }
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         report = generate_report(scored, classified, summary,
                                  concepts or [], meta)
-        # 追加涨停概念章节
-        zt_md = ""
-        if zt_scored:
-            zt_md = generate_zt_md_section(zt_scored, args.top)
-        report += zt_md
         # 追加龙虎榜章节
         lhb_md = ""
         if lhb_sectors:
@@ -931,10 +762,6 @@ def main():
         html = _generate_html_report(scored, classified, summary,
                                      concepts or [], meta)
         marker = "</div>\n\n<footer>"
-        # 追加涨停概念 HTML 章节
-        if zt_scored:
-            zt_html = generate_zt_html_section(zt_scored, args.top)
-            html = html.replace(marker, f"{zt_html}\n{marker}")
         # 追加龙虎榜 HTML 章节
         if lhb_sectors:
             from fetchers.longhubang_agg import generate_lhb_html_section

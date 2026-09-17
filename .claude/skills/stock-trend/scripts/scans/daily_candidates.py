@@ -1353,7 +1353,7 @@ def _persistence_observation(record, sector_code, min_hot):
 
 
 def merge_sector_resonance(ranked, resonance_sectors):
-    """Merge same-day ths-theme ZT/LHB evidence into EM sector rows."""
+    """Merge same-day ths-theme LHB evidence into EM sector rows."""
     by_name = {
         item.get("name", ""): item for item in resonance_sectors
         if item.get("name")
@@ -1362,7 +1362,7 @@ def merge_sector_resonance(ranked, resonance_sectors):
     for source in ranked:
         sector = dict(source)
         resonance = by_name.get(sector.get("name", ""), {})
-        for key in ("zt_score", "lhb_score", "lhb_direction"):
+        for key in ("lhb_score", "lhb_direction"):
             if resonance.get(key) is not None:
                 sector[key] = resonance[key]
         merged.append(sector)
@@ -1467,10 +1467,10 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
         relative_component = 50.0
         if relative_strength is not None:
             relative_component = max(0.0, min(100.0, 50 + relative_strength * 10))
-        resonance_values = [
-            float(sector[key]) for key in ("zt_score", "lhb_score")
-            if sector.get(key) is not None
-        ]
+        resonance_values = (
+            [float(sector["lhb_score"])]
+            if sector.get("lhb_score") is not None else []
+        )
         resonance = (
             sum(resonance_values) / len(resonance_values)
             if resonance_values else 50.0

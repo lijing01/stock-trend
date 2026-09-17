@@ -2,6 +2,8 @@
 
 > 日期：2026-05-30
 > 状态：设计稿
+>
+> 历史说明：涨停复盘模块已移除，文中的涨停复盘内容仅保留为历史设计记录，不代表当前实现。
 
 ---
 
@@ -47,7 +49,7 @@
 | 项 | 说明 |
 |----|------|
 | URL | `https://data.10jqka.com.cn/financial/zt/` |
-| 脚本 | `fetchers/zt_replay.py` |
+| 脚本 | 已移除 |
 | 功能 | `fetch_limitup_stocks(date=None)` → 涨停股票列表 |
 | 独有价值 | **涨停概念归因**（每只涨停股标注所属概念标签） |
 
@@ -108,7 +110,7 @@
 #### 涨停复盘（P0 已实现 ✅）
 
 ```python
-# scripts/fetchers/zt_replay.py
+# 涨停复盘模块已移除
 fetch_limitup_stocks(date_str: str = None) -> list[dict]
 # 返回：
 # [
@@ -165,7 +167,7 @@ aggregate_ddx_by_sector(ddx_list, mapping) -> list[dict]  # DDX 按板块聚合
 不再走统一的 `aggregate_by_sector`，而是**两条独立路径 + 交叉验证**：
 
 ```
-涨停聚合路径:     涨停股 → zt_replay.aggregate_by_concept() → 概念热度分
+涨停聚合路径:     （已移除）
 DDX 聚合路径:     DDX排行 → sector_mapper.aggregate_ddx_by_sector() → DDX资金分
 交叉验证:         ths_theme.cross_reference_with_ddx() → 概念名模糊匹配
 ```
@@ -275,13 +277,13 @@ scripts/
 ├── fetchers/
 │   ├── ddx.py                       # DDX排行: fetch_ddx_data + fetch_ddx_ranking
 │   ├── longhubang_agg.py            # 龙虎榜板块聚合(AKShare+P4)
-│   ├── zt_replay.py                 # 涨停复盘爬虫 + 按概念聚合
+│   ├── （已移除）                    # 涨停复盘爬虫 + 按概念聚合
 │   └── sector_mapper.py             # 股票→板块映射构建 + DDX板块聚合
 └── analysis/
     └── ths_theme.py                 # 主题引擎: 涨停评分 + DDX交叉验证 + MD/HTML报告
 
 tests/
-├── test_zt_replay.py               # 13 tests (zt_replay + ths_utils)
+├── （已移除）                       # 涨停复盘专用测试
 ├── test_ths_theme.py                # 14 tests (评分引擎 + 报告)
 └── test_ddx_integration.py          # 15 tests (DDX扫描 + 聚合 + 交叉验证)
 ```
@@ -292,7 +294,7 @@ tests/
 
 | 阶段 | 内容 | 状态 | 文件 |
 |------|------|------|------|
-| **P0** | 涨停复盘爬虫 + 概念聚合 | ✅ 已完成 | `zt_replay.py`, `test_zt_replay.py` |
+| **P0** | 涨停复盘爬虫 + 概念聚合 | ⛔ 已移除 | — |
 | **P1** | DDX无目标扫描 + 板块映射 + 资金聚合 | ✅ 已完成 | `ddx.py`, `sector_mapper.py`, `test_ddx_integration.py` |
 | **P2** | 评分引擎 + MD/HTML + SKILL挂钩 | ✅ 已完成 | `ths_theme.py`, `test_ths_theme.py`, `SKILL.md` |
 | **P3** | 双源交叉验证（同花顺概念 ↔ BK 板块） | ✅ 已包含在 P1/P2 | `cross_reference_with_ddx()` |

@@ -18,7 +18,6 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "reports" /
 def build_sector_overview(
     total_hot: int,
     leaders: int,
-    dual: int,
     lhb: int,
     top: list[str],
 ) -> dict:
@@ -26,7 +25,6 @@ def build_sector_overview(
     return {
         "total_hot_sectors": total_hot,
         "total_leaders": leaders,
-        "dual_confirmed": dual,
         "lhb_strong": lhb,
         "top_sectors": top,
     }
@@ -46,7 +44,7 @@ def generate_integrated_md(
     # Section 1: Overview
     lines.append("## 一、市场总览")
     lines.append("")
-    lines.append(f"- 双强热力板块: {overview.get('total_hot_sectors', 0)} 个")
+    lines.append(f"- 热力板块: {overview.get('total_hot_sectors', 0)} 个")
     if overview.get("top_sectors"):
         lines.append(f"- 最强板块: {'、'.join(overview['top_sectors'][:3])}")
     lines.append(f"- 龙头标的: {overview.get('total_leaders', 0)} 只")
@@ -67,7 +65,7 @@ def generate_integrated_md(
     if leader_report.strip():
         lines.append(leader_report.strip())
     else:
-        lines.append("*无满足双强条件的板块，跳过龙头扫描*")
+        lines.append("*无满足热度条件的板块，跳过龙头扫描*")
         lines.append("")
 
     # Section 3: Reference
@@ -151,7 +149,7 @@ def generate_integrated_html(
 
     # Overview cards
     html_parts.append('<div class="overview">')
-    html_parts.append(f'  <div class="card"><div class="num">{overview.get("total_hot_sectors",0)}</div><div class="lbl">双强热力板块</div></div>')
+    html_parts.append(f'  <div class="card"><div class="num">{overview.get("total_hot_sectors",0)}</div><div class="lbl">热力板块</div></div>')
     html_parts.append(f'  <div class="card"><div class="num">{overview.get("total_leaders",0)}</div><div class="lbl">龙头标的</div></div>')
     html_parts.append(f'  <div class="card"><div class="num">{overview.get("lhb_strong",0)}</div><div class="lbl">机构净买板块</div></div>')
     html_parts.append(f'  <div class="card"><div class="lbl" style="margin-top:8px">市场情绪: {sentiment}</div></div>')
@@ -199,7 +197,7 @@ def generate_integrated_html(
         if in_table:
             html_parts.append("</tbody></table>")
     else:
-        html_parts.append('<p style="color:#86868b">无满足双强条件的板块，跳过龙头扫描</p>')
+        html_parts.append('<p style="color:#86868b">无满足热度条件的板块，跳过龙头扫描</p>')
 
     html_parts.append("</div>")
 

@@ -5,7 +5,6 @@ Functions:
     export_qualified_sectors: write qualified_sectors.json
     load_qualified_sectors: read qualified_sectors.json as SectorsFile
     map_ths_sector_to_em: look up 同花顺→东方财富 mapping
-    build_signal_label: classify sector+stock into signal tag
 """
 
 import json
@@ -30,7 +29,7 @@ QUALIFIED_PATH = CACHE_DIR / "qualified_sectors.json"
 class SectorsFile:
     """Container for qualified_sectors.json contents."""
     date: str = ""
-    threshold: dict = field(default_factory=lambda: {"heat_min": 50, "zt_min": 50})
+    threshold: dict = field(default_factory=lambda: {"heat_min": 50})
     sectors: list = field(default_factory=list)
 
 
@@ -38,20 +37,18 @@ def export_qualified_sectors(
     sectors: list[dict],
     path: Optional[Path] = None,
     heat_min: int = 50,
-    zt_min: int = 50,
 ) -> None:
     """Write qualified_sectors.json.
 
     Args:
-        sectors: list of dicts with name, heat_score, zt_score, lhb_score, lhb_direction.
+        sectors: list of dicts with name, heat_score, lhb_score, lhb_direction.
         path: output path, defaults to CACHE_DIR/qualified_sectors.json.
         heat_min: minimum heat_score threshold (informational).
-        zt_min: minimum zt_score threshold (informational).
     """
     path = path or QUALIFIED_PATH
     data = {
         "date": datetime.now().strftime("%Y-%m-%d"),
-        "threshold": {"heat_min": heat_min, "zt_min": zt_min},
+        "threshold": {"heat_min": heat_min},
         "sectors": sectors,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,33 +114,3 @@ def map_ths_sector_to_em(ths_name: str) -> list[str]:
         return []
     mapping = _load_mapping()
     return mapping.get(ths_name, [])
-
-
-# ── Signal labels ──
-
-
-def build_signal_label(
-    heat: float,
-    zt_score: float,
-    final_score: float,
-) -> str:
-    """Build combined signal label string.
-
-    Labels:
-        heat≥50 & zt≥50 + final_score≥1.0 → "双强·龙头确认 🟢"
-        heat≥50 & zt≥50 + final_score≥0   → "双强·关注中 🔵"
-        heat≥50 & zt≥50 + final_score<0    → "双强·无龙头 ⚪"
-        heat<50 or zt<50 + final_score≥1.0 → "龙头·板块待确认 🟡"
-        else                                → "弱势区 ⚫"
-    """
-    dual_confirmed = heat >= 50 and zt_score >= 50
-
-    if dual_confirmed and final_score >= 1.0:
-        return "双强·龙头确认 🟢"
-    if dual_confirmed and final_score >= 0:
-        return "双强·关注中 🔵"
-    if dual_confirmed:
-        return "双强·无龙头 ⚪"
-    if final_score >= 1.0:
-        return "龙头·板块待确认 🟡"
-    return "弱势区 ⚫"

@@ -25,7 +25,7 @@ no_proxy="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.1
 - 仅追加本次进程的代理绕过名单，不修改 shell profile、全局代理或系统 DNS 设置。`eastmoney.com` / `.eastmoney.com` 覆盖东方财富子域，`10jqka.com.cn` / `.10jqka.com.cn` 覆盖同花顺子域。
 - 外部直连仍失败时，记录失败来源与原因，按既有缓存/降级规则继续；报告必须标注 `degraded`、`cached` 或数据缺失，绝不能称为实时数据。
 
-**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→涨停热力；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
+**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→板块热力；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
 
@@ -48,17 +48,9 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 
 ---
 
-## /ths-theme [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb]
+## /ths-theme [--top N] [--min-score N] [--json] [--no-lhb]
 
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分。**默认同时执行涨停概念评分 + 龙虎榜分析**，`--no-zt` / `--no-lhb` 可跳过。
-
-涨停概念热度评分（默认开启）：
-1. 拉取东方财富涨停板池（`stock_zt_pool_em`）
-2. 按概念聚合涨停数据，计算涨停分（涨停数30%+连板25%+早盘20%+封单15%-炸板10%）
-3. 与行业热力交叉匹配 → 识别双引擎确认（涨停+行业共振）和独立涨停方向
-4. 报告追加🚀涨停概念热度章节
-
-`--zt-date YYYY-MM-DD` 指定涨停日期（默认今日）。
+基于 AKShare 同花顺数据，对行业/概念板块做热力评分，默认同时执行龙虎榜分析；`--no-lhb` 可跳过。
 
 评分公式：涨跌幅(35%) + 主力净流入(35%) + 上涨比率(30%)
 
@@ -74,24 +66,24 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 
 1. 运行：
 ```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-zt] [--no-lhb] [--lhb-date YYYYMMDD]
+python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-lhb] [--lhb-date YYYYMMDD]
 ```
 
-2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 涨停概念热度 → 龙虎榜板块聚合 → 概念驱动事件 → 资金流向极端 → 弱势板块
+2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 龙虎榜板块聚合 → 概念驱动事件 → 资金流向极端 → 弱势板块
 
-3. 数据来源：同花顺行业实时排行（AKShare）+ 东方财富涨停池 + 东方财富龙虎榜
+3. 数据来源：同花顺行业实时排行（AKShare）+ 东方财富龙虎榜
 
 4. `--json` 输出结构化 JSON 给 Agent 消费。
 
 ---
 
-## /integrated-scan [--top N] [--compact] [--output-html] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
+## /integrated-scan [--top N] [--compact] [--output-html] [--lhb-date YYYYMMDD]
 
 ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块做龙头扫描，输出整合报告。
 
 **顺序 pipeline**：
-1. `ths_theme.py --export-sectors` — 全市场板块热力 + 涨停概念评分
-2. 筛选 heat_score≥50 & zt_score≥50 的板块
+1. `ths_theme.py --export-sectors` — 导出热度达标的行业板块
+2. 筛选 heat_score≥50 的板块
 3. `market_leader.py --sectors-from qualified_sectors.json` — 只扫热板块
 4. 拼接为整合报告
 
@@ -99,7 +91,7 @@ ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块�
 
 1. 运行：
 ```bash
-python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD] [--zt-date YYYY-MM-DD]
+python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD]
 ```
 
 2. 呈现：总览（热力板块数、龙头标数、市场情绪）→ 按板块展开（板块热力指标 → 龙头清单 → 综合信号标签）

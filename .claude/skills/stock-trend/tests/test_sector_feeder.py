@@ -12,7 +12,6 @@ from bridge.sector_feeder import (
     export_qualified_sectors,
     load_qualified_sectors,
     map_ths_sector_to_em,
-    build_signal_label,
     SectorsFile,
 )
 
@@ -24,18 +23,18 @@ CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "stock-tr
 def test_export_and_load(tmp_path):
     """Round-trip: export then load returns same data."""
     sectors = [
-        {"name": "半导体", "heat_score": 78, "zt_score": 82,
+        {"name": "半导体", "heat_score": 78,
          "lhb_score": 45, "lhb_direction": "净买"},
-        {"name": "人形机器人", "heat_score": 65, "zt_score": 71,
+        {"name": "人形机器人", "heat_score": 65,
          "lhb_score": 60, "lhb_direction": "净买"},
     ]
     out_path = tmp_path / "qualified_sectors.json"
-    export_qualified_sectors(sectors, path=out_path, heat_min=50, zt_min=50)
+    export_qualified_sectors(sectors, path=out_path, heat_min=50)
     assert out_path.exists()
 
     loaded = load_qualified_sectors(path=out_path)
     assert re.match(r"\d{4}-\d{2}-\d{2}$", loaded.date), f"bad date: {loaded.date}"
-    assert loaded.threshold == {"heat_min": 50, "zt_min": 50}
+    assert loaded.threshold == {"heat_min": 50}
     assert len(loaded.sectors) == 2
     assert loaded.sectors[0]["name"] == "半导体"
 
@@ -74,36 +73,3 @@ def test_map_ths_to_em_not_exists():
 def test_map_ths_to_em_empty_name():
     """Empty string returns empty list."""
     assert map_ths_sector_to_em("") == []
-
-
-# ── signal label ──
-
-def test_signal_label_dual_strong():
-    """Dual-engine confirmed + high score → 🟢."""
-    label = build_signal_label(heat=65, zt_score=72, final_score=1.5)
-    assert "🟢" in label
-    assert "双强" in label
-
-
-def test_signal_label_dual_watch():
-    """Dual-engine confirmed + low score → 🔵."""
-    label = build_signal_label(heat=55, zt_score=60, final_score=0.4)
-    assert "🔵" in label
-
-
-def test_signal_label_dual_no_leader():
-    """Dual-engine confirmed + negative score → ⚪."""
-    label = build_signal_label(heat=60, zt_score=55, final_score=-0.3)
-    assert "⚪" in label
-
-
-def test_signal_label_leader_no_dual():
-    """Leader but no dual confirmation → 🟡."""
-    label = build_signal_label(heat=30, zt_score=20, final_score=1.2)
-    assert "🟡" in label
-
-
-def test_signal_label_weak():
-    """Neither hot nor leader → ⚫."""
-    label = build_signal_label(heat=30, zt_score=20, final_score=-0.5)
-    assert "⚫" in label

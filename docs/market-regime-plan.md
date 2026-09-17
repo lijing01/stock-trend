@@ -19,7 +19,7 @@
 | 两市成交额 | 上证指数 `000001.SH` amount + **深证综指 `399106.SZ`** amount | 深成指只含500成分股会低估深市,必须用深证综指(全深市);指数 K 线自带 amount 字段 |
 | 涨跌家数 | `sector_data.get_sector_rankings()` **仅 `type=="industry"`** 板块 up_count/down_count 加总 | 概念板块重叠重复计数,只加总行业板块(近似划分全市场) |
 | 板块最强/最弱 | 同上 industry sector rankings | change_pct 排序取前3/后3 |
-| 涨停家数/连板 | `zt_replay.fetch_limitup_stocks(date)` + `aggregate_by_limit_streak()` | {1:25,2:8} → 涨停总数/连板数 |
+| 涨停家数/连板 | `market_regime.fetch_zt_stats()` 直连 AKShare 涨停池 | 涨停总数/连板数/最高连板 |
 | 北向资金 | `capital_flow.fetch_northbound_flow()` | ⚠️ 2024-08 披露机制调整后北向净买入多不可用;失败时**降级用板块 main_force_net 加总(主力净流入)** |
 | HS300 涨跌 | `macro_snapshot.fetch_hs300()` | 已进 pipeline 的 hs300 snapshot |
 | 个股→板块 | `sector_mapper.py --lookup <code>` / `stock_sector_map.json` 缓存 | /stock-trend 集成用 |

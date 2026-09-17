@@ -1510,12 +1510,11 @@ class TestRecommendationPolicy(unittest.TestCase):
         sector = enrich_sector_context(ranked, history)[0]
         self.assertEqual(sector["capital_evidence"], "partial")
 
-    def test_sector_resonance_merges_zt_and_lhb_scores_by_name(self):
+    def test_sector_resonance_merges_lhb_scores_by_name(self):
         ranked = [{"code": "BK1", "name": "半导体"}]
         merged = merge_sector_resonance(ranked, [{
-            "name": "半导体", "zt_score": 75, "lhb_score": 65,
+            "name": "半导体", "lhb_score": 65,
         }])
-        self.assertEqual(merged[0]["zt_score"], 75)
         self.assertEqual(merged[0]["lhb_score"], 65)
 
     def test_rank_score_prefers_quality_adjusted_score(self):

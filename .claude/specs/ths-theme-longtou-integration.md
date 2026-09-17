@@ -10,7 +10,7 @@
 
 ths-theme（同花顺板块热力）和 longtou（龙头股扫描）是项目中两个独立的能力：
 
-- **ths-theme** → top-down 板块热度评分（行业heat + 涨停概念 + 龙虎榜机构资金）
+- **ths-theme** → top-down 板块热度评分（行业heat + 龙虎榜机构资金）
 - **longtou** → bottom-up 个股龙头扫描，产出 per-stock 评分和方向信号
 
 两者当前独立运行、互不感知。用户持中线仓、上班族、不可盯盘，需要「先定方向、再选个股」的决策链条。
@@ -32,7 +32,7 @@ longtou (全市场扫描)   → 龙头报告
 ### 2.2 改造后
 
 ```
-ths-theme 跑全市场 → heat_score + zt_score 筛选 → qualified_sectors.json
+ths-theme 跑全市场 → heat_score 筛选 → qualified_sectors.json
                                                           ↓
                                                   market_leader 读此文件，只扫热板块
                                                           ↓
@@ -53,10 +53,10 @@ ths-theme 跑全市场 → heat_score + zt_score 筛选 → qualified_sectors.js
 ```json
 {
   "date": "2026-05-31",
-  "threshold": {"heat_min": 50, "zt_min": 50},
+  "threshold": {"heat_min": 50},
   "sectors": [
-    {"name": "半导体", "heat_score": 78, "zt_score": 82, "lhb_score": 45, "lhb_direction": "净买"},
-    {"name": "人形机器人", "heat_score": 65, "zt_score": 71, "lhb_score": 60, "lhb_direction": "净买"}
+    {"name": "半导体", "heat_score": 78, "lhb_score": 45, "lhb_direction": "净买"},
+    {"name": "人形机器人", "heat_score": 65, "lhb_score": 60, "lhb_direction": "净买"}
   ]
 }
 ```
@@ -98,25 +98,15 @@ stock_composite = change_pct×50% + amount×30% + ranking×20%
 
 ```
 stock_base_score = composite（原）× 70%
-sector_boost     = sector.heat_score/33.3 × 15% + sector.zt_score/33.3 × 15%
+sector_boost     = sector.heat_score/33.3 × 15%
 final_score      = stock_base_score + sector_boost
 ```
 
-`sector_boost` 范围 0~+1.8（ths-theme 0-100 除以 33.3 压到 -3~+3 区间）。
+`sector_boost` 范围 0~+0.45。
 
-逻辑：板块热力占 30% 权重（heat 和 zt 各 15%），个股自身质量占 70%，板块不喧宾夺主。
+逻辑：板块热力占 15% 权重，个股自身质量占 70%，板块不喧宾夺主。
 
-### 3.2 综合信号标签
-
-| heat≥50 & zt≥50 | final_score | 标签 | 建议 |
-|:---:|:---:|------|------|
-| ✅ | ≥ 1.0 | **双强·龙头确认** 🟢 | 首选，可建仓 |
-| ✅ | 0 ~ 1.0 | **双强·关注中** 🔵 | 板块有力，个股待确认 |
-| ✅ | < 0 | **双强·无龙头** ⚪ | 板块热但群龙无首，观望 |
-| ❌ | ≥ 1.0 | **龙头·板块待确认** 🟡 | 个股强但板块不一致，严设止损 |
-| ❌ | < 0 | **弱势区** ⚫ | 不参与 |
-
-### 3.3 LHB 叠加因子（信息层）
+### 3.2 LHB 叠加因子（信息层）
 
 lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不硬编码到评分中。用户参考。
 
@@ -130,24 +120,24 @@ lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不
 # 市场热力 · 龙头整合报告 — YYYY-MM-DD
 
 ## 一、市场总览
-- 热力板块数（双强共振）
+- 热力板块数
 - 最强板块 top 3
 - 市场情绪定性（积极/中性/谨慎）
 
 ## 二、热力板块 · 龙头扫描
 （每个热板块一张表）
 
-### 板块：名称 （信号标签 🔵/🟢/🟡/⚪）
-| 行业热度 | 涨停概念 | 机构资金 |
-|---------|---------|---------|
-| 78/100 🔥 | 82/100 🔥 | 净买4.2亿 ✅ |
+### 板块：名称
+| 行业热度 | 机构资金 |
+|---------|---------|
+| 78/100 🔥 | 净买4.2亿 ✅ |
 
 | 排名 | 龙头 | 评分 | 方向 | 止损位 | 标签 |
 |------|------|------|------|--------|------|
 | 1 | XX | +2.1 | 看多 | 320.5 | 🟢 |
 | 2 | XX | +1.5 | 看多 | 145.0 | 🟢 |
 
-### 板块：名称 （信号标签）
+### 板块：名称
 ...repeat
 
 ## 三、龙虎榜线索
@@ -161,15 +151,9 @@ lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不
 - Markdown：输出到 `reports/lists/integrated_YYYY-MM-DD.md`
 - HTML：输出到 `reports/lists/integrated_YYYY-MM-DD.html`，用颜色标签
 
-### 4.3 颜色标签定义
+### 4.3 展示约定
 
-| 标签 | CSS class | 颜色 |
-|------|-----------|------|
-| 🟢 双强·龙头确认 | `signal-strong` | 绿 |
-| 🔵 双强·关注中 | `signal-active` | 蓝 |
-| 🟡 龙头·板块待确认 | `signal-caution` | 黄 |
-| ⚪ 双强·无龙头 | `signal-watch` | 灰 |
-| ⚫ 弱势区 | `signal-avoid` | 不显示 |
+报告仅展示行业热力和龙虎榜机构资金，不再展示涨停概念评分或双强标签。
 
 ---
 
@@ -195,7 +179,6 @@ lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不
 
 - `sector_mapper.py` — 已有正常工作
 - `sector_data.py` — longtou 原东方财富接口不动
-- `zt_replay.py` — 涨停数据抓取不动
 - `longhubang_agg.py` — LHB 聚合不动
 - `weekly_report.py` — 后续再考虑整合
 - `market_leader.py` 中的龙虎爬虫 — 不动，保留原独立风险标记
@@ -218,7 +201,7 @@ lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不
 
 | 场景 | 行为 |
 |------|------|
-| 无热板块（双强为0） | 不跑 longtou，输出仅 ths-theme 热力报告 + 提示无强信号 |
+| 无热板块 | 不跑 longtou，输出仅 ths-theme 热力报告 + 提示无强信号 |
 | 映射找不到东方财富板块 | 在报告中标注"东方财富无对应板块"，保留方向参考 |
 | ths-theme 失败 | 降级为原本 longtou 全市场扫描 |
 | longtou 失败 | 降级为原本 ths-theme 热力报告，不阻塞 |
@@ -232,7 +215,6 @@ lhb_score ≥ 60 的板块在报告中标记为「机构净买入板块」，不
 - `sector_mapping.yaml` 读取与查询
 - `qualified_sectors.json` 读写
 - 龙头评分公式改造（原 vs 新对比）
-- 信号标签判定逻辑
 
 ### 7.2 集成测试
 

@@ -78,7 +78,7 @@ def scan_hot_sectors(top_n: int = 10) -> list[dict]:
 def load_sectors_from_file(path: str) -> list[dict]:
     """Load qualified sectors from ths-theme output JSON.
 
-    Returns list of sector dicts with heat_score, zt_score.
+    Returns list of sector dicts with heat_score.
     Returns empty list on any failure.
     """
     p = Path(path)
@@ -96,26 +96,21 @@ def load_sectors_from_file(path: str) -> list[dict]:
         return []
 
 
-def compute_sector_boost(heat: float, zt_score: float) -> float:
+def compute_sector_boost(heat: float) -> float:
     """Compute sector boost for leader scoring.
 
-    boost = (heat/33.3) × 0.15 + (zt_score/33.3) × 0.15
-    Range: 0 ~ +0.9
+    boost = (heat/33.3) × 0.15
+    Range: 0 ~ +0.45
 
     Args:
         heat: ths-theme industry heat score (0-100).
-        zt_score: ths-theme zt concept score (0-100).
 
     Returns:
-        Boost value in [0, ~0.9].
+        Boost value in [0, ~0.45].
     """
-    if heat <= 0 and zt_score <= 0:
+    if heat <= 0:
         return 0.0
-    return round(
-        (max(0, min(100, heat)) / 33.3) * 0.15
-        + (max(0, min(100, zt_score)) / 33.3) * 0.15,
-        4,
-    )
+    return round((max(0, min(100, heat)) / 33.3) * 0.15, 4)
 
 
 def find_sector_by_name(name: str) -> Optional[dict]:
@@ -506,9 +501,8 @@ def generate_report(output: dict, compact: bool = False) -> str:
         change = sec.get("change_pct", 0)
         lines.append(f"### {name} (热度:{hot:.0f} 涨幅:{change:.1f}%)")
         ths_heat = sec.get("ths_heat_score")
-        ths_zt = sec.get("ths_zt_score")
         if ths_heat is not None:
-            lines.append(f"> 行业热力:{ths_heat:.0f}/100  涨停概念:{ths_zt:.0f}/100")
+            lines.append(f"> 行业热力:{ths_heat:.0f}/100")
         lines.append(f"")
 
         leaders = sec.get("leaders", [])
@@ -646,7 +640,6 @@ def main():
 
     # ── Phase 1: Sector scan, single sector, or sectors-from ──
     qualified = []
-    sector_heat_map: dict[str, dict] = {}  # name → {heat_score, zt_score}
 
     if args.sectors_from:
         print(f"[Phase 1/3] Loading sectors from: {args.sectors_from}")
@@ -659,12 +652,6 @@ def main():
             hot_sectors = []
             for qs in qualified:
                 name = qs["name"]
-                sector_heat_map[name] = {
-                    "heat_score": qs.get("heat_score", 0),
-                    "zt_score": qs.get("zt_score", 0),
-                    "lhb_score": qs.get("lhb_score", 0),
-                    "lhb_direction": qs.get("lhb_direction", ""),
-                }
                 # Try to find matching 东方财富 sector via bridge mapping
                 em_names = map_ths_sector_to_em(name) if _HAS_BRIDGE and map_ths_sector_to_em else []
                 found = False
@@ -778,8 +765,7 @@ def main():
             if not s_heat:
                 continue
             heat = s_heat.get("heat_score", 0)
-            zt = s_heat.get("zt_score", 0)
-            boost = compute_sector_boost(heat, zt)
+            boost = compute_sector_boost(heat)
             if boost <= 0:
                 continue
             for stock_list_name in ("leaders", "core_stocks"):
@@ -792,10 +778,8 @@ def main():
                         da["sector_boost"] = boost
                         da["original_score"] = orig
                         da["sector_heat"] = heat
-                        da["sector_zt"] = zt
             # Also store sector heat data on the sector itself for report
             sec["ths_heat_score"] = heat
-            sec["ths_zt_score"] = zt
             sec["ths_lhb_score"] = s_heat.get("lhb_score", 0)
             sec["ths_lhb_direction"] = s_heat.get("lhb_direction", "")
         print(f"  Sector boost applied")
