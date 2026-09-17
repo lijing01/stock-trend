@@ -13,7 +13,7 @@ Python 运行要求为 >=3.10；下文 `python3` 指满足要求的解释器。�
 
 ## 东方财富 / 同花顺实时接口运行契约
 
-东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、`ths_theme.py`、`market_theme.py`、`market_leader.py`、行业/涨停/龙虎榜扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
+东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、`ths_theme.py`、`market_leader.py`、行业/涨停/龙虎榜扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
 
 ```bash
 NO_PROXY="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.10jqka.com.cn" \\
@@ -25,7 +25,7 @@ no_proxy="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.1
 - 仅追加本次进程的代理绕过名单，不修改 shell profile、全局代理或系统 DNS 设置。`eastmoney.com` / `.eastmoney.com` 覆盖东方财富子域，`10jqka.com.cn` / `.10jqka.com.cn` 覆盖同花顺子域。
 - 外部直连仍失败时，记录失败来源与原因，按既有缓存/降级规则继续；报告必须标注 `degraded`、`cached` 或数据缺失，绝不能称为实时数据。
 
-**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/market-theme`→主线；`/ths-theme`→板块热力；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
+**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/ths-theme`→板块热力；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
 
@@ -211,33 +211,6 @@ python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--s
 
 ---
 
-## /market-theme [--top N] [--days N] [--min-score N]
-
-扫描板块+BK指数K线→持续性/趋势强度分析→识别市场主线。默认top15/10天/min-score 30。
-
-**步骤**：
-
-1. 运行：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [--days 10] [--min-score 30] [--output-html]
-```
-三阶段：板块扫描(实时排行API)→快照历史加载→持续性分析(上榜率30%+平均热度20%+排名趋势20%+今日热度15%+上涨率趋势15%)。HTML输出到 `reports/lists/market-theme-{时间}.html`。
-
-2. 非--no-html时打开：`open -a "Google Chrome" reports/lists/market-theme-{时间}.html`
-
-3. 呈现：持续性排名表→分类展开：
-   - **阶段强势**(≥70)：完整表(板块/今日涨幅/5日涨/10日涨/上涨比/持续性分/趋势)
-   - **稳步上行**(50-70)：精简表
-   - **新兴主题**(40-50)：新冒头方向
-   - **脉冲热点**：今日热但持续<50，警惕追高
-   - **退潮板块**(<40)：降温中
-
-4. 可选：对strong Top3搜索 `WebSearch("{板块名} {YYYY}年{M}月 政策 行业 新闻")`
-
-5. 综合研判。
-
----
-
 ## /stock-scanner [--sectors BK0420,...] [--from-leader <file>] [--top N] [--min-score N] [--wyckoff]
 
 A股热点板块成分股筛选器 — 市场主线/龙头之后接个股漏斗。三阶段：汇聚硬过滤(非A股/ST/市值50-2000亿)→多维打分(动量/量价/资金/基本面/板块强度)→排序定星。
@@ -246,7 +219,7 @@ A股热点板块成分股筛选器 — 市场主线/龙头之后接个股漏斗�
 
 1. 板块来源二选一：
 ```bash
-# 方式1:直接给板块代码(来自 market-theme 输出)
+# 方式1:直接给板块代码
 python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --sectors BK0420,BK0897 --top 10
 # 方式2:从 market_leader JSON 输出读取已分析板块
 python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader <leader_output.json> --top 10

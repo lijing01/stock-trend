@@ -993,10 +993,8 @@ def load_rankings_cache_full(provider: str = "eastmoney",
 
 
 # ──────────────────────── Snapshot History ────────────────────────
-# Daily sector snapshot history replaces BK K-line dependence for
-# market-theme persistence analysis. Every successful realtime fetch
-# appends a snapshot.  market_theme.py reads last N snapshot days
-# to compute trend persistence.
+# Daily sector snapshot history preserves the Top-30 sector ranking archive.
+# Successful realtime scans append a snapshot for compatibility consumers.
 
 SNAPSHOT_FILE = CACHE_DIR / "sector_snapshot_history.json"
 SNAPSHOT_MAX_DAYS = 30  # auto-prune older snapshots

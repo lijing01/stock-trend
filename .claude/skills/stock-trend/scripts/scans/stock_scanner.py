@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A股个股筛选器 — Scan A-stock constituents of hot sectors after market_theme/market_leader.
+"""A股个股筛选器 — Scan A-stock constituents of selected hot sectors or market_leader.
 
 Three-phase architecture:
   Phase 1: Gather + hard-filter A-stocks from hot sector constituents
@@ -3773,7 +3773,7 @@ def assign_stars(composite_score):
     return 0
 
 
-def build_output(scored, candidates, excluded, sector_map, elapsed, source="market_theme"):
+def build_output(scored, candidates, excluded, sector_map, elapsed, source="manual"):
     """Build final output JSON."""
     # Sort by composite_score descending
     scored.sort(key=lambda x: x["composite_score"], reverse=True)
@@ -3850,7 +3850,7 @@ def main():
             sys.exit(1)
 
     if args.sectors:
-        source = "market_theme" if not args.from_leader else source
+        source = "manual" if not args.from_leader else source
         sector_codes.extend([s.strip() for s in args.sectors.split(",") if s.strip()])
 
     if not sector_codes:

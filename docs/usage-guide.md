@@ -12,7 +12,6 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 
 - [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
 - [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
-- [3. 市场主线 `/market-theme`](#3-市场主线-market-theme)
 - [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
 - [4. 涨停热力 `/ths-theme`](#4-涨停热力-ths-theme)
 - [5. 周主线报告 `/weekly`](#5-周主线报告-weekly)
@@ -90,39 +89,6 @@ python3 .claude/skills/stock-trend/scripts/scans/etf_scanner.py [--top N] [--foc
 | < -0.5 | ↓ 偏空 |
 
 **星级**：≥80 ★★★ / ≥65 ★★☆ / ≥50 ★☆☆
-
----
-
-## 3. 市场主线 `/market-theme`
-
-扫描板块 + BK 指数 K 线 → 持续性/趋势强度分析 → 识别市场主线。
-
-```bash
-# 默认 Top 15，回溯 10 天
-/market-theme
-
-# 自定义
-/market-theme --top 20 --days 5 --min-score 40
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/market_theme.py [--top 15] [--days 10] [--min-score 30] [--output-html]
-```
-
-**三阶段**：
-1. 板块扫描（实时排行 API）
-2. 快照历史加载
-3. 持续性分析：上榜率 30% + 平均热度 20% + 排名趋势 20% + 今日热度 15% + 上涨率趋势 15%
-
-**分类**：
-| 类别 | 分数 | 含义 |
-|------|------|------|
-| 阶段强势 | ≥70 | 持续上榜，趋势向上 |
-| 稳步上行 | 50-69 | 温和走强 |
-| 新兴主题 | 40-50 | 新冒头方向 |
-| 脉冲热点 | — | 今日热但持续<50，追高警惕 |
-| 退潮板块 | <40 | 降温中 |
 
 ---
 
@@ -219,7 +185,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 | 👀 关注方向 | 45-64 | 温和走强，跟踪观察 |
 | ❄️ 退潮方向 | <30 | 趋势走弱，规避 |
 
-**数据依赖**：需要市场持续性快照（`/market-theme` 每日运行积累）；若存在历史 LHB 快照，周报会附加机构资金验证。
+**数据依赖**：需要板块持续性快照（候选扫描或收盘板块快照任务每日积累）；若存在历史 LHB 快照，周报会附加机构资金验证。
 
 ---
 

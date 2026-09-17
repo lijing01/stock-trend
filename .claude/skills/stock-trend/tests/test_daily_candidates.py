@@ -867,52 +867,6 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(payload["data_date"], "2026-08-06")
         self.assertEqual(payload["rankings"]["sectors"][0]["code"], "BK1")
 
-    def test_market_theme_saves_rankings_with_data_date(self):
-        from analysis import market_theme
-
-        class FrozenDateTime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return cls(2026, 8, 6, 16, 0, 0)
-
-        rankings = {
-            "meta": {
-                "total_sectors": 1,
-                "complete": True,
-                "data_date": "2026-08-05",
-            },
-            "sectors": [{"code": "BK1", "up_count": 1, "down_count": 0}],
-        }
-        hot = [{"code": "BK1", "name": "测试板块"}]
-        with patch.object(market_theme, "datetime", FrozenDateTime), \
-             patch.object(market_theme, "get_sector_rankings",
-                          return_value=rankings), \
-             patch.object(market_theme, "rank_hot_sectors",
-                          return_value=hot), \
-             patch.object(market_theme, "save_rankings_cache") as save, \
-             patch.object(market_theme, "append_daily_snapshot"):
-            market_theme.get_top_sectors(top_n=1)
-
-        self.assertTrue(save.call_args_list)
-        for call in save.call_args_list:
-            self.assertEqual(call.kwargs["data_date"], "2026-08-05")
-
-    def test_market_theme_does_not_cache_unverified_ranking_date(self):
-        from analysis import market_theme
-
-        rankings = {
-            "meta": {"total_sectors": 1, "complete": True},
-            "sectors": [{"code": "BK1", "up_count": 1, "down_count": 0}],
-        }
-        with patch.object(market_theme, "get_sector_rankings",
-                          return_value=rankings), \
-             patch.object(market_theme, "rank_hot_sectors",
-                          return_value=[]), \
-             patch.object(market_theme, "save_rankings_cache") as save:
-            market_theme.get_top_sectors(top_n=1)
-
-        save.assert_not_called()
-
     def test_empty_ranking_source_is_incomplete(self):
         from fetchers import sector_data
 
@@ -1094,34 +1048,6 @@ class TestRecommendationPolicy(unittest.TestCase):
                 trade_date, source = sector_data.get_last_trading_day()
 
         self.assertEqual(trade_date, "2026-08-05")
-        self.assertEqual(source, "cache")
-
-    def test_market_theme_cache_fallback_uses_explicit_data_date(self):
-        from analysis import market_theme
-
-        realtime = {
-            "meta": {"total_sectors": 1, "complete": False},
-            "sectors": [{
-                "code": "BK0", "name": "休市数据",
-                "up_count": 0, "down_count": 0, "change_pct": 0,
-            }],
-        }
-        cached_hot = [{"code": "BK1", "name": "缓存板块"}]
-        cache_payload = {
-            "cached_at": "2026-08-06T16:00:00",
-            "data_date": "2026-08-05",
-            "rankings": {"sectors": [{"up_count": 1, "down_count": 0}]},
-            "hot_sectors": cached_hot,
-        }
-        with patch.object(market_theme, "get_sector_rankings",
-                          return_value=realtime), \
-             patch.object(market_theme, "rank_hot_sectors", return_value=[]), \
-             patch.object(market_theme, "load_rankings_cache_full",
-                          return_value=cache_payload):
-            hot, data_date, source = market_theme.get_top_sectors(top_n=1)
-
-        self.assertEqual(hot, cached_hot)
-        self.assertEqual(data_date, "2026-08-05")
         self.assertEqual(source, "cache")
 
     def test_premarket_uses_previous_close_date(self):

@@ -6,7 +6,7 @@
 
 数据源:
   - ths_theme: 行业板块实时热力评分
-  - market_theme snapshots: 板块持续性记录
+  - sector ranking snapshots: 板块持续性记录
   - LHB snapshots: 机构资金信号
 
 评分公式:
@@ -57,7 +57,7 @@ def _safe_float(v) -> float:
 
 
 def load_market_snapshots(days: int = 10) -> dict[str, list[dict]]:
-    """Load market-theme sector snapshots."""
+    """Load Top-30 sector ranking snapshots."""
     try:
         from fetchers.sector_data import load_snapshot_history
         return load_snapshot_history(days=days)
@@ -306,7 +306,7 @@ def aggregate_sectors(market_snapshots: dict[str, list[dict]],
     sector_days = defaultdict(list)  # sector_name → list of {date, hot_score, ...}
     sector_codes = {}
 
-    # From market-theme snapshots
+    # From Top-30 sector ranking snapshots
     for date_str, sectors in market_snapshots.items():
         for s in sectors:
             name = s.get("name", "")
@@ -317,7 +317,7 @@ def aggregate_sectors(market_snapshots: dict[str, list[dict]],
                 "hot_score": _safe_float(s.get("hot_score", 0)),
                 "change_pct": _safe_float(s.get("change_pct", 0)),
                 "up_ratio": _safe_float(s.get("up_ratio", 0)),
-                "source": "market_theme",
+                "source": "sector_snapshot",
             })
             # Store code from first encounter
             if name not in sector_codes:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""BK index K-line fetcher for sector/market-theme analysis.
+"""BK index K-line fetcher for sector analysis.
 
 Fetches historical daily K-line data for sector indices (BKxxxx)
-from East Money API. Used by analyze_market_theme.py.
+from East Money API.
 
 Usage:
     python3 fetch_sector_kline.py BK0477 [--days 20]
