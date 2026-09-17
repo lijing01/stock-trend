@@ -13,10 +13,9 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 - [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
 - [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
 - [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
-- [4. 周主线报告 `/weekly`](#4-周主线报告-weekly)
-- [5. 持仓管理 `/portfolio`](#5-持仓管理-portfolio)
-- [6. 龙头扫描 `/longtou`](#6-龙头扫描-longtou)
-- [7. 回测 `/etf-backtest`](#7-回测-etf-backtest)
+- [4. 持仓管理 `/portfolio`](#4-持仓管理-portfolio)
+- [5. 龙头扫描 `/longtou`](#5-龙头扫描-longtou)
+- [6. 回测 `/etf-backtest`](#6-回测-etf-backtest)
 
 ---
 
@@ -120,43 +119,7 @@ dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
 
 ---
 
-## 4. 周主线报告 `/weekly`
-
-聚合一周数据（行业热力 + 持续性 + 龙虎榜机构信号），识别中期主线方向。
-
-```bash
-# 本周报告
-/weekly
-
-# HTML 报告
-/weekly --html
-
-# JSON 输出
-/weekly --json
-
-# 回溯 2 周
-/weekly --weeks 2
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1] [--html] [--json]
-```
-
-**评分公式**：周均热度 30% + 上榜频率 25% + 最新热度 25% + 趋势方向 10% + LHB 验证 10%
-
-**分类**：
-| 类别 | 分数 | 含义 |
-|------|------|------|
-| 🔥 中期主线 | ≥65 | 持续强势，适合中线持仓 |
-| 👀 关注方向 | 45-64 | 温和走强，跟踪观察 |
-| ❄️ 退潮方向 | <30 | 趋势走弱，规避 |
-
-**数据依赖**：需要板块持续性快照（候选扫描或收盘板块快照任务每日积累）；若存在历史 LHB 快照，周报会附加机构资金验证。
-
----
-
-## 5. 持仓管理 `/portfolio`
+## 4. 持仓管理 `/portfolio`
 
 浮动盈亏、止损预警、凯利分析。
 
@@ -193,7 +156,7 @@ python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [optio
 
 ---
 
-## 6. 龙头扫描 `/longtou`
+## 5. 龙头扫描 `/longtou`
 
 扫描热点板块 → 识别龙头/中军 → pipeline 深度分析。
 
@@ -220,7 +183,7 @@ python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--s
 
 ---
 
-## 7. 回测 `/etf-backtest`
+## 6. 回测 `/etf-backtest`
 
 回测 ETF Phase 1 速评分模型预测力。
 

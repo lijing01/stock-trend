@@ -25,26 +25,7 @@ no_proxy="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.1
 - 仅追加本次进程的代理绕过名单，不修改 shell profile、全局代理或系统 DNS 设置。`eastmoney.com` / `.eastmoney.com` 覆盖东方财富子域，`10jqka.com.cn` / `.10jqka.com.cn` 覆盖同花顺子域。
 - 外部直连仍失败时，记录失败来源与原因，按既有缓存/降级规则继续；报告必须标注 `degraded`、`cached` 或数据缺失，绝不能称为实时数据。
 
-**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
-
----
-
-## /weekly [--weeks N] [--html] [--json]
-
-周主线报告 — 聚合一周数据，识别适合中线持仓（1-6个月）的主线方向。
-
-**评分公式**：周均热度(30%) + 上榜频率(25%) + 最新热度(25%) + 趋势(10%) + LHB验证(10%)
-
-**步骤**：
-
-1. 运行：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1] [--html] [--json]
-```
-
-2. 数据来源：市场持续性快照 + 龙虎榜快照 + 今日行业热力
-3. 分类：🔥中期主线(≥65) / 👀关注方向(45-64) / ❄️退潮(<30)
-4. 需要积累至少3天市场持续性数据才有效
+**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/etf-backtest`→回测；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
 
