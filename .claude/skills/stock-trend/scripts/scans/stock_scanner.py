@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A股个股筛选器 — Scan A-stock constituents of selected hot sectors or market_leader.
+"""A股个股筛选器 — Scan A-stock constituents of selected hot sectors.
 
 Three-phase architecture:
   Phase 1: Gather + hard-filter A-stocks from hot sector constituents
@@ -8,7 +8,6 @@ Three-phase architecture:
 
 Usage:
     python3 stock_scanner.py --sectors BK0477,BK0897 --top 10
-    python3 stock_scanner.py --from-leader /path/to/leader_output.json --top 10
 """
 
 import sys
@@ -3822,7 +3821,7 @@ def main():
     parser.add_argument("--sectors", type=str,
                         help="板块代码列表, 逗号分隔 (e.g. BK0477,BK0897)")
     parser.add_argument("--from-leader", type=str,
-                        help="从 market_leader JSON 输出文件读取板块")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--top", type=int, default=10,
                         help="输出前N只股票 (默认10)")
     parser.add_argument("--min-score", type=float, default=50,

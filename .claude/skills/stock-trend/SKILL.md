@@ -1,6 +1,6 @@
 ---
 name: stock-trend
-description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、持仓与预警、ETF/维科夫回测、市场主线与龙头扫描、每日复盘、周报及候选股。用户提到股票或 ETF 趋势、代码分析、持仓管理、龙头、选股、复盘或上述工作流时使用。
+description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、持仓与预警、ETF/维科夫回测、每日复盘及候选股。用户提到股票或 ETF 趋势、代码分析、持仓管理、选股、复盘或上述工作流时使用。
 ---
 
 # 股票趋势判断
@@ -13,7 +13,7 @@ Python 运行要求为 >=3.10；下文 `python3` 指满足要求的解释器。�
 
 ## 东方财富 / 同花顺实时接口运行契约
 
-东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、`market_leader.py`、行业扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
+东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、行业扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
 
 ```bash
 NO_PROXY="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.10jqka.com.cn" \\
@@ -25,7 +25,7 @@ no_proxy="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.1
 - 仅追加本次进程的代理绕过名单，不修改 shell profile、全局代理或系统 DNS 设置。`eastmoney.com` / `.eastmoney.com` 覆盖东方财富子域，`10jqka.com.cn` / `.10jqka.com.cn` 覆盖同花顺子域。
 - 外部直连仍失败时，记录失败来源与原因，按既有缓存/降级规则继续；报告必须标注 `degraded`、`cached` 或数据缺失，绝不能称为实时数据。
 
-**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/etf-backtest`→回测；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
+**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/etf-backtest`→回测；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
 
@@ -115,40 +115,15 @@ python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --sec
 
 ---
 
-## /longtou [--top N] [--sector <板块名>] [--compact]
+## /stock-scanner [--sectors BK0420,...] [--top N] [--min-score N] [--wyckoff]
 
-扫描热点板块→识别龙头/中军→pipeline深度分析。`--top`默认10，`--sector`指定板块跳过扫描。
-
-**步骤**：
-
-1. 运行：
-```bash
-python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--sector <板块名>] [--compact] --output-html
-```
-三阶段：Phase 1板块扫描(涨幅40%+主力资金30%+涨跌比30%)→Phase 2龙头筛选(涨幅50%+成交额30%+排行20%)/中军筛选(市值40%+PE合理性40%+走势稳定性20%)→Phase 3 pipeline深度分析。
-
-2. 非compact时打开HTML：`open -a "Google Chrome" reports/lists/longtou-{时间}.html`
-
-3. 呈现：扫描概览→按板块展开(龙头:个股/涨跌幅/方向/星级/止损/目标；中军:市值/PE/方向/星级)。compact省略止损/目标/PE/市值。
-
-4. 可选：对Top3搜索消息面 `WebSearch("{个股} {板块} {YYYY}年{M}月 政策")`
-
-5. 综合研判，信号映射同/stock-trend。
-
----
-
-## /stock-scanner [--sectors BK0420,...] [--from-leader <file>] [--top N] [--min-score N] [--wyckoff]
-
-A股热点板块成分股筛选器 — 市场主线/龙头之后接个股漏斗。三阶段：汇聚硬过滤(非A股/ST/市值50-2000亿)→多维打分(动量/量价/资金/基本面/板块强度)→排序定星。
+A股热点板块成分股筛选器。三阶段：汇聚硬过滤(非A股/ST/市值50-2000亿)→多维打分(动量/量价/资金/基本面/板块强度)→排序定星。
 
 **步骤**：
 
-1. 板块来源二选一：
+1. 直接给板块代码：
 ```bash
-# 方式1:直接给板块代码
 python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --sectors BK0420,BK0897 --top 10
-# 方式2:从 market_leader JSON 输出读取已分析板块
-python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --from-leader <leader_output.json> --top 10
 ```
 
 2. **`--wyckoff`(P0-2 选股漏斗)**：只保留维科夫**吸筹/拉升**阶段且子阶段为买点(Spring/LPS/ST/PRE_MARKUP/JAC/BU)、置信度≥0.3 的候选；不足 60 根 K 线的候选丢弃。新增 `wyckoff` 100 分维度，复合分重配为 动量0.25/量价0.15/资金0.15/基本面0.10/板块0.10/wyckoff0.25。输出含 `wyckoff` 字段(阶段/子阶段/置信度/研判)。

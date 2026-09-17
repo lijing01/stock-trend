@@ -14,8 +14,7 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 - [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
 - [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
 - [4. 持仓管理 `/portfolio`](#4-持仓管理-portfolio)
-- [5. 龙头扫描 `/longtou`](#5-龙头扫描-longtou)
-- [6. 回测 `/etf-backtest`](#6-回测-etf-backtest)
+- [5. 回测 `/etf-backtest`](#5-回测-etf-backtest)
 
 ---
 
@@ -156,34 +155,7 @@ python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [optio
 
 ---
 
-## 5. 龙头扫描 `/longtou`
-
-扫描热点板块 → 识别龙头/中军 → pipeline 深度分析。
-
-```bash
-# 全市场扫描
-/longtou
-
-# 指定板块
-/longtou --sector 白酒
-
-# 精简输出
-/longtou --compact
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--sector <板块名>] [--compact] --output-html
-```
-
-**三阶段**：
-1. 板块扫描（涨幅 40%+主力资金 30%+涨跌比 30%）
-2. 龙头筛选（涨幅 50%+成交额 30%+排行 20%）/ 中军筛选（市值 40%+PE 合理性 40%+走势稳定性 20%）
-3. Pipeline 深度分析
-
----
-
-## 6. 回测 `/etf-backtest`
+## 5. 回测 `/etf-backtest`
 
 回测 ETF Phase 1 速评分模型预测力。
 

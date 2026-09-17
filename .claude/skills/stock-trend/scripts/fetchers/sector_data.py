@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""East Money sector data fetcher for /longtou skill.
+"""East Money sector data fetcher for sector ranking and candidate scans.
 
 Fetches A-share sector/concept rankings and constituent stock data.
 
