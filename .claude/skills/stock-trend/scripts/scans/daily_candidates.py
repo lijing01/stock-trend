@@ -1352,23 +1352,6 @@ def _persistence_observation(record, sector_code, min_hot):
     }
 
 
-def merge_sector_resonance(ranked, resonance_sectors):
-    """Merge same-day ths-theme LHB evidence into EM sector rows."""
-    by_name = {
-        item.get("name", ""): item for item in resonance_sectors
-        if item.get("name")
-    }
-    merged = []
-    for source in ranked:
-        sector = dict(source)
-        resonance = by_name.get(sector.get("name", ""), {})
-        for key in ("lhb_score", "lhb_direction"):
-            if resonance.get(key) is not None:
-                sector[key] = resonance[key]
-        merged.append(sector)
-    return merged
-
-
 def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
                           current_snapshot=None, min_hot=45):
     """Attach strength and persistence using separate coverage/hot evidence."""
@@ -1467,14 +1450,6 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
         relative_component = 50.0
         if relative_strength is not None:
             relative_component = max(0.0, min(100.0, 50 + relative_strength * 10))
-        resonance_values = (
-            [float(sector["lhb_score"])]
-            if sector.get("lhb_score") is not None else []
-        )
-        resonance = (
-            sum(resonance_values) / len(resonance_values)
-            if resonance_values else 50.0
-        )
         recent_capital_entries = known_observations[-5:]
         net_flows = [
             float(observation["row"].get(
@@ -1515,8 +1490,7 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
             float(sector.get("absolute_hot_score", 0)) * 0.30
             + persistence * 0.30
             + relative_component * 0.15
-            + capital_persistence * 0.15
-            + resonance * 0.10,
+            + capital_persistence * 0.15,
             1,
         )
         sector.update({
@@ -1543,7 +1517,6 @@ def enrich_sector_context(ranked, history, hs300_change=None, as_of_date="",
                       else ("verified" if sector_type in ("mainline", "emerging")
                             else "single_day_pulse"))
             ),
-            "resonance_score": round(resonance, 1),
             "sector_score": sector_score,
             "sector_type": sector_type,
             "sector_actionable": sector_type in ("mainline", "emerging"),
@@ -1949,29 +1922,6 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         if sector.get("absolute_hot_score", 0) >= min_hot
     ]
     metrics["sector_qualified_count"] = len(qualified)
-    expected_date = as_of_date or (regime or {}).get("data_date", "")
-    resonance_quality = "not_available"
-    resonance_reason = ""
-    if expected_date:
-        try:
-            from bridge.sector_feeder import load_qualified_sectors
-            resonance = load_qualified_sectors()
-            if resonance.date == expected_date:
-                qualified = merge_sector_resonance(
-                    qualified, resonance.sectors)
-                resonance_quality = "good"
-            else:
-                resonance_quality = "stale"
-                resonance_reason = "date_mismatch"
-                _record_advisory(metrics, "resonance_stale:date_mismatch")
-        except Exception as exc:
-            resonance_quality = "error"
-            resonance_reason = type(exc).__name__
-            _record_degradation(
-                metrics, f"resonance_error:{type(exc).__name__}")
-    for sector in qualified:
-        sector["resonance_quality"] = resonance_quality
-        sector["resonance_reason"] = resonance_reason
     hs300_change = (regime or {}).get("hs300_change")
     history_load_errors = []
     candidate_history = load_candidate_sector_history(

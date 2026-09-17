@@ -1,6 +1,6 @@
 ---
 name: stock-trend
-description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、持仓与预警、ETF/维科夫回测、市场主线与龙头扫描、涨停和龙虎榜跟踪、每日复盘、周报、候选股及整合扫描。用户提到股票或 ETF 趋势、代码分析、持仓管理、市场主题、龙头、选股、复盘或上述工作流时使用。
+description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、持仓与预警、ETF/维科夫回测、市场主线与龙头扫描、每日复盘、周报及候选股。用户提到股票或 ETF 趋势、代码分析、持仓管理、龙头、选股、复盘或上述工作流时使用。
 ---
 
 # 股票趋势判断
@@ -13,7 +13,7 @@ Python 运行要求为 >=3.10；下文 `python3` 指满足要求的解释器。�
 
 ## 东方财富 / 同花顺实时接口运行契约
 
-东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、`ths_theme.py`、`market_leader.py`、行业/涨停/龙虎榜扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
+东方财富和同花顺的实时行情接口在受限沙盒中可能出现 DNS 失败。凡是运行会访问这些来源的 fetcher 或工作流（包括 `market_regime.py`、`daily_candidates.py`、`market_leader.py`、行业扫描，以及 K 线、资金流 fetcher），Agent 必须直接在**沙盒外**执行，且仅对该次命令设置 `NO_PROXY` 和 `no_proxy`：
 
 ```bash
 NO_PROXY="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.10jqka.com.cn" \\
@@ -25,7 +25,7 @@ no_proxy="${NO_PROXY:+${NO_PROXY},}eastmoney.com,.eastmoney.com,10jqka.com.cn,.1
 - 仅追加本次进程的代理绕过名单，不修改 shell profile、全局代理或系统 DNS 设置。`eastmoney.com` / `.eastmoney.com` 覆盖东方财富子域，`10jqka.com.cn` / `.10jqka.com.cn` 覆盖同花顺子域。
 - 外部直连仍失败时，记录失败来源与原因，按既有缓存/降级规则继续；报告必须标注 `degraded`、`cached` 或数据缺失，绝不能称为实时数据。
 
-**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/ths-theme`→板块热力；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
+**分支路由**：用户说“今日推荐”→`/today-recommendation` 统一入口；`/candidates`→仅候选扫描；`/etf-scan`→ETF扫描；`/longtou`→龙头；`/etf-backtest`→回测；`/weekly`→周主线；`/stock-trend`→下方Step 1-4。除“今日推荐”的统一流程外，各流程独立。
 
 ---
 
@@ -45,61 +45,6 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 2. 数据来源：市场持续性快照 + 龙虎榜快照 + 今日行业热力
 3. 分类：🔥中期主线(≥65) / 👀关注方向(45-64) / ❄️退潮(<30)
 4. 需要积累至少3天市场持续性数据才有效
-
----
-
-## /ths-theme [--top N] [--min-score N] [--json] [--no-lhb]
-
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分，默认同时执行龙虎榜分析；`--no-lhb` 可跳过。
-
-评分公式：涨跌幅(35%) + 主力净流入(35%) + 上涨比率(30%)
-
-龙虎榜机构板块聚合分析（默认开启）：
-1. 拉取东方财富龙虎榜机构买卖明细（`stock_lhb_jgmmtj_em`）
-2. 通过板块映射表（BK 分类）将上榜股票按板块聚合
-3. 计算龙虎榜板块评分（机构净买额40% + 上榜家数25% + 机构参与度20% + 净买一致性15%）
-4. 报告追加🏛️龙虎榜机构板块聚合章节（含净买入/净卖出 Top 3 详情）
-
-`--lhb-date YYYYMMDD` 指定龙虎榜日期（默认最近交易日）。
-
-**步骤**：
-
-1. 运行：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-lhb] [--lhb-date YYYYMMDD]
-```
-
-2. 呈现：概览（涨跌比/平均涨跌/总净流入）→ 强势板块(≥70) → 活跃板块(50-69) → 龙虎榜板块聚合 → 概念驱动事件 → 资金流向极端 → 弱势板块
-
-3. 数据来源：同花顺行业实时排行（AKShare）+ 东方财富龙虎榜
-
-4. `--json` 输出结构化 JSON 给 Agent 消费。
-
----
-
-## /integrated-scan [--top N] [--compact] [--output-html] [--lhb-date YYYYMMDD]
-
-ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块做龙头扫描，输出整合报告。
-
-**顺序 pipeline**：
-1. `ths_theme.py --export-sectors` — 导出热度达标的行业板块
-2. 筛选 heat_score≥50 的板块
-3. `market_leader.py --sectors-from qualified_sectors.json` — 只扫热板块
-4. 拼接为整合报告
-
-**步骤**：
-
-1. 运行：
-```bash
-python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD]
-```
-
-2. 呈现：总览（热力板块数、龙头标数、市场情绪）→ 按板块展开（板块热力指标 → 龙头清单 → 综合信号标签）
-
-3. 边界情况：
-   - 无热板块：不跑 longtou，只输出 ths-theme 热力报告 + 提示无强信号
-   - 映射找不到东方财富板块：标注"东方财富无对应板块"，保留方向参考
-   - ths-theme/longtou 任一失败：降级为另一项的输出，不阻塞
 
 ---
 
@@ -189,7 +134,7 @@ python3 .claude/skills/stock-trend/scripts/backtesting/wyckoff_backtest.py --sec
 
 ---
 
-## /longtou [--top N] [--sector <板块名>] [--sectors-from <file>] [--compact]
+## /longtou [--top N] [--sector <板块名>] [--compact]
 
 扫描热点板块→识别龙头/中军→pipeline深度分析。`--top`默认10，`--sector`指定板块跳过扫描。
 

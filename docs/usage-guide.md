@@ -13,12 +13,10 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 - [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
 - [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
 - [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
-- [4. 涨停热力 `/ths-theme`](#4-涨停热力-ths-theme)
-- [5. 周主线报告 `/weekly`](#5-周主线报告-weekly)
-- [6. 持仓管理 `/portfolio`](#6-持仓管理-portfolio)
-- [7. 龙头扫描 `/longtou`](#7-龙头扫描-longtou)
-- [8. 整合扫描 `/integrated-scan`](#8-整合扫描-integrated-scan)
-- [9. 回测 `/etf-backtest`](#9-回测-etf-backtest)
+- [4. 周主线报告 `/weekly`](#4-周主线报告-weekly)
+- [5. 持仓管理 `/portfolio`](#5-持仓管理-portfolio)
+- [6. 龙头扫描 `/longtou`](#6-龙头扫描-longtou)
+- [7. 回测 `/etf-backtest`](#7-回测-etf-backtest)
 
 ---
 
@@ -122,38 +120,7 @@ dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
 
 ---
 
-## 4. 板块热力 `/ths-theme`
-
-基于 AKShare 同花顺数据，对行业/概念板块做热力评分，默认同时执行龙虎榜分析。
-
-```bash
-# 全量（行业 + 龙虎榜）
-/ths-theme
-
-# 仅行业热力（跳过龙虎榜）
-/ths-theme --no-lhb
-
-# 指定龙虎榜日期
-/ths-theme --lhb-date 20260529
-
-# JSON 输出
-/ths-theme --json
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/analysis/ths_theme.py [--top N] [--min-score N] [--json] [--no-lhb] [--lhb-date YYYYMMDD]
-```
-
-**行业评分**：涨跌幅 35% + 主力净流入 35% + 上涨比率 30%
-
-**龙虎榜评分**（默认开启）：机构净买额 40% + 上榜家数 25% + 机构参与度 20% + 净买一致性 15%
-
-**数据源**：AKShare 同花顺行业排行 + 东方财富龙虎榜
-
----
-
-## 5. 周主线报告 `/weekly`
+## 4. 周主线报告 `/weekly`
 
 聚合一周数据（行业热力 + 持续性 + 龙虎榜机构信号），识别中期主线方向。
 
@@ -189,7 +156,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/weekly_report.py [--weeks 1]
 
 ---
 
-## 6. 持仓管理 `/portfolio`
+## 5. 持仓管理 `/portfolio`
 
 浮动盈亏、止损预警、凯利分析。
 
@@ -226,7 +193,7 @@ python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [optio
 
 ---
 
-## 7. 龙头扫描 `/longtou`
+## 6. 龙头扫描 `/longtou`
 
 扫描热点板块 → 识别龙头/中军 → pipeline 深度分析。
 
@@ -237,16 +204,13 @@ python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [optio
 # 指定板块
 /longtou --sector 白酒
 
-# 从 ths-theme 热力数据导入板块（整合模式）
-/longtou --sectors-from .cache/stock-trend/qualified_sectors.json
-
 # 精简输出
 /longtou --compact
 ```
 
 **后台脚本**：
 ```bash
-python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--sector <板块名>] [--sectors-from <file>] [--compact] --output-html
+python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--sector <板块名>] [--compact] --output-html
 ```
 
 **三阶段**：
@@ -254,49 +218,9 @@ python3 .claude/skills/stock-trend/scripts/scans/market_leader.py [--top N] [--s
 2. 龙头筛选（涨幅 50%+成交额 30%+排行 20%）/ 中军筛选（市值 40%+PE 合理性 40%+走势稳定性 20%）
 3. Pipeline 深度分析
 
-**板块热力加成**：使用 `--sectors-from` 导入 ths-theme 热板块数据后，龙头评分增加板块热力加成。
-
 ---
 
-## 8. 整合扫描 `/integrated-scan`
-
-ths-theme + longtou 整合扫描 — 先跑板块热力筛选，再对热板块做龙头扫描，输出整合报告。
-
-```bash
-# 默认 Top 10 热板块
-/integrated-scan
-
-# 指定数量 + HTML
-/integrated-scan --top 15 --output-html
-
-# 精简输出
-/integrated-scan --compact
-```
-
-**Pipeline 流程**：
-
-```
-Step 1: ths_theme.py --export-sectors        → 导出热度达标的行业板块
-Step 2: 筛选 heat_score≥50 的板块
-Step 3: market_leader.py --sectors-from      → 只扫热板块内的龙头/中军
-Step 4: 拼接为整合报告                         → 板块热力 + 龙头清单 + 综合信号标签
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/bridge/run_integrated.py [--top 10] [--compact] [--output-html] [--lhb-date YYYYMMDD]
-```
-
-**龙头评分融合**：行业板块热力叠加到龙头 composite_score 上，板块越热龙头得分越高。
-
-**边界行为**：
-- 无热板块 → 不跑 longtou，仅输出 ths-theme 热力报告 + 提示无强信号
-- ths-theme 失败 → 降级为 longtou 全市场扫描
-- longtou 失败 → 降级为 ths-theme 热力报告
-
----
-
-## 9. 回测 `/etf-backtest`
+## 7. 回测 `/etf-backtest`
 
 回测 ETF Phase 1 速评分模型预测力。
 
@@ -324,10 +248,8 @@ python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-day
 | 趋势判断 | AKShare / Tushare / 东方财富 | K线、资金流向、基本面、宏观 |
 | ETF 扫描 | AKShare / 东方财富 | ETF 净值/IOPV/规模/期货基差 |
 | 市场主题 | 东方财富 push2 API | BK 板块排行 + 成分股 |
-| 同花顺热力 | AKShare 同花顺接口 | 行业排行 + 概念事件 |
 | 涨停数据 | 东方财富涨停池 (AKShare) | 涨停股/封板/连板/炸板 |
 | 龙虎榜 | 东方财富龙虎榜 (AKShare) | 机构买卖明细 |
-| 整合扫描 | ths-theme + market_leader | 板块热力 + 龙头扫描 + 信号标签 |
 | 持仓管理 | portfolio.yaml | 用户手动录入持仓 |
 
 ---

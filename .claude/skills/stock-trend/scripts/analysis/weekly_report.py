@@ -5,7 +5,7 @@
 识别适合中线持仓（1-6个月）的主线方向。
 
 数据源:
-  - ths_theme: 行业板块实时热力评分
+  - sector_data: 东方财富行业板块实时热力评分
   - sector ranking snapshots: 板块持续性记录
   - LHB snapshots: 机构资金信号
 
@@ -39,12 +39,6 @@ REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from core.source_health import classify_failure, live_attempt
-
-try:
-    import akshare as ak
-    HAS_AKSHARE = True
-except ImportError:
-    HAS_AKSHARE = False
 
 
 def _safe_float(v) -> float:
@@ -154,55 +148,50 @@ def _unpack_source_result(result) -> tuple[dict, Optional[dict]]:
     return result if isinstance(result, dict) else {}, None
 
 
-def _fallback_industry_rows(payload: dict) -> list[dict]:
-    """Convert East Money ranking rows to the THS scoring input contract."""
-    rows = []
-    for sector in payload.get("sectors", []) or []:
-        if sector.get("type") != "industry":
-            continue
-        name = str(sector.get("name", "") or "").strip()
-        if not name:
-            continue
-        rows.append({
-            "name": name,
+def _score_eastmoney_industries(payload: dict) -> list[dict]:
+    """Return East Money industry rows in the weekly aggregation contract."""
+    from fetchers.sector_data import rank_hot_sectors
+
+    industries = [
+        dict(sector)
+        for sector in payload.get("sectors", []) or []
+        if sector.get("type") == "industry"
+        and str(sector.get("name", "") or "").strip()
+    ]
+    ranked = rank_hot_sectors(
+        {"sectors": industries}, top_n=None, min_stocks=0, min_up_ratio=0,
+    )
+    for rank, sector in enumerate(ranked, 1):
+        up = int(_safe_float(sector.get("up_count")))
+        down = int(_safe_float(sector.get("down_count")))
+        total = up + down
+        sector.update({
+            "name": str(sector.get("name", "") or "").strip(),
             "code": str(sector.get("code", "") or ""),
             "change_pct": _safe_float(sector.get("change_pct")),
             "net_flow": _safe_float(sector.get("main_force_net")),
             "total_amount": _safe_float(sector.get("amount")),
             "total_volume": 0,
-            "up_count": int(_safe_float(sector.get("up_count"))),
-            "down_count": int(_safe_float(sector.get("down_count"))),
+            "up_count": up,
+            "down_count": down,
+            "up_ratio": round(up / total, 3) if total else 0,
             "leader_name": "",
             "leader_change": 0.0,
+            "rank": rank,
         })
-    return rows
+    return ranked
 
 
 def fetch_current_industry_data() -> dict:
-    """Fetch and score today's industries with THS/EM evidence.
-
-    THS remains the preferred source.  East Money is an independent fallback
-    and is only labelled successful when it returns valid industry rows.
-    """
-    from analysis.ths_theme import (
-        fetch_industry_data_with_evidence,
-        score_industries,
-    )
-
-    ths = fetch_industry_data_with_evidence()
-    ths_attempt = ths.get("live_attempt", {}) or {}
-    errors = list(ths.get("errors", []) or [])
-    if ths.get("status") == "live_success" and ths.get("data"):
-        return {
-            **ths,
-            "data": score_industries(list(ths["data"])),
-        }
-
+    """Fetch and score today's industries from East Money with evidence."""
     em_attempt = {}
     em_payload = {}
+    errors = []
     try:
         from fetchers.sector_data import get_sector_rankings
-        fetched = get_sector_rankings(with_evidence=True)
+        fetched = get_sector_rankings(
+            with_evidence=True, allow_cross_source_fallback=False,
+        )
         em_payload, em_attempt = _unpack_source_result(fetched)
         em_attempt = em_attempt or {}
         em_meta = em_payload.get("meta", {}) or {}
@@ -211,28 +200,15 @@ def fetch_current_industry_data() -> dict:
             text = f"eastmoney_push2: {error}"
             if text not in errors:
                 errors.append(text)
-        # get_sector_rankings has an historical AKShare fallback when its
-        # response is empty.  Reject that path here: this boundary must not
-        # label THS data as an independent East Money success.
-        em_used_internal_fallback = bool(em_meta.get("upstream_errors"))
-        fallback_rows = [] if em_used_internal_fallback else _fallback_industry_rows(em_payload)
-        if em_used_internal_fallback:
-            errors.append("eastmoney_push2: rejected internal AKShare fallback")
-        if fallback_rows:
-            provider_attempts = int(ths_attempt.get("provider_attempts", 0) or 0)
-            provider_attempts += int(em_attempt.get("provider_attempts", 0) or 0)
+        industry_rows = _score_eastmoney_industries(em_payload)
+        if industry_rows:
+            success_attempt = dict(em_attempt)
+            success_attempt.update({"reason": "", "status": "success"})
             return {
-                "data": score_industries(fallback_rows),
+                "data": industry_rows,
                 "status": "live_success",
                 "source": "eastmoney_push2",
-                "live_attempt": live_attempt(
-                    attempted=bool(ths_attempt.get("attempted")
-                                   or em_attempt.get("attempted")),
-                    provider_attempts=provider_attempts,
-                    status="success", failure_chain=[
-                        ths_attempt.get("reason", "")
-                    ] if ths_attempt.get("reason") else None,
-                ),
+                "live_attempt": success_attempt,
                 "errors": errors,
             }
     except Exception as exc:
@@ -244,25 +220,18 @@ def fetch_current_industry_data() -> dict:
             failure_detail=str(exc),
         )
 
-    provider_attempts = int(ths_attempt.get("provider_attempts", 0) or 0)
-    provider_attempts += int(em_attempt.get("provider_attempts", 0) or 0)
-    reasons = [
-        str(ths_attempt.get("reason", "") or ""),
-        str(em_attempt.get("reason", "") or ""),
-    ]
-    reason = next((item for item in reasons if item and item != "empty"), "empty")
+    reason = str(em_attempt.get("reason", "") or "empty")
     status = "error" if reason != "empty" else "no_data"
+    failure_attempt = dict(em_attempt)
+    failure_attempt.update({
+        "reason": reason,
+        "status": "error" if status == "error" else "empty",
+    })
     return {
         "data": [],
         "status": status,
         "source": "none",
-        "live_attempt": live_attempt(
-            attempted=bool(ths_attempt.get("attempted")
-                           or em_attempt.get("attempted")),
-            provider_attempts=provider_attempts,
-            reason=reason,
-            status="error" if status == "error" else "empty",
-        ),
+        "live_attempt": failure_attempt,
         "errors": errors,
     }
 
@@ -335,10 +304,10 @@ def aggregate_sectors(market_snapshots: dict[str, list[dict]],
             "up_ratio": _safe_float(s.get("up_ratio", 0)),
             "net_flow": s.get("net_flow", 0),
             "leader": s.get("leader_name", ""),
-            "source": "ths_theme",
+            "source": "eastmoney_push2",
         })
         if name not in sector_codes:
-            sector_codes[name] = ""
+            sector_codes[name] = s.get("code", "")
 
     if not sector_days:
         return []

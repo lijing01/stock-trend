@@ -17,10 +17,8 @@ from analysis.weekly_report import (
     load_lhb_snapshot_bundle,
     fetch_industry_data,
     fetch_current_industry_data,
-    HAS_AKSHARE,
 )
 import analysis.weekly_report as weekly_report
-import analysis.ths_theme as ths_theme
 import fetchers.sector_data as sector_data
 
 
@@ -89,19 +87,12 @@ def test_aggregate_without_lhb_renormalizes_weights():
     )
 
 
-def test_current_industry_uses_eastmoney_after_ths_failure(monkeypatch):
-    monkeypatch.setattr(
-        ths_theme, "fetch_industry_data_with_evidence",
-        lambda: {
-            "data": [], "status": "error", "source": "none",
-            "live_attempt": {"attempted": True, "provider_attempts": 1,
-                              "reason": "dns", "status": "error"},
-            "errors": ["ths_akshare: dns"],
-        },
-    )
-    monkeypatch.setattr(
-        sector_data, "get_sector_rankings",
-        lambda **kwargs: {
+def test_current_industry_uses_eastmoney_only(monkeypatch):
+    calls = []
+
+    def rankings(**kwargs):
+        calls.append(kwargs)
+        return {
             "payload": {
                 "sectors": [{
                     "code": "BK0001", "name": "东方行业", "type": "industry",
@@ -112,8 +103,11 @@ def test_current_industry_uses_eastmoney_after_ths_failure(monkeypatch):
                 "meta": {"errors": []},
             },
             "live_attempt": {"attempted": True, "provider_attempts": 1,
-                              "reason": "", "status": "success"},
-        },
+                             "reason": "", "status": ""},
+        }
+
+    monkeypatch.setattr(
+        sector_data, "get_sector_rankings", rankings,
     )
 
     evidence = fetch_current_industry_data()
@@ -122,19 +116,17 @@ def test_current_industry_uses_eastmoney_after_ths_failure(monkeypatch):
     assert evidence["source"] == "eastmoney_push2"
     assert evidence["data"]
     assert evidence["data"][0]["name"] == "东方行业"
-    assert evidence["errors"] == ["ths_akshare: dns"]
+    assert evidence["data"][0]["code"] == "BK0001"
+    assert evidence["data"][0]["up_ratio"] == 0.8
+    assert evidence["errors"] == []
+    assert evidence["live_attempt"]["provider_attempts"] == 1
+    assert evidence["live_attempt"]["status"] == "success"
+    assert calls == [{
+        "with_evidence": True, "allow_cross_source_fallback": False,
+    }]
 
 
 def test_current_industry_failure_keeps_weekly_report_diagnostic(monkeypatch):
-    monkeypatch.setattr(
-        ths_theme, "fetch_industry_data_with_evidence",
-        lambda: {
-            "data": [], "status": "error", "source": "none",
-            "live_attempt": {"attempted": True, "provider_attempts": 1,
-                              "reason": "dns", "status": "error"},
-            "errors": ["ths_akshare: dns"],
-        },
-    )
     monkeypatch.setattr(
         sector_data, "get_sector_rankings",
         lambda **kwargs: {
@@ -306,8 +298,6 @@ def test_load_lhb_snapshots_live():
 
 
 def test_fetch_industry_data_live():
-    if not HAS_AKSHARE:
-        return
     data = fetch_industry_data()
     if data:
         assert len(data) > 0
