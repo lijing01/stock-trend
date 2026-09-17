@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from fetchers import capital_flow, kline, kline_eastmoney
 from pipeline import runner
+from core import eastmoney_utils
+from core.source_health import classify_failure
 
 
 VALID_FLOW = {"date": "20260807", "main_net_inflow": 1.0}
@@ -54,6 +56,146 @@ class TestCapitalFlowFallback(unittest.TestCase):
         self.assertEqual(failure["source"], "tushare_fallback")
         self.assertEqual(failure["reason"], "timeout")
         self.assertEqual(failure["scope"], "item")
+
+    def test_tushare_timeout_does_not_disable_moneyflow_capability(self):
+        with patch.object(capital_flow, "fetch_stock_capital_flow",
+                          return_value=[]), \
+                patch.object(capital_flow, "fetch_stock_capital_flow_tushare",
+                             side_effect=TimeoutError("upstream timed out")), \
+                patch.object(capital_flow, "estimate_capital_flow_from_kline",
+                             return_value=[]):
+            result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
+                "600519.SH", "1.600519", "600519")
+
+        self.assertEqual(
+            result["meta"]["failure_chain"][1]["reason"], "timeout")
+        self.assertNotIn("provider_capability_changes", result["meta"])
+
+    def test_tushare_permission_error_is_recorded_and_kline_estimate_continues(self):
+        with patch.object(capital_flow, "fetch_stock_capital_flow",
+                          return_value=[]), \
+                patch.object(
+                    capital_flow, "fetch_stock_capital_flow_tushare",
+                    side_effect=RuntimeError(
+                        "moneyflow 接口没有权限访问")), \
+                patch.object(capital_flow, "estimate_capital_flow_from_kline",
+                             return_value=[VALID_FLOW]):
+            result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
+                "600519.SH", "1.600519", "600519",
+                expected_date="2026-08-07")
+
+        self.assertEqual(result["meta"]["data_source"], "kline_estimate")
+        self.assertEqual(
+            result["meta"]["failure_chain"][1]["reason"],
+            "permission_denied")
+        self.assertEqual(
+            result["meta"]["provider_capability_changes"],
+            {"tushare_moneyflow": "permission_denied"})
+        self.assertEqual(
+            result["meta"]["provider_attempts_by_source"],
+            {"eastmoney": 1, "tushare_fallback": 1})
+        self.assertEqual(
+            result["meta"]["fallback_attempts_by_source"],
+            {"kline_estimate": 1})
+
+    def test_disabled_tushare_still_uses_kline_estimate(self):
+        with patch.object(capital_flow, "fetch_stock_capital_flow",
+                          return_value=[]), \
+                patch.object(capital_flow, "fetch_stock_capital_flow_tushare") as ts, \
+                patch.object(capital_flow, "estimate_capital_flow_from_kline",
+                             return_value=[VALID_FLOW]):
+            result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
+                "600519.SH", "1.600519", "600519",
+                expected_date="2026-08-07",
+                disable_tushare_fallback=True)
+
+        ts.assert_not_called()
+        self.assertEqual(result["meta"]["data_source"], "kline_estimate")
+        self.assertEqual(
+            result["meta"]["provider_attempts_by_source"],
+            {"eastmoney": 1, "tushare_fallback": 0})
+        self.assertEqual(
+            result["meta"]["provider_capabilities"],
+            {"tushare_moneyflow": "unavailable"})
+        self.assertEqual(
+            result["meta"]["failure_chain"][1]["reason"],
+            "skipped_permission_denied")
+
+
+class TestCapitalFlowFallbackAndPush2Rotation(unittest.TestCase):
+    def _fetch(self, eastmoney, tushare, estimate, expected_date=""):
+        with patch.object(capital_flow, "fetch_stock_capital_flow",
+                          return_value=eastmoney) as em, \
+                patch.object(capital_flow, "fetch_stock_capital_flow_tushare",
+                             return_value=tushare) as ts, \
+                patch.object(capital_flow, "estimate_capital_flow_from_kline",
+                             return_value=estimate) as kl:
+            result = capital_flow.fetch_stock_capital_flow_with_fallbacks(
+                "600519.SH", "1.600519", "600519",
+                expected_date=expected_date,
+            )
+        return result, em, ts, kl
+
+    def test_connection_errors_retry_distinct_hosts_with_attempt_evidence(self):
+        hosts = ["push2-a.test", "push2-b.test", "push2-c.test"]
+        observed = []
+        evidence = []
+
+        def fetch(host):
+            observed.append(host)
+            if len(observed) < 3:
+                raise ConnectionResetError("Remote end closed connection")
+            return [VALID_FLOW]
+
+        with patch.object(eastmoney_utils, "EM_PUSH2_HOSTS", hosts), \
+                patch.object(eastmoney_utils.time, "sleep"):
+            result, used_host = eastmoney_utils.rotate_push2_host(
+                fetch, max_retries=3,
+                retryable=lambda error: classify_failure(error) in {
+                    "connection_error", "timeout",
+                },
+                attempt_evidence=evidence,
+                classify_error=classify_failure,
+                retry_delay=0.2,
+            )
+
+        self.assertEqual(result, [VALID_FLOW])
+        self.assertEqual(used_host, hosts[2])
+        self.assertEqual(observed, hosts)
+        self.assertEqual(len(set(observed)), 3)
+        self.assertEqual(
+            [entry["reason"] for entry in evidence],
+            ["connection_error", "connection_error", ""],
+        )
+        self.assertEqual([entry["success"] for entry in evidence],
+                         [False, False, True])
+
+    def test_empty_and_format_errors_do_not_retry(self):
+        for error in (RuntimeError("empty response"), ValueError("bad JSON")):
+            observed = []
+            evidence = []
+
+            def fetch(host):
+                observed.append(host)
+                raise error
+
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(eastmoney_utils, "EM_PUSH2_HOSTS", [
+                        "push2-a.test", "push2-b.test", "push2-c.test",
+                    ]):
+                with self.assertRaises(RuntimeError):
+                    eastmoney_utils.rotate_push2_host(
+                        fetch, max_retries=3,
+                        retryable=lambda exc: classify_failure(exc) in {
+                            "connection_error", "timeout",
+                        },
+                        attempt_evidence=evidence,
+                        classify_error=classify_failure,
+                        retry_delay=0,
+                    )
+
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(len(evidence), 1)
 
     def test_nonempty_eastmoney_result_skips_fallbacks(self):
         result, _, ts, kl = self._fetch([VALID_FLOW], None, None)
@@ -132,6 +274,15 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
         cached = {"meta": {"data_source": "eastmoney"}, "data": [VALID_FLOW]}
         self.assertTrue(capital_flow.is_valid_capital_result(cached))
 
+    def test_minimum_date_accepts_compact_and_iso_formats(self):
+        cached = {"meta": {"data_source": "eastmoney"}, "data": [VALID_FLOW]}
+        self.assertTrue(capital_flow.is_valid_capital_result(
+            cached, min_date="20260807"))
+        self.assertTrue(capital_flow.is_valid_capital_result(
+            cached, min_date="2026-08-07"))
+        self.assertFalse(capital_flow.is_valid_capital_result(
+            cached, min_date="20260808"))
+
     def test_error_result_is_invalid(self):
         cached = {"meta": {"data_source": "error"}, "data": [VALID_FLOW]}
         self.assertFalse(capital_flow.is_valid_capital_result(cached))
@@ -197,6 +348,16 @@ class TestCapitalFlowCacheValidation(unittest.TestCase):
     def test_default_mode_keeps_optional_enrichment(self):
         result, _, _ = self._run_main(None)
         self.assertEqual(result["meta"]["enrichment"], "attempted")
+
+    def test_disable_tushare_cli_flag_reaches_fallback_chain(self):
+        _, fetch, _ = self._run_main(
+            None,
+            argv=["capital_flow.py", "600519.SH",
+                  "--disable-tushare-fallback"],
+        )
+        fetch.assert_called_once_with(
+            "600519.SH", "1.600519", "600519", expected_date=None,
+            disable_tushare_fallback=True)
 
     def test_default_mode_refetches_skip_extended_cache(self):
         cached = {

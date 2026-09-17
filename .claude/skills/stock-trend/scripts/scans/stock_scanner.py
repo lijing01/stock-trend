@@ -68,6 +68,7 @@ SOURCE_EVIDENCE_STATUSES = frozenset({
     "live_success", "cache_valid", "cache_miss", "cache_stale",
     "not_selected_for_enrichment", "not_started_deadline",
     "source_unavailable", "source_date_lagging", "item_date_lagging",
+    "skipped_kline_prerequisite",
 })
 
 # ──────────────────────── Helpers ────────────────────────
@@ -1001,6 +1002,27 @@ def _payload_validation_reasons(payload, allow_nonfatal_errors=False):
     return reasons
 
 
+def _trading_date_key(value):
+    """Normalize YYYYMMDD and YYYY-MM-DD values for date comparisons."""
+    text = str(value or "").strip().replace("-", "")
+    if len(text) != 8 or not text.isdigit():
+        return ""
+    try:
+        datetime.strptime(text, "%Y%m%d")
+    except ValueError:
+        return ""
+    return text
+
+
+def _date_covers(latest_date, expected_date):
+    """Return whether latest_date covers expected_date across both formats."""
+    if not expected_date:
+        return True
+    latest_key = _trading_date_key(latest_date)
+    expected_key = _trading_date_key(expected_date)
+    return bool(latest_key and expected_key and latest_key >= expected_key)
+
+
 def _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds):
     if cache_age_seconds is not None and ttl_seconds is not None:
         if cache_age_seconds >= ttl_seconds:
@@ -1026,7 +1048,8 @@ def _validate_kline_cache(payload, expected_trading_date=""):
     if len(usable_rows) < WYCKOFF_MIN_BARS:
         reasons.append("insufficient_data")
     data_date = latest_data_date({"data": usable_rows})
-    if expected_trading_date and data_date < expected_trading_date:
+    if expected_trading_date and not _date_covers(
+            data_date, expected_trading_date):
         reasons.append("wrong_trading_date")
     return _cache_verdict(reasons)
 
@@ -1049,8 +1072,7 @@ def _validate_capital_cache(payload, expected_trading_date="",
 
         has_numeric_flow = any(
             isinstance(row, dict)
-            and (not expected_trading_date
-                 or _row_date(row) >= expected_trading_date)
+            and _date_covers(_row_date(row), expected_trading_date)
             and any(
                 isinstance(row.get(field), (int, float))
                 and not isinstance(row.get(field), bool)
@@ -1062,7 +1084,8 @@ def _validate_capital_cache(payload, expected_trading_date="",
         if not has_numeric_flow:
             reasons.append("flow_metrics_missing")
     data_date = latest_data_date(payload)
-    if expected_trading_date and data_date < expected_trading_date:
+    if expected_trading_date and not _date_covers(
+            data_date, expected_trading_date):
         reasons.append("wrong_trading_date")
     _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds)
     return _cache_verdict(reasons)
@@ -1382,7 +1405,8 @@ def _same_day_membership_fundamental_fallback(candidate, as_of_date=""):
 
 
 def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
-                        live_deadline=None, expected_trading_date=""):
+                        live_deadline=None, expected_trading_date="",
+                        disable_tushare_fallback=False):
     """Fetch capital flow for a stock via CLI."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "capital_flow.json"
@@ -1417,11 +1441,13 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
     ]
     if expected_trading_date:
         cmd.extend(["--expected-date", expected_trading_date])
+    if disable_tushare_fallback:
+        cmd.append("--disable-tushare-fallback")
     result = run_script(
         cmd, label=f"cap_{ts_code}",
         timeout=_remaining_timeout("capital", live_deadline))
     attempt = live_attempt(
-        attempted=True, provider_attempts=1, subprocess_started=True)
+        attempted=True, provider_attempts=0, subprocess_started=True)
     if result["success"]:
         payload = _read_json(str(cache_path))
         refreshed_verdict = _validate_capital_cache(
@@ -1430,6 +1456,20 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
             meta = payload.get("meta", {}) \
                 if isinstance(payload, dict) else {}
             meta = meta if isinstance(meta, dict) else {}
+            attempt.update({
+                "provider_attempts": max(
+                    0, int(meta.get("provider_attempts", 0) or 0)),
+                "provider_attempts_by_source": meta.get(
+                    "provider_attempts_by_source", {}),
+                "fallback_attempts_by_source": meta.get(
+                    "fallback_attempts_by_source", {}),
+                "provider_capabilities": meta.get(
+                    "provider_capabilities", {}),
+                "provider_capability_changes": meta.get(
+                    "provider_capability_changes", {}),
+                "eastmoney_host_attempts": meta.get(
+                    "eastmoney_host_attempts", []),
+            })
             reason = _capital_failure_reason(payload, refreshed_verdict)
             stale_sources = meta.get("stale_sources", [])
             stale_sources = (stale_sources if isinstance(stale_sources, list)
@@ -1467,6 +1507,18 @@ def _fetch_capital_flow(ts_code, cache_only=False, with_evidence=False,
         else:
             attempt.update({
                 "status": "live_success",
+                "provider_attempts": max(0, int(
+                    payload.get("meta", {}).get("provider_attempts", 0) or 0)),
+                "provider_attempts_by_source": payload.get(
+                    "meta", {}).get("provider_attempts_by_source", {}),
+                "fallback_attempts_by_source": payload.get(
+                    "meta", {}).get("fallback_attempts_by_source", {}),
+                "provider_capabilities": payload.get(
+                    "meta", {}).get("provider_capabilities", {}),
+                "provider_capability_changes": payload.get(
+                    "meta", {}).get("provider_capability_changes", {}),
+                "eastmoney_host_attempts": payload.get(
+                    "meta", {}).get("eastmoney_host_attempts", []),
                 "expected_date": expected_trading_date,
                 "latest_date": latest_data_date(payload),
                 "scope": "item",
@@ -2204,14 +2256,13 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
             _fetch_kline, ts_code, **fetch_kwargs,
             usable=lambda payload: bool(
                 payload and payload.get("data")
-                and (not as_of_date
-                     or latest_data_date(payload) >= as_of_date)
+                and _date_covers(latest_data_date(payload), as_of_date)
                 and not payload.get("meta", {}).get("refresh_error")))
         kline, attempt = _unpack_source_result(wrapped)
         _record_source_evidence("kline", ts_code, attempt)
         kline_current = bool(
             kline and kline.get("data")
-            and (not as_of_date or latest_data_date(kline) >= as_of_date)
+            and _date_covers(latest_data_date(kline), as_of_date)
             and not kline.get("meta", {}).get("refresh_error")
         )
         if kline and kline.get("data"):
@@ -2236,8 +2287,7 @@ def _run_phase2_legacy(candidates, max_workers=4, enable_wyckoff=False,
                 live_deadline=source_health.live_deadline,
                 usable=lambda payload: bool(
                     payload and payload.get("data")
-                    and (not as_of_date
-                         or latest_data_date(payload) >= as_of_date)
+                    and _date_covers(latest_data_date(payload), as_of_date)
                     and not payload.get("meta", {}).get("refresh_error")))
 
         fetched = bounded_source_map(
@@ -2710,7 +2760,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         return bool(
             payload and isinstance(payload, dict)
             and payload.get("data")
-            and (not as_of_date or latest_data_date(payload) >= as_of_date)
+            and _date_covers(latest_data_date(payload), as_of_date)
             and not payload.get("meta", {}).get("refresh_error")
             and _validate_kline_cache(payload, as_of_date)["valid"]
         )
@@ -2811,11 +2861,21 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         time.monotonic() - wyckoff_started)
     metrics_ref["wyckoff_pass_count"] = (
         metrics_ref.get("wyckoff_pass_count", 0) + len(eligible_candidates))
+    kline_usable_codes = {
+        candidate["code"] for candidate in eligible_candidates
+        if _kline_usable(kline_data.get(candidate["ts_code"]))
+    }
 
     def _fetch_capital_for_run(ts_code, **kwargs):
+        disable_tushare = (
+            isinstance(source_health, RunSourceHealth)
+            and not source_health.provider_enabled("tushare_moneyflow")
+        )
         result = _call_fetch_compat(
             _fetch_capital_flow, ts_code,
-            {"expected_trading_date": capital_expected_date, **kwargs})
+            {"expected_trading_date": capital_expected_date,
+             "disable_tushare_fallback": disable_tushare,
+             **kwargs})
         if isinstance(result, dict) and "payload" not in result \
                 and isinstance(result.get("data"), list):
             meta = result.get("meta")
@@ -2883,6 +2943,37 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             else:
                 fundamental_data[ts_code] = None
 
+    # A stale K-line already makes the candidate non-promotable. Preserve it
+    # for observation, but do not spend live enrichment slots on it or report
+    # the resulting K-line estimate as a capital-provider failure.
+    for candidate in eligible_candidates:
+        ts_code = candidate["ts_code"]
+        if candidate["code"] in kline_usable_codes \
+                or ts_code in capital_cache_valid_codes:
+            continue
+        evidence = source_evidence["capital"].setdefault(
+            ts_code, live_attempt(attempted=False))
+        if evidence.get("status") == "cache_stale":
+            evidence["cache_status"] = "cache_stale"
+        evidence.update({
+            "attempted": False,
+            "provider_attempts": 0,
+            "cache_used": False,
+            "stale": False,
+            "status": "skipped_kline_prerequisite",
+            "reason": "skipped_kline_prerequisite",
+            "expected_date": as_of_date,
+            "latest_date": latest_data_date(
+                kline_data.get(ts_code) or {}),
+            "prerequisite": "kline_stale",
+            "selection_stage": "omitted",
+        })
+        skipped_codes = metrics_ref.setdefault(
+            "_capital_skipped_kline_prerequisite_codes", set())
+        skipped_codes.add(candidate["code"])
+        metrics_ref["capital_skipped_kline_prerequisite_count"] = len(
+            skipped_codes)
+
     metrics_ref["capital_cache_valid_count"] = (
         metrics_ref.get("capital_cache_valid_count", 0)
         + len(capital_cache_valid_codes))
@@ -2945,8 +3036,16 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         {**candidate, "provisional_score": _provisional_score(candidate)}
         for candidate in eligible_candidates
     ]
+    capital_enrichment_candidates = [
+        candidate for candidate in eligible_candidates
+        if candidate["code"] in kline_usable_codes
+    ]
+    capital_priority_inputs = [
+        item for item in priority_inputs
+        if item.get("code") in kline_usable_codes
+    ]
     queue_info = rank_capital_enrichment_candidates(
-        priority_inputs, capital_data=capital_data, top=requested_top,
+        capital_priority_inputs, capital_data=capital_data, top=requested_top,
         batch_size=CAPITAL_PREFETCH_BATCH_SIZE,
         prefetch_limit=CAPITAL_PREFETCH_LIMIT,
         expected_trading_date=capital_expected_date)
@@ -2955,7 +3054,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         priority_queue = []
         metrics_ref["enrichment_deferred_candidate_count"] = (
             metrics_ref.get("enrichment_deferred_candidate_count", 0)
-            + len(eligible_candidates))
+            + len(capital_enrichment_candidates))
     elif isinstance(source_health, RunSourceHealth):
         requested_priority_count = len(priority_queue)
         admitted_priority_count = source_health.admit_enrichment_slots(
@@ -3095,6 +3194,28 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             evidence["selection_stage"] = stage
             _record_source_evidence(source, ts_code, evidence)
             if source == "capital":
+                for field, evidence_field in (
+                        ("capital_provider_attempts_by_source",
+                         "provider_attempts_by_source"),
+                        ("capital_fallback_attempts_by_source",
+                         "fallback_attempts_by_source")):
+                    counts = evidence.get(evidence_field, {})
+                    if not isinstance(counts, dict):
+                        continue
+                    totals = metrics_ref.setdefault(field, {})
+                    for provider, count in counts.items():
+                        try:
+                            totals[provider] = totals.get(provider, 0) + max(
+                                0, int(count or 0))
+                        except (TypeError, ValueError):
+                            continue
+                capability_changes = evidence.get(
+                    "provider_capability_changes", {})
+                if isinstance(capability_changes, dict) \
+                        and "tushare_moneyflow" in capability_changes:
+                    metrics_ref["capital_tushare_permission_denied_count"] = (
+                        metrics_ref.get(
+                            "capital_tushare_permission_denied_count", 0) + 1)
                 capital_data[ts_code] = payload if usable(payload) else None
                 if evidence.get("attempted") and evidence.get(
                         "status") not in ("cache_valid", "cache_miss",
@@ -3435,7 +3556,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         + len(report_scope_unenhanced))
     topup_candidates = (
         [] if defer_enrichment else select_capital_topup_candidates(
-            eligible_candidates, provisional_scores,
+            capital_enrichment_candidates, provisional_scores,
             processed_codes=capital_processed_codes,
             capital_cache_valid_codes=capital_cache_valid_codes,
             top=enrichment_report_top,

@@ -187,6 +187,31 @@ class TestRecommendationQuality(unittest.TestCase):
         self.assertIn("source_unavailable", result["reasons"])
         self.assertNotIn("capital_error", result["reasons"])
 
+    def test_stale_kline_prerequisite_skip_is_not_a_capital_provider_failure(self):
+        result = assess_candidate_data(
+            kline=payload([{"trade_date": "20260805"}]),
+            capital=None,
+            fundamental=payload([], quality="good"),
+            as_of_date="2026-08-06",
+            source_evidence={
+                "capital": {
+                    "attempted": False,
+                    "status": "skipped_kline_prerequisite",
+                    "reason": "skipped_kline_prerequisite",
+                    "expected_date": "2026-08-06",
+                    "latest_date": "2026-08-05",
+                },
+            },
+        )
+
+        capital = result["dimensions"]["capital"]
+        self.assertFalse(capital["available"])
+        self.assertEqual(capital["stale_reason"],
+                         "skipped_kline_prerequisite")
+        self.assertIn("skipped_kline_prerequisite", result["reasons"])
+        self.assertIn("kline_stale", result["reasons"])
+        self.assertNotIn("capital_error", result["reasons"])
+
     def test_intraday_capital_can_use_latest_completed_close(self):
         result = assess_candidate_data(
             kline=payload([{"trade_date": "20260915"}]),

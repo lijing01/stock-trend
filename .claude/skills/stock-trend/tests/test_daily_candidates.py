@@ -376,6 +376,14 @@ class TestRecommendationPolicy(unittest.TestCase):
             "capital_valid_count": 8,
             "capital_cache_valid_count": 1,
             "capital_skipped_by_budget": 69,
+            "capital_skipped_kline_prerequisite_count": 3,
+            "capital_tushare_permission_denied_count": 1,
+            "capital_provider_attempts_by_source": {
+                "eastmoney": 24, "tushare_fallback": 8,
+            },
+            "capital_fallback_attempts_by_source": {
+                "kline_estimate": 7,
+            },
             "capital_enrichment_population": 105,
             "capital_failure_reasons": {"timeout": 1},
             "advisory_reasons": ["resonance_stale:date_mismatch"],
@@ -419,6 +427,13 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("capital_topup_selected=6", html)
         self.assertIn("[performance]", stderr.getvalue())
         self.assertIn("capital_topup_selected=6", stderr.getvalue())
+        self.assertIn("K线前置跳过 3", report)
+        self.assertIn("capital_tushare_permission_denied=1", html)
+        self.assertIn('"eastmoney": 24', report)
+        self.assertIn("capital_fallback_attempts_by_source=", html)
+        self.assertIn("&quot;kline_estimate&quot;: 7", html)
+        self.assertIn('capital_provider_attempts_by_source={"eastmoney": 24, "tushare_fallback": 8}',
+                      stderr.getvalue())
         self.assertIn("final_valid=1", stderr.getvalue())
         for field in (
                 "sector_ranking", "sector_membership", "kline", "wyckoff",
@@ -3910,6 +3925,45 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         self.assertIn("已达到实时请求截止时间，未启动", detail)
         self.assertNotIn("资金面数据返回错误", detail)
+
+    def test_stale_kline_prerequisite_is_rendered_as_unrequested_capital(self):
+        item = candidate("stale-kline-prerequisite", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.55,
+            "as_of_date": "2026-09-16",
+            "reasons": ["kline_stale", "skipped_kline_prerequisite"],
+            "dimensions": {
+                "kline": {
+                    "data_date": "2026-09-15",
+                    "stale_reason": "kline_stale",
+                },
+                "capital": {
+                    "available": False,
+                    "source_status": "skipped_kline_prerequisite",
+                    "stale_reason": "skipped_kline_prerequisite",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "capital": {
+                "attempted": False,
+                "status": "skipped_kline_prerequisite",
+                "reason": "skipped_kline_prerequisite",
+                "expected_date": "2026-09-16",
+                "latest_date": "2026-09-15",
+                "selection_stage": "omitted",
+                "provider_attempts": 0,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("K线未覆盖目标日，资金增强未启动", detail)
+        self.assertIn("K线最新日期2026-09-15，未覆盖目标日2026-09-16", detail)
+        self.assertIn("未调用", detail)
+        self.assertNotIn("资金面数据返回错误", detail)
+        self.assertNotIn("失败链路", detail)
 
     def test_genuine_capital_fetch_failure_stays_provider_error(self):
         item = candidate("capital-error", eligible=False)

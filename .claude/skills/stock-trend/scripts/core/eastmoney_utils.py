@@ -116,23 +116,52 @@ def build_secid(ts_code):
     return f"{prefix}.{code}"
 
 
-def rotate_push2_host(fetch_fn, max_retries=3):
+def rotate_push2_host(fetch_fn, max_retries=3, retryable=None,
+                      attempt_evidence=None, classify_error=None,
+                      retry_delay=1.0):
     """Try fetch_fn with each EM_PUSH2_HOSTS node until success.
 
     Same pattern as rotate_em_host but for EM_PUSH2_HOSTS (push2 endpoints
-    for capital flow, sector data, etc.).
+    for capital flow, sector data, etc.). ``retryable`` can narrow retries to
+    transient failures for latency-sensitive callers. Optional attempt
+    evidence records the exact host and outcome without changing the return
+    shape used by existing callers.
     """
     last_error = None
-    for attempt in range(max_retries):
-        host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
+    try:
+        attempt_limit = min(max(0, int(max_retries)), len(EM_PUSH2_HOSTS))
+        delay = max(0.0, float(retry_delay))
+    except (TypeError, ValueError):
+        attempt_limit = 0
+        delay = 0.0
+    attempted_hosts = set()
+    for attempt in range(attempt_limit):
+        host = EM_PUSH2_HOSTS[attempt]
+        if host in attempted_hosts:
+            continue
+        attempted_hosts.add(host)
+        record = {"host": host}
         try:
             data = fetch_fn(host)
+            record.update({"reason": "", "success": True})
+            if isinstance(attempt_evidence, list):
+                attempt_evidence.append(record)
             return data, host
         except Exception as e:
             last_error = e
-            if attempt < max_retries - 1:
-                time.sleep(1)
-    raise RuntimeError(f"East Money push2全节点失败: {last_error}")
+            reason = classify_error(e) if callable(classify_error) else ""
+            record.update({"reason": str(reason or "unknown"),
+                           "success": False})
+            if isinstance(attempt_evidence, list):
+                attempt_evidence.append(record)
+            has_next = attempt + 1 < attempt_limit
+            if not has_next or (callable(retryable) and not retryable(e)):
+                break
+            if delay:
+                time.sleep(delay)
+    raise RuntimeError(
+        f"East Money push2 failed after {len(attempted_hosts)} configured "
+        f"host attempt(s): {last_error}")
 
 
 def rotate_em_host(fetch_fn, max_retries=3):

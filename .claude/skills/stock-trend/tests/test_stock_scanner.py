@@ -17,7 +17,7 @@ import json
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,12 +34,20 @@ def _make_kline(n=60, ts_code="TEST"):
     rows = []
     price = 10.0
     for i in range(n):
+        trade_date = (
+            datetime(2026, 8, 13) - timedelta(days=n - i - 1)
+        ).strftime("%Y%m%d")
         rows.append({
-            "trade_date": f"20260101+{i:03d}",
+            "trade_date": trade_date,
             "open": price, "high": price + 0.2, "low": price - 0.2,
             "close": price, "vol": 1000.0, "pre_close": price,
         })
-    return {"meta": {"ts_code": ts_code, "name": "测试"}, "data": rows}
+    return {
+        "meta": {
+            "ts_code": ts_code, "name": "测试", "data_source": "fixture",
+        },
+        "data": rows,
+    }
 
 
 def _wk(phase="accumulation", sub="lps", conf=0.6, score=2.0):
@@ -1268,6 +1276,122 @@ class TestScoreWyckoff(unittest.TestCase):
 
 
 class TestRunPhase2Funnel(unittest.TestCase):
+    def test_stale_kline_skips_capital_provider_without_health_failure(self):
+        candidate = _make_candidate("610991")
+        health = sc.RunSourceHealth()
+        capital_calls = []
+        stale_kline = _make_dated_kline(
+            60, candidate["ts_code"], "20260915")
+        stale_kline["meta"]["data_source"] = "fixture"
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(
+                    sc, "_fetch_kline",
+                    return_value=stale_kline), \
+                patch.object(
+                    sc, "_fetch_capital_flow",
+                    side_effect=lambda *args, **kwargs:
+                    capital_calls.append((args, kwargs))), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            metrics = {}
+            result = sc.run_phase2(
+                [candidate], source_health=health,
+                as_of_date="2026-09-16",
+                capital_expected_date="2026-09-16",
+                min_candidates=0, top=1, metrics=metrics)
+
+        self.assertEqual(len(result), 1)
+        evidence = result[0]["source_evidence"]["capital"]
+        self.assertEqual(evidence["status"], "skipped_kline_prerequisite")
+        self.assertFalse(evidence["attempted"])
+        self.assertEqual(evidence["provider_attempts"], 0)
+        self.assertEqual(evidence["expected_date"], "2026-09-16")
+        self.assertEqual(evidence["latest_date"], "2026-09-15")
+        self.assertIn("kline_stale", result[0]["data_quality"]["reasons"])
+        self.assertEqual(capital_calls, [])
+        self.assertEqual(metrics["capital_priority_count"], 0)
+        self.assertEqual(metrics["capital_skipped_kline_prerequisite_count"], 1)
+        capital_health = health.snapshot()["capital"]
+        self.assertEqual(capital_health["logical_live_requests"], 0)
+        self.assertEqual(capital_health["failures"], 0)
+        self.assertEqual(capital_health["circuit_breaks"], 0)
+
+    def test_tushare_permission_disables_only_that_fallback_for_this_run(self):
+        candidates = [_make_candidate("610992"), _make_candidate("610993")]
+        health = sc.RunSourceHealth()
+        calls = []
+        permission_sent = False
+        capital_payload = {
+            "meta": {"data_source": "eastmoney"},
+            "data": [{"date": "20260916", "main_net_inflow": 1}],
+        }
+        fundamental_payload = {
+            "meta": {"data_source": "fixture",
+                     "fetch_time": "20260916-160000"},
+            "summary": {"data_quality": "good"},
+            "data": {},
+        }
+
+        def fetch_capital(ts_code, with_evidence=False,
+                          disable_tushare_fallback=False, **_kwargs):
+            nonlocal permission_sent
+            calls.append(disable_tushare_fallback)
+            if not permission_sent:
+                permission_sent = True
+                attempt = sc.live_attempt(
+                    attempted=True, provider_attempts=2,
+                    status="live_success",
+                    provider_attempts_by_source={
+                        "eastmoney": 1, "tushare_fallback": 1,
+                    },
+                    fallback_attempts_by_source={"kline_estimate": 0},
+                    provider_capabilities={"tushare_moneyflow": "unavailable"},
+                    provider_capability_changes={
+                        "tushare_moneyflow": "permission_denied",
+                    })
+            else:
+                attempt = sc.live_attempt(
+                    attempted=True, provider_attempts=1,
+                    status="live_success",
+                    provider_attempts_by_source={"eastmoney": 1},
+                    fallback_attempts_by_source={"kline_estimate": 0},
+                    provider_capabilities={"tushare_moneyflow": "unavailable"})
+            return sc.source_result(capital_payload, attempt)
+
+        def fetch_current_kline(ts_code, **_kwargs):
+            payload = _make_dated_kline(60, ts_code, "20260916")
+            payload["meta"]["data_source"] = "fixture"
+            return payload
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(
+                    sc, "_fetch_kline",
+                    side_effect=fetch_current_kline), \
+                patch.object(sc, "_fetch_capital_flow",
+                             side_effect=fetch_capital), \
+                patch.object(sc, "_fetch_fundamental",
+                             return_value=fundamental_payload):
+            metrics = {}
+            sc.run_phase2(
+                candidates, max_workers=1, source_health=health,
+                as_of_date="2026-09-16",
+                capital_expected_date="2026-09-16",
+                min_candidates=0, top=2, metrics=metrics)
+
+        self.assertEqual(calls, [False, True])
+        self.assertFalse(health.provider_enabled("tushare_moneyflow"))
+        self.assertEqual(
+            health.provider_capability_state("tushare_moneyflow"),
+            "unavailable")
+        self.assertTrue(sc.RunSourceHealth().provider_enabled(
+            "tushare_moneyflow"))
+        self.assertEqual(
+            metrics["capital_provider_attempts_by_source"],
+            {"eastmoney": 2, "tushare_fallback": 1})
+        self.assertEqual(metrics["capital_tushare_permission_denied_count"], 1)
+        self.assertEqual(health.snapshot()["capital"]["failures"], 0)
+
     def test_one_stale_stock_does_not_prevent_fresh_capital_for_next_stock(self):
         candidates = [_make_candidate("600001"), _make_candidate("600002")]
         for candidate in candidates:
@@ -1717,7 +1841,9 @@ class TestRunPhase2Funnel(unittest.TestCase):
         def fetch_kline(ts_code, **_kwargs):
             kline_calls.append(ts_code)
             if len(kline_calls) == len(candidates):
-                health.live_deadline = time.monotonic() + 1.0
+                # Leave less than the 25s provider window without allowing
+                # scoring/report preparation to cross the absolute deadline.
+                health.live_deadline = time.monotonic() + 10.0
             return _make_dated_kline(60, ts_code, "20260827")
 
         def fetch_capital(ts_code, **_kwargs):

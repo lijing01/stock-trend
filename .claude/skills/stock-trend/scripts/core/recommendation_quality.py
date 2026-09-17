@@ -8,6 +8,7 @@ MIN_COVERAGE = 0.70
 NON_PROVIDER_STATUSES = frozenset({
     "cache_miss", "cache_stale", "not_selected_for_enrichment",
     "not_started_deadline", "source_unavailable", "source_date_lagging",
+    "skipped_kline_prerequisite",
 })
 SUCCESS_STATUSES = frozenset({"live_success", "cache_valid"})
 ITEM_DATE_LAG_STATUS = "item_date_lagging"

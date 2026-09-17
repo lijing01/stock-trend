@@ -100,6 +100,7 @@ REASON_LABELS = {
     "not_started_deadline": "已达到实时请求截止时间，未启动",
     "source_unavailable": "资金增强源不可用，本轮未调用",
     "source_date_lagging": "资金增强源日期滞后，本轮未调用",
+    "skipped_kline_prerequisite": "K线未覆盖目标日，资金增强未启动",
     "single_day_pulse": "板块仅呈单日脉冲，持续性证据不足",
     "history_insufficient": "板块历史快照不足，尚不能验证持续性",
     "history_unknown": "本板块历史未匹配，持续性未知",
@@ -151,6 +152,7 @@ DATA_REASON_CODES = {
     "not_started_deadline",
     "source_unavailable",
     "source_date_lagging",
+    "skipped_kline_prerequisite",
     "stale_cache",
     "partial_realtime",
     "regime_missing",
@@ -374,6 +376,8 @@ _PERFORMANCE_FUNNEL_FIELDS = (
     "capital_enrichment_population", "capital_initial_priority_count",
     "capital_initial_budget_cutoff", "capital_global_queue_omitted",
     "capital_item_date_lag_count", "capital_source_block_count",
+    "capital_skipped_kline_prerequisite_count",
+    "capital_tushare_permission_denied_count",
     "capital_topup_selected_count", "capital_topup_live_started",
     "capital_topup_valid_count", "capital_topup_skipped_deadline",
     "capital_topup_executable_count", "capital_topup_budget_insufficient",
@@ -440,6 +444,11 @@ def _complete_performance(performance, source_health, candidates, buckets,
                           min_score, total_seconds):
     """Finalize the additive public performance contract from run evidence."""
     completed = performance
+    skipped_codes = completed.pop(
+        "_capital_skipped_kline_prerequisite_codes", None)
+    if isinstance(skipped_codes, set):
+        completed["capital_skipped_kline_prerequisite_count"] = len(
+            skipped_codes)
     supplied_fields = set(completed)
     for field in _PERFORMANCE_PHASE_FIELDS:
         completed.setdefault(field, 0.0)
@@ -550,6 +559,21 @@ def _complete_performance(performance, source_health, candidates, buckets,
         (item.get("source_evidence", {}) or {}).get("capital", {})
         for item in candidates
     ]
+    inferred_provider_attempts = {}
+    inferred_fallback_attempts = {}
+    for status in candidate_capital_statuses:
+        for field, target in (
+                ("provider_attempts_by_source", inferred_provider_attempts),
+                ("fallback_attempts_by_source", inferred_fallback_attempts)):
+            counts = status.get(field, {})
+            if not isinstance(counts, dict):
+                continue
+            for provider, count in counts.items():
+                try:
+                    target[provider] = target.get(provider, 0) + max(
+                        0, int(count or 0))
+                except (TypeError, ValueError):
+                    continue
     inferred_capital = {
         "capital_initial_priority_count": sum(
             status.get("selection_stage") == "initial"
@@ -602,6 +626,16 @@ def _complete_performance(performance, source_health, candidates, buckets,
             and not status.get("attempted")
             for status in candidate_capital_statuses
         ),
+        "capital_skipped_kline_prerequisite_count": sum(
+            status.get("status") == "skipped_kline_prerequisite"
+            for status in candidate_capital_statuses
+        ),
+        "capital_tushare_permission_denied_count": sum(
+            "tushare_moneyflow" in status.get(
+                "provider_capability_changes", {})
+            for status in candidate_capital_statuses
+            if isinstance(status.get("provider_capability_changes", {}), dict)
+        ),
         "capital_skipped_by_budget": sum(
             status.get("status") in {
                 "not_selected_for_enrichment", "not_started_deadline",
@@ -610,6 +644,10 @@ def _complete_performance(performance, source_health, candidates, buckets,
         ),
         "capital_enrichment_population": len(candidates),
     }
+    inferred_capital["capital_provider_attempts_by_source"] = (
+        inferred_provider_attempts)
+    inferred_capital["capital_fallback_attempts_by_source"] = (
+        inferred_fallback_attempts)
     capital_failure_reasons = {}
     for status in candidate_capital_statuses:
         if not status.get("attempted") \
@@ -642,7 +680,7 @@ def _complete_performance(performance, source_health, candidates, buckets,
     for field, value in inferred_capital.items():
         if field not in supplied_fields:
             completed[field] = (
-                dict(value) if field == "capital_failure_reasons"
+                dict(value) if isinstance(value, dict)
                 else int(value))
     completed["total_seconds"] = max(0.0, float(total_seconds))
     completed.setdefault("advisory_reasons", [])
@@ -842,6 +880,10 @@ def _performance_markdown(performance):
         f"有效 {performance.get('capital_valid_count', 0)}（缓存有效 "
         f"{performance.get('capital_cache_valid_count', 0)}） → "
         f"预算跳过 {performance.get('capital_skipped_by_budget', 0)} | "
+        f"K线前置跳过 {performance.get('capital_skipped_kline_prerequisite_count', 0)} | "
+        f"Tushare权限拒绝 {performance.get('capital_tushare_permission_denied_count', 0)} | "
+        f"Provider尝试 {json.dumps(performance.get('capital_provider_attempts_by_source', {}), ensure_ascii=False, sort_keys=True)} | "
+        f"估算回退 {json.dumps(performance.get('capital_fallback_attempts_by_source', {}), ensure_ascii=False, sort_keys=True)} | "
         f"首轮预算截断 {performance.get('capital_initial_budget_cutoff', 0)} | "
         f"二轮可执行 {performance.get('capital_topup_executable_count', 0)} | "
         f"二轮预算不足 {performance.get('capital_topup_budget_insufficient', 0)} | "
@@ -1001,6 +1043,10 @@ def _performance_html(performance):
         f"capital_initial_budget_cutoff={performance.get('capital_initial_budget_cutoff', 0)} "
         f"capital_topup_executable={performance.get('capital_topup_executable_count', 0)} "
         f"capital_topup_budget_insufficient={performance.get('capital_topup_budget_insufficient', 0)} "
+        f"capital_skipped_kline_prerequisite={performance.get('capital_skipped_kline_prerequisite_count', 0)} "
+        f"capital_tushare_permission_denied={performance.get('capital_tushare_permission_denied_count', 0)} "
+        f"capital_provider_attempts_by_source={json.dumps(performance.get('capital_provider_attempts_by_source', {}), ensure_ascii=False, sort_keys=True)} "
+        f"capital_fallback_attempts_by_source={json.dumps(performance.get('capital_fallback_attempts_by_source', {}), ensure_ascii=False, sort_keys=True)} "
         f"fundamental_topup_selected={performance.get('fundamental_topup_selected_count', 0)} "
         f"fundamental_topup_live_started={performance.get('fundamental_topup_live_started', 0)} "
         f"fundamental_topup_valid={performance.get('fundamental_topup_valid_count', 0)} "
@@ -1098,6 +1144,10 @@ def _emit_performance_summary(performance):
         f"capital_initial_budget_cutoff={performance.get('capital_initial_budget_cutoff', 0)} "
         f"capital_topup_executable={performance.get('capital_topup_executable_count', 0)} "
         f"capital_topup_budget_insufficient={performance.get('capital_topup_budget_insufficient', 0)} "
+        f"capital_skipped_kline_prerequisite={performance.get('capital_skipped_kline_prerequisite_count', 0)} "
+        f"capital_tushare_permission_denied={performance.get('capital_tushare_permission_denied_count', 0)} "
+        f"capital_provider_attempts_by_source={json.dumps(performance.get('capital_provider_attempts_by_source', {}), ensure_ascii=False, sort_keys=True)} "
+        f"capital_fallback_attempts_by_source={json.dumps(performance.get('capital_fallback_attempts_by_source', {}), ensure_ascii=False, sort_keys=True)} "
         f"capital_global_queue_omitted={performance.get('capital_global_queue_omitted', 0)} "
         f"capital_topup_global_omitted={performance.get('capital_topup_global_omitted', 0)} "
         f"capital_live_started={performance.get('capital_live_started', 0)} "
@@ -2311,7 +2361,7 @@ def _reason_detail(code, item):
     if dimension_name is None and code in {
         "cache_miss", "cache_stale", "not_selected_for_enrichment",
         "not_started_deadline", "source_unavailable",
-        "source_date_lagging"}:
+        "source_date_lagging", "skipped_kline_prerequisite"}:
         evidence_by_source = item.get("source_evidence", {})
         for source in ("capital", "fundamental"):
             evidence = evidence_by_source.get(source, {}) \
@@ -2352,6 +2402,15 @@ def _reason_detail(code, item):
             elif code == "source_date_lagging":
                 details.append(
                     f"前序证据确认资金源最新至{actual_date}，本候选未调用")
+        elif dimension_name == "capital" \
+                and code == "skipped_kline_prerequisite":
+            actual_date = evidence.get("latest_date") or "未知"
+            capital_expected = (
+                evidence.get("expected_date")
+                or quality.get("as_of_date") or "未知")
+            details.append(
+                f"K线最新日期{actual_date}，未覆盖目标日{capital_expected}；"
+                "因此未启动资金增强")
         provider = (dimension.get("source") or evidence.get("provider")
                     or evidence.get("evidence_source"))
         if provider:

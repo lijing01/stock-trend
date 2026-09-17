@@ -134,7 +134,12 @@ def live_attempt(*, attempted: bool, provider_attempts: int = 0,
                  failure_detail: str = "", expected_date: str = "",
                  latest_date: str = "", scope: str = "",
                  evidence_source: str = "", affected_scope: str = "",
-                 date_lag_evidence: list | None = None) -> dict:
+                 date_lag_evidence: list | None = None,
+                 provider_attempts_by_source: dict | None = None,
+                 fallback_attempts_by_source: dict | None = None,
+                 provider_capabilities: dict | None = None,
+                 provider_capability_changes: dict | None = None,
+                 eastmoney_host_attempts: list | None = None) -> dict:
     """Build the common evidence record used by every source adapter."""
     evidence = {
         "attempted": bool(attempted),
@@ -163,6 +168,14 @@ def live_attempt(*, attempted: bool, provider_attempts: int = 0,
             evidence[key] = str(value)
     if date_lag_evidence:
         evidence["date_lag_evidence"] = copy.deepcopy(date_lag_evidence)
+    for key, value in (
+            ("provider_attempts_by_source", provider_attempts_by_source),
+            ("fallback_attempts_by_source", fallback_attempts_by_source),
+            ("provider_capabilities", provider_capabilities),
+            ("provider_capability_changes", provider_capability_changes),
+            ("eastmoney_host_attempts", eastmoney_host_attempts)):
+        if value:
+            evidence[key] = copy.deepcopy(value)
     return evidence
 
 
@@ -258,6 +271,7 @@ class RunSourceHealth:
         self._lock = threading.RLock()
         self._states = {source: _new_source_state() for source in SOURCES}
         self._events: list[dict] = []
+        self._provider_capabilities: dict[str, str] = {}
         # Enrichment is invoked once per sector window in the compatibility
         # scanner. Keep admission budgets on the shared run object so those
         # windows cannot each allocate a fresh prefetch/top-up queue.
@@ -391,6 +405,20 @@ class RunSourceHealth:
             state = self._state(token.source)
             state["in_flight"] = max(0, state["in_flight"] - 1)
             evidence = attempt or live_attempt(attempted=True)
+            capability_changes = evidence.get(
+                "provider_capability_changes", {})
+            if isinstance(capability_changes, dict):
+                for provider, reason in capability_changes.items():
+                    provider = str(provider)
+                    if self._provider_capabilities.get(provider) == "unavailable":
+                        continue
+                    self._provider_capabilities[provider] = "unavailable"
+                    self._events.append({
+                        "event": "provider_capability_unavailable",
+                        "source": token.source,
+                        "provider": provider,
+                        "reason": str(reason or "permission_denied"),
+                    })
             state["provider_attempts"] += max(
                 0, int(evidence.get("provider_attempts", 0) or 0))
             if succeeded:
@@ -545,6 +573,16 @@ class RunSourceHealth:
     def unavailable(self, source: str) -> bool:
         with self._lock:
             return self._state(source)["state"] == "unavailable"
+
+    def provider_enabled(self, provider: str) -> bool:
+        """Return whether this run may still try a provider capability."""
+        with self._lock:
+            return self._provider_capabilities.get(str(provider)) != "unavailable"
+
+    def provider_capability_state(self, provider: str) -> str:
+        """Return the run-scoped capability result, if one has been learned."""
+        with self._lock:
+            return self._provider_capabilities.get(str(provider), "unknown")
 
     def live_block_reason(self, source: str) -> str:
         """Return the scheduler reason for suppressing live work, if any."""
