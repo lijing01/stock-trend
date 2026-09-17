@@ -712,33 +712,6 @@ def main():
     # ── Phase 2: Filter leaders + core stocks ──
     sectors_analyzed = run_phase2(hot_sectors, leader_n=3, core_n=3)
 
-    # ── DDX Enhancement: fetch DDX data and rescore leaders ──
-    try:
-        from fetchers.ddx import fetch_ddx_data
-        from fetchers.sector_data import rescore_leaders_with_ddx
-
-        all_codes = list(dict.fromkeys(
-            s["code"]
-            for sec in sectors_analyzed
-            for s in sec.get("leaders", []) + sec.get("core_stocks", [])
-        ))
-
-        if all_codes:
-            print(f"[DDX] Fetching DDX data for {len(all_codes)} candidates...")
-            ddx_data = fetch_ddx_data(all_codes)
-            if ddx_data:
-                print(f"  Found DDX data for {len(ddx_data)} stocks")
-                for sec in sectors_analyzed:
-                    leaders = sec.get("leaders", [])
-                    if leaders:
-                        rescored = rescore_leaders_with_ddx(leaders, ddx_data)
-                        sec["leaders"] = rescored
-                        sec["has_ddx_enhanced"] = True
-            else:
-                print("  No DDX data available (degraded)")
-    except Exception as e:
-        print(f"  [DDX] Enhancement skipped: {e}")
-
     # ── Phase 3: Deep analysis ──
     candidates = []
     roles = []

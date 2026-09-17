@@ -3,8 +3,6 @@
 
 通过东方财富板块成分股 API 反向构建映射：给定股票代码，找出所属行业/概念板块。
 
-用于 DDX 板块聚合：把个股 DDX 数据按所属板块汇总。
-
 Usage:
     python3 sector_mapper.py                              # 构建映射并缓存
     python3 sector_mapper.py --rebuild                    # 强制重建
@@ -221,84 +219,6 @@ def get_mapping(rebuild: bool = False,
     if allow_stale:
         return load_mapping(allow_stale=True)
     return None
-
-
-# ──────────────── DDX 板块聚合 ────────────────
-
-
-def aggregate_ddx_by_sector(ddx_list: list[dict],
-                             mapping: dict) -> list[dict]:
-    """Aggregate DDX data by sector.
-
-    Args:
-        ddx_list: list from fetch_ddx_ranking().
-        mapping: stock_sector_map dict with "mapping" key.
-
-    Returns:
-        List of sector-level DDX aggregate dicts sorted by composite score:
-            sector_code, sector_name, type, ddx_inflow_count, ddx_inflow_ratio,
-            continuous_count, super_order_avg, composite_score
-    """
-    if not ddx_list or not mapping:
-        return []
-
-    stock_map = mapping.get("mapping", {})
-    if not stock_map:
-        return []
-
-    # Group: sector → list of DDX entries for stocks in that sector
-    sector_ddx = defaultdict(list)
-    for stock in ddx_list:
-        code = stock["code"]
-        sectors = stock_map.get(code, [])
-        if not sectors:
-            # Some stocks have no sector mapping (delisted, new, etc.)
-            continue
-        for sec in sectors:
-            key = sec["code"]
-            sector_ddx[key].append({**stock, "sector_name": sec["name"], "sector_type": sec["type"]})
-
-    if not sector_ddx:
-        return []
-
-    results = []
-    for sec_code, members in sector_ddx.items():
-        total = len(members)
-        inflow = [m for m in members if m.get("ddx", 0) > 0]
-        continuous = [m for m in members if m.get("ddx_days", 0) >= 3]
-        high_super = [m for m in members if (m.get("super_order_ratio", 0) or 0) > 0.05]
-
-        avg_ddx = sum(m.get("ddx", 0) for m in members) / total if total else 0
-        avg_super = sum(m.get("super_order_ratio", 0) or 0 for m in members) / total if total else 0
-
-        # Composite DDX sector score (0-100)
-        inflow_ratio = len(inflow) / total if total else 0
-        continuous_ratio = len(continuous) / total if total else 0
-        super_ratio = len(high_super) / total if total else 0
-
-        score = (inflow_ratio * 50 + continuous_ratio * 30 + super_ratio * 20) * 100
-        score = round(max(0, min(100, score)), 1)
-
-        member_codes = [m["code"] for m in members[:5]]
-
-        results.append({
-            "sector_code": sec_code,
-            "sector_name": members[0]["sector_name"] if members else "",
-            "sector_type": members[0]["sector_type"] if members else "",
-            "total_ddx_stocks": total,
-            "ddx_inflow_count": len(inflow),
-            "ddx_inflow_ratio": round(inflow_ratio, 3),
-            "continuous_count": len(continuous),
-            "continuous_ratio": round(continuous_ratio, 3),
-            "high_super_count": len(high_super),
-            "avg_ddx": round(avg_ddx, 4),
-            "avg_super_order_ratio": round(avg_super, 4),
-            "ddx_score": score,
-            "member_codes": member_codes,
-        })
-
-    results.sort(key=lambda r: r["ddx_score"], reverse=True)
-    return results
 
 
 # ──────────────── CLI ────────────────

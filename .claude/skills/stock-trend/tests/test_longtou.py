@@ -880,87 +880,6 @@ def _run_script(script_name, *args, timeout=30):
 # ──────────────────────── Main ────────────────────────
 
 
-# ──────────────────────── DDX Score Tests ────────────────────────
-
-
-def test_ddx_score_computation():
-    """Test compute_ddx_score() and compute_super_order_score()."""
-    from fetch_ddx import compute_ddx_score, compute_super_order_score
-
-    test("DDX-01: ddx>=0.5 + ddx_days>=3 -> 100",
-         compute_ddx_score({"ddx": 0.6, "ddx_days": 5}) == 100)
-    test("DDX-02: ddx>=0.5 alone -> 90",
-         compute_ddx_score({"ddx": 0.5, "ddx_days": 1}) == 90)
-    test("DDX-03: ddx=0.2 -> 80",
-         compute_ddx_score({"ddx": 0.2, "ddx_days": 0}) == 80)
-    score = compute_ddx_score({"ddx": 0.1, "ddx_days": 0})
-    test("DDX-04: ddx=0.1 interpolated 50-80",
-         50 < score < 80, f"score={score}")
-    test("DDX-05: ddx=0 -> 50",
-         compute_ddx_score({"ddx": 0, "ddx_days": 0}) == 50)
-    test("DDX-06: ddx=-0.3 -> max(0,20)=20",
-         compute_ddx_score({"ddx": -0.3, "ddx_days": 0}) == 20)
-    test("DDX-07: ddx=-0.6 -> clamped to 0",
-         compute_ddx_score({"ddx": -0.6, "ddx_days": 0}) == 0)
-    test("DDX-08: empty dict -> 50",
-         compute_ddx_score({}) == 50)
-
-    test("DSO-01: ratio>=15% -> 100",
-         compute_super_order_score({"super_order_ratio": 0.15}) == 100)
-    test("DSO-02: ratio>=8% -> 80",
-         compute_super_order_score({"super_order_ratio": 0.08}) == 80)
-    test("DSO-03: ratio=6% -> 60",
-         compute_super_order_score({"super_order_ratio": 0.06}) == 60)
-    test("DSO-04: ratio=3% -> 50",
-         compute_super_order_score({"super_order_ratio": 0.03}) == 50)
-    test("DSO-05: ratio=25% -> 100",
-         compute_super_order_score({"super_order_ratio": 0.25}) == 100)
-    test("DSO-06: empty -> 50",
-         compute_super_order_score({}) == 50)
-
-
-def test_rescore_leaders_with_ddx():
-    """Test rescore_leaders_with_ddx() DDX-enhanced leader scoring."""
-    from fetch_sector_data import rescore_leaders_with_ddx
-
-    stocks = [
-        {"code": "600001", "name": "高DDX龙头", "change_pct": 9.5, "amount": 5e8},
-        {"code": "600002", "name": "低DDX龙头", "change_pct": 7.2, "amount": 3e8},
-        {"code": "600003", "name": "负DDX跟风", "change_pct": 6.0, "amount": 2e8},
-    ]
-    ddx_data = {
-        "600001": {"ddx": 0.8, "ddx_days": 5, "super_order_ratio": 0.18},
-        "600002": {"ddx": 0.1, "ddx_days": 1, "super_order_ratio": 0.04},
-        "600003": {"ddx": -0.4, "ddx_days": 0, "super_order_ratio": 0.02},
-    }
-
-    rescored = rescore_leaders_with_ddx(stocks, ddx_data)
-    test("RS-01: 高DDX股排首位", rescored[0]["code"] == "600001",
-         f"top={rescored[0]['name']} score={rescored[0]['leader_score']}")
-    test("RS-02: 负DDX排最后", rescored[-1]["code"] == "600003",
-         f"last={rescored[-1]['name']} score={rescored[-1]['leader_score']}")
-
-    no_ddx = rescore_leaders_with_ddx(stocks, {})
-    test("RS-03: 无DDX数据保持排序", no_ddx[0]["code"] == "600001")
-
-    empty = rescore_leaders_with_ddx([], {"600001": {}})
-    test("RS-04: 空列表不抛异常", len(empty) == 0)
-
-    partial = rescore_leaders_with_ddx(stocks[:2], {"600001": ddx_data["600001"]})
-    test("RS-05: 部分DDX覆盖正常工作", len(partial) == 2, f"count={len(partial)}")
-
-
-def test_ddx_degradation():
-    """Test graceful degradation when DDX fetch fails."""
-    from fetch_ddx import fetch_ddx_data, compute_ddx_score, compute_super_order_score
-
-    empty = fetch_ddx_data([])
-    test("DG-01: DDX空列表返回空", len(empty) == 0)
-
-    test("DG-02: DDX空数据分=50", compute_ddx_score({}) == 50)
-    test("DG-03: 超级资金空数据分=50", compute_super_order_score({}) == 50)
-
-
 def test_sector_dedup():
     """Sectors with identical constituent stats should be deduplicated."""
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -1069,18 +988,6 @@ def main():
     test_run_deep_analysis_retries_pipeline()
     test_run_deep_analysis_pipeline_failure()
     test_run_deep_analysis_scoring_failure()
-
-    print("\n📐 DDX评分计算测试")
-    print("=" * 40)
-    test_ddx_score_computation()
-
-    print("\n🏆 DDX龙头重评分测试")
-    print("=" * 40)
-    test_rescore_leaders_with_ddx()
-
-    print("\n🛡️ 降级测试")
-    print("=" * 40)
-    test_ddx_degradation()
 
     print("\n⭐ 星级转换测试")
     print("=" * 40)
