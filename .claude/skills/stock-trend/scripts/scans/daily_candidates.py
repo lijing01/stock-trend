@@ -1935,7 +1935,7 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     current_snapshot = None
     if (ranking_meta.get("quality") == "good"
             and ranking_meta.get("provider") == "eastmoney"
-            and ranking_meta.get("data_date") == expected_date):
+            and ranking_meta.get("data_date") == as_of_date):
         current_snapshot = {
             "data_date": ranking_meta["data_date"],
             "complete": True,
@@ -1946,14 +1946,14 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         qualified,
         persistence_history,
         hs300_change=hs300_change,
-        as_of_date=expected_date,
+        as_of_date=as_of_date,
         current_snapshot=current_snapshot,
         min_hot=min_hot,
     )
     for sector in enriched:
         if sector.get("ranking_source") == "cache" \
-                and expected_date \
-                and sector.get("ranking_data_date") != expected_date:
+                and as_of_date \
+                and sector.get("ranking_data_date") != as_of_date:
             sector["sector_type"] = "stale_cache"
             sector["sector_actionable"] = False
         elif sector.get("ranking_quality") in (
