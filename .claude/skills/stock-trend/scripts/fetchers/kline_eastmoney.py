@@ -23,60 +23,14 @@ import os
 import sys
 from core.cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
 from core.resolve_code import detect_asset, detect_adj
+from core.kline_utils import (
+    latest_kline_date, cache_validation, reject_stale_payload,
+)
 from datetime import datetime, timedelta
 from core.eastmoney_utils import (
     EM_HEADERS, EM_API_HOSTS, build_secid,
     fetch_url, build_em_kline_url, parse_em_kline_line,
 )
-
-
-def latest_kline_date(payload):
-    """Return the newest bar's trade_date as 'YYYY-MM-DD', or ''."""
-    rows = payload.get("data", []) if isinstance(payload, dict) else []
-    if not isinstance(rows, list):
-        return ""
-    dates = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        text = str(row.get("trade_date") or row.get("date") or "").strip()
-        text = text.replace("-", "")
-        if len(text) == 8 and text.isdigit():
-            dates.append(f"{text[:4]}-{text[4:6]}-{text[6:]}")
-    return max(dates) if dates else ""
-
-
-def cache_validation(payload, expected_date):
-    """Describe whether a K-line payload covers the requested trading day."""
-    latest_date = latest_kline_date(payload)
-    return {
-        "expected_date": expected_date,
-        "latest_date": latest_date,
-        "valid": bool(latest_date and latest_date >= expected_date),
-    }
-
-
-def reject_stale_payload(result, expected_date):
-    """Return an explicit error payload when fresh data misses expected_date."""
-    validation = cache_validation(result, expected_date)
-    result.setdefault("meta", {})["cache_validation"] = validation
-    if validation["valid"]:
-        return result
-
-    meta = dict(result.get("meta", {}))
-    stale_source = meta.get("data_source", "unknown")
-    meta.update({
-        "data_source": "error",
-        "error_type": "stale_data",
-        "stale_data_source": stale_source,
-        "record_count": 0,
-        "error": (
-            f"数据最新日期{validation['latest_date'] or '未知'}早于"
-            f"预期交易日{expected_date}"
-        ),
-        "cache_validation": validation,
-    })
-    return {"meta": meta, "data": []}
 
 
 def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com",

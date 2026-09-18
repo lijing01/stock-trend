@@ -27,8 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from core.cache_utils import clean_cache, safe_float, run_script
-from core.eastmoney_utils import latest_kline_record
+from core.cache_utils import clean_cache, run_script
+from core.kline_utils import build_kline_fetch_command, is_usable_kline_payload
 from core.resolve_code import resolve_and_save
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -53,19 +53,7 @@ def read_json(path):
 
 def is_successful_kline(kline_data):
     """Return True only when the current K-line payload has usable rows."""
-    if not isinstance(kline_data, dict):
-        return False
-    if kline_data.get("meta", {}).get("data_source") == "error":
-        return False
-    if kline_data.get("meta", {}).get("cache_validation", {}).get("valid") is False:
-        return False
-    rows = kline_data.get("data")
-    if not isinstance(rows, list) or not rows:
-        return False
-    latest_row = latest_kline_record(rows)
-    if latest_row is None:
-        return False
-    return all(safe_float(latest_row.get(key)) is not None for key in ("open", "high", "low", "close"))
+    return is_usable_kline_payload(kline_data)
 
 
 def resolve_expected_date(freq, cli_expected_date=None, now=None):
@@ -221,19 +209,15 @@ def main():
     kline_path = str(output_dir / "kline.json")
 
     # Try Tushare first
-    kline_cmd = [
-        sys.executable, str(SCRIPT_DIR / "fetchers/kline.py"),
-        ts_code, "--asset", asset, "--freq", args.freq,
-        "--adj", adj, "-o", kline_path,
-    ]
-    if args.no_cache:
-        kline_cmd.append("--no-cache")
-    if expected_date:
-        kline_cmd.extend(["--expected-date", expected_date])
     # Calculate start date from kline_days for Tushare
     from datetime import datetime, timedelta
     start_date = (datetime.now() - timedelta(days=args.kline_days)).strftime("%Y%m%d")
-    kline_cmd.extend(["--start-date", start_date])
+    kline_cmd = build_kline_fetch_command(
+        "tushare", ts_code, kline_path,
+        asset=asset, freq=args.freq, adj=adj,
+        no_cache=args.no_cache, expected_date=expected_date,
+        start_date=start_date,
+    )
     kline_result = run_script(kline_cmd, label="fetch_kline_tushare")
     if kline_result.get("timeout"):
         timeouts.append("fetch_kline_tushare")
@@ -254,16 +238,12 @@ def main():
 
     if need_fallback:
         print(f"  Falling back to East Money...")
-        fallback_cmd = [
-                sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"),
-                ts_code, "--asset", asset, "--freq", args.freq,
-                "-o", kline_path,
-            ]
-        if args.no_cache:
-            fallback_cmd.append("--no-cache")
-        if expected_date:
-            fallback_cmd.extend(["--expected-date", expected_date])
-        fallback_cmd.extend(["--lmt", str(args.kline_days)])
+        fallback_cmd = build_kline_fetch_command(
+            "eastmoney", ts_code, kline_path,
+            asset=asset, freq=args.freq,
+            no_cache=args.no_cache, expected_date=expected_date,
+            limit=args.kline_days,
+        )
         fallback_result = run_script(fallback_cmd, label="fetch_kline_eastmoney")
         if fallback_result.get("timeout"):
             timeouts.append("fetch_kline_eastmoney")

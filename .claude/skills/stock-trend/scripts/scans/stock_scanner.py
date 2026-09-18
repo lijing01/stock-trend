@@ -26,6 +26,7 @@ from datetime import datetime
 
 from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
+from core.kline_utils import build_kline_fetch_command
 from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
     assess_candidate_data,
@@ -1171,15 +1172,14 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     # budget: one fast EastMoney attempt (including its direct fallbacks), then
     # Tencent.  This prevents a slow EM host from consuming the subprocess
     # deadline before an independent provider can run.
-    cmd = [
-        sys.executable, str(SCRIPT_DIR / "fetchers/kline_eastmoney.py"),
-        ts_code, "--asset", "E", "--freq", "D",
-        "--em-timeout", "4", "--em-fallback-timeout", "2",
-        "--em-host-retries", "1", "--fallback-timeout", "8",
-        "-o", str(cache_path),
-    ]
-    if as_of_date:
-        cmd.extend(["--expected-date", as_of_date])
+    cmd = build_kline_fetch_command(
+        "eastmoney", ts_code, cache_path,
+        asset="E", freq="D", expected_date=as_of_date,
+        provider_args=(
+            "--em-timeout", "4", "--em-fallback-timeout", "2",
+            "--em-host-retries", "1", "--fallback-timeout", "8",
+        ),
+    )
 
     def _run_kline_subprocess():
         return run_script(
