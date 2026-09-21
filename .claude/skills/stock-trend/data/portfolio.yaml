@@ -1,0 +1,18 @@
+# Observation List
+# 仅记录观察对象、加入观察日期和加入时阶段。
+observation_list:
+  - date: '2026-09-21'
+    code: '301489'
+    entry_phase: 未记录
+
+  - date: '2026-09-21'
+    code: '001207'
+    entry_phase: 未记录
+
+  - date: '2026-09-21'
+    code: '300457'
+    entry_phase: 未记录
+
+  - date: '2026-09-21'
+    code: '60336'
+    entry_phase: 未记录
