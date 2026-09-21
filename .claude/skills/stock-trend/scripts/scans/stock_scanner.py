@@ -498,7 +498,7 @@ def _cache_fetch(fetcher, *args, **kwargs):
 
 def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                       max_workers: int = 4, sector_context=None,
-                      source_health=None, metrics=None) -> dict:
+                      source_health=None, metrics=None, as_of_date="") -> dict:
     """Phase 1: Gather constituent A-stocks from hot sectors, dedup, hard filter.
 
     Returns dict with:
@@ -581,7 +581,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         """Dispatch membership using the ranking provider identity."""
         if _uses_name_provider(code):
             context = _sector_context(code)
-            kwargs.setdefault("as_of_date", context.get(
+            kwargs.setdefault("as_of_date", as_of_date or context.get(
                 "ranking_data_date", context.get("data_date", "")))
             directory = em_directories.get(_sector_type(code))
             if directory is not None:
@@ -638,19 +638,28 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             cache_only = _source_unavailable(source_health, "sector_membership")
             if cache_only:
                 stocks = _fetch_sector_cache(
-                    code, top_n=top_n_per_sector)
+                    code, top_n=top_n_per_sector, as_of_date=as_of_date)
+                verified_snapshot = bool(
+                    stocks and as_of_date
+                    and all(stock.get("membership_data_date") == as_of_date
+                            and stock.get("membership_quality") ==
+                            "historical_verified"
+                            for stock in stocks))
                 attempt = live_attempt(
                     attempted=False, cache_used=bool(stocks),
-                    stale=bool(stocks), reason="cache_only" if stocks else "")
+                    stale=bool(stocks) and not verified_snapshot,
+                    reason="cache_only" if stocks else "")
             else:
                 try:
                     fetched = _fetch_sector_live(
-                        code, top_n=top_n_per_sector, with_evidence=True)
+                        code, top_n=top_n_per_sector,
+                        as_of_date=as_of_date, with_evidence=True)
                 except TypeError as exc:
                     if "with_evidence" not in str(exc):
                         raise
                     fetched = _fetch_sector_live(
-                        code, top_n=top_n_per_sector)
+                        code, top_n=top_n_per_sector,
+                        as_of_date=as_of_date)
                 if isinstance(fetched, dict) and set(
                         ("payload", "live_attempt")) <= set(fetched):
                     stocks = fetched["payload"]
@@ -669,7 +678,12 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             if not stocks:
                 raise RuntimeError("无可用成分股缓存")
             if stocks[0].get("membership_source") == "cache":
-                if not cache_only:
+                verified_snapshot = all(
+                    stock.get("membership_data_date") == as_of_date
+                    and stock.get("membership_quality") ==
+                    "historical_verified"
+                    for stock in stocks)
+                if not cache_only and not verified_snapshot:
                     _source_failed(source_health, "sector_membership")
             else:
                 _source_succeeded(source_health, "sector_membership")
@@ -706,6 +720,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         try:
             wrapped = _fetch_sector_live(
                 code, top_n=top_n_per_sector,
+                as_of_date=as_of_date,
                 timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_membership"],
                 retries=MAX_PROVIDER_ATTEMPTS["sector_membership"] - 1,
                 with_evidence=True, deadline=source_health.live_deadline)
@@ -739,9 +754,16 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             else f"cache_only_{scheduler_reason}")
         stocks = _fetch_sector_cache(
             code, top_n=top_n_per_sector,
-            fallback_reason=fallback_reason)
+            fallback_reason=fallback_reason, as_of_date=as_of_date)
+        verified_snapshot = bool(
+            stocks and as_of_date
+            and all(stock.get("membership_data_date") == as_of_date
+                    and stock.get("membership_quality") ==
+                    "historical_verified"
+                    for stock in stocks))
         attempt = live_attempt(
-            attempted=False, cache_used=bool(stocks), stale=bool(stocks),
+            attempted=False, cache_used=bool(stocks),
+            stale=bool(stocks) and not verified_snapshot,
             reason=scheduler_reason if stocks else "")
         stocks = [
             {**stock,
@@ -1954,13 +1976,19 @@ def apply_membership_quality(base_quality, membership, as_of_date=""):
     membership_quality = membership.get("membership_quality", "good")
     cache_error = membership.get("membership_cache_error", "")
     date_mismatch = bool(as_of_date and data_date != as_of_date)
+    verified_historical_cache = (
+        source == "cache"
+        and membership_quality == "historical_verified"
+        and not cache_error
+        and not date_mismatch
+    )
     same_day_verified_cache = (
         source == "cache"
         and membership_quality == "same_day_verified"
         and not cache_error
         and not date_mismatch
     )
-    if not same_day_verified_cache and (
+    if not verified_historical_cache and not same_day_verified_cache and (
             source != "realtime" or membership_quality != "good"
             or date_mismatch):
         quality["eligible"] = False

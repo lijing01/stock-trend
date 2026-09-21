@@ -2305,6 +2305,30 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual({item["code"] for item in result},
                          {"600001", "600002"})
 
+    def test_scan_passes_evaluation_date_to_membership_gather(self):
+        gather_kwargs = []
+
+        def fake_gather(batch, **kwargs):
+            gather_kwargs.append(kwargs)
+            return {"candidates": [{"code": "600001",
+                                    "sector_code": batch[0]}]}
+
+        def fake_phase2(candidates, **_kwargs):
+            return [{
+                **candidates[0], "composite_score": 80,
+                "quality_adjusted_score": 80,
+                "data_quality": {"eligible": True},
+            }]
+
+        with patch.object(dc, "gather_candidates", side_effect=fake_gather), \
+                patch.object(dc, "run_phase2", side_effect=fake_phase2):
+            dc.scan_sectors(
+                ["BK1"], batch_size=1, min_candidates=1,
+                as_of_date="2026-09-18",
+                sector_context={"BK1": {"sector_actionable": True}})
+
+        self.assertEqual(gather_kwargs[0]["as_of_date"], "2026-09-18")
+
     def test_source_health_scan_prefetches_membership_in_bounded_windows(self):
         gather_calls = []
         phase2_calls = []

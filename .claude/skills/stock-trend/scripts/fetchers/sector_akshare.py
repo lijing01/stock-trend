@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -335,6 +336,15 @@ def _ths_stock_cache_path(sector_name: str, sector_type: str) -> Path:
     return CACHE_DIR / "sector_stocks_ths" / f"{digest}.json"
 
 
+def _ths_stock_history_path(sector_name: str, sector_type: str,
+                            data_date: str) -> Path:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(data_date or "")):
+        raise ValueError(f"invalid constituent snapshot date: {data_date!r}")
+    identity = f"{sector_type}:{sector_name}".encode("utf-8")
+    digest = hashlib.sha256(identity).hexdigest()[:24]
+    return CACHE_DIR / "sector_stocks_ths" / "history" / data_date / f"{digest}.json"
+
+
 def _tag_ths_stocks(stocks: list[dict], *, source: str, data_date: str,
                     cached_at: str = "", fallback_reason: str = "",
                     provider_attempts: int = 0,
@@ -376,10 +386,11 @@ def _save_ths_stock_cache(sector_name: str, sector_type: str,
     path = _ths_stock_cache_path(sector_name, sector_type)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now().isoformat()
+    snapshot_date = data_date or now[:10]
     payload = {
         "schema_version": 2,
         "cached_at": now,
-        "data_date": data_date or now[:10],
+        "data_date": snapshot_date,
         "provider": "akshare",
         "membership_provider": membership_provider,
         "membership_provider_code": provider_code or sector_name,
@@ -389,28 +400,42 @@ def _save_ths_stock_cache(sector_name: str, sector_type: str,
         "sector_type": sector_type,
         "stocks": stocks,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    history_path = _ths_stock_history_path(
+        sector_name, sector_type, snapshot_date)
+    encoded = json.dumps(payload, ensure_ascii=False)
+    path.write_text(encoded, encoding="utf-8")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(encoded, encoding="utf-8")
 
 
 def _load_ths_stock_cache(sector_name: str, sector_type: str,
-                          top_n: int = 50) -> tuple[list[dict], dict]:
-    path = _ths_stock_cache_path(sector_name, sector_type)
-    if not path.exists():
-        return [], {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        cached_at = datetime.fromisoformat(payload["cached_at"])
-        age = datetime.now() - cached_at
-        if age.total_seconds() > THS_STOCKS_CACHE_MAX_AGE_HOURS * 3600:
-            return [], {}
-        if not payload.get("stocks") or payload.get("provider") != "akshare":
-            return [], {}
-        data_date = str(payload.get("data_date") or cached_at.date())
-        if data_date > datetime.now().strftime("%Y-%m-%d"):
-            return [], {}
-        return payload["stocks"][:top_n], payload
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
-        return [], {}
+                          top_n: int = 50,
+                          as_of_date: str = "") -> tuple[list[dict], dict]:
+    paths = []
+    if as_of_date:
+        paths.append(_ths_stock_history_path(
+            sector_name, sector_type, as_of_date))
+    paths.append(_ths_stock_cache_path(sector_name, sector_type))
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            cached_at = datetime.fromisoformat(payload["cached_at"])
+            age = datetime.now() - cached_at
+            if age.total_seconds() > THS_STOCKS_CACHE_MAX_AGE_HOURS * 3600:
+                continue
+            if not payload.get("stocks") or payload.get("provider") != "akshare":
+                continue
+            data_date = str(payload.get("data_date") or cached_at.date())
+            if data_date > datetime.now().strftime("%Y-%m-%d"):
+                continue
+            if as_of_date and data_date != as_of_date:
+                continue
+            return payload["stocks"][:top_n], payload
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+            continue
+    return [], {}
 
 
 def _historical_em_sector_code(sector_name: str, sector_type: str) -> str:
@@ -445,7 +470,8 @@ def _historical_em_sector_code(sector_name: str, sector_type: str) -> str:
 
 
 def _historical_em_cache(sector_name: str, sector_type: str, top_n: int,
-                         fallback_reason: str, provider_attempts: int) -> list[dict]:
+                         fallback_reason: str, provider_attempts: int,
+                         as_of_date: str = "") -> list[dict]:
     """Use a verified historical BK cache only after the named live route fails."""
     code = _historical_em_sector_code(sector_name, sector_type)
     if not code:
@@ -453,7 +479,8 @@ def _historical_em_cache(sector_name: str, sector_type: str, top_n: int,
     try:
         from fetchers.sector_data import get_sector_stocks_cached
         stocks = get_sector_stocks_cached(
-            code, top_n=top_n, fallback_reason=fallback_reason)
+            code, top_n=top_n, fallback_reason=fallback_reason,
+            as_of_date=as_of_date)
     except Exception:
         return []
     for stock in stocks:
@@ -601,7 +628,7 @@ def get_sector_stocks_akshare(
 
     if cache_only:
         stocks, payload = _load_ths_stock_cache(
-            sector_name, sector_type, top_n=top_n)
+            sector_name, sector_type, top_n=top_n, as_of_date=as_of_date)
         if stocks:
             tagged = _tag_ths_stocks(
                 stocks, source="cache",
@@ -616,6 +643,33 @@ def get_sector_stocks_akshare(
                 reason=fallback_reason or "cache_only"))
         return finish([], _evidence(
             attempted=False, reason=fallback_reason or "cache_miss"))
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if as_of_date and as_of_date != today:
+        stocks, payload = _load_ths_stock_cache(
+            sector_name, sector_type, top_n=top_n, as_of_date=as_of_date)
+        if stocks:
+            tagged = _tag_ths_stocks(
+                stocks, source="cache", data_date=as_of_date,
+                cached_at=str(payload.get("cached_at", "")),
+                fallback_reason="historical_snapshot",
+                provider_attempts=0,
+                membership_provider=payload.get("membership_provider", "akshare"),
+                provider_code=payload.get("membership_provider_code", sector_name),
+                mapping=payload.get("membership_mapping", "ths_name_cache"),
+                membership_quality=payload.get(
+                    "membership_quality", "cross_source_unverified"))
+            return finish(tagged, _evidence(
+                attempted=False, cache_used=True, stale=False))
+        historical = _historical_em_cache(
+            sector_name, sector_type, top_n, "historical_snapshot", 0,
+            as_of_date=as_of_date)
+        if historical:
+            return finish(historical, _evidence(
+                attempted=False, cache_used=True, stale=False))
+        raise SectorMembershipFetchError(
+            f"板块{sector_name}缺少{as_of_date}历史成分快照",
+            provider_attempts=0, reason="historical_snapshot_missing")
 
     provider_attempts = 0
     failure_reason = ""
@@ -695,10 +749,11 @@ def get_sector_stocks_akshare(
 
 def get_sector_stocks_akshare_cached(
         sector_name: str, sector_type: str = "industry", top_n: int = 50,
-        fallback_reason: str = "cache_only") -> list[dict]:
+        fallback_reason: str = "cache_only", as_of_date: str = "") -> list[dict]:
     """Return only provider-isolated THS/name or verified historical caches."""
     stocks, payload = _load_ths_stock_cache(
-        str(sector_name or "").strip(), sector_type, top_n=top_n)
+        str(sector_name or "").strip(), sector_type, top_n=top_n,
+        as_of_date=as_of_date)
     if stocks:
         return _tag_ths_stocks(
             stocks, source="cache",
@@ -710,7 +765,7 @@ def get_sector_stocks_akshare_cached(
             mapping="ths_name_cache")
     return _historical_em_cache(
         str(sector_name or "").strip(), sector_type, top_n,
-        fallback_reason, 0)
+        fallback_reason, 0, as_of_date=as_of_date)
 
 
 def enrich_stock_market_data(stocks: list[dict]) -> list[dict]:

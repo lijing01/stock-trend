@@ -1058,6 +1058,44 @@ class TestSectorConstituentFallback(unittest.TestCase):
 
         self.assertEqual(stocks[0]["membership_data_date"], "2026-08-26")
 
+    def test_historical_sector_snapshot_is_selected_without_live_request(self):
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 8, 16, 0, 0)
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+                patch.object(sd, "datetime", FrozenDateTime), \
+                patch.object(sd, "_fetch_json") as fetch:
+            sd.save_sector_stocks_cache(
+                "BK0001", self.payload["data"]["diff"],
+                data_date="2026-08-06", provider="eastmoney")
+            stocks = sd.get_sector_stocks(
+                "BK0001", as_of_date="2026-08-06")
+
+        fetch.assert_not_called()
+        self.assertEqual(stocks[0]["membership_data_date"], "2026-08-06")
+        self.assertEqual(stocks[0]["membership_quality"],
+                         "historical_verified")
+
+    def test_historical_sector_snapshot_missing_never_uses_live_data(self):
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 8, 16, 0, 0)
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+                patch.object(sd, "datetime", FrozenDateTime), \
+                patch.object(sd, "_fetch_json") as fetch:
+            with self.assertRaisesRegex(
+                    sd.ProviderFetchError, "历史成分快照"):
+                sd.get_sector_stocks(
+                    "BK0001", as_of_date="2026-08-06")
+
+        fetch.assert_not_called()
+
     def test_sector_code_cannot_escape_cache_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(sd, "SECTOR_STOCKS_CACHE_DIR",
@@ -2268,6 +2306,21 @@ class TestRunPhase2Funnel(unittest.TestCase):
             {
                 "membership_source": "cache",
                 "membership_quality": "same_day_verified",
+                "membership_data_date": "2026-08-06",
+            },
+            as_of_date="2026-08-06",
+        )
+
+        self.assertTrue(quality["eligible"])
+        self.assertEqual(quality["freshness_factor"], 1.0)
+        self.assertNotIn("sector_membership_stale", quality["reasons"])
+
+    def test_historical_verified_sector_cache_remains_candidate_eligible(self):
+        quality = sc.apply_membership_quality(
+            {"eligible": True, "reasons": [], "freshness_factor": 1.0},
+            {
+                "membership_source": "cache",
+                "membership_quality": "historical_verified",
                 "membership_data_date": "2026-08-06",
             },
             as_of_date="2026-08-06",

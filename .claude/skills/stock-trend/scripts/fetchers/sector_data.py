@@ -441,6 +441,18 @@ def _sector_stocks_cache_path(sector_code: str) -> Path:
     return path
 
 
+def _sector_stocks_history_path(sector_code: str, data_date: str) -> Path:
+    """Return the exact-date constituent snapshot path."""
+    _sector_stocks_cache_path(sector_code)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(data_date or "")):
+        raise ValueError(f"invalid constituent snapshot date: {data_date!r}")
+    history_dir = (SECTOR_STOCKS_CACHE_DIR / "history" / data_date).resolve()
+    root = (SECTOR_STOCKS_CACHE_DIR / "history").resolve()
+    if history_dir.parent != root:
+        raise ValueError(f"invalid constituent snapshot date: {data_date!r}")
+    return history_dir / f"{sector_code}.json"
+
+
 def save_sector_stocks_cache(sector_code: str, stocks: list[dict],
                              data_date: str = "",
                              provider: str = "eastmoney") -> None:
@@ -448,33 +460,45 @@ def save_sector_stocks_cache(sector_code: str, stocks: list[dict],
     path = _sector_stocks_cache_path(sector_code)
     SECTOR_STOCKS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     fetched_at = datetime.now().isoformat()
+    snapshot_date = data_date or fetched_at[:10]
     payload = {
         "schema_version": SECTOR_STOCKS_CACHE_SCHEMA_VERSION,
         "cached_at": fetched_at,
         "fetched_at": fetched_at,
-        "data_date": data_date or fetched_at[:10],
+        "data_date": snapshot_date,
         "provider": provider,
         "stocks": stocks,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    history_path = _sector_stocks_history_path(sector_code, snapshot_date)
+    encoded = json.dumps(payload, ensure_ascii=False)
+    path.write_text(encoded, encoding="utf-8")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(encoded, encoding="utf-8")
 
 
-def load_sector_stocks_cache(sector_code: str) -> Optional[dict]:
+def load_sector_stocks_cache(sector_code: str, as_of_date: str = "") -> Optional[dict]:
     """Load a non-empty constituent snapshot younger than 30 days."""
-    path = _sector_stocks_cache_path(sector_code)
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        cached_at = datetime.fromisoformat(payload["cached_at"])
-        age = datetime.now() - cached_at
-        if age.total_seconds() > SECTOR_STOCKS_MAX_AGE_HOURS * 3600:
-            return None
-        if not payload.get("stocks"):
-            return None
-        return payload
-    except (KeyError, ValueError, json.JSONDecodeError, OSError):
-        return None
+    paths = []
+    if as_of_date:
+        paths.append(_sector_stocks_history_path(sector_code, as_of_date))
+    paths.append(_sector_stocks_cache_path(sector_code))
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            cached_at = datetime.fromisoformat(payload["cached_at"])
+            age = datetime.now() - cached_at
+            if age.total_seconds() > SECTOR_STOCKS_MAX_AGE_HOURS * 3600:
+                continue
+            if not payload.get("stocks"):
+                continue
+            if as_of_date and payload.get("data_date") != as_of_date:
+                continue
+            return payload
+        except (KeyError, ValueError, json.JSONDecodeError, OSError):
+            continue
+    return None
 
 
 def _sector_cache_metadata(cached_at: str) -> dict:
@@ -522,8 +546,9 @@ def _tag_sector_stocks(stocks: list[dict], source: str, data_date: str,
 
 def _load_tagged_sector_stocks_cache(sector_code: str,
                                      top_n: int, fallback_reason: str = "",
-                                     provider_attempts: int = 0) -> list[dict]:
-    cached = load_sector_stocks_cache(sector_code)
+                                     provider_attempts: int = 0,
+                                     as_of_date: str = "") -> list[dict]:
+    cached = load_sector_stocks_cache(sector_code, as_of_date=as_of_date)
     if not cached:
         return []
     fetched_at = cached.get("fetched_at") or cached.get("cached_at", "")
@@ -533,7 +558,11 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
         "dns", "timeout", "connection_error", "proxy_error", "http",
         "cache_only",
     } or fallback_reason.startswith("cache_only_")
+    historical_verified = bool(
+        as_of_date and data_date == as_of_date
+        and cached.get("provider") == "eastmoney")
     cache_quality = (
+        "historical_verified" if historical_verified else
         "same_day_verified"
         if cached.get("provider") == "eastmoney"
         and cache_metadata.get("tier") == "same_day"
@@ -553,16 +582,19 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
 
 
 def get_sector_stocks_cached(sector_code: str, top_n: int = 50,
-                             fallback_reason: str = "cache_only") -> list[dict]:
+                             fallback_reason: str = "cache_only",
+                             as_of_date: str = "") -> list[dict]:
     """Return cached constituents without attempting a live request."""
     _sector_stocks_cache_path(sector_code)
     return _load_tagged_sector_stocks_cache(
-        sector_code, top_n, fallback_reason=fallback_reason)
+        sector_code, top_n, fallback_reason=fallback_reason,
+        as_of_date=as_of_date)
 
 
 def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
-                                     reason: str) -> list[dict]:
-    cached_stocks = _load_tagged_sector_stocks_cache(sector_code, top_n)
+                                     reason: str, as_of_date: str = "") -> list[dict]:
+    cached_stocks = _load_tagged_sector_stocks_cache(
+        sector_code, top_n, as_of_date=as_of_date)
     if cached_stocks:
         return cached_stocks
     raise RuntimeError(
@@ -572,7 +604,8 @@ def _sector_stocks_fallback_or_raise(sector_code: str, top_n: int,
 def get_sector_stocks(sector_code: str, top_n: int = 50,
                       timeout: int = 15, retries: int = 3,
                       with_evidence: bool = False,
-                      deadline: float | None = None) -> list[dict]:
+                      deadline: float | None = None,
+                      as_of_date: str = "") -> list[dict]:
     """Fetch constituent stocks for a sector.
 
     Args:
@@ -583,6 +616,18 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         List of {code, name, change_pct, amount, market_cap, pe}.
     """
     _sector_stocks_cache_path(sector_code)
+    today_iso = datetime.now().strftime("%Y-%m-%d")
+    if as_of_date and as_of_date != today_iso:
+        cached = _load_tagged_sector_stocks_cache(
+            sector_code, top_n, fallback_reason="historical_snapshot",
+            as_of_date=as_of_date)
+        if cached:
+            wrapped = source_result(cached, live_attempt(
+                attempted=False, cache_used=True, stale=False))
+            return wrapped if with_evidence else cached
+        raise ProviderFetchError(
+            f"板块{sector_code}缺少{as_of_date}历史成分快照",
+            provider_attempts=0, reason="historical_snapshot_missing")
     today = datetime.now().strftime("%Y%m%d")
     # b:BKxxx filters stocks belonging to this sector
     url = (
@@ -608,7 +653,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         failure_reason = getattr(e, "reason", "") or classify_failure(e)
         cached = _load_tagged_sector_stocks_cache(
             sector_code, top_n, fallback_reason=failure_reason,
-            provider_attempts=provider_attempts)
+            provider_attempts=provider_attempts, as_of_date=as_of_date)
         if cached:
             wrapped = source_result(cached, live_attempt(
                 attempted=provider_attempts > 0,
@@ -623,7 +668,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         failure_reason = "empty"
         cached = _load_tagged_sector_stocks_cache(
             sector_code, top_n, fallback_reason=failure_reason,
-            provider_attempts=provider_attempts)
+            provider_attempts=provider_attempts, as_of_date=as_of_date)
         if cached:
             wrapped = source_result(cached, live_attempt(
                 attempted=True, provider_attempts=provider_attempts,
@@ -649,7 +694,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         failure_reason = "empty"
         cached = _load_tagged_sector_stocks_cache(
             sector_code, top_n, fallback_reason=failure_reason,
-            provider_attempts=provider_attempts)
+            provider_attempts=provider_attempts, as_of_date=as_of_date)
         if cached:
             wrapped = source_result(cached, live_attempt(
                 attempted=True, provider_attempts=provider_attempts,
@@ -659,10 +704,11 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
             f"获取板块{sector_code}成分股失败: "
             "实时接口未返回有效股票代码; 无有效成分股且无可用快照")
     cache_error = ""
-    data_date = datetime.now().strftime("%Y-%m-%d")
+    data_date = as_of_date or today_iso
     if stocks:
         try:
-            save_sector_stocks_cache(sector_code, stocks)
+            save_sector_stocks_cache(
+                sector_code, stocks, data_date=data_date)
         except OSError as exc:
             cache_error = str(exc)
             print(

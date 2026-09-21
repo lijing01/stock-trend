@@ -2140,12 +2140,14 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                 phase1 = gather_candidates(
                     batch, top_n_per_sector=per_sector,
                     sector_context=sector_context,
-                    source_health=source_health, metrics=metrics)
+                    source_health=source_health, metrics=metrics,
+                    as_of_date=as_of_date)
             except TypeError as exc:
                 # Preserve compatibility with callers/tests that inject the
                 # historical two-argument gather function.
                 if not any(name in str(exc) for name in (
-                        "sector_context", "source_health", "metrics")):
+                        "sector_context", "source_health", "metrics",
+                        "as_of_date")):
                     raise
                 phase1 = gather_candidates(
                     batch, top_n_per_sector=per_sector)
