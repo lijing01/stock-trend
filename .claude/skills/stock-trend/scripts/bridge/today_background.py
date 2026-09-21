@@ -27,6 +27,7 @@ from core.recommendation_snapshot import canonical_json, content_sha256
 
 SHANGHAI = timezone(timedelta(hours=8))
 DEFAULT_ROOT = Path(evolution.CACHE_DIR) / "evolution" / "background"
+REVIEW_HTML_ROOT_NAME = "review_html"
 TERMINAL = {"completed", "partial", "failed", "timed_out", "interrupted", "launch_failed"}
 RESEARCH_DONE = {"completed", "continue_accumulating", "skipped", "scope_unverified",
                  "baseline_mismatch", "input_incomplete", "insufficient_data"}
@@ -151,6 +152,96 @@ def launch_task(task_id, root=DEFAULT_ROOT):
         log.close()
     return update_status(task_id, root=root, status="running", stage="starting", pid=process.pid,
                          started_at=_now())
+
+
+def _review_html_root(root=DEFAULT_ROOT):
+    return Path(root) / REVIEW_HTML_ROOT_NAME
+
+
+def ensure_review_html_task(html_path, root=DEFAULT_ROOT):
+    """Create an independent task for replacing one daily-review HTML block."""
+    path = str(Path(html_path).resolve())
+    manifest = {
+        "schema_version": "daily-review-html-background/v1",
+        "kind": "daily-review-html",
+        "html_path": path,
+    }
+    return ensure_task(manifest, root=_review_html_root(root))
+
+
+def read_review_html_status(task_id, root=DEFAULT_ROOT):
+    return read_status(task_id, root=_review_html_root(root))
+
+
+def launch_review_html_task(task_id, root=DEFAULT_ROOT):
+    """Launch the tiny detached HTML updater and return its task status."""
+    review_root = _review_html_root(root)
+    directory = _task_dir(task_id, review_root)
+    directory.mkdir(parents=True, exist_ok=True)
+    status = read_status(task_id, root=review_root)
+    if status.get("status") == "completed":
+        return status
+    if status.get("status") == "running" and _pid_alive(status.get("pid")):
+        return status
+    # Mark the task before spawning.  The worker is intentionally tiny and
+    # can finish before Popen returns; checking the status again below then
+    # preserves its completed result instead of overwriting it with running.
+    started_at = _now()
+    update_status(task_id, root=review_root, status="running", stage="starting",
+                  pid=None, started_at=started_at)
+    log = (directory / "worker.log").open("ab")
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__)), "--update-html", task_id,
+             "--root", str(review_root)],
+            cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            start_new_session=True, close_fds=True,
+            env={**os.environ, "TZ": "Asia/Shanghai"},
+        )
+    finally:
+        log.close()
+    status = read_status(task_id, root=review_root)
+    if status.get("status") in TERMINAL:
+        return status
+    return update_status(task_id, root=review_root, status="running", stage="starting",
+                         pid=process.pid, started_at=started_at)
+
+
+def run_review_html_task(task_id, root=DEFAULT_ROOT):
+    """Replace only the marked observation block and persist task state."""
+    review_root = _review_html_root(root)
+    directory = _task_dir(task_id, review_root)
+    manifest = _read(directory / "manifest.json")
+    update_status(task_id, root=review_root, status="running", stage="updating",
+                  pid=os.getpid())
+    try:
+        from analysis import market_regime
+        result = market_regime.update_observation_list_html(manifest["html_path"])
+        result.update({"task_id": task_id, "finished_at": _now()})
+        _write(directory / "result.json", result)
+        update_status(task_id, root=review_root, status="completed", stage="done",
+                      result_path=str(directory / "result.json"),
+                      finished_at=result["finished_at"])
+        return result
+    except Exception as exc:
+        result = {"task_id": task_id, "status": "failed",
+                  "reason": type(exc).__name__, "finished_at": _now()}
+        _write(directory / "result.json", result)
+        update_status(task_id, root=review_root, status="failed", stage="done",
+                      reason=type(exc).__name__, result_path=str(directory / "result.json"),
+                      finished_at=result["finished_at"])
+        return result
+
+
+def resume_review_html_task(task_id, root=DEFAULT_ROOT):
+    status = read_review_html_status(task_id, root=root)
+    if status.get("status") == "missing":
+        return status
+    if status.get("status") == "completed":
+        return status
+    if status.get("status") == "running" and _pid_alive(status.get("pid")):
+        return status
+    return launch_review_html_task(task_id, root=root)
 
 
 def _lock(root, deadline):
@@ -368,11 +459,15 @@ def resume_task(task_id, root=DEFAULT_ROOT):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--run")
+    parser.add_argument("--update-html")
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     args = parser.parse_args(argv)
     if args.run:
         result = run_task(args.run, root=args.root)
         return 0 if result.get("status") in {"completed", "partial"} else 1
+    if args.update_html:
+        result = run_review_html_task(args.update_html, root=Path(args.root).parent)
+        return 0 if result.get("status") == "completed" else 1
     parser.error("--run TASK_ID is required")
 
 

@@ -389,6 +389,43 @@ def test_report():
     md = mr.generate_report(ctx)
     test("stale_note 显示", "非今日" in md)
 
+
+def test_observation_list_html():
+    print("\n--- observation list HTML ---")
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "observation.yaml"
+        path.write_text(
+            "observation_list:\n"
+            "  - code: '001207'\n"
+            "    date: '2026-09-21'\n"
+            "    entry_phase: '<待确认>'\n"
+            "  - code: '60336'\n"
+            "    date: '2026-09-21'\n"
+            "    entry_phase: 未记录\n",
+            encoding="utf-8",
+        )
+        with patch.object(mr, "OBSERVATION_LIST_FILE", path):
+            state = mr.load_observation_list()
+            ready = mr.render_observation_list_html(state)
+            pending = mr.render_observation_list_html(pending=True)
+            test("读取 observation_list", state["status"] == "ready" and len(state["items"]) == 2)
+            test("区块标题为观察列表", "<h2>观察列表</h2>" in ready)
+            test("保留 YAML 顺序", ready.index("001207") < ready.index("60336"))
+            test("HTML 文本转义", "&lt;待确认&gt;" in ready and "<待确认>" not in ready)
+            test("pending 不展示股票", "候选扫描进行中" in pending and "001207" not in pending)
+
+            html_path = Path(directory) / "daily-review.html"
+            original = "<body>before\n" + mr.render_observation_list_html(pending=True) + "\nafter</body>"
+            html_path.write_text(original, encoding="utf-8")
+            result = mr.update_observation_list_html(html_path)
+            updated = html_path.read_text(encoding="utf-8")
+            test("原子更新返回完成", result["status"] == "completed")
+            test("更新保留报告其他内容", "before" in updated and "after</body>" in updated)
+            test("更新后包含列表", "001207" in updated and "60336" in updated)
+
+        missing = mr.load_observation_list(Path(directory) / "missing.yaml")
+        test("缺文件可降级", missing["status"] == "unavailable" and not missing["items"])
+
 # ──────────────── _index_metrics ────────────────
 
 
@@ -691,6 +728,7 @@ def main():
     test_capital()
     test_regime()
     test_report()
+    test_observation_list_html()
     test_index_metrics()
     test_persistence()
     test_persistence_rejects_malformed_and_weekend_dates()

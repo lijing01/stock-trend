@@ -115,9 +115,9 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --sectors BK04
 
 `--top`、`--min-candidates`、`--no-html` 等原 candidates 参数可直接传入。`--dry-run` 不联网、不写入，只输出计划。默认先返回候选报告，后处理由本次调用启动的独立后台任务继续执行；不安装后台定时器：
 
-1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。候选原有量化逻辑完成后，默认运行新闻影子层：优先取巨潮公告，再补充个股新闻；只接受推荐决策时点之前、近 14 个自然日且发布时间明确的证据。新闻分数限制为 `[-3,+1]`，重大正式风险可在影子结果中否决，正向消息不得跨越市场环境、数据质量、板块持续性、资金背离或维科夫硬门槛。首版只冻结证据、展示影子排序，不改变正式推荐。
+1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。统一入口在市场刷新完成后先生成带“观察列表待更新”占位的今日复盘 HTML，并通过进度输出立即给出该绝对路径；候选扫描继续使用同一次 `market_regime.json`，不等待 HTML 后处理。候选扫描结束后独立后台任务只替换该 HTML 的观察列表区块，原链接保持不变；更新失败不影响候选 JSON/MD/HTML 或正式推荐结果。候选原有量化逻辑完成后，默认运行新闻影子层：优先取巨潮公告，再补充个股新闻；只接受推荐决策时点之前、近 14 个自然日且发布时间明确的证据。新闻分数限制为 `[-3,+1]`，重大正式风险可在影子结果中否决，正向消息不得跨越市场环境、数据质量、板块持续性、资金背离或维科夫硬门槛。首版只冻结证据、展示影子排序，不改变正式推荐。
 2. 从已有权威交易日历按上海时区取得最近已知完成交易日；15:10 前用上一交易日评价历史。日历缺失时明确跳过依赖交易日的后处理；日历只覆盖历史区间时继续评价已知区间，并明确呈现 `workflow.calendar.coverage_end`，不得把未覆盖日期解释为休市。
-3. 报告就绪后返回 `workflow.status=report_ready`，并给出 `workflow.postprocess.task_id`；后台按 `factor_ablation_daily → close → weekly → monitor → factor_ablation_evaluation` 执行。每日消融和成熟评价分别受 10 秒、20 秒限制，close/weekly/monitor 保留各自 300 秒预算。用 `--status <task_id> --json` 查询，用 `--resume <task_id>` 显式续跑。
+3. 报告就绪后返回 `workflow.status=report_ready`，并给出 `workflow.postprocess.task_id`；HTML 观察列表更新另有 `workflow.review_html` 任务状态。候选报告路径在 `report_paths.html`，复盘路径在 `report_paths.daily_review_html`。后台研究按 `factor_ablation_daily → close → weekly → monitor → factor_ablation_evaluation` 执行。每日消融和成熟评价分别受 10 秒、20 秒限制，close/weekly/monitor 保留各自 300 秒预算。研究任务用 `--status <task_id> --json` 查询；复盘 HTML 更新任务状态保存在同一后台目录的 `review_html` 子目录。
 4. 后台按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，均允许同周再次尝试。
 5. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
 6. `factor_ablation_daily` 只读取同一次正式扫描的冻结研究快照，验证真实选择范围、六维分数逐项舍入、质量因子和买点奖励后，在同一资格层内分别移除一个维度重排。它只生成观察用影子 Top 1/3/5，不改变正式权重、门槛、报告或发布指针。结果写入 `.cache/stock-trend/evolution/factor_ablation/daily/<依据日>/`。
@@ -227,8 +227,8 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refre
 open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
 ```
 3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/全市场主力净流入。
-4. 输出: 复盘报告(①市场环境 ②板块最强/最弱) → `reports/lists/daily-review-<时间>.md` + `.html`。观察对象记录保存在 `data/observation_list.yaml` 的 `observation_list` 中，不写入今日复盘。
-5. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。`--no-refresh` 仅重用市场缓存，不读取或改写观察列表配置。
+4. 输出: 复盘报告(①市场环境 ②板块最强/最弱) → `reports/lists/daily-review-<时间>.md` + `.html`；HTML 另含 ③“观察列表”。观察列表只读 `.claude/skills/stock-trend/data/observation_list.yaml` 的 `observation_list`，按原顺序展示代码、加入日期和加入时阶段；缺失或格式错误只降级该 HTML 区块，不阻断市场评分。
+5. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。`--no-refresh` 仅重用市场缓存并直接读取观察列表，不写回观察列表配置。
 
 复盘回复只呈现同一次运行的市场评分、宽度/情绪、板块强弱及数据质量说明；盘中或非当日结果必须标注 `intraday_note`/`stale_note`，缺失字段写“未提供/数据缺失”。完整报告保留 Markdown/HTML 路径，并附带：**本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。**
 

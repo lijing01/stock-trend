@@ -52,13 +52,14 @@ def _run_script(script, arguments):
     if not isinstance(result, dict) or result.get("error"):
         raise ValueError("upstream_output_invalid")
     paths = {}
-    for line in (process.stderr or "").splitlines():
-        match = re.search(r"(?:HTML|HTML report):\s*(\S+)", line)
-        if match and Path(match.group(1)).is_file():
-            paths["html"] = match.group(1)
-        match = re.search(r"(?:MD|候选报告):\s*(\S+)", line)
-        if match and Path(match.group(1)).is_file():
-            paths["markdown"] = match.group(1)
+    for text in (process.stdout or "", process.stderr or ""):
+        for line in text.splitlines():
+            match = re.search(r"(?:HTML|HTML report):\s*(\S+)", line)
+            if match and Path(match.group(1)).is_file():
+                paths["html"] = str(Path(match.group(1)).resolve())
+            match = re.search(r"(?:MD|候选报告):\s*(\S+)", line)
+            if match and Path(match.group(1)).is_file():
+                paths["markdown"] = str(Path(match.group(1)).resolve())
     if paths:
         result["report_paths"] = paths
     if script == "analysis/market_regime.py":
@@ -155,6 +156,26 @@ def _launch_background(output, *, now, as_of, sessions, state_root, postprocess_
         return {**task, "status": "launch_failed", "reason": type(exc).__name__}
 
 
+def _launch_review_html_update(html_path, *, background_root=None):
+    """Queue the optional observation-list replacement without blocking candidates."""
+    from bridge import today_background
+
+    root = Path(background_root or DEFAULT_BACKGROUND_ROOT)
+    task = today_background.ensure_review_html_task(html_path, root=root)
+    if task.get("status") in {"completed", "failed", "timed_out", "interrupted", "launch_failed"}:
+        return task
+    if task.get("status") == "running":
+        return task
+    try:
+        launched = today_background.launch_review_html_task(task["task_id"], root=root)
+        return {**task, **launched}
+    except (OSError, ValueError) as exc:
+        today_background.update_status(
+            task["task_id"], root=today_background._review_html_root(root),
+            status="launch_failed", reason=type(exc).__name__)
+        return {**task, "status": "launch_failed", "reason": type(exc).__name__}
+
+
 def _policy_notice(previous, current, source):
     if previous == current or (previous is None and current.get("status") == "baseline"):
         return None
@@ -209,20 +230,43 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
     if notice:
         output["notifications"].append(notice)
 
+    daily_review_path = None
     try:
-        _run_script("analysis/market_regime.py", ["--no-html"])
-        workflow["market"] = {"status": "completed"}
+        market = _run_script("analysis/market_regime.py", ["--observation-status", "pending"])
+        market_paths = market.get("report_paths") or {}
+        daily_review_path = market_paths.get("html")
+        workflow["market"] = {"status": "completed", "report_paths": market_paths}
+        if daily_review_path:
+            output["report_paths"] = {"daily_review_html": daily_review_path}
+            print(f"今日复盘 HTML: {daily_review_path}", file=sys.stderr, flush=True)
     except Exception as exc:
         workflow["market"] = {"status": "failed", "reason": type(exc).__name__}
     if workflow["market"]["status"] == "completed":
         try:
             candidates = _run_script("scans/daily_candidates.py", candidate_args)
+            candidate_paths = candidates.get("report_paths") or {}
             output.update(candidates)
+            output["report_paths"] = {
+                **candidate_paths,
+                **({"daily_review_html": daily_review_path} if daily_review_path else {}),
+            }
             workflow["candidates"] = {"status": "completed"}
         except Exception as exc:
             workflow["candidates"] = {"status": "failed", "reason": type(exc).__name__}
     else:
         workflow["candidates"] = {"status": "skipped", "reason": "market_refresh_failed"}
+
+    if daily_review_path:
+        try:
+            workflow["review_html"] = _launch_review_html_update(
+                daily_review_path,
+                background_root=Path(background_root) if background_root else state_root / "background")
+        except Exception as exc:
+            # This optional presentation update must never change candidate
+            # generation or suppress the already-created reports.
+            workflow["review_html"] = {"status": "failed", "reason": type(exc).__name__}
+    else:
+        workflow["review_html"] = {"status": "skipped", "reason": "review_html_unavailable"}
 
     try:
         sessions, coverage_end = _completed_sessions(now)
@@ -332,6 +376,15 @@ def render_summary(result):
     lines.append(f"今日推荐：{labels.get(workflow['status'], workflow['status'])}；评价日期：{workflow.get('as_of') or '待确定'}")
     if workflow.get("postprocess", {}).get("task_id"):
         lines.append(f"后台任务：{workflow['postprocess']['task_id']}（可用 --status 查询）")
+    if workflow.get("review_html", {}).get("task_id"):
+        lines.append(f"复盘更新任务：{workflow['review_html']['task_id']}（可用 --status 查询）")
+    paths = result.get("report_paths") or {}
+    if paths.get("candidate_html"):
+        lines.append(f"候选报告：{paths['candidate_html']}")
+    elif paths.get("html"):
+        lines.append(f"候选报告：{paths['html']}")
+    if paths.get("daily_review_html"):
+        lines.append(f"今日复盘：{paths['daily_review_html']}")
     if workflow.get("calendar", {}).get("status") == "historical_only":
         lines.append(f"交易日历仅覆盖至 {workflow['calendar']['coverage_end']}，后处理仅评价已知历史区间。")
     for stage, label in (("market", "市场刷新"), ("candidates", "候选扫描"),
@@ -364,8 +417,14 @@ def main(argv=None):
         from bridge import today_background
         if args.resume:
             result = today_background.resume_task(args.resume, root=DEFAULT_BACKGROUND_ROOT)
+            if result.get("status") == "missing":
+                result = today_background.resume_review_html_task(
+                    args.resume, root=DEFAULT_BACKGROUND_ROOT)
         else:
             result = today_background.read_status(args.status, root=DEFAULT_BACKGROUND_ROOT)
+            if result.get("status") == "missing":
+                result = today_background.read_review_html_status(
+                    args.status, root=DEFAULT_BACKGROUND_ROOT)
         print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else json.dumps(result, ensure_ascii=False))
         return 0 if result.get("status") not in {"missing", "failed", "timed_out", "interrupted"} else 1
     result = run_today(candidate_args, dry_run=args.dry_run, postprocess=args.postprocess)

@@ -23,12 +23,14 @@ Usage:
 """
 
 import argparse
+import html as html_lib
 import json
 import os
 import statistics
 import sys
 import time
 import shutil
+import tempfile
 from datetime import datetime, date
 from pathlib import Path
 
@@ -38,6 +40,12 @@ CACHE_DIR = Path(os.environ.get("STOCK_TREND_CACHE_DIR", str(PROJECT_ROOT / ".ca
 REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 CONTEXT_FILE = CACHE_DIR / "market_regime.json"
 HISTORY_FILE = CACHE_DIR / "market_regime_history.json"
+OBSERVATION_LIST_FILE = Path(os.environ.get(
+    "STOCK_TREND_OBSERVATION_LIST_FILE",
+    str(PROJECT_ROOT / ".claude" / "skills" / "stock-trend" / "data" / "observation_list.yaml"),
+))
+OBSERVATION_BLOCK_START = "<!-- OBSERVATION_LIST:START -->"
+OBSERVATION_BLOCK_END = "<!-- OBSERVATION_LIST:END -->"
 HISTORY_MAX_DAYS = 30
 MIN_AMOUNT_HISTORY_DAYS = 5
 RETIRED_CONTEXT_KEYS = (
@@ -52,6 +60,13 @@ try:
     HAS_AKSHARE = True
 except ImportError:
     HAS_AKSHARE = False
+
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    yaml = None
+    HAS_YAML = False
 
 
 def _safe_float(v) -> float:
@@ -668,6 +683,145 @@ def load_context() -> dict | None:
 
 # ──────────────── 报告 ────────────────
 
+
+def _observation_text(value, fallback="未记录") -> str:
+    """Convert YAML scalar values to stable display text."""
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
+
+
+def load_observation_list(path=None) -> dict:
+    """Read the user-maintained observation list without changing it.
+
+    The report must remain renderable when this optional input is missing or
+    malformed, so errors are returned as data for the HTML block to display.
+    """
+    observation_path = Path(path or OBSERVATION_LIST_FILE)
+    if not HAS_YAML:
+        return {"status": "unavailable", "reason": "YAML 依赖不可用", "items": []}
+    try:
+        raw = yaml.safe_load(observation_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "unavailable", "reason": "观察列表文件不存在", "items": []}
+    except OSError as exc:
+        return {"status": "unavailable", "reason": f"读取失败: {type(exc).__name__}", "items": []}
+    except Exception as exc:
+        return {"status": "unavailable", "reason": f"YAML 格式错误: {type(exc).__name__}", "items": []}
+
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        return {"status": "unavailable", "reason": "顶层结构不是对象", "items": []}
+    entries = raw.get("observation_list", [])
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        return {"status": "unavailable", "reason": "observation_list 不是列表", "items": []}
+
+    items = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            items.append({
+                "code": _observation_text(entry),
+                "date": "未记录",
+                "entry_phase": "未记录",
+                "error": f"第 {index} 项不是对象",
+            })
+            continue
+        item = {
+            "code": _observation_text(entry.get("code")),
+            "date": _observation_text(entry.get("date")),
+            "entry_phase": _observation_text(entry.get("entry_phase")),
+        }
+        missing = [key for key in ("code", "date", "entry_phase")
+                   if entry.get(key) in (None, "")]
+        if missing:
+            item["error"] = "缺少字段: " + ", ".join(missing)
+        items.append(item)
+    return {"status": "ready", "items": items, "path": str(observation_path)}
+
+
+def render_observation_list_html(state: dict | None = None, *, pending: bool = False) -> str:
+    """Render the replaceable observation-list section for a daily-review HTML."""
+    state = state or {"status": "ready", "items": []}
+    rows = []
+    if pending:
+        body = '<p class="dt" data-observation-status="pending">候选扫描进行中，完成后将更新观察列表。</p>'
+    elif state.get("status") != "ready":
+        reason = html_lib.escape(str(state.get("reason") or "未知原因"), quote=True)
+        body = f'<p class="dt" data-observation-status="unavailable">观察列表不可用：{reason}</p>'
+    elif not state.get("items"):
+        body = '<p class="dt" data-observation-status="empty">暂无观察对象。</p>'
+    else:
+        for item in state.get("items", []):
+            error = item.get("error")
+            note = (f' <span class="dt">（{html_lib.escape(str(error), quote=True)}）</span>'
+                    if error else "")
+            rows.append(
+                "<tr>"
+                f"<td>{html_lib.escape(str(item.get('code', '未记录')), quote=True)}{note}</td>"
+                f"<td>{html_lib.escape(str(item.get('date', '未记录')), quote=True)}</td>"
+                f"<td>{html_lib.escape(str(item.get('entry_phase', '未记录')), quote=True)}</td>"
+                "</tr>"
+            )
+        body = (
+            "<table><thead><tr><th>代码</th><th>加入日期</th><th>加入时阶段</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
+    return (
+        f"{OBSERVATION_BLOCK_START}\n"
+        '<section id="observation-list">\n'
+        "<h2>观察列表</h2>\n"
+        '<p class="dt">仅为观察对象，正式推荐见候选报告。</p>\n'
+        f"{body}\n"
+        "</section>\n"
+        f"{OBSERVATION_BLOCK_END}"
+    )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace a generated report atomically so readers never see a partial file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                                     dir=str(path.parent), text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def update_observation_list_html(html_path, *, pending: bool = False) -> dict:
+    """Update only the marked observation block in an existing daily-review HTML."""
+    path = Path(html_path)
+    original = path.read_text(encoding="utf-8")
+    start = original.find(OBSERVATION_BLOCK_START)
+    end_marker = OBSERVATION_BLOCK_END
+    end = original.find(end_marker, start + len(OBSERVATION_BLOCK_START)) if start >= 0 else -1
+    if start < 0 or end < 0:
+        raise ValueError("observation_block_missing")
+    end += len(end_marker)
+    state = load_observation_list()
+    replacement = render_observation_list_html(state, pending=pending)
+    updated = original[:start] + replacement + original[end:]
+    _atomic_write_text(path, updated)
+    return {
+        "status": "pending" if pending else "completed",
+        "html_path": str(path.resolve()),
+        "observation_status": state.get("status"),
+        "count": len(state.get("items", [])),
+    }
+
 DISCLAIMER = "本报告仅供学习参考,不构成任何投资建议。股市有风险,投资需谨慎。"
 
 
@@ -958,6 +1112,8 @@ def main():
                         help="(默认) 生成 HTML 报告")
     parser.add_argument("--no-html", dest="html", action="store_false",
                         help="不生成 HTML(仅 MD)")
+    parser.add_argument("--observation-status", choices=("pending", "ready"), default="ready",
+                        help="HTML 观察列表状态；统一入口先写 pending，再由后台更新")
     args = parser.parse_args()
 
     start = time.time()
@@ -1005,7 +1161,7 @@ def main():
 
     if args.html:
         try:
-            html = _generate_html(ctx, now_ts)
+            html = _generate_html(ctx, now_ts, observation_status=args.observation_status)
             html_path = REPORTS_DIR / f"daily-review-{now_ts}.html"
             html_path.write_text(html, encoding="utf-8")
             print(f"HTML: {html_path}")
@@ -1015,7 +1171,7 @@ def main():
     print(f"\nDone in {time.time() - start:.1f}s")
 
 
-def _generate_html(ctx: dict, now_ts: str) -> str:
+def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready") -> str:
     """Lightweight HTML mirror of the MD report."""
     regime = ctx.get("regime", {})
     label_color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime.get("label", ""), "#86868b")
@@ -1036,6 +1192,8 @@ def _generate_html(ctx: dict, now_ts: str) -> str:
     bottom = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
         for s in ctx.get("bottom_sectors", [])[:3])
+    observation_html = render_observation_list_html(
+        pending=observation_status == "pending")
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1069,6 +1227,8 @@ ul{{padding-left:20px;line-height:1.8}}
 <h2>② 板块</h2>
 <p><strong>最强前3:</strong></p><ul>{top or '<li>—</li>'}</ul>
 <p><strong>最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
+
+{observation_html}
 
 <footer><p class="disc">数据来源: 东方财富 + AKShare | {DISCLAIMER}</p></footer>
 </div></body></html>"""

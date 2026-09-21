@@ -230,16 +230,36 @@ class TodayTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result["workflow"]["candidate_args"], ["--top", "5", "--no-html"])
 
+    def test_cli_status_finds_review_html_task(self):
+        from analysis import market_regime
+        from bridge import today_background
+        html_path = self.root / "daily-review.html"
+        html_path.write_text(market_regime.render_observation_list_html(pending=True), encoding="utf-8")
+        task = today_background.ensure_review_html_task(
+            html_path, root=self.root / "background")
+        stream = io.StringIO()
+        with patch.object(job, "DEFAULT_BACKGROUND_ROOT", self.root / "background"), \
+                redirect_stdout(stream):
+            code = job.main(["--status", task["task_id"], "--json"])
+        result = json.loads(stream.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(result["task_id"], task["task_id"])
+        self.assertEqual(result["status"], "queued")
+
     def test_subprocess_accepts_market_progress_around_json(self):
         from subprocess import CompletedProcess
         meta = {"generated_at": "2026-09-09 16:00:00", "data_date": "2026-09-09"}
         result = {"meta": meta, "regime": {"score": 80}}
         (self.root / "market_regime.json").write_text(json.dumps({**meta, "regime": result["regime"]}))
-        payload = '[1/5] 拉取数据\n' + json.dumps(result, indent=2) + '\nDone in 1.0s\n'
+        html_path = self.root / "daily-review.html"
+        html_path.write_text("html", encoding="utf-8")
+        payload = ('[1/5] 拉取数据\n' + json.dumps(result, indent=2)
+                   + f'\nHTML: {html_path}\nDone in 1.0s\n')
         with patch.object(job, "CACHE_DIR", self.root), patch.object(
                 job.subprocess, "run", return_value=CompletedProcess([], 0, payload)) as run:
             result = RUN_SCRIPT("analysis/market_regime.py", ["--no-html"])
         self.assertEqual(result["regime"]["score"], 80)
+        self.assertEqual(result["report_paths"]["html"], str(html_path.resolve()))
         self.assertEqual(run.call_args.kwargs["cwd"], Path(__file__).resolve().parents[4])
         self.assertEqual(run.call_args.kwargs["env"]["TZ"], "Asia/Shanghai")
 
@@ -281,6 +301,39 @@ class TodayTests(unittest.TestCase):
         self.assertEqual(result["workflow"]["close"]["status"], "background")
         self.assertEqual(result["recommendations"], [{"code": "600000"}])
 
+    def test_daily_review_path_is_emitted_before_review_update(self):
+        daily_path = self.root / "daily-review.html"
+        candidate_path = self.root / "candidates.html"
+        daily_path.write_text("daily", encoding="utf-8")
+        candidate_path.write_text("candidate", encoding="utf-8")
+        calls = []
+
+        def run_script(script, arguments):
+            calls.append(script)
+            if "market_regime" in script:
+                return {
+                    "meta": {"generated_at": "2026-09-09 16:00:00", "data_date": "2026-09-09"},
+                    "regime": {"score": 80},
+                    "report_paths": {"html": str(daily_path)},
+                }
+            return {
+                "recommendations": [{"code": "600000"}],
+                "report_paths": {"html": str(candidate_path)},
+            }
+
+        queued = []
+        with patch.object(job, "_run_script", side_effect=run_script), \
+                patch.object(job, "_launch_review_html_update",
+                             side_effect=lambda path, **_: queued.append(path)
+                             or {"task_id": "review-1", "status": "running"}):
+            result = self.run_job()
+
+        self.assertEqual(calls, ["analysis/market_regime.py", "scans/daily_candidates.py"])
+        self.assertEqual(queued, [str(daily_path)])
+        self.assertEqual(result["report_paths"]["daily_review_html"], str(daily_path))
+        self.assertEqual(result["report_paths"]["html"], str(candidate_path))
+        self.assertEqual(result["workflow"]["review_html"]["task_id"], "review-1")
+
     def test_background_worker_persists_final_status_and_stages(self):
         from bridge import today_background
         with tempfile.TemporaryDirectory() as root:
@@ -300,6 +353,37 @@ class TodayTests(unittest.TestCase):
             self.assertEqual(today_background.read_status(task["task_id"], root=root / "background")["status"],
                              "completed")
             self.assertTrue((root / "background" / task["task_id"] / "result.json").exists())
+
+    def test_review_html_background_task_updates_same_path(self):
+        from analysis import market_regime
+        from bridge import today_background
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            html_path = root / "daily-review.html"
+            yaml_path = root / "observation.yaml"
+            html_path.write_text(
+                "before\n" + market_regime.render_observation_list_html(pending=True) + "\nafter",
+                encoding="utf-8",
+            )
+            yaml_path.write_text(
+                "observation_list:\n"
+                "  - code: '001207'\n"
+                "    date: '2026-09-21'\n"
+                "    entry_phase: 未记录\n",
+                encoding="utf-8",
+            )
+            with patch.object(market_regime, "OBSERVATION_LIST_FILE", yaml_path):
+                task = today_background.ensure_review_html_task(html_path, root=root / "background")
+                result = today_background.run_review_html_task(task["task_id"], root=root / "background")
+                status = today_background.read_review_html_status(
+                    task["task_id"], root=root / "background")
+            updated = html_path.read_text(encoding="utf-8")
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(status["status"], "completed")
+            self.assertIn("观察列表", updated)
+            self.assertIn("001207", updated)
+            self.assertIn("before", updated)
+            self.assertIn("after", updated)
 
     def test_research_stages_wrap_formal_stages_in_sync_mode(self):
         from bridge import today_background
