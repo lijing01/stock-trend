@@ -408,11 +408,16 @@ def test_observation_list_html():
             state = mr.load_observation_list()
             ready = mr.render_observation_list_html(state)
             pending = mr.render_observation_list_html(pending=True)
+            generated = mr._generate_html(
+                {"data_date": "2026-09-21", "generated_at": "2026-09-22 00:00:00",
+                 "regime": {}, "components": {}, "top_sectors": [], "bottom_sectors": []},
+                "20260922-000000")
             test("读取 observation_list", state["status"] == "ready" and len(state["items"]) == 2)
             test("区块标题为观察列表", "<h2>观察列表</h2>" in ready)
             test("保留 YAML 顺序", ready.index("001207") < ready.index("60336"))
             test("HTML 文本转义", "&lt;待确认&gt;" in ready and "<待确认>" not in ready)
             test("pending 不展示股票", "候选扫描进行中" in pending and "001207" not in pending)
+            test("独立复盘 HTML 读取 YAML", "001207" in generated and "60336" in generated)
 
             html_path = Path(directory) / "daily-review.html"
             original = "<body>before\n" + mr.render_observation_list_html(pending=True) + "\nafter</body>"

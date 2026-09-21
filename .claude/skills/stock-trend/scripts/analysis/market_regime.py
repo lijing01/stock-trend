@@ -1192,8 +1192,10 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready")
     bottom = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
         for s in ctx.get("bottom_sectors", [])[:3])
+    observation_pending = observation_status == "pending"
+    observation_state = None if observation_pending else load_observation_list()
     observation_html = render_observation_list_html(
-        pending=observation_status == "pending")
+        observation_state, pending=observation_pending)
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
