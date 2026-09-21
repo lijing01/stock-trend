@@ -2,7 +2,7 @@
 
 ## 现状
 
-31 个 Python 文件平铺在 `scripts/`，跨文件通信方式混用：直接 import + subprocess 调用 + 延迟 import。4 处 `run_script()` 重复实现，`BaseFetcher` 定义了但零个子类。16k 行代码，top 4 文件占 65%：`etf_scanner.py`(1964), `analyze_technical.py`(1921), `compute_scores.py`(1272), `portfolio_manager.py`(1169)。
+31 个 Python 文件平铺在 `scripts/`，跨文件通信方式混用：直接 import + subprocess 调用 + 延迟 import。4 处 `run_script()` 重复实现，`BaseFetcher` 定义了但零个子类。16k 行代码，top 3 文件占主要代码量：`etf_scanner.py`(1964), `analyze_technical.py`(1921), `compute_scores.py`(1272)。
 
 ### 关键约束
 
@@ -48,7 +48,7 @@ def run_script_file(script_name, *args, timeout=30):
     """接受脚本名 + 参数，自动拼接 SCRIPT_DIR 路径."""
 ```
 
-影响文件：`run_pipeline.py`, `etf_scanner.py`, `portfolio_manager.py`, `diagnose.py`
+影响文件：`run_pipeline.py`, `etf_scanner.py`, `diagnose.py`
 
 ### 1c. 删除重复工具函数
 
@@ -112,9 +112,6 @@ scripts/
 │   ├── __init__.py
 │   ├── report.py            # 原 generate_report.py
 │   └── chart.py             # 原 generate_chart_html.py
-├── portfolio/
-│   ├── __init__.py
-│   └── manager.py           # 原 portfolio_manager.py
 ├── backtesting/
 │   ├── __init__.py
 │   └── engine.py            # 原 backtest_engine.py

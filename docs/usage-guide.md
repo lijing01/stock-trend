@@ -13,8 +13,7 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 - [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
 - [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
 - [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
-- [4. 持仓管理 `/portfolio`](#4-持仓管理-portfolio)
-- [5. 回测 `/etf-backtest`](#5-回测-etf-backtest)
+- [4. 回测 `/etf-backtest`](#4-回测-etf-backtest)
 
 ---
 
@@ -118,44 +117,7 @@ dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
 
 ---
 
-## 4. 持仓管理 `/portfolio`
-
-浮动盈亏、止损预警、凯利分析。
-
-```bash
-# 查看持仓
-/portfolio
-/portfolio list
-
-# 添加
-/portfolio add --code 600519 --price 1500 --date 2026-05-01 --qty 100 [--stop-loss 1350] [--targets 1700,1800]
-
-# 平仓
-/portfolio remove --code 600519 --close-price 1600
-
-# 更新止损/目标
-/portfolio update --code 600519 --stop-loss 1400 --targets 1750,1900
-
-# 全面状态（含预警+凯利+ETF对比）
-/portfolio status
-
-# 仅预警
-/portfolio alerts
-
-# 凯利仓位计算
-/portfolio kelly
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [options]
-```
-
-**数据文件**：`.claude/skills/stock-trend/data/portfolio.yaml`
-
----
-
-## 5. 回测 `/etf-backtest`
+## 4. 回测 `/etf-backtest`
 
 回测 ETF Phase 1 速评分模型预测力。
 
@@ -185,7 +147,7 @@ python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-day
 | 市场主题 | 东方财富 push2 API | BK 板块排行 + 成分股 |
 | 涨停数据 | 东方财富涨停池 (AKShare) | 涨停股/封板/连板/炸板 |
 | 龙虎榜 | 东方财富龙虎榜 (AKShare) | 机构买卖明细 |
-| 持仓管理 | portfolio.yaml | 用户手动录入持仓 |
+| 观察列表 | observation_list.yaml | 用户手动录入观察对象、日期和加入时阶段 |
 
 ---
 

@@ -1780,22 +1780,6 @@ def run_validate_tests():
     os.rmdir(tmpdir)
 
 
-def run_portfolio_integration_tests():
-    """Run portfolio manager tests from tests/test_portfolio.py."""
-    print("\n📁 持仓管理测试 (Portfolio)")
-    print("=" * 50)
-    tests_dir = SCRIPT_DIR
-    sys.path.insert(0, str(tests_dir))
-    try:
-        from test_portfolio import run_portfolio_tests
-        p, f = run_portfolio_tests()
-        global PASSED, FAILED
-        PASSED += p
-        FAILED += f
-    except ImportError as e:
-        print(f"  [SKIP] portfolio tests — {e}")
-
-
 def run_backtest_integration_tests():
     """Run backtest engine tests from tests/test_backtest.py."""
     print("\n📊 回测验证测试 (Backtest)")
@@ -2053,10 +2037,6 @@ def main():
     # Script unit tests (eastmoney_utils, base_fetcher, cache_utils)
     if not args.fetch_only and not args.analyze_only:
         run_script_unit_tests()
-
-    # Portfolio manager tests
-    if not args.fetch_only and not args.analyze_only:
-        run_portfolio_integration_tests()
 
     # Backtest engine tests
     if not args.fetch_only and not args.analyze_only:

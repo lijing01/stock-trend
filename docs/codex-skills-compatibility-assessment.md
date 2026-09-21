@@ -102,7 +102,6 @@ allowed-tools:
 ```text
 /stock-trend
 /etf-scan
-/portfolio
 /etf-backtest
 /longtou
 /market-theme
@@ -120,7 +119,6 @@ Codex CLI 支持 `/import` 导入 Claude Code 的 skills、slash commands、指�
 当前 description 只描述“A股/港股/ETF日趋势判断”，但同一个 skill 实际还承载：
 
 - ETF 扫描；
-- 持仓管理；
 - ETF 回测；
 - 龙头和中军扫描；
 - 市场主线分析；
@@ -130,7 +128,7 @@ Codex CLI 支持 `/import` 导入 Claude Code 的 skills、slash commands、指�
 - 每日候选股；
 - 整合扫描。
 
-Codex 主要根据 `name` 和 `description` 决定是否隐式加载 skill。当前描述难以覆盖这些分支。例如用户要求“查看持仓预警”时，Codex 未必会把它与“日趋势判断”匹配起来。
+Codex 主要根据 `name` 和 `description` 决定是否隐式加载 skill。当前描述难以覆盖这些分支。例如用户要求“查看观察列表”时，Codex 未必会把它与“日趋势判断”匹配起来。
 
 ### 3.5 Skill 规模偏大
 
@@ -146,7 +144,6 @@ Codex 主要根据 `name` 和 `description` 决定是否隐式加载 skill。当
 
 - `stock-trend`：单标的趋势分析；
 - `etf-scan`：ETF 扫描；
-- `portfolio`：持仓管理；
 - `market-theme`：市场主线、龙头和候选股；
 - `stock-backtest`：ETF/选股模型回测。
 
@@ -294,7 +291,7 @@ python3 .claude/skills/stock-trend/tests/test_golden.py --diff
 1. Codex `/skills` 能显示 `stock-trend`。
 2. `$stock-trend 513180` 能正确加载完整 `SKILL.md`。
 3. “分析 513180 趋势”能隐式触发该 skill。
-4. ETF 扫描、持仓和回测请求能触发正确的独立 skill 或明确路由。
+4. ETF 扫描、观察列表和回测请求能触发正确的独立 skill 或明确路由。
 5. 无网络授权时给出清晰降级提示，不误用旧行情。
 6. 联网授权后东方财富、港股和周线诊断通过。
 7. 主测试套件零失败。

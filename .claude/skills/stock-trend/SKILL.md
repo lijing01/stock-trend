@@ -1,6 +1,6 @@
 ---
 name: stock-trend
-description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、持仓与预警、ETF/维科夫回测、每日复盘及候选股。用户提到股票或 ETF 趋势、代码分析、持仓管理、选股、复盘或上述工作流时使用。
+description: 分析 A股、港股和 ETF 的中线趋势并生成结构化报告；也用于今日推荐、ETF 扫描、观察列表、ETF/维科夫回测、每日复盘及候选股。用户提到股票或 ETF 趋势、代码分析、观察列表、选股、复盘或上述工作流时使用。
 ---
 
 # 股票趋势判断
@@ -44,33 +44,6 @@ python3 .claude/skills/stock-trend/scripts/scans/etf_scanner.py [--top N] [--foc
 2. 呈现：完整模式→排名表+Top3逻辑+排除+板块强弱。`--compact`→Top5表+Top1-2逻辑+排除摘要。
 
 3. 信号映射：≥+2.0→↑↑看多，+0.5~+2.0→↑偏多，-0.5~+0.5→→震荡，<-0.5→↓偏空。星级：≥80→★★★，≥65→★★☆，≥50→★☆☆。`deep_score`=null时标注"深度分析跳过"。必须附带免责声明。
-
----
-
-## /portfolio [list|add|remove|update|status|alerts|kelly] [options]
-
-持仓管理：浮动盈亏、止损预警、凯利分析、etf-scan对比。
-
-| 命令 | 说明 |
-|------|------|
-| (无)/list | 全部持仓+实时盈亏 |
-| add | `--code --price --date --qty [--name] [--stop-loss] [--targets] [--notes]` |
-| remove | `--code <代码> [--close-price]` 平仓标记 |
-| update | `--code [--stop-loss] [--targets]` |
-| status | 持仓总览+预警+凯利+etf-scan对比。`--skip-scan`跳过扫描 |
-| alerts | 仅预警，critical高亮 |
-| kelly | 凯利仓位对比当前vs最优 |
-
-**步骤**：
-
-1. 执行：
-```bash
-python3 .claude/skills/stock-trend/scripts/portfolio/manager.py <command> [options]
-```
-
-2. 呈现结果（表格/确认/预警）。
-
-3. `status`时运行etf-scan Phase 1对比：≥70→继续持有，55-70→关注，<55→建议减仓。
 
 ---
 
@@ -254,8 +227,8 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refre
 open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
 ```
 3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/全市场主力净流入。
-4. 输出: 复盘报告(①市场环境 ②板块最强/最弱) → `reports/lists/daily-review-<时间>.md` + `.html`。持仓详情与仓位触发规则由 `/portfolio list|status` 和 `data/portfolio.yaml` 管理，不写入今日复盘。
-5. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。`--no-refresh` 仅重用市场缓存，不读取或改写持仓配置。
+4. 输出: 复盘报告(①市场环境 ②板块最强/最弱) → `reports/lists/daily-review-<时间>.md` + `.html`。观察对象记录保存在 `data/observation_list.yaml` 的 `observation_list` 中，不写入今日复盘。
+5. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。`--no-refresh` 仅重用市场缓存，不读取或改写观察列表配置。
 
 复盘回复只呈现同一次运行的市场评分、宽度/情绪、板块强弱及数据质量说明；盘中或非当日结果必须标注 `intraday_note`/`stale_note`，缺失字段写“未提供/数据缺失”。完整报告保留 Markdown/HTML 路径，并附带：**本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。**
 

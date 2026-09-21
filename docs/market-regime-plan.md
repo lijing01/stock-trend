@@ -68,7 +68,7 @@ python3 analysis/market_regime.py [--no-refresh] [--json] [--html]
 
 1. **市场环境**:regime 分数 + 状态标签 + 组件明细 + 涨跌家数/两市成交额/北向/涨停家数/连板
 2. **板块**:最强前3 + 最弱前3
-3. 免责声明(必带)。持仓明细、止损和仓位规则由独立的 `/portfolio` 工作流及 `data/portfolio.yaml` 管理，不写入市场复盘。
+3. 免责声明(必带)。观察对象由 `data/observation_list.yaml` 的 `observation_list` 管理，不写入市场复盘。
 
 ### 实现要点
 
@@ -99,7 +99,7 @@ SKILL.md `/stock-trend` 流程加一句说明:报告含大盘/板块对比段,�
 
 - 纯函数测试:regime 评分(fixture 指数/板块/涨停/北向)、组件归一化、gate 标签、复盘 MD 生成、if-then 计划生成。
 - `HAS_AKSHARE` guard 的 live 加载器测试(仿 `test_weekly_report.py:153`)。
-- 市场复盘不读取 `portfolio.yaml`，持仓行为由独立的 `/portfolio` 工作流测试。
+- 市场复盘不读取 `observation_list.yaml`，观察列表仅供人工维护。
 
 **不做 golden**(market-wide 非 per-symbol;先例 weekly_report/market_theme 均不在 golden_config)。
 
