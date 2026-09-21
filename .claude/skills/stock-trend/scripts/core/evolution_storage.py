@@ -73,7 +73,7 @@ def load_research_snapshot(path_or_payload):
         raise ValueError("research_snapshot_not_object")
     content = value.get("content") if isinstance(value.get("content"), dict) else None
     version = value.get("schema_version") or (content or {}).get("schema_version")
-    if version == "candidate-research-snapshot/v1":
+    if version in {"candidate-research-snapshot/v1", "candidate-research-snapshot/v2"}:
         return value
     legacy = _legacy_content(value)
     return {

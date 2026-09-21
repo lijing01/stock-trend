@@ -144,10 +144,12 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --sectors BK04
 
 1. 刷新 `market_regime`，成功后运行 candidates；刷新失败时不得使用陈旧上下文继续扫描。候选原有量化逻辑完成后，默认运行新闻影子层：优先取巨潮公告，再补充个股新闻；只接受推荐决策时点之前、近 14 个自然日且发布时间明确的证据。新闻分数限制为 `[-3,+1]`，重大正式风险可在影子结果中否决，正向消息不得跨越市场环境、数据质量、板块持续性、资金背离或维科夫硬门槛。首版只冻结证据、展示影子排序，不改变正式推荐。
 2. 从已有权威交易日历按上海时区取得最近已知完成交易日；15:10 前用上一交易日评价历史。日历缺失时明确跳过依赖交易日的后处理；日历只覆盖历史区间时继续评价已知区间，并明确呈现 `workflow.calendar.coverage_end`，不得把未覆盖日期解释为休市。
-3. 报告就绪后返回 `workflow.status=report_ready`，并给出 `workflow.postprocess.task_id`；后台按 close → weekly → monitor 执行。用 `--status <task_id> --json` 查询，用 `--resume <task_id>` 显式续跑。
+3. 报告就绪后返回 `workflow.status=report_ready`，并给出 `workflow.postprocess.task_id`；后台按 `factor_ablation_daily → close → weekly → monitor → factor_ablation_evaluation` 执行。每日消融和成熟评价分别受 10 秒、20 秒限制，close/weekly/monitor 保留各自 300 秒预算。用 `--status <task_id> --json` 查询，用 `--resume <task_id>` 显式续跑。
 4. 后台按评价日期所属 ISO 周执行 weekly；只有同周已有成功且 `input.research_snapshots > 0` 的有效任务记录才跳过。失败或没有研究样本的成功空跑，均允许同周再次尝试。
 5. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
-6. 周度诊断按新闻分数档与风险级别统计成熟样本的 5/10/20 日结果、沪深300超额收益、胜率与 MAE。新闻层是否提升准确性必须由前向样本回答；证据不足时明确“继续积累”，不得凭单日案例转正。`--no-news` 仅用于诊断降级，`--news-file <JSON>` 可注入带发布时间和来源的可复现证据。
+6. `factor_ablation_daily` 只读取同一次正式扫描的冻结研究快照，验证真实选择范围、六维分数逐项舍入、质量因子和买点奖励后，在同一资格层内分别移除一个维度重排。它只生成观察用影子 Top 1/3/5，不改变正式权重、门槛、报告或发布指针。结果写入 `.cache/stock-trend/evolution/factor_ablation/daily/<依据日>/`。
+7. `factor_ablation_evaluation` 严格按 `(record_id, research_snapshot_sha256, evaluation_contract_id)` 关联前向结果；5 日仅作质量排查，20 日为主窗口，60 日作方向确认。样本未达到 20 个成熟日期和 100 个去重事件时返回 `continue_accumulating`，不触发调权或发布。旧快照缺真实选择范围时返回 `scope_unverified`。
+8. 周度诊断按新闻分数档与风险级别统计成熟样本的 5/10/20 日结果、沪深300超额收益、胜率与 MAE。新闻层是否提升准确性必须由前向样本回答；证据不足时明确“继续积累”，不得凭单日案例转正。`--no-news` 仅用于诊断降级，`--news-file <JSON>` 可注入带发布时间和来源的可复现证据。
 
 需要诊断或兼容旧的同步行为时，显式传 `--postprocess sync`。后台任务状态保存在 `.cache/stock-trend/evolution/background/<task_id>/`，包括冻结输入、状态、日志和最终结果；报告成功不代表后台研究已完成。
 

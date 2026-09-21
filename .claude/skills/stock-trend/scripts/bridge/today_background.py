@@ -28,6 +28,10 @@ from core.recommendation_snapshot import canonical_json, content_sha256
 SHANGHAI = timezone(timedelta(hours=8))
 DEFAULT_ROOT = Path(evolution.CACHE_DIR) / "evolution" / "background"
 TERMINAL = {"completed", "partial", "failed", "timed_out", "interrupted", "launch_failed"}
+RESEARCH_DONE = {"completed", "continue_accumulating", "skipped", "scope_unverified",
+                 "baseline_mismatch", "input_incomplete", "insufficient_data"}
+CORE_DONE = {"completed", "insufficient_data", "healthy", "review_required",
+             "fallback_required"}
 
 
 def _task_dir(task_id, root):
@@ -59,8 +63,9 @@ def ensure_task(manifest, root=DEFAULT_ROOT):
     if not manifest_path.exists():
         _write(manifest_path, {**copy.deepcopy(manifest), "task_id": task_id})
     if status_path.exists():
-        status = _read(status_path)
-        return {"task_id": task_id, **status}
+        # Rehydrate checkpoints/result metadata so repeated foreground calls
+        # expose the same per-stage state as an explicit --status query.
+        return read_status(task_id, root=root)
     status = {"status": "queued", "task_id": task_id, "stage": "queued",
               "created_at": _now(), "heartbeat_at": _now()}
     _write(status_path, status)
@@ -71,10 +76,18 @@ def read_status(task_id, root=DEFAULT_ROOT):
     directory = _task_dir(task_id, root)
     try:
         status = _read(directory / "status.json")
+        checkpoint_path = directory / "checkpoints.json"
+        if checkpoint_path.is_file():
+            status = {**status, "stages": {
+                name: {**item.get("result", {}), "input_sha256": item.get("input_sha256")}
+                for name, item in _read(checkpoint_path).get("stages", {}).items()}}
         result_path = status.get("result_path") or str(directory / "result.json")
         if Path(result_path).is_file():
             result = _read(result_path)
-            if result.get("status") in {"completed", "partial", "failed", "timed_out", "interrupted"}:
+            fresh_result = (status.get("status") != "running" or
+                            str(result.get("finished_at") or "") >= str(status.get("started_at") or ""))
+            if fresh_result and result.get("status") in {
+                    "completed", "partial", "failed", "timed_out", "interrupted"}:
                 status = {**status, "status": result["status"], "stage": "done",
                           "finished_at": result.get("finished_at"), "result_path": result_path}
                 _write(directory / "status.json", status)
@@ -88,7 +101,9 @@ def read_status(task_id, root=DEFAULT_ROOT):
                 try:
                     manifest = _read(directory / "manifest.json")
                     started = datetime.fromisoformat(status.get("started_at") or status.get("created_at"))
-                    budget = max(1, int(manifest.get("budget_seconds", 300)))
+                    budget = (max(1, int(manifest.get("budget_seconds", 300)))
+                              + max(1, int(manifest.get("factor_daily_budget_seconds", 10)))
+                              + max(1, int(manifest.get("factor_evaluation_budget_seconds", 20))))
                     stale = (datetime.now(SHANGHAI) - started).total_seconds() > budget + 5
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     stale = False
@@ -183,39 +198,138 @@ def _stage(task_id, root, name, callback, job_root, deadline):
         return {"status": "failed", "reason": type(exc).__name__}
 
 
+def _research_stage(task_id, root, name, callback, seconds):
+    update_status(task_id, root=root, status="running", stage=name)
+    return run_research_stage(callback, seconds)
+
+
+def run_research_stage(callback, seconds):
+    """Bound an optional research callback without failing the formal pipeline."""
+    try:
+        with _stage_timeout(seconds):
+            result = callback()
+        if not isinstance(result, dict) or not isinstance(result.get("status"), str):
+            return {"status": "failed", "reason": "invalid_research_result"}
+        return result
+    except TimeoutError:
+        return {"status": "timed_out", "reason": "background_stage_timeout"}
+    except Exception as exc:
+        return {"status": "failed", "reason": type(exc).__name__}
+
+
+def _factor_daily(as_of, state_root):
+    from analysis import factor_ablation
+    return factor_ablation.run_daily(as_of, state_root=state_root)
+
+
+def _factor_evaluation(as_of, state_root):
+    from analysis import factor_ablation
+    return factor_ablation.run_evaluation(as_of, state_root=state_root)
+
+
+def _checkpoint(directory, manifest, stage, value, result):
+    digest = content_sha256({"manifest": {key: item for key, item in manifest.items()
+                                            if key != "requested_at"},
+                             "stage": stage,
+                             "close": (result.get("stages", {}).get("close")
+                                       if stage == "factor_ablation_evaluation" else None)})
+    path = directory / "checkpoints.json"
+    try:
+        current = _read(path)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        current = {"stages": {}}
+    current["stages"][stage] = {"input_sha256": digest, "result": value}
+    _write(path, current)
+    return digest
+
+
+def _cached_stage(directory, manifest, stage, result):
+    try:
+        saved = _read(directory / "checkpoints.json")["stages"][stage]
+    except (FileNotFoundError, OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    digest = content_sha256({"manifest": {key: item for key, item in manifest.items()
+                                            if key != "requested_at"},
+                             "stage": stage,
+                             "close": (result.get("stages", {}).get("close")
+                                       if stage == "factor_ablation_evaluation" else None)})
+    value = saved.get("result")
+    done = RESEARCH_DONE if stage.startswith("factor_ablation_") else CORE_DONE
+    return value if saved.get("input_sha256") == digest and isinstance(value, dict) \
+        and value.get("status") in done else None
+
+
+def _run_or_reuse(directory, manifest, result, stage, callback):
+    value = _cached_stage(directory, manifest, stage, result)
+    if value is None:
+        value = callback()
+        _checkpoint(directory, manifest, stage, value, result)
+    result["stages"][stage] = value
+    return value
+
+
 def run_task(task_id, root=DEFAULT_ROOT):
     root = Path(root); directory = _task_dir(task_id, root)
     manifest = _read(directory / "manifest.json")
     budget = max(1, int(manifest.get("budget_seconds", 300)))
-    deadline = time.monotonic() + budget
-    status = update_status(task_id, root=root, status="running", stage="waiting_for_lock", pid=os.getpid())
+    daily_budget = max(1, int(manifest.get("factor_daily_budget_seconds", 10)))
+    evaluation_budget = max(1, int(manifest.get("factor_evaluation_budget_seconds", 20)))
+    update_status(task_id, root=root, status="running", stage="starting", pid=os.getpid())
     result = {"task_id": task_id, "as_of": manifest.get("as_of"), "stages": {}}
     lock = None
     try:
-        lock = _lock(root, deadline)
         job_root = Path(manifest["job_root"])
+        state_root = Path(manifest.get("state_root") or job_root.parent)
         as_of = manifest["as_of"]
         sessions = manifest.get("trading_sessions") or []
-        result["stages"]["close"] = _stage(task_id, root, "close",
-            lambda: evolution.run_close(as_of), job_root, deadline)
+        _run_or_reuse(directory, manifest, result, "factor_ablation_daily", lambda:
+            _research_stage(task_id, root, "factor_ablation_daily",
+                            lambda: _factor_daily(as_of, state_root), daily_budget)
+            if manifest.get("research_eligible", False) else
+            {"status": "skipped", "reason": "not_post_close_final"})
+        # Research has its own limit; the existing post-processing stages keep
+        # their entire budget even if daily shadow ranking used all 10 seconds.
+        deadline = time.monotonic() + budget
+        update_status(task_id, root=root, status="running", stage="waiting_for_lock")
+        lock = _lock(root, deadline)
+        _run_or_reuse(directory, manifest, result, "close", lambda:
+            _stage(task_id, root, "close", lambda: evolution.run_close(as_of), job_root, deadline))
         if time.monotonic() >= deadline:
             raise TimeoutError("background_budget_exhausted")
         if result["stages"]["close"].get("status") == "completed":
             # The weekly job still owns its own same-week deduplication in the
             # foreground compatibility path; this task has a frozen input.
-            result["stages"]["weekly"] = _stage(task_id, root, "weekly",
-                lambda: evolution.run_weekly(as_of), job_root, deadline)
+            _run_or_reuse(directory, manifest, result, "weekly", lambda:
+                _stage(task_id, root, "weekly", lambda: evolution.run_weekly(as_of), job_root, deadline))
         else:
             result["stages"]["weekly"] = {"status": "skipped", "reason": "close_not_complete"}
+            _checkpoint(directory, manifest, "weekly", result["stages"]["weekly"], result)
         if time.monotonic() >= deadline:
             raise TimeoutError("background_budget_exhausted")
-        result["stages"]["monitor"] = _stage(task_id, root, "monitor", lambda:
-            evolution.monitoring_snapshot(job_root=job_root, expected_trading_days=sessions,
-                                          as_of=as_of), job_root, deadline)
-        statuses = [stage.get("status") for stage in result["stages"].values()]
-        final = "completed" if all(status in {"completed", "insufficient_data", "healthy",
-                                               "review_required", "fallback_required"}
-                                   for status in statuses) else "partial"
+        _run_or_reuse(directory, manifest, result, "monitor", lambda:
+            _stage(task_id, root, "monitor", lambda:
+                evolution.monitoring_snapshot(job_root=job_root, expected_trading_days=sessions,
+                                              as_of=as_of), job_root, deadline))
+        if (not manifest.get("research_eligible", False)):
+            result["stages"]["factor_ablation_evaluation"] = {
+                "status": "skipped", "reason": "not_post_close_final"}
+            _checkpoint(directory, manifest, "factor_ablation_evaluation",
+                        result["stages"]["factor_ablation_evaluation"], result)
+        elif (result["stages"]["close"].get("status") == "completed"
+                and result["stages"]["monitor"].get("status") in CORE_DONE):
+            _run_or_reuse(directory, manifest, result, "factor_ablation_evaluation", lambda:
+                _research_stage(task_id, root, "factor_ablation_evaluation",
+                                lambda: _factor_evaluation(as_of, state_root), evaluation_budget))
+        else:
+            result["stages"]["factor_ablation_evaluation"] = {
+                "status": "deferred_core_incomplete"}
+            _checkpoint(directory, manifest, "factor_ablation_evaluation",
+                        result["stages"]["factor_ablation_evaluation"], result)
+        core_statuses = [result["stages"][stage].get("status") for stage in ("close", "weekly", "monitor")]
+        research_statuses = [result["stages"][stage].get("status") for stage in
+                             ("factor_ablation_daily", "factor_ablation_evaluation")]
+        final = "completed" if (all(status in CORE_DONE for status in core_statuses)
+                                and all(status in RESEARCH_DONE for status in research_statuses)) else "partial"
         result.update({"status": final, "finished_at": _now()})
         _write(directory / "result.json", result)
         update_status(task_id, root=root, status=final, stage="done", result_path=str(directory / "result.json"),

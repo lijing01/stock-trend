@@ -14,7 +14,7 @@ from .recommendation_snapshot import canonical_json, content_sha256, _normalize_
 from .evolution_storage import input_manifest, storage_root
 
 
-SCHEMA_VERSION = "candidate-research-snapshot/v1"
+SCHEMA_VERSION = "candidate-research-snapshot/v2"
 DEFAULT_ROOT = storage_root("research")
 
 
@@ -135,9 +135,30 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
                             official_tracking=None, known_at=None,
                             model_version="daily-candidates/v4",
                             parameter_summary=None, decision_at=None,
-                            captured_at=None):
+                            captured_at=None, selection_scope=None):
     """Build a detached, deterministic snapshot for every scanned object."""
     by_code = _bucket_by_code(buckets)
+    # ``selection_scope`` is deliberately explicit.  An omitted value keeps
+    # legacy callers readable but marks the snapshot unverifiable for replay;
+    # an empty code list is never interpreted as full scope.
+    scope = copy.deepcopy(selection_scope) if isinstance(selection_scope, dict) else {}
+    scope_mode = scope.get("mode") if scope.get("mode") in {"explicit_codes", "full_scan"} else None
+    scope_codes = sorted({str(code) for code in (scope.get("codes") or []) if code})
+    scope_codes_sha256 = scope.get("codes_sha256")
+    if scope_mode and not scope_codes_sha256:
+        scope_codes_sha256 = content_sha256(scope_codes)
+    scope_verified = bool(scope_mode and scope_codes_sha256)
+    if scope_verified:
+        scope["mode"] = scope_mode
+        scope["codes"] = scope_codes
+        scope["codes_sha256"] = scope_codes_sha256
+        scope["count"] = len(scope_codes)
+        scope["top"] = (parameter_summary or {}).get("top")
+        scope["min_score"] = _finite_number(min_score)
+    else:
+        scope = {"mode": None, "codes": [], "codes_sha256": None,
+                 "count": 0, "status": "scope_unverified"}
+    scope_set = set(scope_codes)
     records = []
     for item in scanned_candidates or []:
         if not isinstance(item, dict) or not item.get("code"):
@@ -169,6 +190,9 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
                 "top": (parameter_summary or {}).get("top"),
                 "min_score": preselection["min_score"],
             },
+            # Terminal research rows can sit beside the production pool; only
+            # rows whose code is in the frozen selector universe are replayed.
+            "selection_scope_included": bool(code in scope_set) if scope_verified else False,
             "scores": {
                 "raw_composite_score": candidate.get("raw_composite_score"),
                 "composite_score": candidate.get("composite_score"),
@@ -203,6 +227,7 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
         "market_regime": copy.deepcopy(market_regime or {}),
         "sectors": copy.deepcopy(sector_codes or []),
         "parameter_summary": copy.deepcopy(parameter_summary or {}),
+        "selection_scope": scope,
         "input_manifest": input_manifest(
             candidate_records=records,
             market_regime=market_regime or {},
@@ -214,6 +239,7 @@ def build_research_snapshot(scanned_candidates, buckets, recommendation_date,
                 "content_sha256": (official_tracking or {}).get("content_sha256"),
                 "link_status": "linked" if (official_tracking or {}).get("status") in ("created", "unchanged") else "unlinked",
             },
+            selection_scope=scope,
         ),
         # ``created`` and ``unchanged`` describe the same formal decision on
         # a rerun.  Persist the stable linkage rather than write telemetry

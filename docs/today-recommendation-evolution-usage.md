@@ -8,7 +8,7 @@
 /Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
 ```
 
-该命令先完成市场环境刷新和候选扫描并返回报告；历史推荐评价、每周研究和策略监控由本次调用启动的独立后台任务继续执行。不安装后台定时器，不向外部服务推送通知，也不自动打开 GUI 或浏览器。
+该命令先完成市场环境刷新和候选扫描并返回报告；历史推荐评价、六维分数消融、每周研究和策略监控由本次调用启动的独立后台任务继续执行。不安装后台定时器，不向外部服务推送通知，也不自动打开 GUI 或浏览器。
 
 ## 日常使用
 
@@ -44,7 +44,13 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
   --resume <task_id> --json
 ```
 
-后台目录 `.cache/stock-trend/evolution/background/<task_id>/` 保存 `manifest.json`、`status.json`、`worker.log` 和 `result.json`。后台使用冻结的评价日期/交易日列表；超出默认 300 秒预算会写入 `timed_out`，可通过 `--resume` 继续未完成任务。close 同一次运行共享沪深300、板块和个股序列，避免对每条历史记录重复发起相同资源请求。
+后台目录 `.cache/stock-trend/evolution/background/<task_id>/` 保存 `manifest.json`、`status.json`、`checkpoints.json`、`worker.log` 和 `result.json`。后台使用冻结的评价日期/交易日列表；每日消融、核心后处理、成熟评价分别使用 10 秒、300 秒、20 秒预算。超出预算会写入 `timed_out` 或 `partial`，可通过 `--resume` 继续未完成阶段；已完成且输入摘要未变的阶段会复用检查点。close 同一次运行共享沪深300、板块和个股序列，避免对每条历史记录重复发起相同资源请求。
+
+## 六维分数贡献对照
+
+正式推荐使用动量、量价、资金、基本面、板块强度和维科夫结构六维权重。后台每日只在冻结的正式选择范围内做六个预登记单项消融：移除一个维度后按剩余权重归一化，保留正式资格、分桶和买点奖励，仅观察层内 Top 1/3/5 的换位。每日产物位于 `.cache/stock-trend/evolution/factor_ablation/daily/<依据日>/`，周度配对评价位于 `weekly/<ISO周>/`。
+
+状态 `scope_unverified`、`baseline_mismatch`、`input_incomplete` 表示该日只能审计，不能进入收益比较；`continue_accumulating` 表示前向窗口尚未形成足够证据。5 日结果不用于改权重，20 日主窗口需同时具备同日基线和处理组完整沪深300超额收益，60 日仅作确认。该研究不调用发布、回滚或修改 `active_policy.json`。
 
 调用者应在当前对话中醒目呈现 `notifications`；它们不是短信、邮件或其他外部推送。
 

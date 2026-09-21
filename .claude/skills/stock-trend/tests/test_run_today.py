@@ -301,6 +301,69 @@ class TodayTests(unittest.TestCase):
                              "completed")
             self.assertTrue((root / "background" / task["task_id"] / "result.json").exists())
 
+    def test_research_stages_wrap_formal_stages_in_sync_mode(self):
+        from bridge import today_background
+        with patch.object(today_background, "_factor_daily", side_effect=lambda *_:
+                          self.calls.append("factor_daily") or {"status": "completed"}), \
+             patch.object(today_background, "_factor_evaluation", side_effect=lambda *_:
+                          self.calls.append("factor_evaluation") or {"status": "continue_accumulating"}):
+            result = self.run_job()
+        self.assertEqual(self.calls, ["analysis/market_regime.py", "scans/daily_candidates.py",
+                                      "factor_daily", "close:2026-09-09", "weekly:2026-09-09",
+                                      "monitor:2026-09-09", "factor_evaluation"])
+        self.assertEqual(result["workflow"]["factor_ablation_evaluation"]["status"],
+                         "continue_accumulating")
+
+    def test_background_resume_retries_failed_research_and_reuses_core_checkpoints(self):
+        from bridge import today_background
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            manifest = {"as_of": "2026-09-09", "trading_sessions": ["2026-09-09"],
+                        "state_root": str(root), "job_root": str(root / "jobs"),
+                        "budget_seconds": 30, "research_eligible": True}
+            task = today_background.ensure_task(manifest, root=root / "background")
+            package = lambda kind, status: job.evolution._package(kind, {"status": status})
+            calls = []
+
+            def daily(*_):
+                calls.append("daily")
+                if calls.count("daily") == 1:
+                    raise TimeoutError("forced")
+                return {"status": "completed", "path": str(root / "daily.json")}
+
+            with patch.object(today_background, "_factor_daily", side_effect=daily), \
+                 patch.object(today_background, "_factor_evaluation", side_effect=lambda *_:
+                              calls.append("evaluation") or {"status": "continue_accumulating"}), \
+                 patch.object(today_background.evolution, "run_close", side_effect=lambda *_:
+                              calls.append("close") or package("close", "completed")), \
+                 patch.object(today_background.evolution, "run_weekly", side_effect=lambda *_:
+                              calls.append("weekly") or package("weekly", "completed")), \
+                 patch.object(today_background.evolution, "monitoring_snapshot", side_effect=lambda **_:
+                              calls.append("monitor") or package("monitor", "healthy")):
+                first = today_background.run_task(task["task_id"], root=root / "background")
+                second = today_background.run_task(task["task_id"], root=root / "background")
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(first["stages"]["factor_ablation_daily"]["status"], "timed_out")
+            self.assertEqual(second["status"], "completed")
+            self.assertEqual(calls, ["daily", "close", "weekly", "monitor", "evaluation", "daily"])
+            stages = today_background.read_status(task["task_id"], root=root / "background")["stages"]
+            self.assertEqual(stages["factor_ablation_daily"]["status"], "completed")
+            self.assertTrue(stages["close"]["input_sha256"])
+
+    def test_resumed_worker_status_is_not_masked_by_previous_result(self):
+        from bridge import today_background
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            task = today_background.ensure_task({"as_of": "2026-09-09", "job_root": str(root)},
+                                                root=root / "background")
+            directory = root / "background" / task["task_id"]
+            today_background._write(directory / "result.json", {
+                "status": "partial", "finished_at": "2026-09-09T16:00:00+08:00"})
+            today_background.update_status(task["task_id"], root=root / "background",
+                                           status="running", started_at="2026-09-09T16:01:00+08:00")
+            status = today_background.read_status(task["task_id"], root=root / "background")
+            self.assertEqual(status["status"], "running")
+
     def test_shared_series_loader_deduplicates_benchmark_and_sector(self):
         from analysis import recommendation_attribution as attribution
         loader = attribution.SharedSeriesLoader()

@@ -137,6 +137,9 @@ def _launch_background(output, *, now, as_of, sessions, state_root, postprocess_
         "state_root": str(Path(state_root).resolve()),
         "job_root": str((Path(state_root) / "jobs").resolve()),
         "budget_seconds": int(os.environ.get("STOCK_TREND_BACKGROUND_BUDGET", "300")),
+        "factor_daily_budget_seconds": 10,
+        "factor_evaluation_budget_seconds": 20,
+        "research_eligible": _should_use_post_close_final(now),
     }
     task = today_background.ensure_task(manifest, root=postprocess_root)
     if task["status"] in {"completed", "partial", "failed", "timed_out", "interrupted"}:
@@ -174,7 +177,8 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         raise ValueError("invalid_postprocess_mode")
     workflow = {"status": "dry_run" if dry_run else "running",
                 "candidate_args": candidate_args,
-                "steps": ["market", "candidates", "close", "weekly", "monitor"]}
+                "steps": ["market", "candidates", "close", "weekly", "monitor"],
+                "research_steps": ["factor_ablation_daily", "factor_ablation_evaluation"]}
     output = {"workflow": workflow, "notifications": []}
     if dry_run:
         return output
@@ -242,9 +246,17 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
                 postprocess_root=Path(background_root or DEFAULT_BACKGROUND_ROOT),
             )
             workflow["postprocess"] = task
-            for stage in ("close", "weekly", "monitor"):
-                workflow[stage] = {"status": "background", "task_id": task.get("task_id")}
+            for stage in ("factor_ablation_daily", "close", "weekly", "monitor",
+                          "factor_ablation_evaluation"):
+                workflow[stage] = (task.get("stages") or {}).get(stage) or {
+                    "status": "background", "task_id": task.get("task_id")}
         else:
+            from bridge import today_background
+            eligible = _should_use_post_close_final(now) and "recommendations" in output
+            workflow["factor_ablation_daily"] = (
+                today_background.run_research_stage(
+                    lambda: today_background._factor_daily(as_of, state_root), 10)
+                if eligible else {"status": "skipped", "reason": "not_post_close_final"})
             workflow["close"] = _job_stage("close", lambda: evolution.run_close(as_of), job_root)
             if _weekly_completed(job_root, as_of):
                 workflow["weekly"] = {"status": "skipped", "reason": "already_completed_this_week"}
@@ -252,10 +264,18 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
                 workflow["weekly"] = _job_stage("weekly", lambda: evolution.run_weekly(as_of), job_root)
             workflow["monitor"] = _job_stage("monitor", lambda: evolution.monitoring_snapshot(
                 job_root=job_root, expected_trading_days=sessions, as_of=as_of), job_root)
+            workflow["factor_ablation_evaluation"] = (
+                today_background.run_research_stage(
+                    lambda: today_background._factor_evaluation(as_of, state_root), 20)
+                if eligible and workflow["close"]["status"] == "completed"
+                and workflow["monitor"]["status"] in today_background.CORE_DONE else
+                {"status": ("deferred_core_incomplete" if eligible else "skipped"),
+                 "reason": ("core_incomplete" if eligible else "not_post_close_final")})
     else:
         workflow["report"] = {"status": "degraded" if "recommendations" not in output else "ready"}
         workflow["postprocess"] = {"status": "skipped", "reason": "trading_calendar_unavailable"}
-        for stage in ("close", "weekly", "monitor"):
+        for stage in ("factor_ablation_daily", "close", "weekly", "monitor",
+                      "factor_ablation_evaluation"):
             workflow[stage] = {"status": "skipped", "reason": "trading_calendar_unavailable"}
 
     after = load_active_policy()
@@ -299,7 +319,11 @@ def render_summary(result):
               "dry_run": "仅预览",
               "failed": "失败", "skipped": "已跳过", "upstream_gap": "正式数据缺口",
               "insufficient_data": "样本不足", "healthy": "正常",
-              "review_required": "需要复核", "fallback_required": "已触发安全恢复"}
+              "review_required": "需要复核", "fallback_required": "已触发安全恢复",
+              "continue_accumulating": "继续积累样本", "scope_unverified": "选择范围未验证",
+              "baseline_mismatch": "基线重放不一致", "input_incomplete": "输入不完整",
+              "deferred_core_incomplete": "等待核心任务完成", "timed_out": "超时",
+              "background": "后台处理中"}
     lines = []
     for notice in result["notifications"]:
         lines.append(notice["message"])
@@ -311,13 +335,17 @@ def render_summary(result):
     if workflow.get("calendar", {}).get("status") == "historical_only":
         lines.append(f"交易日历仅覆盖至 {workflow['calendar']['coverage_end']}，后处理仅评价已知历史区间。")
     for stage, label in (("market", "市场刷新"), ("candidates", "候选扫描"),
-                         ("close", "历史评价"), ("weekly", "每周研究"), ("monitor", "策略监控")):
+                         ("factor_ablation_daily", "六维分数每日对照"),
+                         ("close", "历史评价"), ("weekly", "每周研究"), ("monitor", "策略监控"),
+                         ("factor_ablation_evaluation", "六维分数成熟样本评价")):
         detail = workflow.get(stage, {})
         status = detail.get("status", "待执行")
         reason = detail.get("reason", "")
         reason = {"already_completed_this_week": "本周已完成", "trading_calendar_unavailable": "交易日历不可用",
                   "market_refresh_failed": "市场刷新失败"}.get(reason, reason)
         lines.append(f"{label}：{labels.get(status, status)} {reason}".rstrip())
+        if detail.get("path"):
+            lines.append(f"  产物：{detail['path']}")
     lines.append(f"可执行 {len(result.get('recommendations', []))}；等待触发 {len(result.get('waiting_trigger', []))}；观察 {len(result.get('observation', []))}")
     lines.append("本报告仅供学习参考，不构成任何投资建议。")
     return "\n".join(lines)

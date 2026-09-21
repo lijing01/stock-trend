@@ -4484,6 +4484,16 @@ def main():
          if item.get("code") in global_scope_codes]
         if global_scope_codes is not None else scored
     )
+    # Freeze the exact stock universe used by the production selector.  A
+    # missing/legacy scope is intentionally distinguishable from an explicit
+    # empty universe so later research cannot infer it from Top-N output.
+    selection_scope = {
+        "mode": "explicit_codes" if global_scope_codes is not None else "full_scan",
+        "codes": sorted({str(item.get("code")) for item in output_population
+                          if item.get("code")}),
+        "source": "global_scope_codes" if global_scope_codes is not None else "scored_population",
+    }
+    selection_scope["codes_sha256"] = content_sha256(selection_scope["codes"])
     candidates = select_candidate_pool(
         output_population, args.top, args.min_score, policy=policy,
         priority_bonuses=active_policy["priority_bonuses"])
@@ -4581,6 +4591,7 @@ def main():
                 "shadow_selected": news_shadow.get("shadow_selected", []) if news_shadow else [],
             },
         },
+        selection_scope=selection_scope,
     )
     research_tracking = save_research_snapshot_safely(research_snapshot)
     tracking["research_snapshot"] = research_tracking
