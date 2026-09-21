@@ -393,42 +393,41 @@ def test_report():
 def test_observation_list_html():
     print("\n--- observation list HTML ---")
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "observation.yaml"
-        path.write_text(
-            "observation_list:\n"
-            "  - code: '001207'\n"
-            "    date: '2026-09-21'\n"
-            "    entry_phase: '<待确认>'\n"
-            "  - code: '60336'\n"
-            "    date: '2026-09-21'\n"
-            "    entry_phase: 未记录\n",
-            encoding="utf-8",
-        )
-        with patch.object(mr, "OBSERVATION_LIST_FILE", path):
-            state = mr.load_observation_list()
+        pool = Path(directory) / "2026-09-21.json"
+        pool.write_text(json.dumps({
+            "schema_version": "candidate-observation-pool/v1", "data_date": "2026-09-21",
+            "observation": [{"code": "001207", "name": "测试<股>", "composite_score": 60,
+                             "quality_adjusted_score": 55, "execution_priority_score": 56,
+                             "wyckoff": {}, "data_quality": {"coverage": 0.8}},
+                            {"code": "60336", "name": "第二只", "composite_score": 60,
+                             "quality_adjusted_score": 55, "execution_priority_score": 56,
+                             "wyckoff": {}, "data_quality": {"coverage": 0.8}}]},
+            ensure_ascii=False), encoding="utf-8")
+        with patch.object(mr, "OBSERVATION_POOL_DIR", Path(directory)):
+            state = mr.load_observation_pool("2026-09-21")
             ready = mr.render_observation_list_html(state)
             pending = mr.render_observation_list_html(pending=True)
             generated = mr._generate_html(
                 {"data_date": "2026-09-21", "generated_at": "2026-09-22 00:00:00",
                  "regime": {}, "components": {}, "top_sectors": [], "bottom_sectors": []},
                 "20260922-000000")
-            test("读取 observation_list", state["status"] == "ready" and len(state["items"]) == 2)
+            test("读取同日候选观察池", state["status"] == "ready" and len(state["items"]) == 2)
             test("区块标题为观察列表", "<h2>观察列表</h2>" in ready)
             test("保留 YAML 顺序", ready.index("001207") < ready.index("60336"))
-            test("HTML 文本转义", "&lt;待确认&gt;" in ready and "<待确认>" not in ready)
+            test("HTML 文本转义", "测试&lt;股&gt;" in ready and "测试<股>" not in ready)
             test("pending 不展示股票", "候选扫描进行中" in pending and "001207" not in pending)
-            test("独立复盘 HTML 读取 YAML", "001207" in generated and "60336" in generated)
+            test("独立复盘 HTML 读取同日候选池", "001207" in generated and "60336" in generated)
 
             html_path = Path(directory) / "daily-review.html"
             original = "<body>before\n" + mr.render_observation_list_html(pending=True) + "\nafter</body>"
             html_path.write_text(original, encoding="utf-8")
-            result = mr.update_observation_list_html(html_path)
+            result = mr.update_observation_list_html(html_path, data_date="2026-09-21")
             updated = html_path.read_text(encoding="utf-8")
             test("原子更新返回完成", result["status"] == "completed")
             test("更新保留报告其他内容", "before" in updated and "after</body>" in updated)
             test("更新后包含列表", "001207" in updated and "60336" in updated)
 
-        missing = mr.load_observation_list(Path(directory) / "missing.yaml")
+        missing = mr.load_observation_pool("2026-09-20", Path(directory) / "missing.json")
         test("缺文件可降级", missing["status"] == "unavailable" and not missing["items"])
 
 # ──────────────── _index_metrics ────────────────

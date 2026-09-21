@@ -24,6 +24,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 CACHE_DIR = Path(os.environ.get("STOCK_TREND_CACHE_DIR", str(PROJECT_ROOT / ".cache" / "stock-trend")))
 REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
+OBSERVATION_POOL_DIR = CACHE_DIR / "observation_pools"
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -3837,9 +3838,11 @@ def _html_candidate_rows(items, buy_level_display="none"):
         quality = item.get("data_quality", {})
         news = item.get("news_analysis") or {}
         detail = _candidate_diagnostic_text(item)
+        name = escape(str(item.get("name") or "—"))
+        code = escape(str(item.get("code") or "—"))
         rows.append(
-            f"<tr{row_class}><td>{index}</td><td><strong>{item['name']}</strong><br>"
-            f"<span style='color:#86868b;font-size:12px'>{item['code']}</span>"
+            f"<tr{row_class}><td>{index}</td><td><strong>{name}</strong><br>"
+            f"<span style='color:#86868b;font-size:12px'>{code}</span>"
             f"{buy_level_badge}</td>"
             f"<td>{_sector_html(item)}</td>"
             f"<td>{_minor_phase_html(wyckoff)}</td>"
@@ -3875,6 +3878,51 @@ def _html_candidate_section(title, items, rows, empty_text):
         if count
         else f"<p class='empty-state'>{escape(empty_text)}</p>"
     )
+
+
+def render_observation_pool_html(items, *, source_date=None, source_report=None):
+    """Render the candidate observation pool for embedding in daily review."""
+    rows = _html_candidate_rows(items, buy_level_display="observation")
+    intro = (
+        "<div class='observation-buy-level-note' role='note'>"
+        "<strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>"
+        "市场环境、数据质量、板块持续性和维科夫筛选仍是硬门槛；"
+        "只有“今日可执行”区域具备推荐资格。</div>"
+        "<div class='buy-level-legend observation-buy-level-legend' "
+        "aria-label='观察池潜在维科夫买点分级图例'>"
+        "<span class='level-1'>潜在一级 · Spring/Test</span>"
+        "<span class='level-2'>潜在二级 · SOS 后 LPS</span>"
+        "<span class='level-3'>潜在三级 · JAC/BU 后再确认</span></div>"
+        if items else ""
+    )
+    provenance = f"候选依据日：{escape(str(source_date or '未记录'))}。"
+    if source_report:
+        provenance += (" 来源：<a href='" + escape(str(source_report), quote=True)
+                       + "'>候选报告</a>。")
+    contents = _html_candidate_table(rows) if items else (
+        "<p class='empty-state'>当前没有通过数据与板块观察门槛的标的。</p>")
+    return ("<p class='dt candidate-observation-provenance'>" + provenance + "</p>"
+            + intro + contents)
+
+
+def save_observation_pool_artifact(output, *, source_report=None):
+    """Freeze the observation bucket for the matching daily-review update."""
+    regime = output.get("market_regime") or {}
+    source_date = regime.get("data_date") or datetime.now().date().isoformat()
+    payload = {
+        "schema_version": "candidate-observation-pool/v1",
+        "data_date": source_date,
+        "generated_at": (output.get("meta") or {}).get("generated_at"),
+        "source_report": str(source_report) if source_report else None,
+        "observation": output.get("observation") or [],
+    }
+    OBSERVATION_POOL_DIR.mkdir(parents=True, exist_ok=True)
+    path = OBSERVATION_POOL_DIR / f"{source_date}.json"
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(_normalize_for_json(payload), ensure_ascii=False,
+                                    indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+    return str(path.resolve())
     return (
         "<section class='candidate-section'><h2>"
         f"{escape(title)} <span class='section-count'>{count}</span>"
@@ -4661,6 +4709,14 @@ def main():
                 print(f"HTML: {html_path}", file=sys.stderr)
             except Exception as e:
                 print(f"⚠️ HTML 生成失败: {e}", file=sys.stderr)
+        try:
+            artifact = save_observation_pool_artifact(
+                out, source_report=html_path if args.html and 'html_path' in locals() else None)
+            out["meta"]["observation_pool_artifact"] = artifact
+            print(f"观察池副产物: {artifact}", file=sys.stderr)
+        except Exception as e:
+            out["meta"]["observation_pool_artifact_error"] = type(e).__name__
+            print(f"⚠️ 观察池副产物保存失败: {e}", file=sys.stderr)
         _emit_performance_summary(performance)
         print(json.dumps(_normalize_for_json(out),
                          ensure_ascii=False, indent=2))
@@ -4699,6 +4755,15 @@ def main():
             print(f"HTML: {html_path}")
         except Exception as e:
             print(f"⚠️ HTML 生成失败: {e}")
+
+    try:
+        artifact = save_observation_pool_artifact(
+            {"meta": {"generated_at": ts}, "market_regime": regime,
+             "observation": report_buckets.get("observation", [])},
+            source_report=html_path if args.html and 'html_path' in locals() else None)
+        print(f"观察池副产物: {artifact}")
+    except Exception as e:
+        print(f"⚠️ 观察池副产物保存失败: {e}")
 
     _emit_performance_summary(performance)
     print(f"Done in {elapsed:.1f}s")

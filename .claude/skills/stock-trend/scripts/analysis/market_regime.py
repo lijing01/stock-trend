@@ -26,6 +26,7 @@ import argparse
 import html as html_lib
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -46,6 +47,7 @@ OBSERVATION_LIST_FILE = Path(os.environ.get(
 ))
 OBSERVATION_BLOCK_START = "<!-- OBSERVATION_LIST:START -->"
 OBSERVATION_BLOCK_END = "<!-- OBSERVATION_LIST:END -->"
+OBSERVATION_POOL_DIR = CACHE_DIR / "observation_pools"
 HISTORY_MAX_DAYS = 30
 MIN_AMOUNT_HISTORY_DAYS = 5
 RETIRED_CONTEXT_KEYS = (
@@ -744,33 +746,35 @@ def load_observation_list(path=None) -> dict:
     return {"status": "ready", "items": items, "path": str(observation_path)}
 
 
+def load_observation_pool(data_date, artifact_path=None) -> dict:
+    """Load only a same-date candidate observation pool; never fall back by date."""
+    path = Path(artifact_path) if artifact_path else OBSERVATION_POOL_DIR / f"{data_date}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "unavailable", "reason": "同日候选观察池尚未生成", "items": []}
+    except (OSError, ValueError, TypeError):
+        return {"status": "unavailable", "reason": "同日候选观察池文件损坏或不可读", "items": []}
+    if (not isinstance(payload, dict) or payload.get("schema_version") != "candidate-observation-pool/v1"
+            or payload.get("data_date") != data_date or not isinstance(payload.get("observation"), list)):
+        return {"status": "unavailable", "reason": "候选观察池与复盘依据日不匹配", "items": []}
+    return {"status": "ready", "items": payload["observation"], "data_date": data_date,
+            "source_report": payload.get("source_report"), "path": str(path)}
+
+
 def render_observation_list_html(state: dict | None = None, *, pending: bool = False) -> str:
     """Render the replaceable observation-list section for a daily-review HTML."""
     state = state or {"status": "ready", "items": []}
-    rows = []
     if pending:
         body = '<p class="dt" data-observation-status="pending">候选扫描进行中，完成后将更新观察列表。</p>'
     elif state.get("status") != "ready":
         reason = html_lib.escape(str(state.get("reason") or "未知原因"), quote=True)
         body = f'<p class="dt" data-observation-status="unavailable">观察列表不可用：{reason}</p>'
-    elif not state.get("items"):
-        body = '<p class="dt" data-observation-status="empty">暂无观察对象。</p>'
     else:
-        for item in state.get("items", []):
-            error = item.get("error")
-            note = (f' <span class="dt">（{html_lib.escape(str(error), quote=True)}）</span>'
-                    if error else "")
-            rows.append(
-                "<tr>"
-                f"<td>{html_lib.escape(str(item.get('code', '未记录')), quote=True)}{note}</td>"
-                f"<td>{html_lib.escape(str(item.get('date', '未记录')), quote=True)}</td>"
-                f"<td>{html_lib.escape(str(item.get('entry_phase', '未记录')), quote=True)}</td>"
-                "</tr>"
-            )
-        body = (
-            "<table><thead><tr><th>代码</th><th>加入日期</th><th>加入时阶段</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table>"
-        )
+        from scans.daily_candidates import render_observation_pool_html
+        body = render_observation_pool_html(
+            state.get("items", []), source_date=state.get("data_date"),
+            source_report=state.get("source_report"))
     return (
         f"{OBSERVATION_BLOCK_START}\n"
         '<section id="observation-list">\n'
@@ -801,7 +805,8 @@ def _atomic_write_text(path: Path, content: str) -> None:
             pass
 
 
-def update_observation_list_html(html_path, *, pending: bool = False) -> dict:
+def update_observation_list_html(html_path, *, pending: bool = False, data_date=None,
+                                 artifact_path=None) -> dict:
     """Update only the marked observation block in an existing daily-review HTML."""
     path = Path(html_path)
     original = path.read_text(encoding="utf-8")
@@ -811,16 +816,40 @@ def update_observation_list_html(html_path, *, pending: bool = False) -> dict:
     if start < 0 or end < 0:
         raise ValueError("observation_block_missing")
     end += len(end_marker)
-    state = load_observation_list()
+    state = (load_observation_pool(data_date, artifact_path) if not pending else None)
     replacement = render_observation_list_html(state, pending=pending)
     updated = original[:start] + replacement + original[end:]
     _atomic_write_text(path, updated)
     return {
         "status": "pending" if pending else "completed",
         "html_path": str(path.resolve()),
-        "observation_status": state.get("status"),
-        "count": len(state.get("items", [])),
+        "observation_status": state.get("status") if state else "pending",
+        "count": len(state.get("items", [])) if state else 0,
     }
+
+
+def backfill_observation_pool_from_candidate_html(html_path, candidate_html_path) -> dict:
+    """One-off historical migration retaining the candidate page's news columns."""
+    source = Path(candidate_html_path).read_text(encoding="utf-8")
+    match = re.search(
+        r"(<div class='observation-buy-level-note'.*?<section class='candidate-section'><h2>)"
+        r"观察池 (.*?</section>)", source, flags=re.DOTALL)
+    if not match:
+        raise ValueError("candidate_observation_section_missing")
+    fragment = match.group(1) + "观察列表 " + match.group(2)
+    if fragment.count("<tr") - 1 != 26 or fragment.count("新闻净调整 / 影子分") != 1:
+        raise ValueError("candidate_observation_section_invalid")
+    path = Path(html_path)
+    original = path.read_text(encoding="utf-8")
+    start = original.find(OBSERVATION_BLOCK_START)
+    end = original.find(OBSERVATION_BLOCK_END, start)
+    if start < 0 or end < 0:
+        raise ValueError("observation_block_missing")
+    replacement = (f"{OBSERVATION_BLOCK_START}\n<section id=\"observation-list\">\n"
+                   f"{fragment}\n</section>\n{OBSERVATION_BLOCK_END}")
+    _atomic_write_text(path, original[:start] + replacement +
+                       original[end + len(OBSERVATION_BLOCK_END):])
+    return {"status": "completed", "html_path": str(path.resolve()), "count": 26}
 
 DISCLAIMER = "本报告仅供学习参考,不构成任何投资建议。股市有风险,投资需谨慎。"
 
@@ -1193,7 +1222,8 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready")
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
         for s in ctx.get("bottom_sectors", [])[:3])
     observation_pending = observation_status == "pending"
-    observation_state = None if observation_pending else load_observation_list()
+    observation_state = (None if observation_pending else
+                         load_observation_pool(ctx.get("data_date") or ""))
     observation_html = render_observation_list_html(
         observation_state, pending=observation_pending)
     return f"""<!DOCTYPE html>
@@ -1210,6 +1240,10 @@ h1{{font-size:24px}} h2{{font-size:18px;margin:22px 0 10px;padding-bottom:6px;bo
 table{{width:100%;border-collapse:collapse;margin:12px 0;border-radius:8px;overflow:hidden}}
 th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:14px}}
 th{{background:#1d4ed8;color:#fff;font-size:13px}}
+.candidate-table-wrap{{overflow-x:auto;margin:12px 0}}.candidate-table{{table-layout:fixed;min-width:1080px}}
+.candidate-table th:nth-child(10),.candidate-table td:nth-child(10){{width:19%}}
+.candidate-table td.candidate-diagnostic{{min-width:220px;vertical-align:top;overflow-wrap:break-word;word-break:normal}}
+.buy-level-legend{{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}}.buy-level-legend span,.wyckoff-buy-level-badge{{padding:2px 6px;border-radius:5px;font-size:11px}}.buy-level-legend .level-1{{background:#fffdf4}}.buy-level-legend .level-2{{background:#f3fcf6}}.buy-level-legend .level-3{{background:#f4f8ff}}.observation-buy-level-note{{margin:8px 0;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;color:#4b5563;font-size:12px}}.wyckoff-observation-buy-level-1>td{{background:#fffdf4}}.wyckoff-observation-buy-level-2>td{{background:#f3fcf6}}.wyckoff-observation-buy-level-3>td{{background:#f4f8ff}}.wyckoff-buy-level-badge.observation{{background:transparent;border:1px dashed #9ca3af;color:#6b7280}}.empty-state{{color:#86868b}}
 ul{{padding-left:20px;line-height:1.8}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:28px}}
 </style></head><body><div class="w">

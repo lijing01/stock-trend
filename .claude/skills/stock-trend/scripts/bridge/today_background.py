@@ -158,13 +158,15 @@ def _review_html_root(root=DEFAULT_ROOT):
     return Path(root) / REVIEW_HTML_ROOT_NAME
 
 
-def ensure_review_html_task(html_path, root=DEFAULT_ROOT):
+def ensure_review_html_task(html_path, *, data_date=None, artifact_path=None, root=DEFAULT_ROOT):
     """Create an independent task for replacing one daily-review HTML block."""
     path = str(Path(html_path).resolve())
     manifest = {
         "schema_version": "daily-review-html-background/v1",
         "kind": "daily-review-html",
         "html_path": path,
+        "data_date": data_date,
+        "artifact_path": str(artifact_path) if artifact_path else None,
     }
     return ensure_task(manifest, root=_review_html_root(root))
 
@@ -216,7 +218,9 @@ def run_review_html_task(task_id, root=DEFAULT_ROOT):
                   pid=os.getpid())
     try:
         from analysis import market_regime
-        result = market_regime.update_observation_list_html(manifest["html_path"])
+        result = market_regime.update_observation_list_html(
+            manifest["html_path"], data_date=manifest.get("data_date"),
+            artifact_path=manifest.get("artifact_path"))
         result.update({"task_id": task_id, "finished_at": _now()})
         _write(directory / "result.json", result)
         update_status(task_id, root=review_root, status="completed", stage="done",

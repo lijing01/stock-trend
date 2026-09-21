@@ -156,12 +156,14 @@ def _launch_background(output, *, now, as_of, sessions, state_root, postprocess_
         return {**task, "status": "launch_failed", "reason": type(exc).__name__}
 
 
-def _launch_review_html_update(html_path, *, background_root=None):
+def _launch_review_html_update(html_path, *, data_date=None, artifact_path=None,
+                               background_root=None):
     """Queue the optional observation-list replacement without blocking candidates."""
     from bridge import today_background
 
     root = Path(background_root or DEFAULT_BACKGROUND_ROOT)
-    task = today_background.ensure_review_html_task(html_path, root=root)
+    task = today_background.ensure_review_html_task(
+        html_path, data_date=data_date, artifact_path=artifact_path, root=root)
     if task.get("status") in {"completed", "failed", "timed_out", "interrupted", "launch_failed"}:
         return task
     if task.get("status") == "running":
@@ -231,10 +233,12 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         output["notifications"].append(notice)
 
     daily_review_path = None
+    daily_review_date = None
     try:
         market = _run_script("analysis/market_regime.py", ["--observation-status", "pending"])
         market_paths = market.get("report_paths") or {}
         daily_review_path = market_paths.get("html")
+        daily_review_date = (market.get("meta") or {}).get("data_date")
         workflow["market"] = {"status": "completed", "report_paths": market_paths}
         if daily_review_path:
             output["report_paths"] = {"daily_review_html": daily_review_path}
@@ -258,8 +262,10 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
 
     if daily_review_path:
         try:
+            artifact = ((output.get("meta") or {}).get("observation_pool_artifact"))
             workflow["review_html"] = _launch_review_html_update(
                 daily_review_path,
+                data_date=daily_review_date, artifact_path=artifact,
                 background_root=Path(background_root) if background_root else state_root / "background")
         except Exception as exc:
             # This optional presentation update must never change candidate

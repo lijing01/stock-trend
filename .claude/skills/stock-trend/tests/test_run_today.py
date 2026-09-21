@@ -304,6 +304,7 @@ class TodayTests(unittest.TestCase):
     def test_daily_review_path_is_emitted_before_review_update(self):
         daily_path = self.root / "daily-review.html"
         candidate_path = self.root / "candidates.html"
+        artifact_path = self.root / "observation-pool.json"
         daily_path.write_text("daily", encoding="utf-8")
         candidate_path.write_text("candidate", encoding="utf-8")
         calls = []
@@ -318,18 +319,21 @@ class TodayTests(unittest.TestCase):
                 }
             return {
                 "recommendations": [{"code": "600000"}],
+                "meta": {"observation_pool_artifact": str(artifact_path)},
                 "report_paths": {"html": str(candidate_path)},
             }
 
         queued = []
         with patch.object(job, "_run_script", side_effect=run_script), \
                 patch.object(job, "_launch_review_html_update",
-                             side_effect=lambda path, **_: queued.append(path)
+                             side_effect=lambda path, **kwargs: queued.append((path, kwargs))
                              or {"task_id": "review-1", "status": "running"}):
             result = self.run_job()
 
         self.assertEqual(calls, ["analysis/market_regime.py", "scans/daily_candidates.py"])
-        self.assertEqual(queued, [str(daily_path)])
+        self.assertEqual(queued, [(str(daily_path), {
+            "data_date": "2026-09-09", "artifact_path": str(artifact_path),
+            "background_root": self.root / "background"})])
         self.assertEqual(result["report_paths"]["daily_review_html"], str(daily_path))
         self.assertEqual(result["report_paths"]["html"], str(candidate_path))
         self.assertEqual(result["workflow"]["review_html"]["task_id"], "review-1")
@@ -360,23 +364,23 @@ class TodayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
             html_path = root / "daily-review.html"
-            yaml_path = root / "observation.yaml"
             html_path.write_text(
                 "before\n" + market_regime.render_observation_list_html(pending=True) + "\nafter",
                 encoding="utf-8",
             )
-            yaml_path.write_text(
-                "observation_list:\n"
-                "  - code: '001207'\n"
-                "    date: '2026-09-21'\n"
-                "    entry_phase: 未记录\n",
-                encoding="utf-8",
-            )
-            with patch.object(market_regime, "OBSERVATION_LIST_FILE", yaml_path):
-                task = today_background.ensure_review_html_task(html_path, root=root / "background")
-                result = today_background.run_review_html_task(task["task_id"], root=root / "background")
-                status = today_background.read_review_html_status(
-                    task["task_id"], root=root / "background")
+            artifact = root / "observation-pool.json"
+            artifact.write_text(json.dumps({
+                "schema_version": "candidate-observation-pool/v1", "data_date": "2026-09-21",
+                "observation": [{"code": "001207", "name": "测试股", "composite_score": 60,
+                                 "quality_adjusted_score": 55, "execution_priority_score": 56,
+                                 "wyckoff": {}, "data_quality": {"coverage": .8}}]},
+                ensure_ascii=False), encoding="utf-8")
+            task = today_background.ensure_review_html_task(
+                html_path, data_date="2026-09-21", artifact_path=artifact,
+                root=root / "background")
+            result = today_background.run_review_html_task(task["task_id"], root=root / "background")
+            status = today_background.read_review_html_status(
+                task["task_id"], root=root / "background")
             updated = html_path.read_text(encoding="utf-8")
             self.assertEqual(result["status"], "completed")
             self.assertEqual(status["status"], "completed")
