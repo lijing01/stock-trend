@@ -23,7 +23,6 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import os
 import statistics
@@ -37,11 +36,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
 CACHE_DIR = Path(os.environ.get("STOCK_TREND_CACHE_DIR", str(PROJECT_ROOT / ".cache" / "stock-trend")))
 REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
-PORTFOLIO_YAML = SCRIPT_DIR.parent / "data" / "portfolio.yaml"
 CONTEXT_FILE = CACHE_DIR / "market_regime.json"
 HISTORY_FILE = CACHE_DIR / "market_regime_history.json"
 HISTORY_MAX_DAYS = 30
 MIN_AMOUNT_HISTORY_DAYS = 5
+RETIRED_CONTEXT_KEYS = (
+    "holdings", "portfolio_snapshot", "holdings_refreshed_at",
+    "holdings_sync_note", "plan",
+)
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -654,139 +656,14 @@ def save_context(ctx: dict) -> None:
 def load_context() -> dict | None:
     try:
         if CONTEXT_FILE.exists():
-            return json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
+            ctx = json.loads(CONTEXT_FILE.read_text(encoding="utf-8"))
+            if isinstance(ctx, dict):
+                for key in RETIRED_CONTEXT_KEYS:
+                    ctx.pop(key, None)
+            return ctx
     except Exception:
         pass
     return None
-
-
-# ──────────────── 持仓轻量分析 ────────────────
-
-
-def load_portfolio() -> list[dict]:
-    """Read active holdings from portfolio.yaml."""
-    try:
-        import yaml
-        data = yaml.safe_load(PORTFOLIO_YAML.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return []
-    holdings = data.get("holdings", []) if isinstance(data, dict) else []
-    return [h for h in holdings if h.get("status") == "active"]
-
-
-def portfolio_snapshot_meta(holdings: list[dict] | None = None) -> dict:
-    """Return a versioned description of the portfolio used by a review.
-
-    Market context can be safely reused on non-trading days, but the active
-    holdings list can change at any time.  Persist both a file fingerprint and
-    the active codes so cached reviews can detect and repair that divergence.
-    """
-    active = holdings if holdings is not None else load_portfolio()
-    meta = {
-        "loaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "active_codes": [str(h.get("code", "")) for h in active],
-        "active_count": len(active),
-    }
-    try:
-        raw = PORTFOLIO_YAML.read_bytes()
-        meta["source_mtime_ns"] = PORTFOLIO_YAML.stat().st_mtime_ns
-        meta["content_sha256"] = hashlib.sha256(raw).hexdigest()
-    except OSError:
-        meta["source_mtime_ns"] = None
-        meta["content_sha256"] = None
-    return meta
-
-
-def refresh_cached_holdings(ctx: dict) -> dict:
-    """Reconcile a cached market review with the current active holdings.
-
-    This deliberately does not fetch new K-lines: ``--no-refresh`` remains a
-    market-data cache path.  Existing technical snapshots are retained for
-    unchanged codes; new holdings are shown as pending the next live review.
-    """
-    active = load_portfolio()
-    snapshot = portfolio_snapshot_meta(active)
-    cached = {str(h.get("code", "")): h for h in ctx.get("holdings", [])}
-    refreshed = []
-    for holding in active[:8]:
-        code = str(holding.get("code", ""))
-        previous = cached.get(code)
-        if previous:
-            item = dict(previous)
-            # Portfolio fields are authoritative even when its technical data
-            # comes from the cached market snapshot.
-            item["name"] = holding.get("name") or item.get("name") or code
-            item["stop_loss"] = holding.get("stop_loss")
-            item["targets"] = holding.get("targets") or []
-        else:
-            item = {
-                "code": code,
-                "name": holding.get("name") or code,
-                "close": None,
-                "pct_chg": None,
-                "ma5": None,
-                "ma20": None,
-                "above_ma5": None,
-                "above_ma20": None,
-                "stop_loss": holding.get("stop_loss"),
-                "targets": holding.get("targets") or [],
-                "ok": False,
-            }
-        refreshed.append(item)
-
-    previous_meta = ctx.get("portfolio_snapshot") or {}
-    old_codes = previous_meta.get("active_codes") or list(cached)
-    changed = (
-        old_codes != snapshot["active_codes"]
-        or previous_meta.get("content_sha256") != snapshot.get("content_sha256")
-    )
-    ctx["holdings"] = refreshed
-    ctx["portfolio_snapshot"] = snapshot
-    ctx["holdings_refreshed_at"] = snapshot["loaded_at"]
-    if changed:
-        ctx["holdings_sync_note"] = (
-            "持仓已按当前持仓记录刷新；市场与技术数据仍沿用缓存快照，"
-            "新增持仓的技术数据待下次实时复盘补齐。"
-        )
-    else:
-        ctx.pop("holdings_sync_note", None)
-    ctx["plan"] = build_plan(ctx.get("regime", {}), refreshed)
-    return ctx
-
-
-def analyze_holding(holding: dict) -> dict:
-    """Lightweight holding check: 现价 vs MA5/MA20 + 今日涨跌 + 相对止损/目标."""
-    code = str(holding.get("code", ""))
-    suffix = holding.get("ts_code", "")
-    if not suffix and code:
-        suffix = code + ".SH" if code.startswith("6") else code + ".SZ"
-    records = fetch_index_kline(suffix, lmt=40) if suffix else []
-    result = {
-        "code": code,
-        "name": holding.get("name") or code,
-        "close": None,
-        "pct_chg": None,
-        "ma5": None,
-        "ma20": None,
-        "above_ma5": None,
-        "above_ma20": None,
-        "stop_loss": holding.get("stop_loss"),
-        "targets": holding.get("targets") or [],
-        "ok": False,
-    }
-    if not records:
-        return result
-    metrics = _index_metrics(records)
-    if not metrics.get("ok"):
-        return result
-    result["close"] = metrics["close"]
-    result["pct_chg"] = metrics.get("pct_chg")
-    result["ma5"] = metrics["ma5"]
-    result["ma20"] = metrics["ma20"]
-    result["above_ma5"] = metrics["close"] > metrics["ma5"]
-    result["above_ma20"] = metrics["above_ma20"]
-    result["ok"] = True
-    return result
 
 
 # ──────────────── 报告 ────────────────
@@ -863,77 +740,9 @@ def generate_report(ctx: dict) -> str:
         lines.append("- —")
     lines.append("")
 
-    # ③ 持仓
-    lines.append("### ③ 持仓")
-    lines.append("")
-    portfolio_meta = ctx.get("portfolio_snapshot") or {}
-    if portfolio_meta:
-        lines.append(
-            f"▸ 持仓快照: {portfolio_meta.get('loaded_at', '—')} | "
-            f"活跃持仓 {portfolio_meta.get('active_count', '—')} 笔")
-    if ctx.get("holdings_sync_note"):
-        lines.append(f"▸ ⚠️ {ctx['holdings_sync_note']}")
-    if portfolio_meta or ctx.get("holdings_sync_note"):
-        lines.append("")
-    holdings = ctx.get("holdings", [])
-    if holdings:
-        lines.append("| 代码 | 名称 | 现价 | 今日% | MA5 | MA20 | 相对止损 |")
-        lines.append("|------|------|------|-------|-----|------|---------|")
-        for h in holdings:
-            if not h.get("ok"):
-                lines.append(f"| {h['code']} | {h['name']} | — | — | — | — | 数据不可用 |")
-                continue
-            rel_sl = ""
-            if h.get("stop_loss"):
-                rel_sl = f"{(_safe_float(h['close']) / _safe_float(h['stop_loss']) - 1) * 100:+.1f}%"
-            lines.append(
-                f"| {h['code']} | {h['name']} | {h['close']:.3f} | "
-                f"{_safe_float(h['pct_chg']):+.2f}% | {h['ma5']:.3f} | {h['ma20']:.3f} | "
-                f"{rel_sl or '—'} |")
-    else:
-        lines.append("- 无活跃持仓")
-    lines.append("")
-
-    # ④ 明日计划
-    lines.append("### ④ 明日计划 (if-then)")
-    lines.append("")
-    for p in ctx.get("plan", []):
-        lines.append(f"- {p}")
-    lines.append("")
-
     lines.append("---")
     lines.append(f"> *数据来源: 东方财富/腾讯 + AKShare | {DISCLAIMER}*")
     return "\n".join(lines)
-
-
-def build_plan(regime: dict, holdings: list[dict]) -> list[str]:
-    plan = []
-    label = regime.get("label", "")
-    if label == "强势":
-        plan.append("如果 市场评分≥80维持强势 且 个股评分≥90 → 可建仓/加仓强势板块龙头")
-        plan.append("如果 市场转弱跌破60 → 停止加仓,收紧止损")
-    elif label == "中性":
-        plan.append("如果 市场维持中性 → 轻仓,只做高分标的,不追高")
-        plan.append("如果 市场评分站上80 → 可加大仓位")
-        plan.append("如果 市场评分跌破60 → 降仓防守")
-    else:
-        plan.append("如果 市场弱势 → 降仓/空仓,不找牛股,等大盘站上MA20")
-        plan.append("如果 大盘放量站回MA20 → 再恢复选股")
-    for h in holdings:
-        if not h.get("ok"):
-            continue
-        name = h["name"]
-        if h.get("stop_loss") and _safe_float(h["close"]) <= _safe_float(h["stop_loss"]):
-            plan.append(f"如果 {name} 跌破止损位 {h['stop_loss']} → 无条件离场")
-        elif not h.get("above_ma20"):
-            plan.append(f"如果 {name} 失守MA20 {h['ma20']:.3f} → 减仓/离场")
-        elif h.get("above_ma5"):
-            plan.append(f"如果 {name} 站稳MA5且MA20向上 → 继续持有")
-        else:
-            plan.append(f"如果 {name} 跌破MA5但不破MA20 → 持有观察,破MA20离场")
-    if not plan:
-        plan.append("如果 出现明确买点(放量突破/LPS) → 按评分系统建仓")
-    return plan
 
 
 # ──────────────── 主流程 ────────────────
@@ -1072,12 +881,6 @@ def collect_context(now=None) -> dict:
     top_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[:5]]
     bottom_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[-5:]]
 
-    # 持仓轻量分析
-    holdings_raw = load_portfolio()
-    holdings = []
-    for h in holdings_raw[:8]:
-        holdings.append(analyze_holding(h))
-
     ctx = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_date": data_date,
@@ -1118,10 +921,6 @@ def collect_context(now=None) -> dict:
         "index_data_quality": index_diagnostics,
         "top_sectors": top_sectors,
         "bottom_sectors": bottom_sectors,
-        "holdings": holdings,
-        "portfolio_snapshot": portfolio_snapshot_meta(holdings_raw),
-        "holdings_refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "plan": build_plan(regime, holdings),
     }
     from analysis.market_explanation import build_market_explanation
     ctx["market_explanation"] = build_market_explanation(
@@ -1147,11 +946,6 @@ def build_agent_output(ctx: dict) -> dict:
         "zt": ctx["zt"],
         "top_sectors": ctx["top_sectors"],
         "bottom_sectors": ctx["bottom_sectors"],
-        "holdings": ctx["holdings"],
-        "portfolio_snapshot": ctx.get("portfolio_snapshot", {}),
-        "holdings_refreshed_at": ctx.get("holdings_refreshed_at"),
-        "holdings_sync_note": ctx.get("holdings_sync_note", ""),
-        "plan": ctx["plan"],
     }
 
 
@@ -1173,15 +967,13 @@ def main():
         if not ctx:
             print("⚠️ 无今日缓存(market_regime.json),先不带 --no-refresh 跑一次")
             return
-        # 市场数据沿用缓存，但持仓状态必须以当前组合为准。
-        refresh_cached_holdings(ctx)
         save_context(ctx)
     else:
         print("[1/5] 拉取指数K线 + 成交额...")
         print("[2/5] 拉取行业板块排行...")
         print("[3/5] 拉取涨停情绪...")
         print("[4/5] 拉取资金(全市场主力净流入)...")
-        print("[5/5] 计算评分 + 持仓分析...")
+        print("[5/5] 计算市场评分...")
         ctx = collect_context()
         # 持久化: 盘中快照不写 history(避免 partial 污染基线),但 context 仍写
         # (candidates 盘中需要当日 regime 分档)
@@ -1244,18 +1036,6 @@ def _generate_html(ctx: dict, now_ts: str) -> str:
     bottom = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
         for s in ctx.get("bottom_sectors", [])[:3])
-    holdings_rows = ""
-    for h in ctx.get("holdings", [])[:8]:
-        if not h.get("ok"):
-            holdings_rows += f"<tr><td>{h['code']}</td><td>{h['name']}</td><td colspan='5'>数据不可用</td></tr>"
-            continue
-        rel_sl = f"{(_safe_float(h['close'])/_safe_float(h['stop_loss'])-1)*100:+.1f}%" if h.get("stop_loss") else "—"
-        holdings_rows += (
-            f"<tr><td>{h['code']}</td><td>{h['name']}</td>"
-            f"<td>{h['close']:.3f}</td><td>{_safe_float(h['pct_chg']):+.2f}%</td>"
-            f"<td>{h['ma5']:.3f}</td><td>{h['ma20']:.3f}</td><td>{rel_sl}</td></tr>")
-    plan = "".join(f"<li>{p}</li>" for p in ctx.get("plan", []))
-
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1289,14 +1069,6 @@ ul{{padding-left:20px;line-height:1.8}}
 <h2>② 板块</h2>
 <p><strong>最强前3:</strong></p><ul>{top or '<li>—</li>'}</ul>
 <p><strong>最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
-
-<h2>③ 持仓</h2>
-<table><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>今日%</th><th>MA5</th><th>MA20</th><th>相对止损</th></tr></thead><tbody>
-{holdings_rows or '<tr><td colspan="7">无活跃持仓</td></tr>'}
-</tbody></table>
-
-<h2>④ 明日计划</h2>
-<ul>{plan or '<li>—</li>'}</ul>
 
 <footer><p class="disc">数据来源: 东方财富 + AKShare | {DISCLAIMER}</p></footer>
 </div></body></html>"""

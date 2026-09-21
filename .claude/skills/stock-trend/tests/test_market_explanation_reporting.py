@@ -159,14 +159,15 @@ class TestMarketExplanationReporting(unittest.TestCase):
         ctx["market_explanation"] = explanation
         ctx.update({"stale_note": "", "intraday_note": "", "amount_yi": 19460,
                     "zt": {"count": 93, "streak_count": 13},
-                    "top_sectors": [], "bottom_sectors": [],
-                    "holdings": [], "plan": []})
+                    "top_sectors": [], "bottom_sectors": []})
 
         markdown = mr.generate_report(ctx)
         html = mr._generate_html(ctx, "20260907-150432")
         self.assertIn("市场环境解释", markdown)
         self.assertIn("53.4", html)
         self.assertIn("regime_data_partial", markdown)
+        self.assertNotIn("③ 持仓", markdown)
+        self.assertNotIn("④ 明日计划", markdown)
 
 
 if __name__ == "__main__":

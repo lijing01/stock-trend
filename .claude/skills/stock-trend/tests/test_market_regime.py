@@ -8,8 +8,7 @@ Tests for analysis/market_regime.py covering:
   - score_zt_emotion: 历史均值 + 连板加成 + 无历史
   - score_capital: 主力资金 + 缺失
   - compute_regime: 加权/钳制/gate 三档
-  - build_plan: 三档 if-then + 持仓信号
-  - generate_report: 五段渲染
+  - generate_report: 市场环境与板块渲染
   - _index_metrics: MA 计算
   - 持久化: history prune
 
@@ -189,7 +188,7 @@ def test_index_fallback_and_amount():
         "generated_at": "2026-08-07 16:00:00",
         "data_date": "2026-08-07",
         "regime": {}, "components": {}, "amount_yi": 26.0, "zt": {},
-        "top_sectors": [], "bottom_sectors": [], "holdings": [], "plan": [],
+        "top_sectors": [], "bottom_sectors": [],
         "index_data_quality": {"000001.SH": {"source": "tencent"}},
     })
     test("Agent JSON 暴露指数数据质量",
@@ -227,8 +226,7 @@ def test_collect_context_rejects_stale_turnover_leg():
             patch.object(mr, "fetch_sector_rankings", return_value=[]), \
             patch.object(mr, "fetch_zt_stats", return_value={"count": 0}), \
             patch.object(mr, "fetch_market_activity", return_value=None), \
-            patch.object(mr, "load_history", return_value={}), \
-            patch.object(mr, "load_portfolio", return_value=[]):
+            patch.object(mr, "load_history", return_value={}):
         ctx = mr.collect_context()
 
     test("单边成交额过期不回退复盘日期",
@@ -354,29 +352,6 @@ def test_regime():
          str(missing_result))
 
 
-# ──────────────── build_plan ────────────────
-
-
-def test_plan():
-    print("\n--- build_plan ---")
-    p = mr.build_plan({"label": "强势"}, [])
-    test("强势有计划", len(p) >= 2, f"n={len(p)}")
-    p = mr.build_plan({"label": "弱势"}, [])
-    test("弱势含降仓", any("空仓" in x or "降仓" in x for x in p), "|".join(p))
-
-    # 持仓信号: 破止损 → 离场
-    holdings = [{"ok": True, "name": "测试", "close": 10.0, "stop_loss": 10.5,
-                 "above_ma20": True, "above_ma5": True, "ma20": 9.5, "ma5": 9.8, "pct_chg": 1.0}]
-    p = mr.build_plan({"label": "中性"}, holdings)
-    test("破止损提示", any("止损" in x and "离场" in x for x in p), "|".join(p))
-
-    # 破MA20 → 减仓
-    holdings = [{"ok": True, "name": "测试", "close": 10.0, "stop_loss": None,
-                 "above_ma20": False, "above_ma5": False, "ma20": 10.5, "ma5": 10.3, "pct_chg": -2.0}]
-    p = mr.build_plan({"label": "中性"}, holdings)
-    test("破MA20提示", any("MA20" in x and "减仓" in x for x in p), "|".join(p))
-
-
 # ──────────────── generate_report ────────────────
 
 
@@ -398,16 +373,14 @@ def test_report():
         "zt": {"count": 99, "streak_count": 10},
         "top_sectors": [{"name": "文字媒体", "change_pct": 14.99}],
         "bottom_sectors": [{"name": "涂料", "change_pct": -1.3}],
-        "holdings": [],
-        "plan": ["如果 市场弱势 → 降仓/空仓"],
     }
     md = mr.generate_report(ctx)
     test("含标题", "今日复盘" in md)
     test("含评分", "57.5" in md)
     test("含市场环境", "① 市场环境" in md)
     test("含板块", "② 板块" in md)
-    test("含持仓", "③ 持仓" in md)
-    test("含明日计划", "④ 明日计划" in md)
+    test("不含持仓", "持仓" not in md)
+    test("不含明日计划", "明日计划" not in md)
     test("含免责声明", "不构成任何投资建议" in md)
     test("含腾讯指数数据源", "腾讯" in md)
 
@@ -415,13 +388,6 @@ def test_report():
     ctx["stale_note"] = "数据日期 2026-07-31,非今日"
     md = mr.generate_report(ctx)
     test("stale_note 显示", "非今日" in md)
-
-    ctx["portfolio_snapshot"] = {"loaded_at": "2026-08-01 20:00:00", "active_count": 2}
-    ctx["holdings_sync_note"] = "持仓已按当前持仓记录刷新"
-    md = mr.generate_report(ctx)
-    test("持仓快照时间显示", "持仓快照: 2026-08-01 20:00:00" in md)
-    test("持仓刷新提示显示", "持仓已按当前持仓记录刷新" in md)
-
 
 # ──────────────── _index_metrics ────────────────
 
@@ -483,40 +449,19 @@ def test_persistence_rejects_malformed_and_weekend_dates():
     mr.HISTORY_FILE = old
 
 
-def test_cached_holdings_refresh():
-    print("\n--- cached holdings refresh ---")
-    old_portfolio = mr.PORTFOLIO_YAML
+def test_load_context_drops_retired_portfolio_fields():
+    print("\n--- retired portfolio fields ---")
+    old_context = mr.CONTEXT_FILE
     with tempfile.TemporaryDirectory() as tmp:
-        portfolio_path = Path(tmp) / "portfolio.yaml"
-        portfolio_path.write_text(
-            "holdings:\n"
-            "- code: '601166'\n  name: 兴业银行\n  status: active\n"
-            "  stop_loss: 17.0\n  targets: [18.4]\n",
-            encoding="utf-8")
-        mr.PORTFOLIO_YAML = portfolio_path
-        old_meta = mr.portfolio_snapshot_meta(mr.load_portfolio())
-        ctx = {
-            "regime": {"label": "中性"},
-            "holdings": [{"code": "601166", "name": "兴业银行", "ok": True,
-                          "close": 18.3, "ma5": 18.4, "ma20": 18.2,
-                          "above_ma5": False, "above_ma20": True,
-                          "stop_loss": 17.0, "targets": [18.4]}],
-            "portfolio_snapshot": old_meta,
-        }
-        portfolio_path.write_text(
-            "holdings:\n"
-            "- code: '601166'\n  name: 兴业银行\n  status: closed\n"
-            "- code: '588060'\n  name: 科创50ETF\n  status: active\n"
-            "  stop_loss: null\n  targets: []\n",
-            encoding="utf-8")
-        mr.refresh_cached_holdings(ctx)
-        codes = [h["code"] for h in ctx["holdings"]]
-        test("缓存重出移除已平仓标的", "601166" not in codes, str(codes))
-        test("缓存重出加入新增活跃标的", codes == ["588060"], str(codes))
-        test("新增持仓标为待实时分析", ctx["holdings"][0]["ok"] is False)
-        test("持仓变更给出提示", "持仓已按当前持仓记录刷新" in ctx.get("holdings_sync_note", ""))
-        test("计划不再引用已平仓标的", not any("兴业银行" in p for p in ctx["plan"]), str(ctx["plan"]))
-    mr.PORTFOLIO_YAML = old_portfolio
+        mr.CONTEXT_FILE = Path(tmp) / "market_regime.json"
+        mr.CONTEXT_FILE.write_text(json.dumps({
+            "regime": {}, "holdings": [{"code": "159740"}],
+            "portfolio_snapshot": {}, "plan": ["旧规则"],
+        }), encoding="utf-8")
+        ctx = mr.load_context()
+        test("缓存移除持仓与计划字段",
+             all(key not in ctx for key in mr.RETIRED_CONTEXT_KEYS), str(ctx))
+    mr.CONTEXT_FILE = old_context
 
 
 # ──────────────── 盘中混合评分 (intraday blend) ────────────────
@@ -654,8 +599,7 @@ def test_collect_context_intraday_blend_not_weak():
                              return_value={"count": 55, "streak_count": 20, "max_streak": 5}), \
                 patch.object(mr, "fetch_market_activity",
                              return_value={"up": 1827, "down": 3542, "main_force_yi": -232.6}), \
-                patch.object(mr, "load_history", return_value=history), \
-                patch.object(mr, "load_portfolio", return_value=[]):
+                patch.object(mr, "load_history", return_value=history):
             return mr.collect_context(now=now)
 
     # 10:15 — 有外推: 评分不误判弱势(锚昨收强势)
@@ -746,12 +690,11 @@ def main():
     test_zt()
     test_capital()
     test_regime()
-    test_plan()
     test_report()
     test_index_metrics()
     test_persistence()
     test_persistence_rejects_malformed_and_weekend_dates()
-    test_cached_holdings_refresh()
+    test_load_context_drops_retired_portfolio_fields()
     test_session_elapsed_fraction()
     test_blend_weight()
     test_baseline_history_excludes_partials()

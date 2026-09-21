@@ -68,9 +68,7 @@ python3 analysis/market_regime.py [--no-refresh] [--json] [--html]
 
 1. **市场环境**:regime 分数 + 状态标签 + 组件明细 + 涨跌家数/两市成交额/北向/涨停家数/连板
 2. **板块**:最强前3 + 最弱前3
-3. **持仓(轻量)**:读 `portfolio.yaml`,每只拉K线 → 现价 vs MA5/MA20、今日涨跌、相对止损/目标位;提示"深挖用 /stock-trend"
-4. **明日计划**:if-then 模板,由 regime 状态 + 持仓信号生成(如"如果大盘≥80且个股放量突破→加仓;如果跌破MA20→止损")
-5. 免责声明(必带)
+3. 免责声明(必带)。持仓明细、止损和仓位规则由独立的 `/portfolio` 工作流及 `data/portfolio.yaml` 管理，不写入市场复盘。
 
 ### 实现要点
 
@@ -101,7 +99,7 @@ SKILL.md `/stock-trend` 流程加一句说明:报告含大盘/板块对比段,�
 
 - 纯函数测试:regime 评分(fixture 指数/板块/涨停/北向)、组件归一化、gate 标签、复盘 MD 生成、if-then 计划生成。
 - `HAS_AKSHARE` guard 的 live 加载器测试(仿 `test_weekly_report.py:153`)。
-- 持仓轻量段:用 fixture portfolio.yaml 结构测"现价 vs MA/止损"输出。
+- 市场复盘不读取 `portfolio.yaml`，持仓行为由独立的 `/portfolio` 工作流测试。
 
 **不做 golden**(market-wide 非 per-symbol;先例 weekly_report/market_theme 均不在 golden_config)。
 
