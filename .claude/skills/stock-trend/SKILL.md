@@ -155,6 +155,15 @@ python3 .claude/skills/stock-trend/scripts/scans/stock_scanner.py --sectors BK04
 
 JSON 保留候选输出，并追加 `workflow` 阶段结果和 `notifications`。通知覆盖本次及跨调用检测到的策略版本/参数变化与 `invalid_pointer_fallback` 等安全回退；首次建立基线不报告变更。回复中醒目呈现通知，但不向外部渠道推送。publish 仍需显式人工审核，统一入口不得自动发布。不得自动打开 GUI 或浏览器。
 
+**最终交付链接（必须执行）**：在“今日推荐”最终回复中，候选报告链接后必须紧跟同一次统一入口中 `market_regime.py` 生成的今日复盘 HTML 链接，使用绝对本地路径和清晰标签：
+
+```markdown
+报告：[HTML 候选报告](<absolute_candidates_html_path>)
+今日复盘：[HTML 复盘报告](<absolute_daily_review_html_path>)
+```
+
+通过统一入口运行时，优先链接本次市场刷新实际生成且已验证存在的复盘 HTML。若当前请求未执行 `run_today.py`（例如仅解释或展示既有候选报告），则链接 `reports/lists/` 中最近生成、已验证存在的 `daily-review-*.html`，并标注“最近复盘”。候选报告仍需使用当前请求实际生成或明确指定的文件；找不到可验证的复盘 HTML 时，第二行改为“今日复盘：未生成（未找到可用复盘报告）”。
+
 只需候选扫描时继续使用独立的 `/candidates`。
 
 ---
@@ -248,6 +257,29 @@ open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
 4. 输出: 复盘报告(①市场环境 ②板块最强/最弱 ③持仓轻量分析 ④明日if-then计划) → `reports/lists/daily-review-<时间>.md` + `.html`。
 4. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。上下文记录持仓文件版本、活跃代码和持仓快照时间。
 5. `--no-refresh` 用今日缓存重出报告(非交易日/盘中补看)：市场数据不刷新，但会重新读取当前活跃持仓、重建持仓段落与 if-then 计划；新增持仓标记为待下次实时复盘补齐技术数据。任何“当前持仓”结论应以 `/portfolio list|status` 为准。
+
+### 最终回复格式（必须执行）
+
+复盘成功后的最终回复必须直接展示一份精炼的“今日复盘摘要”，不能只列市场评分、几项行情数字和报告路径。摘要只能提取**同一次**脚本标准输出或 `--json` 中的 `regime`、`components`、`amount_yi`、`zt`、`top_sectors`、`bottom_sectors`、`holdings`、`plan`，不得用缓存或推测补数；完整报告不重复粘贴。
+
+按以下结构交付，缺失字段写“未提供/数据缺失”，不得用 `0` 代替：
+
+```markdown
+## 今日复盘摘要（<data_date>，收盘/盘中临时）
+
+- 市场结论：<score>/100，<label>；<advice>。
+- 宽度与情绪：涨 <up> / 跌 <down>；两市成交 <amount_yi> 亿；涨停 <count> 家、连板 <streak_count> 家。补充最关键的正负组件信号各一条。
+- 板块：最强 <前 1–3 个板块及涨幅>；最弱 <前 1–3 个板块及跌幅>。
+- 持仓重点：仅列跌破止损、失守/站稳 MA5 或 MA20、数据不可用等需要行动或复核的项目；没有此类项目则写“无新增持仓预警”。无持仓则明确写“当前无活跃持仓”。
+- 明日计划：列不超过 3 条、优先市场档位门槛与持仓触发条件的 if-then 计划。
+
+完整报告：[Markdown](<absolute_md_path>)、[HTML](<absolute_html_path>)
+```
+
+- 必须标示盘中、非当日或缓存结论：原样优先展示 `intraday_note`、`stale_note`；盘中结果不得称为收盘确认。
+- `regime.data_quality=partial`、存在缺失/部分组件，或市场解释中组件不是 `scorable` 时，在“市场结论”后简要说明数据限制；来源时间未知只能称为“来源时间未记录”，不能称为实时或 fresh。
+- 对持仓的完整逐行数据、五项评分完整表及全部报告正文仅留在报告文件中；会话摘要只保留上述关键结论。
+- 摘要之后必须附带：**本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。**
 
 **与 /stock-trend 联动**: 每次先跑 `/daily-review` 生成市场上下文,`/stock-trend` 报告自动含「📊 大盘/板块对比」段(个股 vs 沪深300 相对强弱 + 所属板块位置)。
 
