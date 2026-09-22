@@ -96,6 +96,19 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(sc.normalize_wyckoff_score(5.0), 100.0)
         self.assertEqual(sc.normalize_wyckoff_score(-5.0), 0.0)
 
+    def test_kline_as_of_cutoff_drops_future_rows(self):
+        payload = _make_kline(3)
+        payload["data"][0]["trade_date"] = "20260919"
+        payload["data"][1]["trade_date"] = "20260921"
+        payload["data"][2]["trade_date"] = "20260922"
+        trimmed = sc._truncate_kline_as_of(payload, "2026-09-21")
+        self.assertEqual(
+            [row["trade_date"] for row in trimmed["data"]],
+            ["20260919", "20260921"],
+        )
+        self.assertEqual(trimmed["meta"]["rows_dropped_after_as_of"], 1)
+        self.assertEqual(len(payload["data"]), 3)
+
 
 class TestMetadata(unittest.TestCase):
     def _valid_kline(self, trade_date="20260813"):

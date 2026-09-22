@@ -1046,6 +1046,32 @@ def _date_covers(latest_date, expected_date):
     return bool(latest_key and expected_key and latest_key >= expected_key)
 
 
+def _truncate_kline_as_of(payload, as_of_date=""):
+    """Drop bars after the scoring date to prevent historical look-ahead."""
+    if not isinstance(payload, dict) or not as_of_date:
+        return payload
+    expected_key = _trading_date_key(as_of_date)
+    rows = payload.get("data")
+    if not expected_key or not isinstance(rows, list):
+        return payload
+    filtered = [
+        row for row in rows
+        if isinstance(row, dict)
+        and (row_key := _trading_date_key(
+            row.get("trade_date") or row.get("date") or row.get("datetime")))
+        and row_key <= expected_key
+    ]
+    if len(filtered) == len(rows):
+        return payload
+    trimmed = copy.deepcopy(payload)
+    trimmed["data"] = filtered
+    meta = trimmed.setdefault("meta", {})
+    if isinstance(meta, dict):
+        meta["as_of_cutoff"] = as_of_date
+        meta["rows_dropped_after_as_of"] = len(rows) - len(filtered)
+    return trimmed
+
+
 def _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds):
     if cache_age_seconds is not None and ttl_seconds is not None:
         if cache_age_seconds >= ttl_seconds:
@@ -1977,13 +2003,13 @@ def apply_membership_quality(base_quality, membership, as_of_date=""):
     cache_error = membership.get("membership_cache_error", "")
     date_mismatch = bool(as_of_date and data_date != as_of_date)
     verified_historical_cache = (
-        source == "cache"
+        source in {"cache", "historical_snapshot"}
         and membership_quality == "historical_verified"
         and not cache_error
         and not date_mismatch
     )
     same_day_verified_cache = (
-        source == "cache"
+        source in {"cache", "historical_snapshot"}
         and membership_quality == "same_day_verified"
         and not cache_error
         and not date_mismatch
@@ -2254,7 +2280,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                as_of_date="", source_health=None, metrics=None,
                trade_plan_policy=None, top=30, min_candidates=20,
                min_score=50, capital_expected_date="",
-               defer_enrichment=False, disable_early_stop=False):
+               defer_enrichment=False, disable_early_stop=False,
+               require_wyckoff_gate=True):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2266,6 +2293,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     queue score. The second pass uses a fixed enrichment-only buffer beyond
     the output/minimum-candidate frontier. ``defer_enrichment`` is for
     sector-window scans that leave live slots for a single global report queue.
+    ``require_wyckoff_gate`` defaults to the production candidate behavior;
+    observation-only callers may disable the buy-point gate while retaining
+    the same six dimensions and diagnostics.
     """
     candidates = list(candidates or [])
     print(f"[Phase 2/3] Scoring {len(candidates)} candidates...", file=sys.stderr)
@@ -2313,6 +2343,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             source_evidence[source][ts_code] = copy.deepcopy(attempt)
 
     def _kline_usable(payload):
+        payload = _truncate_kline_as_of(payload, as_of_date)
         return bool(
             payload and isinstance(payload, dict)
             and payload.get("data")
@@ -2374,6 +2405,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             include_evidence=True)
         for item, result in fetched:
             payload, attempt = _unpack_source_result(result)
+            payload = _truncate_kline_as_of(payload, as_of_date)
             evidence = _normalize_source_evidence(
                 "kline", payload, attempt,
                 usable=_kline_usable)
@@ -2390,7 +2422,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                        for candidate in candidates]
             for future in as_completed(futures):
                 ts_code, payload, _ = future.result()
-                kline_data[ts_code] = payload
+                kline_data[ts_code] = _truncate_kline_as_of(payload, as_of_date)
 
     metrics_ref["kline_seconds"] = metrics_ref.get("kline_seconds", 0.0) + (
         time.monotonic() - kline_started)
@@ -2409,7 +2441,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             if len(records) < WYCKOFF_MIN_BARS:
                 continue
             analysis = analyze_kline_dict(kline)
-            if not wyckoff_gate_pass(analysis):
+            if require_wyckoff_gate and not wyckoff_gate_pass(analysis):
                 continue
             analysis_by_ts[ts_code] = analysis
         eligible_candidates.append(candidate)

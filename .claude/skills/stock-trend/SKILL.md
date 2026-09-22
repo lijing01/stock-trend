@@ -227,7 +227,7 @@ python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py [--no-refre
 open -a "Google Chrome" reports/lists/daily-review-<最新时间>.html
 ```
 3. 数据源: 指数K线(东财→BaoStock降级)、行业板块排行、涨停池(AKShare)、地域板块涨跌家数/全市场主力净流入。
-4. 输出: 复盘报告(①市场环境 ②板块最强/最弱) → `reports/lists/daily-review-<时间>.md` + `.html`；HTML 另含 ③“观察列表”。该区块读取同一依据日的候选扫描冻结观察池，按候选报告的十列展示，并保留新闻影子分与观察分级；统一入口先呈现“候选扫描进行中”，候选完成后后台原子替换同一报告链接。独立复盘若无同日完整候选副产物，明确显示不可用，不回退到其他日期。`observation_list.yaml` 仍为手工观察配置，但不作为此候选表数据源；缺失候选池只降级该 HTML 区块，不阻断市场评分。
+4. 输出: 复盘报告(①市场环境 ②板块最强/最弱) → `reports/lists/daily-review-<时间>.md` + `.html`；HTML 另含 ③“观察列表”。该区块唯一标的来源是 `observation_list.yaml`，按同一依据日对 YAML 中每只股票执行今日推荐的六维分析（动量、量价、资金、基本面、板块强度、维科夫），展示六维分数、综合/质量分和数据诊断；不读取候选扫描的 `buckets.observation`，不展示候选新闻影子分或推荐数量门槛。统一入口先呈现“YAML 观察列表六维分析进行中”，分析完成后后台原子替换同一报告链接；失败只降级该区块，不阻断市场评分或正式推荐。分析 artifact 必须绑定依据日和 YAML 内容摘要，历史重放不得使用未来 K 线。
 5. 持久化: `market_regime.json`(今日上下文,供 /stock-trend 对比)、`market_regime_history.json`(30天,支撑涨停/成交额均值)。`--no-refresh` 仅重用市场缓存并直接读取观察列表，不写回观察列表配置。
 
 复盘回复只呈现同一次运行的市场评分、宽度/情绪、板块强弱及数据质量说明；盘中或非当日结果必须标注 `intraday_note`/`stale_note`，缺失字段写“未提供/数据缺失”。完整报告保留 Markdown/HTML 路径，并附带：**本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。**

@@ -2,6 +2,7 @@
 """Detached lifecycle for today's post-report research stages."""
 import argparse
 import copy
+import hashlib
 import json
 import os
 import signal
@@ -158,7 +159,8 @@ def _review_html_root(root=DEFAULT_ROOT):
     return Path(root) / REVIEW_HTML_ROOT_NAME
 
 
-def ensure_review_html_task(html_path, *, data_date=None, artifact_path=None, root=DEFAULT_ROOT):
+def ensure_review_html_task(html_path, *, data_date=None, artifact_path=None,
+                            yaml_path=None, config_sha256=None, root=DEFAULT_ROOT):
     """Create an independent task for replacing one daily-review HTML block."""
     path = str(Path(html_path).resolve())
     manifest = {
@@ -167,6 +169,8 @@ def ensure_review_html_task(html_path, *, data_date=None, artifact_path=None, ro
         "html_path": path,
         "data_date": data_date,
         "artifact_path": str(artifact_path) if artifact_path else None,
+        "yaml_path": str(yaml_path) if yaml_path else None,
+        "config_sha256": config_sha256,
     }
     return ensure_task(manifest, root=_review_html_root(root))
 
@@ -214,13 +218,23 @@ def run_review_html_task(task_id, root=DEFAULT_ROOT):
     review_root = _review_html_root(root)
     directory = _task_dir(task_id, review_root)
     manifest = _read(directory / "manifest.json")
-    update_status(task_id, root=review_root, status="running", stage="updating",
+    update_status(task_id, root=review_root, status="running", stage="analyzing",
                   pid=os.getpid())
     try:
         from analysis import market_regime
+        from analysis.observation_list_analysis import analyze_observation_list
+        yaml_path = Path(manifest.get("yaml_path") or market_regime.OBSERVATION_LIST_FILE)
+        expected_hash = manifest.get("config_sha256")
+        if expected_hash is not None and hashlib.sha256(yaml_path.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError("observation_yaml_changed")
+        analyze_observation_list(
+            manifest["data_date"], yaml_path=yaml_path,
+            artifact_path=manifest.get("artifact_path"))
+        update_status(task_id, root=review_root, status="running", stage="updating",
+                      pid=os.getpid())
         result = market_regime.update_observation_list_html(
             manifest["html_path"], data_date=manifest.get("data_date"),
-            artifact_path=manifest.get("artifact_path"))
+            artifact_path=manifest.get("artifact_path"), yaml_path=yaml_path)
         result.update({"task_id": task_id, "finished_at": _now()})
         _write(directory / "result.json", result)
         update_status(task_id, root=review_root, status="completed", stage="done",

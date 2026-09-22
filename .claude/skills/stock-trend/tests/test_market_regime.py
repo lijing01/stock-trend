@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -393,30 +394,41 @@ def test_report():
 def test_observation_list_html():
     print("\n--- observation list HTML ---")
     with tempfile.TemporaryDirectory() as directory:
-        pool = Path(directory) / "2026-09-21.json"
-        pool.write_text(json.dumps({
-            "schema_version": "candidate-observation-pool/v1", "data_date": "2026-09-21",
-            "observation": [{"code": "001207", "name": "测试<股>", "composite_score": 60,
-                             "quality_adjusted_score": 55, "execution_priority_score": 56,
-                             "wyckoff": {}, "data_quality": {"coverage": 0.8}},
-                            {"code": "60336", "name": "第二只", "composite_score": 60,
-                             "quality_adjusted_score": 55, "execution_priority_score": 56,
-                             "wyckoff": {}, "data_quality": {"coverage": 0.8}}]},
+        yaml_path = Path(directory) / "observation_list.yaml"
+        yaml_path.write_text("observation_list:\n  - code: '001207'\n  - code: '60336'\n", encoding="utf-8")
+        artifact = Path(directory) / "2026-09-21.json"
+        artifact.write_text(json.dumps({
+            "schema": "yaml-observation-analysis/v1", "status": "ready", "data_date": "2026-09-21",
+            "config_sha256": hashlib.sha256(yaml_path.read_bytes()).hexdigest(),
+            "items": [{"code": "001207", "name": "测试<股>", "date": "2026-09-01",
+                       "entry_phase": "吸筹", "composite_score": 60,
+                       "quality_adjusted_score": 55,
+                       "raw_dimensions": {"momentum": 60, "volume_price": 70,
+                                          "capital": 50, "fundamental": 80,
+                                          "sector_strength": 40, "wyckoff": 60},
+                       "wyckoff": {"phase": "吸筹"}, "data_quality": {"status": "partial"},
+                       "reasons": ["观察中"]},
+                      {"code": "60336", "name": "第二只", "date": "2026-09-02",
+                       "entry_phase": "拉升", "composite_score": 60,
+                       "quality_adjusted_score": 55, "raw_dimensions": {},
+                       "wyckoff": {}, "data_quality": {"status": "ready"}}]},
             ensure_ascii=False), encoding="utf-8")
-        with patch.object(mr, "OBSERVATION_POOL_DIR", Path(directory)):
-            state = mr.load_observation_pool("2026-09-21")
+        with patch.object(mr, "OBSERVATION_ANALYSIS_DIR", Path(directory)), \
+             patch.object(mr, "OBSERVATION_LIST_FILE", yaml_path):
+            state = mr.load_observation_analysis("2026-09-21")
             ready = mr.render_observation_list_html(state)
             pending = mr.render_observation_list_html(pending=True)
             generated = mr._generate_html(
                 {"data_date": "2026-09-21", "generated_at": "2026-09-22 00:00:00",
                  "regime": {}, "components": {}, "top_sectors": [], "bottom_sectors": []},
                 "20260922-000000")
-            test("读取同日候选观察池", state["status"] == "ready" and len(state["items"]) == 2)
+            test("读取同日 YAML 观察分析", state["status"] == "ready" and len(state["items"]) == 2)
             test("区块标题为观察列表", "<h2>观察列表</h2>" in ready)
             test("保留 YAML 顺序", ready.index("001207") < ready.index("60336"))
             test("HTML 文本转义", "测试&lt;股&gt;" in ready and "测试<股>" not in ready)
-            test("pending 不展示股票", "候选扫描进行中" in pending and "001207" not in pending)
-            test("独立复盘 HTML 读取同日候选池", "001207" in generated and "60336" in generated)
+            test("pending 不展示股票", "六维分析进行中" in pending and "001207" not in pending)
+            test("独立复盘 HTML 读取同日 YAML 分析", "001207" in generated and "60336" in generated)
+            test("六维与手工字段呈现", "量价" in ready and "70.0" in ready and "2026-09-01" in ready)
 
             html_path = Path(directory) / "daily-review.html"
             original = "<body>before\n" + mr.render_observation_list_html(pending=True) + "\nafter</body>"
@@ -427,7 +439,10 @@ def test_observation_list_html():
             test("更新保留报告其他内容", "before" in updated and "after</body>" in updated)
             test("更新后包含列表", "001207" in updated and "60336" in updated)
 
-        missing = mr.load_observation_pool("2026-09-20", Path(directory) / "missing.json")
+            yaml_path.write_text("observation_list: []\n", encoding="utf-8")
+            stale = mr.load_observation_analysis("2026-09-21")
+            test("配置变化拒绝旧分析", stale["status"] == "unavailable")
+        missing = mr.load_observation_analysis("2026-09-20", Path(directory) / "missing.json", yaml_path)
         test("缺文件可降级", missing["status"] == "unavailable" and not missing["items"])
 
 # ──────────────── _index_metrics ────────────────

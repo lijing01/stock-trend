@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """今日推荐: collect, scan, evaluate, research and monitor on each invocation."""
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -160,10 +161,17 @@ def _launch_review_html_update(html_path, *, data_date=None, artifact_path=None,
                                background_root=None):
     """Queue the optional observation-list replacement without blocking candidates."""
     from bridge import today_background
+    from analysis import market_regime
 
     root = Path(background_root or DEFAULT_BACKGROUND_ROOT)
+    yaml_path = market_regime.OBSERVATION_LIST_FILE
+    try:
+        config_sha256 = hashlib.sha256(yaml_path.read_bytes()).hexdigest()
+    except OSError:
+        config_sha256 = None
     task = today_background.ensure_review_html_task(
-        html_path, data_date=data_date, artifact_path=artifact_path, root=root)
+        html_path, data_date=data_date, artifact_path=artifact_path,
+        yaml_path=yaml_path, config_sha256=config_sha256, root=root)
     if task.get("status") in {"completed", "failed", "timed_out", "interrupted", "launch_failed"}:
         return task
     if task.get("status") == "running":
@@ -243,6 +251,12 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         if daily_review_path:
             output["report_paths"] = {"daily_review_html": daily_review_path}
             print(f"今日复盘 HTML: {daily_review_path}", file=sys.stderr, flush=True)
+            try:
+                workflow["review_html"] = _launch_review_html_update(
+                    daily_review_path, data_date=daily_review_date,
+                    background_root=Path(background_root) if background_root else state_root / "background")
+            except Exception as exc:
+                workflow["review_html"] = {"status": "failed", "reason": type(exc).__name__}
     except Exception as exc:
         workflow["market"] = {"status": "failed", "reason": type(exc).__name__}
     if workflow["market"]["status"] == "completed":
@@ -260,18 +274,7 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
     else:
         workflow["candidates"] = {"status": "skipped", "reason": "market_refresh_failed"}
 
-    if daily_review_path:
-        try:
-            artifact = ((output.get("meta") or {}).get("observation_pool_artifact"))
-            workflow["review_html"] = _launch_review_html_update(
-                daily_review_path,
-                data_date=daily_review_date, artifact_path=artifact,
-                background_root=Path(background_root) if background_root else state_root / "background")
-        except Exception as exc:
-            # This optional presentation update must never change candidate
-            # generation or suppress the already-created reports.
-            workflow["review_html"] = {"status": "failed", "reason": type(exc).__name__}
-    else:
+    if not daily_review_path:
         workflow["review_html"] = {"status": "skipped", "reason": "review_html_unavailable"}
 
     try:
