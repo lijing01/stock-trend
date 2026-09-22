@@ -3878,6 +3878,11 @@ def _html_candidate_section(title, items, rows, empty_text):
         if count
         else f"<p class='empty-state'>{escape(empty_text)}</p>"
     )
+    return (
+        "<section class='candidate-section'><h2>"
+        f"{escape(title)} <span class='section-count'>{count}</span>"
+        f"</h2>{contents}</section>"
+    )
 
 
 def render_observation_pool_html(items, *, source_date=None, source_report=None):
@@ -3923,11 +3928,6 @@ def save_observation_pool_artifact(output, *, source_report=None):
                                     indent=2), encoding="utf-8")
     os.replace(temporary, path)
     return str(path.resolve())
-    return (
-        "<section class='candidate-section'><h2>"
-        f"{escape(title)} <span class='section-count'>{count}</span>"
-        f"</h2>{contents}</section>"
-    )
 
 
 def _html_reason_summary(candidates, limit=4, exclude=()):

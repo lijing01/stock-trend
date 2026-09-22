@@ -24,6 +24,7 @@ from scans.daily_candidates import (
     _generate_html,
     _is_final_valid_candidate,
     _freeze_output_envelope,
+    _html_candidate_section,
     build_json_output,
     build_recommendation_policy,
     candidate_rank_score,
@@ -3465,6 +3466,21 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("阶段D：需求确认", html)
         self.assertIn("需求占优，回踩缩量后等待向上确认", html)
         self.assertIn("股市有风险，投资需谨慎", html)
+
+    def test_html_candidate_section_returns_markup_for_nonempty_and_empty(self):
+        nonempty = _html_candidate_section(
+            "观察池", [candidate("1")], "<tr>candidate</tr>", "观察池为空。"
+        )
+        empty = _html_candidate_section(
+            "等待触发", [], "", "当前没有等待触发标的。"
+        )
+
+        self.assertIn("<section class='candidate-section'>", nonempty)
+        self.assertIn("观察池", nonempty)
+        self.assertIn("candidate", nonempty)
+        self.assertNotIn("None", nonempty)
+        self.assertIn("当前没有等待触发标的。", empty)
+        self.assertNotIn("None", empty)
 
     def test_candidate_html_prioritizes_sector_and_minor_phase_columns(self):
         item = candidate("1")
