@@ -51,17 +51,29 @@ class ObservationAnalysisTests(unittest.TestCase):
                     "data_quality": {"eligible": True, "reasons": []},
                 }]
 
+            resolved = []
+
+            def name_resolver(code, data_date):
+                resolved.append((code, data_date))
+                if code == "600519":
+                    return {"name": "贵州茅台", "name_source": "fixture",
+                            "name_quality": "identity_only"}
+                return {}
+
             artifact_path = Path(tmp) / "analysis.json"
             result = observation.analyze_observation_list(
                 "2026-09-22", yaml_path=yaml_path,
                 artifact_path=artifact_path, candidate_builder=builder,
-                analyzer=analyzer)
+                analyzer=analyzer, name_resolver=name_resolver)
             self.assertEqual(result["schema"], observation.SCHEMA)
             self.assertEqual([item["code"] for item in result["items"]],
                              ["600519", "000001", "600519", "60336"])
             self.assertEqual(result["items"][0]["raw_composite_score"],
                              stock_scanner.composite_from_dimensions(
                                  {key: 60.0 for key in observation.DIMENSIONS}))
+            self.assertEqual(result["items"][0]["name"], "贵州茅台")
+            self.assertEqual(result["items"][0]["name_quality"], "identity_only")
+            self.assertEqual(resolved, [("600519", "2026-09-22"), ("000001", "2026-09-22")])
             self.assertEqual(result["items"][1]["status"], "degraded")
             self.assertIn("重复代码", result["items"][2]["reasons"])
             self.assertIn("无效 A 股代码", result["items"][3]["reasons"])

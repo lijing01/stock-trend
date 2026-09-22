@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from analysis import market_regime
 from scans import stock_scanner
 from core.resolve_code import resolve_suffix
+from core.eastmoney_utils import EM_HEADERS, build_secid, rotate_push2_host
 
 SCHEMA = "yaml-observation-analysis/v1"
 DIMENSIONS = (
@@ -31,8 +33,118 @@ DEFAULT_YAML = market_regime.OBSERVATION_LIST_FILE
 CACHE_DIR = Path(os.environ.get(
     "STOCK_TREND_CACHE_DIR", str(PROJECT_ROOT / ".cache" / "stock-trend")))
 ARTIFACT_DIR = CACHE_DIR / "observation_analyses"
+NAME_CACHE_DIR = CACHE_DIR / "security_names"
 SECTOR_SNAPSHOT_DIR = CACHE_DIR / "sector_stocks" / "history"
 RANKING_CACHE = CACHE_DIR / "sector_rankings_cache.json"
+
+
+def _display_name(value, code):
+    """Return a real security name, never a code-shaped placeholder."""
+    text = str(value or "").strip()
+    return text if text and text != str(code) and not re.fullmatch(r"\d{6}", text) else ""
+
+
+def _name_cache_path(data_date):
+    return NAME_CACHE_DIR / f"{data_date}.json"
+
+
+def _load_name_cache(data_date):
+    """Load only the cache bound to this analysis date."""
+    try:
+        payload = json.loads(_name_cache_path(data_date).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if payload.get("schema") != "security-name-cache/v1" \
+            or payload.get("data_date") != data_date:
+        return {}
+    entries = payload.get("items")
+    return entries if isinstance(entries, dict) else {}
+
+
+def _save_name_cache(data_date, entries):
+    """Atomically persist display-only identity metadata."""
+    path = _name_cache_path(data_date)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "security-name-cache/v1", "data_date": data_date,
+        "generated_at": datetime.now().isoformat(), "items": entries,
+    }
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _fetch_eastmoney_name(code):
+    """Resolve one A-share name without making it scoring evidence."""
+    suffix = resolve_suffix(code)
+    if not suffix:
+        return None
+    secid = build_secid(f"{code}{suffix}")
+    if not secid:
+        return None
+
+    def _fetch(host):
+        url = (f"https://{host}/api/qt/stock/get?secid={secid}"
+               "&fields=f57,f58")
+        request = urllib.request.Request(url, headers=EM_HEADERS)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise RuntimeError("empty_security_quote")
+        returned_code = str(data.get("f57") or "").strip()
+        name = _display_name(data.get("f58"), code)
+        if returned_code and returned_code != code:
+            raise RuntimeError("security_code_mismatch")
+        if not name:
+            raise RuntimeError("security_name_missing")
+        return {"name": name, "provider": "eastmoney_stock_quote",
+                "provider_host": host}
+
+    try:
+        result, _ = rotate_push2_host(_fetch, max_retries=2)
+        return result
+    except Exception:
+        return None
+
+
+def resolve_observation_name(code, data_date):
+    """Return display-only identity metadata for a valid observation code.
+
+    A quote name is intentionally marked ``identity_only``: it identifies the
+    security for the report but never supplies historical market evidence or
+    changes six-dimension eligibility.
+    """
+    cached = _load_name_cache(data_date).get(code)
+    if isinstance(cached, dict) and _display_name(cached.get("name"), code):
+        return {**cached, "name_quality": cached.get("name_quality", "identity_only"),
+                "name_source": cached.get("name_source", "identity_cache")}
+    fetched = _fetch_eastmoney_name(code)
+    if not fetched:
+        return {"name": "", "name_source": "unavailable", "name_quality": "unavailable",
+                "name_data_date": "", "name_fetched_at": ""}
+    result = {
+        "name": fetched["name"], "name_source": fetched.get(
+            "provider", "eastmoney_stock_quote"),
+        "name_quality": "identity_only", "name_data_date": "",
+        "name_fetched_at": datetime.now().isoformat(),
+    }
+    entries = _load_name_cache(data_date)
+    entries[code] = result
+    try:
+        _save_name_cache(data_date, entries)
+    except OSError:
+        pass
+    return result
 
 
 def artifact_path_for(data_date, artifact_dir=None):
@@ -165,6 +277,12 @@ def build_candidates(codes, data_date):
         candidate = {
             **stock, "code": code, "ts_code": code + resolve_suffix(code),
             "name": name or code, "sector_memberships": memberships,
+            "name_source": "sector_constituent_snapshot" if _display_name(name, code)
+            else "unavailable",
+            "name_quality": "same_date" if _display_name(name, code)
+            else "unavailable",
+            "name_data_date": data_date if _display_name(name, code) else "",
+            "name_fetched_at": "",
             "sector_code": primary.get("code", ""),
             "sector_name": primary.get("name", ""),
             "sector_hot_score": primary.get("hot_score", 50),
@@ -179,6 +297,45 @@ def build_candidates(codes, data_date):
             ) else "ranking_missing",
         }
     return output
+
+
+def _enrich_candidate_names(built, codes, data_date, resolver=None):
+    """Fill missing display names without changing the analysis universe."""
+    resolver = resolver or resolve_observation_name
+    resolved_codes = set()
+    for code in codes:
+        if code in resolved_codes:
+            continue
+        resolved_codes.add(code)
+        result = built.get(code)
+        if not isinstance(result, dict):
+            continue
+        candidate = result.get("candidate")
+        if not isinstance(candidate, dict):
+            continue
+        current = _display_name(candidate.get("name"), code)
+        if current:
+            candidate.setdefault("name_source", "sector_constituent_snapshot")
+            candidate.setdefault("name_quality", "same_date")
+            candidate.setdefault("name_data_date", data_date)
+            candidate.setdefault("name_fetched_at", "")
+            continue
+        try:
+            identity = resolver(code, data_date) or {}
+        except Exception:
+            identity = {}
+        name = _display_name(identity.get("name"), code)
+        candidate["name"] = name or code
+        candidate["name_source"] = identity.get("name_source", "unavailable")
+        candidate["name_quality"] = identity.get("name_quality", "unavailable")
+        candidate["name_data_date"] = identity.get("name_data_date", "")
+        candidate["name_fetched_at"] = identity.get("name_fetched_at", "")
+        if name and result.get("error") == "证券名称缺失":
+            result["error"] = ""
+        result["name_source"] = candidate["name_source"]
+        result["name_quality"] = candidate["name_quality"]
+        result["name_data_date"] = candidate["name_data_date"]
+        result["name_fetched_at"] = candidate["name_fetched_at"]
 
 
 def _row(source, data_date, candidate_result=None, scored=None):
@@ -210,8 +367,22 @@ def _row(source, data_date, candidate_result=None, scored=None):
     return {
         "code": source.get("code", ""), "date": source.get("date", ""),
         "entry_phase": source.get("entry_phase", ""),
-        "data_date": data_date, "name": scored.get("name") or
-        (candidate_result.get("candidate") or {}).get("name", ""),
+        "data_date": data_date, "name": _display_name(
+            scored.get("name"), source.get("code", "")) or _display_name(
+                (candidate_result.get("candidate") or {}).get("name", ""),
+                source.get("code", "")),
+        "name_source": scored.get("name_source") or candidate_result.get(
+            "name_source") or (candidate_result.get("candidate") or {}).get(
+                "name_source", "unavailable"),
+        "name_quality": scored.get("name_quality") or candidate_result.get(
+            "name_quality") or (candidate_result.get("candidate") or {}).get(
+                "name_quality", "unavailable"),
+        "name_data_date": scored.get("name_data_date") or candidate_result.get(
+            "name_data_date") or (candidate_result.get("candidate") or {}).get(
+                "name_data_date", ""),
+        "name_fetched_at": scored.get("name_fetched_at") or candidate_result.get(
+            "name_fetched_at") or (candidate_result.get("candidate") or {}).get(
+                "name_fetched_at", ""),
         "status": "ready" if complete and not reasons else "degraded",
         "reasons": list(dict.fromkeys(reasons)),
         "raw_dimensions": dimensions,
@@ -230,7 +401,8 @@ def _row(source, data_date, candidate_result=None, scored=None):
 
 def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
                              candidate_builder=None, analyzer=None,
-                             capital_expected_date=None, save=True):
+                             capital_expected_date=None, name_resolver=None,
+                             save=True):
     """Analyze YAML entries and optionally atomically freeze their artifact.
 
     ``candidate_builder(codes, data_date)`` returns a code-keyed mapping with
@@ -259,6 +431,7 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
     except Exception as exc:
         built = {code: {"error": f"候选输入构造失败: {type(exc).__name__}"}
                  for code in valid_codes}
+    _enrich_candidate_names(built, valid_codes, data_date, resolver=name_resolver)
     analyzer = analyzer or stock_scanner.run_phase2
     for entry in entries:
         candidate_result = built.get(entry["code"], {}) if not entry.get("error") else {}

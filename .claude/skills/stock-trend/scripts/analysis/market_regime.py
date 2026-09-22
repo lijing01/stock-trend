@@ -770,6 +770,18 @@ def _observation_cell(value) -> str:
     return html_lib.escape(_observation_text(value), quote=True)
 
 
+def _observation_identity(item: dict) -> tuple[str, str]:
+    """Return a non-duplicated display name and the raw six-digit code."""
+    code = _observation_text(item.get("code"), "未记录")
+    name = str(item.get("name") or "").strip()
+    reasons = item.get("reasons") or item.get("reason") or item.get("error") or []
+    if isinstance(reasons, list):
+        reasons = "；".join(str(reason) for reason in reasons)
+    if not name or name == code or (name.isdigit() and len(name) == 6):
+        name = "名称未提供" if "无效 A 股代码" in str(reasons) else "名称未获取"
+    return name, code
+
+
 def render_observation_list_html(state: dict | None = None, *, pending: bool = False) -> str:
     """Render the replaceable observation-list section for a daily-review HTML."""
     state = state or {"status": "ready", "items": []}
@@ -791,14 +803,15 @@ def render_observation_list_html(state: dict | None = None, *, pending: bool = F
                              ("momentum", "volume_price", "capital", "fundamental", "sector_strength", "wyckoff"))
             structure = wyckoff.get("sub_phase") or wyckoff.get("phase") or "未提供"
             quality_text = quality.get("status") or quality.get("quality") or item.get("status") or "未提供"
+            display_name, display_code = _observation_identity(item)
             rows.append("<tr>" +
-                        f"<td>{_observation_cell(item.get('name'))}<br>{_observation_cell(item.get('code'))}</td>" +
+                        f"<td>{_observation_cell(display_name)}<br><small>{_observation_cell(display_code)}</small></td>" +
                         f"<td>{_observation_cell(item.get('date'))}</td>" +
                         f"<td>{_observation_cell(item.get('entry_phase'))}</td>" + scores +
                         f"<td>{_observation_score(item.get('composite_score'))} / {_observation_score(item.get('quality_adjusted_score'))}</td>" +
                         f"<td>{_observation_cell(structure)}</td><td>{_observation_cell(quality_text)}</td>" +
                         f"<td>{_observation_cell(reasons)}</td></tr>")
-        headers = ("观察对象", "加入日期", "加入时阶段", "动量", "量价", "资金", "基本面", "板块强度",
+        headers = ("股票名称 / 代码", "加入日期", "加入时阶段", "动量", "量价", "资金", "基本面", "板块强度",
                    "维科夫", "综合 / 质量调整", "维科夫结构", "数据质量", "观察原因")
         status_note = ('<p class="dt" data-observation-status="degraded">部分观察标的数据或资格证据不足，详见各行原因。</p>'
                        if state.get("status") == "degraded" else "")

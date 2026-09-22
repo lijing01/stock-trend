@@ -408,10 +408,11 @@ def test_observation_list_html():
                                           "sector_strength": 40, "wyckoff": 60},
                        "wyckoff": {"phase": "吸筹"}, "data_quality": {"status": "partial"},
                        "reasons": ["观察中"]},
-                      {"code": "60336", "name": "第二只", "date": "2026-09-02",
+                      {"code": "60336", "name": "60336", "date": "2026-09-02",
                        "entry_phase": "拉升", "composite_score": 60,
                        "quality_adjusted_score": 55, "raw_dimensions": {},
-                       "wyckoff": {}, "data_quality": {"status": "ready"}}]},
+                       "wyckoff": {}, "data_quality": {"status": "ready"},
+                       "reasons": ["无效 A 股代码"]}]},
             ensure_ascii=False), encoding="utf-8")
         with patch.object(mr, "OBSERVATION_ANALYSIS_DIR", Path(directory)), \
              patch.object(mr, "OBSERVATION_LIST_FILE", yaml_path):
@@ -426,6 +427,9 @@ def test_observation_list_html():
             test("区块标题为观察列表", "<h2>观察列表</h2>" in ready)
             test("保留 YAML 顺序", ready.index("001207") < ready.index("60336"))
             test("HTML 文本转义", "测试&lt;股&gt;" in ready and "测试<股>" not in ready)
+            test("表头明确名称与代码", "股票名称 / 代码" in ready)
+            test("旧 artifact 名称等于代码时不重复", ready.count("60336") == 1)
+            test("无效代码名称降级提示", "名称未提供" in ready)
             test("pending 不展示股票", "六维分析进行中" in pending and "001207" not in pending)
             test("独立复盘 HTML 读取同日 YAML 分析", "001207" in generated and "60336" in generated)
             test("六维与手工字段呈现", "量价" in ready and "70.0" in ready and "2026-09-01" in ready)
