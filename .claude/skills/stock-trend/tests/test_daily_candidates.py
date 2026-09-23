@@ -25,6 +25,7 @@ from scans.daily_candidates import (
     _is_final_valid_candidate,
     _freeze_output_envelope,
     _html_candidate_section,
+    build_gate_audit,
     build_json_output,
     build_recommendation_policy,
     candidate_rank_score,
@@ -32,7 +33,6 @@ from scans.daily_candidates import (
     enrich_sector_context,
     generate_report,
     is_recommendation_session,
-    merge_sector_resonance,
     resolve_capital_expected_date,
     resolve_recommendation_date,
 )
@@ -1452,13 +1452,6 @@ class TestRecommendationPolicy(unittest.TestCase):
         sector = enrich_sector_context(ranked, history)[0]
         self.assertEqual(sector["capital_evidence"], "partial")
 
-    def test_sector_resonance_merges_lhb_scores_by_name(self):
-        ranked = [{"code": "BK1", "name": "半导体"}]
-        merged = merge_sector_resonance(ranked, [{
-            "name": "半导体", "lhb_score": 65,
-        }])
-        self.assertEqual(merged[0]["lhb_score"], 65)
-
     def test_rank_score_prefers_quality_adjusted_score(self):
         self.assertEqual(
             candidate_rank_score(candidate("1", adjusted_score=63.5)), 63.5)
@@ -1667,6 +1660,96 @@ class TestRecommendationPolicy(unittest.TestCase):
         }
         self.assertEqual(
             classify_candidates([unverified], strong_policy)["actionable"], [])
+
+    def test_gate_audit_reports_independent_blockers_and_shadow_passes(self):
+        good = candidate("good")
+        bad_data = candidate("bad-data", eligible=False)
+        bad_sector = candidate("bad-sector", sector_actionable=False)
+        stale_entry = candidate("stale-entry")
+        stale_entry["wyckoff"]["entry_timing"] = {
+            "status": "entry_stale", "reason_code": "wyckoff_signal_stale",
+            "executable": False, "entry_timing_score": 0,
+        }
+        weak_policy = {
+            "mode": "observation", "max_recommendations": 0,
+            "reasons": ["regime_weak"],
+        }
+        rows = [good, bad_data, bad_sector, stale_entry]
+        buckets = classify_candidates(rows, weak_policy)
+        audit = build_gate_audit(rows, weak_policy, buckets, min_score=50)
+
+        self.assertEqual(audit["candidate_count"], 4)
+        self.assertEqual(audit["blocking_counts"], {
+            "market": 4, "data_quality": 1,
+            "sector_persistence": 1, "capital_evidence": 0,
+            "buy_point_health": 1,
+        })
+        self.assertEqual(audit["shadow_pass_lists"]["market"], [])
+        self.assertEqual(
+            audit["shadow_pass_lists"]["data_quality"],
+            ["good", "bad-sector", "stale-entry"],
+        )
+        self.assertEqual(audit["all_gates_pass_codes"], [])
+
+        strong_policy = {
+            "mode": "actionable", "max_recommendations": 5, "reasons": [],
+        }
+        strong = build_gate_audit(
+            rows, strong_policy,
+            classify_candidates(rows, strong_policy), min_score=50)
+        self.assertEqual(strong["blocking_counts"]["market"], 0)
+        self.assertEqual(strong["all_gates_pass_codes"], ["good"])
+        output = build_json_output(
+            rows, [], 0.1, strong_policy,
+            classify_candidates(rows, strong_policy),
+            performance={"gate_audit": strong},
+        )
+        self.assertEqual(output["gate_audit"], strong)
+
+    def test_market_data_recovery_does_not_bypass_other_hard_gates(self):
+        partial = build_recommendation_policy({
+            "score": 70, "data_date": "2026-08-06",
+            "data_quality": "partial", "partial_components": ["volume"],
+        }, "2026-08-06")
+        self.assertEqual(partial["mode"], "observation")
+
+        weak = build_recommendation_policy({
+            "score": 55, "data_date": "2026-08-06",
+            "data_quality": "good", "partial_components": [],
+        }, "2026-08-06")
+        self.assertEqual(weak["mode"], "observation")
+
+        divergence = build_recommendation_policy({
+            "score": 70, "data_date": "2026-08-06",
+            "data_quality": "good", "partial_components": [],
+            "capital_score": 20,
+        }, "2026-08-06")
+        item = candidate("recovered-market")
+        item["sector_capital_evidence"] = "unverified"
+        blocked = classify_candidates([item], divergence)
+        self.assertEqual(blocked["waiting_trigger"], [])
+        self.assertEqual(
+            [row["code"] for row in blocked["next_day_confirmation"]],
+            ["recovered-market"],
+        )
+        audit = build_gate_audit([item], divergence, blocked)
+        self.assertEqual(audit["blocking_counts"]["capital_evidence"], 1)
+        self.assertEqual(audit["shadow_pass_lists"]["capital_evidence"], [])
+
+        item["sector_capital_evidence"] = "positive_verified"
+        self.assertEqual(
+            [row["code"] for row in classify_candidates([item], divergence)[
+                "waiting_trigger"]],
+            ["recovered-market"],
+        )
+        item["wyckoff"]["short_term"]["current_state"] = "failed_breakout"
+        item["wyckoff"]["entry_timing"] = {
+            "status": "failed_breakout",
+            "reason_code": "wyckoff_failed_breakout",
+            "executable": False,
+        }
+        self.assertEqual(
+            classify_candidates([item], divergence)["waiting_trigger"], [])
 
     def test_capital_blocked_high_score_cannot_displace_promotable_candidate(self):
         blocked = candidate("blocked", adjusted_score=90.0)

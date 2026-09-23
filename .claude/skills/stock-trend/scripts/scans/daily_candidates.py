@@ -361,6 +361,120 @@ def _is_final_valid_candidate(item, min_score, policy=None):
     return _candidate_gate_pass(item, min_score, policy)
 
 
+_MARKET_GATE_BLOCK_REASONS = frozenset({
+    "regime_missing", "regime_stale", "regime_data_missing",
+    "regime_data_quality_unknown", "regime_data_partial", "regime_weak",
+})
+
+
+def _market_gate_pass(policy):
+    """Return whether the frozen market policy permits any promotion."""
+    policy = policy if isinstance(policy, dict) else {}
+    reasons = set(policy.get("reasons") or [])
+    return (
+        policy.get("mode") in {"actionable", "waiting_trigger"}
+        and not reasons.intersection(_MARKET_GATE_BLOCK_REASONS)
+    )
+
+
+def _data_quality_gate_pass(item, min_score):
+    """Keep data eligibility and the quality score as one hard data gate."""
+    quality = item.get("data_quality") or {}
+    if not quality.get("eligible", False):
+        return False
+    explicit = item.get("score_eligible")
+    return bool(explicit) if explicit is not None else candidate_quality_score(item) >= min_score
+
+
+def _sector_persistence_gate_pass(item):
+    """Use only verified sector persistence for promotion."""
+    return item.get("sector_actionable", True) is True
+
+
+def _capital_gate_pass(item, policy):
+    """Keep weak-market breadth divergence as an independent hard gate."""
+    if not (policy or {}).get("requires_sector_capital_proof"):
+        return True
+    return item.get("sector_capital_evidence") == "positive_verified"
+
+
+def _buy_point_health_gate_pass(item, policy):
+    """Check structural health and policy-compatible entry timing."""
+    if _short_term_observation_reason(item) is not None \
+            or not _entry_timing_is_visible(item):
+        return False
+    if _entry_timing_is_fresh(item):
+        return True
+    timing = classify_entry_timing(item.get("wyckoff"))
+    return (
+        (policy or {}).get("mode") == "waiting_trigger"
+        and timing.get("status") == "entry_wait_pullback"
+    )
+
+
+def _ordered_codes(items):
+    """Return non-empty candidate codes once, preserving selector order."""
+    codes = []
+    seen = set()
+    for item in items or []:
+        code = str(item.get("code") or "")
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
+
+
+def build_gate_audit(candidates, policy, buckets=None, min_score=50):
+    """Expose independent hard-gate blockers without changing selection.
+
+    ``shadow_pass_lists`` deliberately evaluates each gate independently. It
+    answers whether the population was blocked by the market, data, sector,
+    or buy-point gate, while ``all_gates_pass_codes`` shows the intersection
+    before the existing recommendation limit is applied.
+    """
+    rows = list(candidates or [])
+    definitions = {
+        "market": lambda _item: _market_gate_pass(policy),
+        "data_quality": lambda item: _data_quality_gate_pass(item, min_score),
+        "sector_persistence": _sector_persistence_gate_pass,
+        "capital_evidence": lambda item: _capital_gate_pass(item, policy),
+        "buy_point_health": lambda item: _buy_point_health_gate_pass(item, policy),
+    }
+    shadow_pass_lists = {}
+    blocked_codes = {}
+    blocking_counts = {}
+    for name, predicate in definitions.items():
+        passed = [item for item in rows if predicate(item)]
+        blocked = [item for item in rows if not predicate(item)]
+        shadow_pass_lists[name] = _ordered_codes(passed)
+        blocked_codes[name] = _ordered_codes(blocked)
+        blocking_counts[name] = len(blocked_codes[name])
+
+    all_gates_pass_codes = [
+        code for code in _ordered_codes(rows)
+        if all(code in shadow_pass_lists[name] for name in definitions)
+    ]
+    policy_reasons = [
+        str(reason) for reason in (policy or {}).get("reasons", [])
+        if str(reason) in _MARKET_GATE_BLOCK_REASONS
+    ]
+    audit = {
+        "schema_version": "recommendation-gates/v1",
+        "candidate_count": len(_ordered_codes(rows)),
+        "policy_mode": (policy or {}).get("mode", "observation"),
+        "policy_reasons": policy_reasons,
+        "blocking_counts": blocking_counts,
+        "blocked_codes": blocked_codes,
+        "shadow_pass_lists": shadow_pass_lists,
+        "all_gates_pass_codes": all_gates_pass_codes,
+        "formal_recommendation_codes": _ordered_codes(
+            list((buckets or {}).get("actionable", []))
+            + list((buckets or {}).get("waiting_trigger", []))
+        ),
+    }
+    return audit
+
+
 _PERFORMANCE_PHASE_FIELDS = (
     "sector_ranking_seconds", "sector_membership_seconds", "kline_seconds",
     "wyckoff_seconds", "capital_seconds", "fundamental_seconds",
@@ -784,6 +898,37 @@ def _performance_markdown(performance):
         ("资金", "capital_seconds"), ("基本面", "fundamental_seconds"),
         ("报告", "report_seconds"), ("总计", "total_seconds"),
     )
+    gate_audit = performance.get("gate_audit") or {}
+    gate_labels = {
+        "market": "市场门",
+        "data_quality": "数据质量门",
+        "sector_persistence": "板块持续性门",
+        "capital_evidence": "资金证据门",
+        "buy_point_health": "买点健康门",
+    }
+    gate_lines = []
+    if isinstance(gate_audit, dict) and gate_audit.get("blocking_counts") is not None:
+        gate_lines = [
+            "",
+            "**门控审计**: "
+            f"模式 {gate_audit.get('policy_mode', 'observation')} | "
+            f"市场原因 {'、'.join(gate_audit.get('policy_reasons', [])) or '无'}",
+            "",
+            "| 门 | 阻断数 | 影子通过名单 |",
+            "|---|---:|---|",
+        ]
+        for key, label in gate_labels.items():
+            passed = gate_audit.get("shadow_pass_lists", {}).get(key, [])
+            gate_lines.append(
+                f"| {label} | "
+                f"{gate_audit.get('blocking_counts', {}).get(key, 0)} | "
+                f"{'、'.join(passed) or '无'} |"
+            )
+        gate_lines.extend([
+            "",
+            "**全门通过（限额前）**: "
+            f"{'、'.join(gate_audit.get('all_gates_pass_codes', [])) or '无'}",
+        ])
     lines = ["", "## 性能与数据源审计", "", "| 阶段 | 秒 |", "|---|---:|"]
     lines.extend(
         f"| {label} | {float(performance.get(field, 0)):.3f} |"
@@ -857,6 +1002,7 @@ def _performance_markdown(performance):
         f"数据失效 {performance.get('data_rejected_count', 0)} → "
         f"扩展观察未增强 {performance.get('unenriched_observation_count', 0)} → "
         f"可执行 {performance.get('actionable_count', 0)}",
+        *gate_lines,
         "",
         "**运行预算**: "
         f"总计 {performance.get('budget', {}).get('total_seconds', '未知')}s | "
@@ -1017,6 +1163,35 @@ def _performance_html(performance):
         f"rejected={performance.get('data_rejected_count', 0)}→"
         f"actionable={performance.get('actionable_count', 0)}"
     )
+    gate_audit = performance.get("gate_audit") or {}
+    gate_labels = {
+        "market": "市场门",
+        "data_quality": "数据质量门",
+        "sector_persistence": "板块持续性门",
+        "capital_evidence": "资金证据门",
+        "buy_point_health": "买点健康门",
+    }
+    gate_text = ""
+    if isinstance(gate_audit, dict) and gate_audit.get("blocking_counts") is not None:
+        gate_rows = []
+        for key, label in gate_labels.items():
+            passed = gate_audit.get("shadow_pass_lists", {}).get(key, [])
+            gate_rows.append(
+                f"<tr><td>{escape(label)}</td>"
+                f"<td>{gate_audit.get('blocking_counts', {}).get(key, 0)}</td>"
+                f"<td>{escape('、'.join(passed) or '无')}</td></tr>"
+            )
+        gate_text = (
+            "<h3 style='font-size:15px;margin:14px 0 6px'>门控审计</h3>"
+            f"<p class='dt'>模式={escape(str(gate_audit.get('policy_mode', 'observation')))} | "
+            f"市场原因={escape('、'.join(gate_audit.get('policy_reasons', [])) or '无')}</p>"
+            "<table><thead><tr><th>门</th><th>阻断数</th>"
+            "<th>影子通过名单</th></tr></thead><tbody>"
+            f"{''.join(gate_rows)}</tbody></table>"
+            f"<p class='dt'>全门通过（限额前）："
+            f"{escape('、'.join(gate_audit.get('all_gates_pass_codes', [])) or '无')}"
+            "</p>"
+        )
     membership_text = (
         f"membership_queue={performance.get('sector_membership_queued_count', 0)} "
         f"attempted={performance.get('sector_membership_attempted_count', 0)} "
@@ -1106,6 +1281,7 @@ def _performance_html(performance):
         "<section><h2 style='font-size:18px;margin:18px 0 8px'>"
         "性能与数据源审计</h2>"
         f"<p class='dt'>{phase_text}</p><p class='dt'>{funnel_text}</p>"
+        f"{gate_text}"
         f"<p class='dt'>{escape(membership_text)}</p>"
         f"<p class='dt'>{escape(coverage_text)}</p>"
         f"<p class='dt'>{escape(capital_text)}</p>"
@@ -1161,6 +1337,10 @@ def _emit_performance_summary(performance):
         f"capital_source_block={performance.get('capital_source_block_count', 0)} "
         f"capital_failure_reasons={json.dumps(performance.get('capital_failure_reasons', {}), ensure_ascii=False, sort_keys=True)}"
     )
+    gate_counts = json.dumps(
+        (performance.get("gate_audit") or {}).get("blocking_counts", {}),
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
     print(
         f"[performance] {phase_text} "
         f"sectors={performance.get('sector_universe_count', 0)}->"
@@ -1181,6 +1361,7 @@ def _emit_performance_summary(performance):
         f"scope_failed={performance.get('scope_failed_count', 0)} "
         f"scope_complete={performance.get('scope_complete', True)} "
         f"scope_early_stopped={performance.get('scope_early_stopped', False)} "
+        f"gate_blocking_counts={gate_counts} "
         f"{capital_text} "
         f"sources=[{source_text}]",
         file=sys.stderr,
@@ -2151,8 +2332,20 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                         "sector_context", "source_health", "metrics",
                         "as_of_date")):
                     raise
-                phase1 = gather_candidates(
-                    batch, top_n_per_sector=per_sector)
+                try:
+                    # Older adapters may not know the evaluation date but can
+                    # still consume the immutable sector context. Keep that
+                    # evidence attached before falling back to two args.
+                    phase1 = gather_candidates(
+                        batch, top_n_per_sector=per_sector,
+                        sector_context=sector_context,
+                        source_health=source_health, metrics=metrics)
+                except TypeError as compat_exc:
+                    if not any(name in str(compat_exc) for name in (
+                            "sector_context", "source_health", "metrics")):
+                        raise
+                    phase1 = gather_candidates(
+                        batch, top_n_per_sector=per_sector)
         except Exception as e:
             print(f"  ⚠️ 板块 {batch} 汇聚失败: {e}", file=sys.stderr)
             _record_failed_batch(metrics, batch, e)
@@ -4312,6 +4505,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         "market_regime": copy.deepcopy(market_regime or {}),
         "sectors": sector_codes,
         "candidates": candidates,
+        "gate_audit": copy.deepcopy((performance or {}).get("gate_audit", {})),
         "recommendations": buckets["actionable"],
         "waiting_trigger": buckets["waiting_trigger"],
         "next_day_confirmation": buckets.get("next_day_confirmation", []),
@@ -4574,6 +4768,10 @@ def main():
         scored, args.top, args.min_score, policy, expected_date,
         strategy_shadow_state)
     performance["candidate_concentration"] = candidate_concentration(candidates)
+    # P3: keep each hard gate independently auditable.  This is additive
+    # evidence only; formal selection remains owned by ``classify_candidates``.
+    performance["gate_audit"] = build_gate_audit(
+        candidates, policy, buckets=buckets, min_score=args.min_score)
 
     elapsed = time.time() - start
     performance = _complete_performance(
