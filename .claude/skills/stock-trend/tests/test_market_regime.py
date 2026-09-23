@@ -406,7 +406,13 @@ def test_observation_list_html():
                        "raw_dimensions": {"momentum": 60, "volume_price": 70,
                                           "capital": 50, "fundamental": 80,
                                           "sector_strength": 40, "wyckoff": 60},
-                       "wyckoff": {"phase": "吸筹"}, "data_quality": {"status": "partial"},
+                       "wyckoff": {"phase": "吸筹", "sub_phase": "最后支撑点（LPS）",
+                                   "minor_phase": {
+                                       "name": "阶段D：需求确认",
+                                       "description": "需求占优，回踩缩量后等待向上确认",
+                                       "trigger": {"date": "20260923", "low": 17.2,
+                                                   "close": 17.35},
+                                   }}, "data_quality": {"status": "partial"},
                        "reasons": ["观察中"]},
                       {"code": "60336", "name": "60336", "date": "2026-09-02",
                        "entry_phase": "拉升", "composite_score": 60,
@@ -433,6 +439,7 @@ def test_observation_list_html():
             test("pending 不展示股票", "六维分析进行中" in pending and "001207" not in pending)
             test("独立复盘 HTML 读取同日 YAML 分析", "001207" in generated and "60336" in generated)
             test("六维与手工字段呈现", "量价" in ready and "70.0" in ready and "2026-09-01" in ready)
+            test("维科夫结构与候选报告一致", "阶段D：需求确认（需求占优，回踩缩量后等待向上确认）；触发K线 20260923 低17.2 收17.35" in ready)
 
             html_path = Path(directory) / "daily-review.html"
             original = "<body>before\n" + mr.render_observation_list_html(pending=True) + "\nafter</body>"

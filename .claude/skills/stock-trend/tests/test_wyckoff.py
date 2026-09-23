@@ -12,6 +12,7 @@ from analysis.wyckoff import (
     compute_atr, compute_ma, detect_swing_points, mark_climaxes,
     detect_trading_range, detect_trading_ranges, analyze_vsa, compute_cause_effect,
     wyckoff_score, generate_trading_implication, build_minor_phase,
+    format_minor_phase_text,
     classify_accumulation, classify_markup, classify_distribution, classify_markdown,
     PHASE_ACCUMULATION, PHASE_MARKUP, PHASE_DISTRIBUTION, PHASE_MARKDOWN, PHASE_UNKNOWN,
     SUB_SC, SUB_AR, SUB_ST, SUB_LPS, SUB_SPRING, SUB_PRE_MARKUP,
@@ -45,6 +46,31 @@ class TestSafeFloat(unittest.TestCase):
     def test_invalid(self):
         self.assertIsNone(_safe_float(None))
         self.assertIsNone(_safe_float(""))
+
+
+class TestMinorPhaseDisplay(unittest.TestCase):
+    def test_formats_phase_description_and_trigger_kline(self):
+        text = format_minor_phase_text({
+            "sub_phase": SUB_LPS,
+            "minor_phase": {
+                "name": "阶段D：需求确认",
+                "description": "需求占优，回踩缩量后等待向上确认",
+                "trigger": {"date": "20260923", "low": 17.2, "close": 17.35},
+            },
+        })
+        self.assertEqual(
+            text,
+            "阶段D：需求确认（需求占优，回踩缩量后等待向上确认）；"
+            "触发K线 20260923 低17.2 收17.35",
+        )
+
+    def test_preserves_lps_event_health_display(self):
+        text = format_minor_phase_text({
+            "short_term": {"sub_phase": SUB_LPS, "current_state": "failed_breakout"},
+            "minor_phase": {"name": "阶段D：LPS历史已确认，突破失败",
+                            "description": "旧事件不可执行"},
+        })
+        self.assertEqual(text, "阶段D：LPS历史已确认，当前突破失败、等待重新构筑（旧事件不可执行）")
 
 
 class TestEntryTiming(unittest.TestCase):

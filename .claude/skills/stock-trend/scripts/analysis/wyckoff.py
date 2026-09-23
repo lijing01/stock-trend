@@ -124,6 +124,48 @@ def build_minor_phase(phase: str, sub_phase: str, trigger: dict | None = None,
         minor["trigger"] = trigger
     return minor
 
+
+def format_minor_phase_text(wyckoff: dict | None) -> str:
+    """Render the display-only short-term A–E Wyckoff structure.
+
+    Candidate and daily-review reports consume the same frozen Wyckoff
+    payload, so this formatter is shared to keep their phase wording and
+    trigger K-line evidence identical.
+    """
+    wyckoff = wyckoff if isinstance(wyckoff, dict) else {}
+    minor = wyckoff.get("minor_phase") or {}
+    if not isinstance(minor, dict):
+        minor = {}
+    name = str(minor.get("name") or "小级别阶段未确认")
+    description = str(minor.get("description") or "")
+    short = wyckoff.get("short_term") or {}
+    if not isinstance(short, dict):
+        short = {}
+    sub_phase = str(short.get("sub_phase") or wyckoff.get("sub_phase") or "").lower()
+    current_state = str(
+        short.get("current_state")
+        or (wyckoff.get("signal") or {}).get("current_state")
+        or (wyckoff.get("event_health") or {}).get("state")
+        or "not_evaluated"
+    )
+    if sub_phase == SUB_LPS and current_state == "confirmed_holding":
+        name = "阶段D：LPS历史已确认，当前维持有效"
+    elif sub_phase == SUB_LPS and current_state == "follow_through_weakened":
+        name = "阶段D：LPS历史已确认，后续转弱、待重新确认"
+    elif sub_phase == SUB_LPS and current_state == "failed_breakout":
+        name = "阶段D：LPS历史已确认，当前突破失败、等待重新构筑"
+    elif sub_phase == SUB_LPS and current_state == "state_unknown":
+        name = "阶段D：LPS历史已确认，当前状态未知、待评估"
+
+    text = f"{name}（{description}）" if description else name
+    trigger = minor.get("trigger")
+    if isinstance(trigger, dict) and trigger.get("date"):
+        text += (
+            f"；触发K线 {trigger['date']} "
+            f"低{trigger.get('low', '—')} 收{trigger.get('close', '—')}"
+        )
+    return text
+
 # Phase → score mapping
 PHASE_SCORES = {
     (PHASE_ACCUMULATION, SUB_SC): 0.5,

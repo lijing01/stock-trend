@@ -56,6 +56,8 @@ RETIRED_CONTEXT_KEYS = (
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
+from analysis.wyckoff import format_minor_phase_text
+
 try:
     import akshare as ak
     HAS_AKSHARE = True
@@ -801,7 +803,11 @@ def render_observation_list_html(state: dict | None = None, *, pending: bool = F
                 reasons = "；".join(str(reason) for reason in reasons)
             scores = "".join(f"<td>{_observation_score(dimensions.get(key))}</td>" for key in
                              ("momentum", "volume_price", "capital", "fundamental", "sector_strength", "wyckoff"))
-            structure = wyckoff.get("sub_phase") or wyckoff.get("phase") or "未提供"
+            structure = (
+                format_minor_phase_text(wyckoff)
+                if wyckoff.get("minor_phase")
+                else wyckoff.get("sub_phase") or wyckoff.get("phase") or "未提供"
+            )
             quality_text = quality.get("status") or quality.get("quality") or item.get("status") or "未提供"
             display_name, display_code = _observation_identity(item)
             rows.append("<tr>" +

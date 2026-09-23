@@ -43,6 +43,7 @@ from analysis.wyckoff import (
     NON_HEALTHY_EVENT_STATES,
     classify_buy_point_level,
     classify_entry_timing,
+    format_minor_phase_text,
 )
 from analysis.market_explanation import build_market_explanation
 from analysis.market_regime import compute_regime
@@ -2751,33 +2752,7 @@ def _sector_html(item):
 
 
 def _minor_phase_text(wyckoff):
-    """Render the short-term Wyckoff A–E phase with its Chinese meaning.
-
-    When the phase carries a trigger K-line, its date and low/close prices
-    are appended so readers can see which bar satisfied the phase condition.
-    """
-    minor = wyckoff.get("minor_phase", {})
-    name = minor.get("name", "小级别阶段未确认")
-    description = minor.get("description", "")
-    current_state = _wyckoff_current_state(wyckoff)
-    short = wyckoff.get("short_term") or {}
-    sub_phase = str(short.get("sub_phase") or wyckoff.get("sub_phase") or "").lower()
-    if sub_phase == "lps" and current_state == "confirmed_holding":
-        name = "阶段D：LPS历史已确认，当前维持有效"
-    elif sub_phase == "lps" and current_state == "follow_through_weakened":
-        name = "阶段D：LPS历史已确认，后续转弱、待重新确认"
-    elif sub_phase == "lps" and current_state == "failed_breakout":
-        name = "阶段D：LPS历史已确认，当前突破失败、等待重新构筑"
-    elif sub_phase == "lps" and current_state == "state_unknown":
-        name = "阶段D：LPS历史已确认，当前状态未知、待评估"
-    text = f"{name}（{description}）" if description else name
-    trigger = minor.get("trigger")
-    if trigger and trigger.get("date"):
-        text += (
-            f"；触发K线 {trigger['date']} "
-            f"低{trigger['low']} 收{trigger['close']}"
-        )
-    return text
+    return format_minor_phase_text(wyckoff)
 
 
 def _minor_phase_html(wyckoff):
