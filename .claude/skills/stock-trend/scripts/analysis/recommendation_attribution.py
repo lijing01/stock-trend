@@ -34,12 +34,15 @@ from core.evolution_contract import (
 )
 from core.evolution_storage import input_manifest, storage_root
 from core.recommendation_snapshot import canonical_json, content_sha256, iter_official_snapshots
+from core.candidate_research_snapshot import (
+    resolve_official_link, selection_scope_status,
+)
 from core.research_events import assign_research_events, summarize_daily_alpha
 
 
 WINDOWS = (5, 10, 20, 60)
-EVALUATOR_VERSION = "recommendation-attribution/v5"
-CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v3"
+EVALUATOR_VERSION = "recommendation-attribution/v6"
+CANDIDATE_EVALUATOR_VERSION = "candidate-signal-performance/v4"
 EVALUATION_RESULT_VERSION = "v2"
 DEFAULT_RESEARCH_ROOT = storage_root("research")
 
@@ -259,12 +262,48 @@ def resolve_entry(plan, recommendation_date, market_sessions, stock_rows, code="
 
 
 def _benchmark_return(series, entry, exit_date):
+    """Backward-compatible benchmark return helper."""
+    value, _reason = _benchmark_evidence(series, entry, exit_date)
+    return value
+
+
+def _benchmark_evidence(series, entry, exit_date, required_dates=None):
+    """Return a benchmark return plus a stable missing-evidence reason.
+
+    Alpha is only valid when both endpoints and their prices are present in
+    the same frozen calendar.  ``required_dates`` lets callers distinguish an
+    isolated endpoint gap from a broader calendar mismatch without treating a
+    missing benchmark as a stock-data failure.
+    """
+    if not series:
+        return None, "hs300_series_missing"
     rows = _rows_by_date(series)
-    start = rows.get(entry)
-    end = rows.get(exit_date)
-    start_close = _number(start or {}, "close")
-    end_close = _number(end or {}, "close")
-    return _ret(start_close, end_close)
+    required = list(dict.fromkeys(required_dates or (entry, exit_date)))
+    available = set(rows)
+    missing = [day for day in required if day not in available]
+    if missing:
+        missing_set = set(missing)
+        if entry in missing_set:
+            return None, "hs300_entry_missing"
+        if exit_date in missing_set:
+            return None, "hs300_exit_missing"
+        return None, "calendar_mismatch"
+    start_close = _number(rows.get(entry) or {}, "close")
+    end_close = _number(rows.get(exit_date) or {}, "close")
+    if start_close is None:
+        return None, "hs300_entry_missing"
+    if end_close is None:
+        return None, "hs300_exit_missing"
+    value = _ret(start_close, end_close)
+    if value is None:
+        return None, "calendar_mismatch"
+    return value, None
+
+
+def _stock_path_missing(rows, path):
+    """Return missing stock dates/close fields for a required evaluation path."""
+    return [day for day in path
+            if day not in rows or _number(rows.get(day) or {}, "close") is None]
 
 
 def evaluate_candidate_signal(recommendation, evaluation_as_of, market_sessions,
@@ -309,11 +348,20 @@ def evaluate_candidate_signal(recommendation, evaluation_as_of, market_sessions,
             result["windows"][str(window)] = {"status": "pending", "required_session": window}
             continue
         exit_date = future[window - 1]
+        path_dates = future[:window]
+        missing_stock_dates = _stock_path_missing(rows, path_dates)
+        if missing_stock_dates:
+            result["windows"][str(window)] = {
+                "status": "data_error",
+                "reason": "historical_data_missing",
+                "missing_stock_dates": missing_stock_dates,
+            }
+            continue
         ret = _ret(entry_close, _number(rows.get(exit_date, {}), "close"))
         if ret is None:
             result["windows"][str(window)] = {"status": "data_error", "reason": "historical_data_missing"}
             continue
-        path = [rows.get(session, {}) for session in future[:window]]
+        path = [rows.get(session, {}) for session in path_dates]
         lows = [_number(row, "low", _number(row, "close")) for row in path]
         valid_lows = [value for value in lows if value is not None]
         # This is a signal-path excursion, not an executable trade MAE: the
@@ -321,8 +369,15 @@ def evaluate_candidate_signal(recommendation, evaluation_as_of, market_sessions,
         mae = min((_ret(entry_close, value) for value in valid_lows), default=None)
         item = {"status": "complete", "signal_return": ret, "mae": mae,
                 "entry_date": entry, "exit_date": exit_date}
-        for label, series in (("hs300", hs300_rows), ("sector", sector_rows)):
-            benchmark = _benchmark_return(series, entry, exit_date) if series else None
+        benchmark, benchmark_reason = _benchmark_evidence(
+            hs300_rows, entry, exit_date, required_dates=path_dates)
+        item["hs300_return"] = benchmark
+        item["hs300_alpha"] = ret - benchmark if benchmark is not None else None
+        item["hs300_alpha_status"] = "complete" if benchmark is not None else "missing"
+        item["hs300_alpha_reason"] = benchmark_reason
+        for label, series in (("sector", sector_rows),):
+            benchmark, _benchmark_reason = _benchmark_evidence(
+                series, entry, exit_date, required_dates=path_dates)
             item[label + "_return"] = benchmark
             item[label + "_alpha"] = ret - benchmark if benchmark is not None else None
         result["windows"][str(window)] = item
@@ -513,8 +568,15 @@ def evaluate_recommendation(
                 "cost_mode": costs.mode,
             },
         }
-        for label, series in (("hs300", hs300_rows), ("sector", sector_rows)):
-            benchmark = _benchmark_return(series, entry, path[-1]) if series else None
+        benchmark, benchmark_reason = _benchmark_evidence(
+            hs300_rows, entry, path[-1], required_dates=path)
+        item["hs300_return"] = benchmark
+        item["hs300_alpha"] = gross - benchmark if benchmark is not None else None
+        item["hs300_alpha_status"] = "complete" if benchmark is not None else "missing"
+        item["hs300_alpha_reason"] = benchmark_reason
+        for label, series in (("sector", sector_rows),):
+            benchmark, _benchmark_reason = _benchmark_evidence(
+                series, entry, path[-1], required_dates=path)
             item[label + "_return"] = benchmark
             item[label + "_alpha"] = gross - benchmark if benchmark is not None else None
         result["windows"][str(window)] = item
@@ -525,6 +587,7 @@ _IDENTITY_FIELDS = (
     "snapshot_sha256", "evaluator_version", "evaluation_version",
     "recommendation_date", "code", "cost_model", "evaluation_contract",
     "evaluation_identity", "research_run_id", "research_snapshot_sha256",
+    "official_snapshot_sha256", "selection_scope", "evaluation_contract_id",
     "population_kind", "research_link_status", "input_manifest",
 )
 
@@ -553,7 +616,8 @@ def _merge_record(existing, incoming):
         "snapshot_sha256", "evaluator_version", "evaluation_version",
         "recommendation_date", "code", "evaluation_as_of", "cost_model",
         "evaluation_contract", "evaluation_identity", "research_run_id",
-        "research_snapshot_sha256", "population_kind", "research_link_status",
+        "research_snapshot_sha256", "official_snapshot_sha256", "selection_scope",
+        "evaluation_contract_id", "population_kind", "research_link_status",
         "record_id", "execution",
         "input_manifest",
     ):
@@ -593,7 +657,8 @@ def merge_attribution(existing, incoming):
         "snapshot_sha256", "evaluator_version", "evaluation_version",
         "recommendation_date", "evaluation_as_of", "cost_model",
         "evaluation_contract", "evaluation_identity", "research_run_id",
-        "research_snapshot_sha256", "population_kind", "research_link_status", "execution",
+        "research_snapshot_sha256", "official_snapshot_sha256", "selection_scope",
+        "evaluation_contract_id", "population_kind", "research_link_status", "execution",
         "input_manifest", "incremental",
     ):
         if field in incoming and (can_update_metadata or field in _IDENTITY_FIELDS):
@@ -767,6 +832,11 @@ def summarize_attribution(items, minimum_dates=20, minimum_mature=100,
     summarized = {}
     for label, stats in by_window.items():
         values = [window.get("net_return") for window in stats["completed"] if window.get("net_return") is not None]
+        alpha_missing_reasons = {}
+        for window in stats["completed"]:
+            if window.get("hs300_alpha") is None:
+                reason = str(window.get("hs300_alpha_reason") or "hs300_alpha_missing")
+                alpha_missing_reasons[reason] = alpha_missing_reasons.get(reason, 0) + 1
         summarized[label] = {
             "raw_records": (len(stats["completed"]) + stats["pending"]
                             + stats["unexecutable"] + stats["errors"]),
@@ -774,6 +844,8 @@ def summarize_attribution(items, minimum_dates=20, minimum_mature=100,
             "pending": stats["pending"],
             "unexecutable": stats["unexecutable"],
             "errors": stats["errors"],
+            "benchmark_missing": sum(alpha_missing_reasons.values()),
+            "alpha_missing_reasons": dict(sorted(alpha_missing_reasons.items())),
             "mean_net_return": sum(values) / len(values) if values else None,
         }
     primary_label = str(primary_window)
@@ -787,6 +859,12 @@ def summarize_attribution(items, minimum_dates=20, minimum_mature=100,
     deduped_mature = len(deduped)
     deduped_primary_values = [window.get("net_return") for _, window in deduped
                               if window.get("net_return") is not None]
+    valid_alpha = [
+        (item, window) for item, window in deduped
+        if _number(window, "hs300_alpha") is not None
+    ]
+    valid_alpha_dates = len({item.get("recommendation_date") for item, _ in valid_alpha
+                             if item.get("recommendation_date")})
     return {
         "official_dates": minimum_dates,
         "primary_window": primary_window,
@@ -795,12 +873,18 @@ def summarize_attribution(items, minimum_dates=20, minimum_mature=100,
         "raw_mature_records": raw_primary,
         "deduplicated_mature_events": deduped_mature,
         "duplicate_primary_records": len(duplicates),
+        "valid_alpha_events": len(valid_alpha),
+        "valid_alpha_dates": valid_alpha_dates,
+        "alpha_mature_dates": valid_alpha_dates,
         "pending": primary.get("pending", 0),
         "unexecutable": primary.get("unexecutable", 0),
         "errors": primary.get("errors", 0),
         "data_evaluable_coverage": raw_primary / evaluated_primary if evaluated_primary else 0.0,
         "date_coverage": mature_dates / minimum_dates if minimum_dates else 0.0,
-        "status": "evidence_insufficient" if not primary_available or mature_dates < 20 or deduped_mature < minimum_mature else "ready",
+        "status": "evidence_insufficient" if (
+            not primary_available or valid_alpha_dates < minimum_dates
+            or len(valid_alpha) < minimum_mature
+        ) else "ready",
         "mean_net_return": (sum(deduped_primary_values) / len(deduped_primary_values)
                             if deduped_primary_values else None),
         "by_window": summarized,
@@ -862,11 +946,18 @@ def summarize_candidate_performance(items, minimum_dates=20, minimum_mature=100,
                 "evaluation_status": window.get("status"),
             })
         daily_alpha = summarize_daily_alpha(alpha_rows)
+        alpha_missing_reasons = {}
+        for _item, window in alpha_items:
+            if window.get("status") == "complete" and window.get("hs300_alpha") is None:
+                reason = str(window.get("hs300_alpha_reason") or "hs300_alpha_missing")
+                alpha_missing_reasons[reason] = alpha_missing_reasons.get(reason, 0) + 1
         stats["mean_signal_return"] = sum(values) / len(values) if values else None
         stats["mean_hs300_alpha"] = daily_alpha["mean_alpha"]
         stats["daily_alpha"] = daily_alpha["daily"]
         stats["alpha_mature_dates"] = daily_alpha["mature_dates"]
         stats["alpha_missing_records"] = daily_alpha["missing_records"]
+        stats["alpha_missing_reasons"] = dict(sorted(alpha_missing_reasons.items()))
+        stats["benchmark_missing"] = sum(alpha_missing_reasons.values())
         if label == primary_label:
             stats["valid_alpha_events"] = valid_alpha_events
             stats["valid_alpha_dates"] = valid_alpha_dates
@@ -932,7 +1023,7 @@ def _research_record_is_excluded(record):
 
 
 def _excluded_signal_result(recommendation_date, candidate, evaluation_as_of,
-                            windows, reason, record=None):
+                            windows, reason, record=None, identity=None):
     code = str((candidate or {}).get("code") or "")
     result = {
         "evaluator_version": CANDIDATE_EVALUATOR_VERSION,
@@ -951,6 +1042,12 @@ def _excluded_signal_result(recommendation_date, candidate, evaluation_as_of,
     }
     if record and record.get("record_id"):
         result["record_id"] = record["record_id"]
+    for key in (
+        "official_snapshot_sha256", "research_run_id", "research_snapshot_sha256",
+        "selection_scope", "evaluation_contract_id",
+    ):
+        if identity and identity.get(key) is not None:
+            result[key] = copy.deepcopy(identity[key])
     return result
 
 
@@ -962,10 +1059,20 @@ def _research_signal_records(snapshot, research_snapshot=None):
     """
     if research_snapshot:
         research_content = research_snapshot.get("content", research_snapshot)
+        scope_info = selection_scope_status(research_snapshot)
+        scope_codes = set(scope_info.get("codes") or [])
         records = []
         for record in research_content.get("records") or []:
             if not isinstance(record, dict) or not record.get("code"):
                 continue
+            # New snapshots explicitly freeze the selector universe.  Rows
+            # outside that universe are retained in the artifact for audit,
+            # but must not become a research population.  Legacy snapshots
+            # without a scope remain readable for diagnostics only and are
+            # never promoted by their link status.
+            if scope_info.get("status") == "verified" and scope_info.get("mode") == "explicit_codes":
+                if str(record.get("code")) not in scope_codes:
+                    continue
             candidate = copy.deepcopy(record.get("candidate") or {})
             candidate.setdefault("code", str(record["code"]))
             records.append({
@@ -973,6 +1080,7 @@ def _research_signal_records(snapshot, research_snapshot=None):
                 "candidate": candidate,
                 "research_run_id": research_snapshot.get("run_id"),
                 "research_snapshot_sha256": research_snapshot.get("content_sha256"),
+                "selection_scope": copy.deepcopy(research_content.get("selection_scope") or {}),
                 "population_kind": "frozen_investable_research_population",
             })
         return records
@@ -1027,6 +1135,10 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
     population_identity = {
         "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
         "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "official_snapshot_sha256": snapshot.get("content_sha256"),
+        "selection_scope": copy.deepcopy(
+            (research_snapshot.get("content") or {}).get("selection_scope") or {})
+            if research_snapshot else None,
         "record_ids": sorted(str(item["record"].get("record_id") or
                                  f"{recommendation_date}:{item['candidate'].get('code', '')}")
                              for item in population),
@@ -1109,6 +1221,13 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
             signal_results.append(_excluded_signal_result(
                 recommendation_date, candidate, evaluation_as_of, windows,
                 exclusion_reason, record,
+                identity={
+                    "official_snapshot_sha256": snapshot.get("content_sha256"),
+                    "research_run_id": population_item.get("research_run_id"),
+                    "research_snapshot_sha256": population_item.get("research_snapshot_sha256"),
+                    "selection_scope": population_item.get("selection_scope"),
+                    "evaluation_contract_id": contract.get("contract_id"),
+                },
             ))
             continue
         try:
@@ -1127,6 +1246,9 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
                 "population_kind": population_item["population_kind"],
                 "research_run_id": population_item.get("research_run_id"),
                 "research_snapshot_sha256": population_item.get("research_snapshot_sha256"),
+                "official_snapshot_sha256": snapshot.get("content_sha256"),
+                "selection_scope": population_item.get("selection_scope"),
+                "evaluation_contract_id": contract.get("contract_id"),
                 "selection_status": record.get("selection_status") or record.get("final_status"),
                 "selection_reason": record.get("selection_reason"),
             })
@@ -1144,12 +1266,17 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
                 "population_kind": population_item["population_kind"],
                 "research_run_id": population_item.get("research_run_id"),
                 "research_snapshot_sha256": population_item.get("research_snapshot_sha256"),
+                "official_snapshot_sha256": snapshot.get("content_sha256"),
+                "selection_scope": population_item.get("selection_scope"),
+                "evaluation_contract_id": contract.get("contract_id"),
             })
             signal_results.append(signal_result)
     evaluation_identity = {
         "contract_id": contract["contract_id"],
+        "official_snapshot_sha256": snapshot.get("content_sha256"),
         "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
         "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "selection_scope": copy.deepcopy(population_identity.get("selection_scope")),
         "recommendation_date": recommendation_date,
         "evaluation_as_of": evaluation_as_of,
         "population_kind": population_kind,
@@ -1162,8 +1289,11 @@ def track_attribution(snapshot, series_loader, evaluation_as_of, root=None,
         "recommendation_date": recommendation_date,
         "evaluation_as_of": evaluation_as_of,
         "snapshot_sha256": snapshot.get("content_sha256"),
+        "official_snapshot_sha256": snapshot.get("content_sha256"),
         "research_run_id": research_snapshot.get("run_id") if research_snapshot else None,
         "research_snapshot_sha256": research_snapshot.get("content_sha256") if research_snapshot else None,
+        "selection_scope": copy.deepcopy(population_identity.get("selection_scope")),
+        "evaluation_contract_id": contract.get("contract_id"),
         "population_kind": population_kind,
         "research_link_status": research_link_status or (
             "linked" if research_snapshot else "legacy_fallback"),
@@ -1336,29 +1466,34 @@ def track_official_history(
         day = str((snapshot.get("content") or {}).get("recommendation_date"))
         research = research_by_date.get(day)
         if not research:
-            return None, "missing"
-        official = (snapshot.get("content") or {}).get("content_sha256")
-        if official is None:
-            official = snapshot.get("content_sha256")
-        official_link = (research.get("content") or {}).get("official_snapshot") or {}
-        if official_link.get("link_status") != "linked":
-            return None, "unverified"
-        linked = official_link.get("content_sha256")
-        if not official or not linked:
-            return None, "unverified"
-        if official != linked:
-            return None, "mismatch"
-        return research, "linked"
+            return None, "missing", {"reason": "research_snapshot_missing"}
+        link = resolve_official_link(research, snapshot)
+        if link.get("status") != "linked":
+            return None, link.get("status") or "unverified", {"reason": link.get("reason")}
+        scope = selection_scope_status(research)
+        if scope.get("status") != "verified":
+            # A hash-linked legacy snapshot may still lack the original
+            # selector universe.  It remains auditable, but cannot be used to
+            # infer a research population from the current Top-N display.
+            return None, "unverified", {"reason": scope.get("reason"),
+                                         "selection_scope_status": scope.get("status")}
+        return research, "linked", {"reason": link.get("reason"),
+                                     "repaired": bool(link.get("repaired")),
+                                     "selection_scope_status": scope.get("status"),
+                                     "official_snapshot_sha256": snapshot.get("content_sha256"),
+                                     "research_run_id": research.get("run_id"),
+                                     "research_snapshot_sha256": research.get("content_sha256")}
 
     shared_loader = SharedSeriesLoader() if series_loader is default_series_loader else None
     effective_loader = shared_loader or series_loader
     payloads = []
     research_link_statuses = []
     for snapshot in snapshots:
-        research, link_status = linked_research(snapshot)
+        research, link_status, link_audit = linked_research(snapshot)
         research_link_statuses.append({
             "recommendation_date": str((snapshot.get("content") or {}).get("recommendation_date")),
             "status": link_status,
+            **link_audit,
         })
         payloads.append(track_attribution(
             snapshot, effective_loader, as_of, root=attribution_root,
@@ -1368,7 +1503,10 @@ def track_official_history(
     items = [item for payload in payloads for item in payload.get("items", [])]
     signal_items = [item for payload in payloads
                     for item in payload.get("candidate_signal_items", [])]
-    summary = summarize_attribution(items, minimum_dates=len(snapshots))
+    # The 20-day/100-event research gate is fixed for both candidate signals
+    # and simulated trades; the observed snapshot count is reported
+    # separately and must not lower the denominator during cold start.
+    summary = summarize_attribution(items, minimum_dates=20, minimum_mature=100)
     summary["snapshots"] = len(snapshots)
     summary["rejected_snapshots"] = rejected
     candidate_summary = summarize_candidate_performance(

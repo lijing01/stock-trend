@@ -1,6 +1,6 @@
 # 投资胜率证据链修复计划
 
-状态：P1 已实施；P2–P5 待实施。日期：2026-09-23。
+状态：P2 已实施；P3–P5 待实施。日期：2026-09-23。
 
 ## 目标与边界
 
@@ -53,7 +53,7 @@
 
 验收：连续 5 个完成交易日后，成交额与涨停情绪在来源完整时由 `partial` 自动变为 `good`；任何盘中、缺半边市场、日期不一致或来源时间未知的证据都不能伪装成完整历史。
 
-### P2：修复研究快照链接和前向评价完整度
+### P2：修复研究快照链接和前向评价完整度（已实施）
 
 1. 审计正式推荐快照与研究快照的稳定关联，逐日核对 `recommendation_date`、`official_snapshot.content_sha256`、`research_run_id`、`research_snapshot_sha256`、`selection_scope` 和评估合同 ID。
 2. 对 2026-09-08 以后具备同日冻结证据的记录修复可确定的链接；旧日期缺少原始研究人口时保持 `missing/mismatch`，不得从当前候选或正式 Top-N 反推。
@@ -68,6 +68,8 @@
 - `.claude/skills/stock-trend/scripts/analysis/recommendation_diagnostics.py:136-501`
 - `.claude/skills/stock-trend/tests/test_recommendation_attribution.py:183-224`
 - `.claude/skills/stock-trend/tests/test_recommendation_diagnostics.py`
+
+实施结果：正式/研究快照按日期与内容哈希解析；已有哈希证据但旧状态标记不一致时仅内存修复链接，缺少 `selection_scope` 或原始人口证据的旧日期保持 `unverified`。评价结果逐条携带官方快照、研究运行、研究哈希、冻结范围和评价合同 ID；沪深300缺失行/缺价/日历错位写入稳定原因码，缺基准不进入有效 alpha 成熟分母，`pending` 与研究人口缺口继续独立统计。
 
 验收：每个候选记录在每个窗口都有且只有一个稳定终态或 `pending`；完整窗口的 `hs300_alpha` 可由冻结价格独立复算；研究链接缺失不会产生候选评价人口；重复运行不产生重复成熟事件。
 

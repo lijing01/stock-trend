@@ -18,6 +18,72 @@ SCHEMA_VERSION = "candidate-research-snapshot/v2"
 DEFAULT_ROOT = storage_root("research")
 
 
+def resolve_official_link(research_snapshot, official_snapshot):
+    """Resolve a research/official link without reconstructing old research.
+
+    A link is only repairable when the immutable official content digest was
+    already captured in the research record.  Same-day coincidence alone is
+    not evidence: legacy records without that digest remain ``unverified``.
+    The helper is intentionally read-only so callers can audit or use a
+    repaired link without rewriting historical artifacts.
+    """
+    research = research_snapshot or {}
+    research_content = research.get("content", research)
+    official = official_snapshot or {}
+    official_content = official.get("content", official)
+    if not isinstance(research_content, dict) or not isinstance(official_content, dict):
+        return {"status": "unverified", "reason": "snapshot_content_missing"}
+    research_day = str(research_content.get("recommendation_date") or "")[:10]
+    official_day = str(official_content.get("recommendation_date") or "")[:10]
+    if not research_day or not official_day or research_day != official_day:
+        return {"status": "mismatch", "reason": "recommendation_date_mismatch"}
+    research_digest = research.get("content_sha256")
+    expected_research_digest = content_sha256(research_content)
+    if not research_digest:
+        return {"status": "unverified", "reason": "research_content_hash_missing"}
+    if research_digest != expected_research_digest:
+        return {"status": "unverified", "reason": "research_content_hash_mismatch"}
+    run_id = research.get("run_id")
+    if not run_id:
+        return {"status": "unverified", "reason": "research_run_id_missing"}
+    if run_id != expected_research_digest[:16]:
+        return {"status": "unverified", "reason": "research_run_id_mismatch"}
+    official_hash = official.get("content_sha256")
+    if not official_hash:
+        return {"status": "unverified", "reason": "official_content_hash_missing"}
+    link = research_content.get("official_snapshot") or {}
+    linked_hash = link.get("content_sha256")
+    if not linked_hash:
+        return {"status": "unverified", "reason": "research_official_hash_missing"}
+    if linked_hash != official_hash:
+        return {"status": "mismatch", "reason": "official_content_hash_mismatch"}
+    # A prior ``unlinked`` marker can be repaired in memory because the hash
+    # is already immutable evidence; no historical file is rewritten.
+    return {
+        "status": "linked",
+        "reason": "hash_match",
+        "repaired": link.get("link_status") != "linked",
+        "official_snapshot_sha256": official_hash,
+    }
+
+
+def selection_scope_status(research_snapshot):
+    """Return whether the frozen research population has a replayable scope."""
+    content = (research_snapshot or {}).get("content", research_snapshot or {})
+    scope = content.get("selection_scope") if isinstance(content, dict) else None
+    if not isinstance(scope, dict):
+        return {"status": "unverified", "reason": "selection_scope_missing"}
+    mode = scope.get("mode")
+    codes = scope.get("codes")
+    digest = scope.get("codes_sha256")
+    if mode not in {"explicit_codes", "full_scan"} or not isinstance(codes, list):
+        return {"status": "unverified", "reason": "selection_scope_invalid"}
+    if not digest or digest != content_sha256(sorted({str(code) for code in codes if code})):
+        return {"status": "unverified", "reason": "selection_scope_hash_mismatch"}
+    return {"status": "verified", "mode": mode, "codes": sorted({str(code) for code in codes if code}),
+            "codes_sha256": digest}
+
+
 def _bucket_by_code(buckets):
     return {
         str(item.get("code")): name
@@ -293,7 +359,9 @@ def save_research_snapshot(snapshot, root=DEFAULT_ROOT):
     content = snapshot.get("content") or {}
     day = str(content.get("recommendation_date") or "")
     run_id = str(snapshot.get("run_id") or "")
-    if not day or not run_id or snapshot.get("content_sha256") != content_sha256(content):
+    expected_hash = content_sha256(content)
+    if (not day or not run_id or snapshot.get("content_sha256") != expected_hash
+            or run_id != expected_hash[:16]):
         raise ValueError("invalid candidate research snapshot")
     payload = canonical_json(snapshot) + b"\n"
     is_provisional = content.get("snapshot_type") == "provisional"

@@ -6,6 +6,8 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/'scripts'))
 from analysis.recommendation_attribution import *
 from core.candidate_research_snapshot import build_research_snapshot
+from core.candidate_research_snapshot import resolve_official_link, selection_scope_status
+from core.recommendation_snapshot import content_sha256
 from core.recommendation_snapshot import build_snapshot
 class T(unittest.TestCase):
  def test_cost(self): self.assertEqual(CostModel().mode, 'gross')
@@ -74,6 +76,51 @@ class T(unittest.TestCase):
   self.assertAlmostEqual(result['windows']['5']['signal_return'],4/11)
   self.assertAlmostEqual(result['windows']['5']['mae'],0)
 
+ def test_hs300_missing_endpoint_has_stable_reason_and_is_not_valid_alpha(self):
+  days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
+  rows=[{'date':d,'close':10+i,'low':10+i} for i,d in enumerate(days)]
+  benchmark=[{'date':d,'close':100+i} for i,d in enumerate(days[:-1])]
+  result=evaluate_candidate_signal(
+   {'recommendation_date':'2026-08-20','code':'X'}, '2026-08-27', days,
+   rows, hs300_rows=benchmark, stock_meta={'adj':'qfq'}, windows=(5,))
+  window=result['windows']['5']
+  self.assertEqual(window['status'],'complete')
+  self.assertIsNone(window['hs300_alpha'])
+  self.assertEqual(window['hs300_alpha_reason'],'hs300_exit_missing')
+  summary=summarize_candidate_performance([result], minimum_dates=1, minimum_mature=1)
+  self.assertEqual(summary['valid_alpha_events'],0)
+  self.assertEqual(summary['by_window']['5']['benchmark_missing'],1)
+  self.assertEqual(summary['by_window']['5']['alpha_missing_reasons'],
+                   {'hs300_exit_missing':1})
+
+ def test_hs300_calendar_gap_is_not_silently_scored(self):
+  days=['2026-08-20','2026-08-21','2026-08-22','2026-08-25','2026-08-26','2026-08-27']
+  rows=[{'date':d,'close':10+i,'low':10+i} for i,d in enumerate(days)]
+  benchmark=[{'date':days[1],'close':100}, {'date':days[-1],'close':105}]
+  result=evaluate_candidate_signal(
+   {'recommendation_date':'2026-08-20','code':'X'}, '2026-08-27', days,
+   rows, hs300_rows=benchmark, stock_meta={'adj':'qfq'}, windows=(5,))
+  self.assertEqual(result['windows']['5']['hs300_alpha_reason'],'calendar_mismatch')
+
+ def test_hash_link_can_be_repaired_but_same_day_without_hash_stays_unverified(self):
+  research=build_research_snapshot([], {}, '2026-08-20', {}, {}, [], 50,
+   official_tracking={'status':'created','content_sha256':'official-hash'},
+   model_version='test', selection_scope={'mode':'full_scan','codes':[]})
+  research['content']['official_snapshot']['link_status']='unlinked'
+  research['content_sha256']=content_sha256(research['content'])
+  research['run_id']=research['content_sha256'][:16]
+  official={'content':{'recommendation_date':'2026-08-20'},
+            'content_sha256':'official-hash'}
+  repaired=resolve_official_link(research, official)
+  self.assertEqual(repaired['status'],'linked')
+  self.assertTrue(repaired['repaired'])
+  no_hash=copy.deepcopy(research)
+  no_hash['content']['official_snapshot']['content_sha256']=None
+  no_hash['content_sha256']=content_sha256(no_hash['content'])
+  no_hash['run_id']=no_hash['content_sha256'][:16]
+  self.assertEqual(resolve_official_link(no_hash, official)['status'],'unverified')
+  self.assertEqual(selection_scope_status(research)['status'],'verified')
+
  def test_candidate_readiness_requires_finite_alpha_evidence(self):
   # Complete holding endpoints alone are not usable candidate research when
   # the benchmark alpha is absent. Keep 100 events across 20 dates to prove
@@ -122,6 +169,28 @@ class T(unittest.TestCase):
   self.assertEqual(by_code['B']['windows']['5']['status'],'data_error')
   self.assertEqual(by_code['C']['windows']['5']['status'],'excluded')
   self.assertEqual(result['population_kind'],'frozen_investable_research_population')
+
+ def test_excluded_research_record_keeps_snapshot_identity(self):
+  def candidate(code, **extra):
+   value={'code':code,'ts_code':code+'.SH','composite_score':80,
+          'quality_adjusted_score':80,'data_quality':{'eligible':True}}
+   value.update(extra)
+   return value
+  research=build_research_snapshot(
+   [candidate('A'), candidate('B', research_terminal_status='phase2_filtered',
+    research_terminal_reason='phase2_no_eligible_buy_point_or_data_error')],
+   {'actionable':[candidate('A')]}, '2026-08-20', {}, {}, [], 50,
+   official_tracking={'status':'created','content_sha256':'official-hash'},
+   model_version='test', selection_scope={'mode':'explicit_codes','codes':['A','B']})
+  result=track_attribution(
+   {'content':{'recommendation_date':'2026-08-20','buckets':{'actionable':[]},
+               'candidates':[]}, 'content_sha256':'official-hash'},
+   lambda code,candidate: {}, '2026-08-27', windows=(5,), research_snapshot=research)
+  excluded={item['code']:item for item in result['candidate_signal_items']}['B']
+  self.assertEqual(excluded['research_snapshot_sha256'], research['content_sha256'])
+  self.assertEqual(excluded['research_run_id'], research['run_id'])
+  self.assertEqual(excluded['official_snapshot_sha256'], 'official-hash')
+  self.assertEqual(excluded['evaluation_contract_id'], result['evaluation_contract']['contract_id'])
 
  def test_failed_population_member_can_be_retried_in_same_v2_sidecar(self):
   candidate={'code':'B','ts_code':'B.SH','composite_score':80,
@@ -206,6 +275,7 @@ class T(unittest.TestCase):
   self.assertEqual(summary['mature_observations'],1)
   self.assertAlmostEqual(summary['mean_net_return'],.03)
   self.assertEqual(summary['by_window']['5']['mature_observations'],2)
+  self.assertEqual(summary['status'],'evidence_insufficient')
 
  def test_candidate_research_readiness_is_not_blocked_by_trade_plan(self):
   candidate={'status':'ready'}

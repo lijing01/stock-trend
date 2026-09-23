@@ -23,6 +23,7 @@ from core.cache_utils import CACHE_DIR
 from core.evolution_contract import PRIMARY_WINDOW, build_evaluation_contract
 from core.evolution_storage import LEGACY_RESEARCH_ROOT, input_manifest, load_research_snapshot, storage_root
 from core.recommendation_snapshot import canonical_json, content_sha256, load_official_snapshot
+from core.candidate_research_snapshot import selection_scope_status
 from core.research_events import assign_research_events, summarize_daily_alpha
 
 
@@ -198,6 +199,10 @@ def _summarize_group(rows):
                         if row.get("hs300_alpha") is not None]
     valid_alpha_events = len({row["event_id"] for row in valid_alpha_rows})
     valid_alpha_dates = sorted({row["recommendation_date"] for row in valid_alpha_rows})
+    alpha_missing_reasons = defaultdict(int)
+    for row in complete:
+        if row.get("hs300_alpha") is None:
+            alpha_missing_reasons[str(row.get("hs300_alpha_reason") or "hs300_alpha_missing")] += 1
     return {
         "records": len(rows), "mature_records": len(complete),
         "mature_events": event_count,
@@ -215,6 +220,8 @@ def _summarize_group(rows):
         "mean_hs300_alpha": daily_alpha["mean_alpha"],
         "daily_hs300_alpha": daily_alpha["daily"],
         "alpha_missing_records": daily_alpha["missing_records"],
+        "alpha_missing_reasons": dict(sorted(alpha_missing_reasons.items())),
+        "benchmark_missing": sum(alpha_missing_reasons.values()),
         "median_hs300_alpha": _median(values),
         "mean_signal_return": sum(returns) / len(returns) if returns else None,
         "mean_mae": sum(maes) / len(maes) if maes else None,
@@ -291,6 +298,7 @@ def build_diagnostics(research_snapshots, candidate_signal_items,
                 "recommendation_date": recommendation_date, "code": code, "status": status,
                 "signal_return": _number(window.get("signal_return")),
                 "hs300_alpha": _number(window.get("hs300_alpha")),
+                "hs300_alpha_reason": window.get("hs300_alpha_reason"),
                 "mae": _number(window.get("mae")),
                 "entry_date": _day(window.get("entry_date")),
                 "exit_date": _day(window.get("exit_date") or window.get("mark_date")),
@@ -598,6 +606,7 @@ def load_p0_research_inventory(root=DEFAULT_RESEARCH_ROOT,
                     "link_status": official.get("link_status") or "missing",
                     "content": content,
                     "content_sha256": snapshot.get("content_sha256"),
+                    "selection_scope_integrity": selection_scope_status(snapshot),
                 }
                 continue
             except (OSError, ValueError, json.JSONDecodeError):
@@ -622,6 +631,7 @@ def load_p0_research_inventory(root=DEFAULT_RESEARCH_ROOT,
                     "link_status": "missing",
                     "content": content,
                     "content_sha256": loaded.get("content_sha256"),
+                    "selection_scope_integrity": selection_scope_status(loaded),
                 }
                 continue
         inventory[day] = {"status": "missing", "link_status": "missing"}
@@ -653,7 +663,7 @@ def _p0_alpha_reason(window):
     if status == "complete" and _p0_finite(value):
         return None
     if status == "complete":
-        return "hs300_alpha_missing"
+        return str((window or {}).get("hs300_alpha_reason") or "hs300_alpha_missing")
     if status == "pending":
         return "pending"
     if status == "excluded":
@@ -822,6 +832,12 @@ def build_p0_audit(trading_days, market_history, official_history,
         if partial_components or market_quality == "partial":
             market_partial_dates.append(day)
         scope = research_content.get("selection_scope")
+        scope_integrity = research.get("selection_scope_integrity")
+        if scope_integrity is None:
+            # P0 keeps its historical denominator semantics for frozen
+            # fixtures, while P2 exposes whether the scope hash is actually
+            # replay-verifiable.
+            scope_integrity = selection_scope_status(research)
         if (research.get("status") == "formal" and link_status == "linked"
                 and isinstance(scope, dict) and isinstance(scope.get("codes"), list)):
             frozen_count = len(scope["codes"])
@@ -869,6 +885,7 @@ def build_p0_audit(trading_days, market_history, official_history,
                 "link_status": link_status,
                 "records": len(research_content.get("records") or []),
                 "selection_scope_status": scope_status,
+                "selection_scope_integrity": scope_integrity,
                 "frozen_candidate_denominator": frozen_count,
             },
             "observation_pool": {"denominator": observation_count},
