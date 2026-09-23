@@ -49,6 +49,7 @@ OBSERVATION_BLOCK_END = "<!-- OBSERVATION_LIST:END -->"
 OBSERVATION_ANALYSIS_DIR = CACHE_DIR / "observation_analyses"
 HISTORY_MAX_DAYS = 30
 MIN_AMOUNT_HISTORY_DAYS = 5
+TOP_SECTOR_COUNT = 10
 RETIRED_CONTEXT_KEYS = (
     "holdings", "portfolio_snapshot", "holdings_refreshed_at",
     "holdings_sync_note", "plan",
@@ -934,9 +935,9 @@ def generate_report(ctx: dict) -> str:
     # ② 板块
     lines.append("### ② 板块")
     lines.append("")
-    top = ctx.get("top_sectors", [])[:3]
+    top = ctx.get("top_sectors", [])[:TOP_SECTOR_COUNT]
     bottom = ctx.get("bottom_sectors", [])[:3]
-    lines.append("**最强前3**:")
+    lines.append(f"**最强前{TOP_SECTOR_COUNT}**:")
     if top:
         for s in top:
             lines.append(f"- {s.get('name', '')} {_safe_float(s.get('change_pct')):+.2f}%")
@@ -1089,7 +1090,7 @@ def collect_context(now=None) -> dict:
 
     # 板块最强/最弱(industry, 按 change_pct)
     ranked = sorted(sectors, key=lambda s: _safe_float(s.get("change_pct")), reverse=True)
-    top_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[:5]]
+    top_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[:TOP_SECTOR_COUNT]]
     bottom_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[-5:]]
 
     ctx = {
@@ -1256,7 +1257,7 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
 
     top = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
-        for s in ctx.get("top_sectors", [])[:3])
+        for s in ctx.get("top_sectors", [])[:TOP_SECTOR_COUNT])
     bottom = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
         for s in ctx.get("bottom_sectors", [])[:3])
@@ -1297,7 +1298,7 @@ ul{{padding-left:20px;line-height:1.8}}
 {explanation_html}
 
 <h2>② 板块</h2>
-<p><strong>最强前3:</strong></p><ul>{top or '<li>—</li>'}</ul>
+<p><strong>最强前{TOP_SECTOR_COUNT}:</strong></p><ul>{top or '<li>—</li>'}</ul>
 <p><strong>最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
 
 {observation_html}

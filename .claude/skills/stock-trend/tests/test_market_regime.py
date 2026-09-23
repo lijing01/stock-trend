@@ -372,7 +372,10 @@ def test_report():
         },
         "amount_yi": 25419.0,
         "zt": {"count": 99, "streak_count": 10},
-        "top_sectors": [{"name": "文字媒体", "change_pct": 14.99}],
+        "top_sectors": [
+            {"name": f"强势板块{i}", "change_pct": 20.0 - i}
+            for i in range(1, 12)
+        ],
         "bottom_sectors": [{"name": "涂料", "change_pct": -1.3}],
     }
     md = mr.generate_report(ctx)
@@ -384,6 +387,19 @@ def test_report():
     test("不含明日计划", "明日计划" not in md)
     test("含免责声明", "不构成任何投资建议" in md)
     test("含腾讯指数数据源", "腾讯" in md)
+    test("Markdown 显示最强前10", "**最强前10**:" in md)
+    test("Markdown 包含前10名", all(f"强势板块{i}" in md for i in range(1, 11)))
+    test("Markdown 不包含第11名", "强势板块11" not in md)
+    test("Markdown 最强板块保持输入顺序",
+         md.index("强势板块1") < md.index("强势板块10"))
+
+    html = mr._generate_html(ctx, "20260801-190000")
+    test("HTML 显示最强前10", "最强前10:" in html)
+    test("HTML 包含前10名", all(f"强势板块{i}" in html for i in range(1, 11)))
+    test("HTML 不包含第11名", "强势板块11" not in html)
+    test("HTML 最强板块保持输入顺序",
+         html.index("强势板块1") < html.index("强势板块10"))
+    test("最弱板块仍显示前3", "最弱前3" in md and "最弱前3" in html)
 
     # stale_note 显示
     ctx["stale_note"] = "数据日期 2026-07-31,非今日"
