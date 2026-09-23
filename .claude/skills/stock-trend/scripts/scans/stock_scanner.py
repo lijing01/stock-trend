@@ -2281,7 +2281,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                trade_plan_policy=None, top=30, min_candidates=20,
                min_score=50, capital_expected_date="",
                defer_enrichment=False, disable_early_stop=False,
-               require_wyckoff_gate=True):
+               require_wyckoff_gate=True, peer_cohorts=None):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2332,7 +2332,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         if report_scope_base_limit > 0 else 0
     )
 
-    peer_cohorts = build_sector_peer_cohorts(candidates)
+    # Observation-list analysis can provide a same-date cohort built from the
+    # complete sector snapshot.  Candidate scans retain the historical
+    # default of deriving cohorts from their own candidate universe.
+    peer_cohorts = (copy.deepcopy(peer_cohorts)
+                    if isinstance(peer_cohorts, dict)
+                    else build_sector_peer_cohorts(candidates))
     kline_data = {}
     source_evidence = {
         "kline": {}, "capital": {}, "fundamental": {},

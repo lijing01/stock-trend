@@ -251,12 +251,6 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         if daily_review_path:
             output["report_paths"] = {"daily_review_html": daily_review_path}
             print(f"今日复盘 HTML: {daily_review_path}", file=sys.stderr, flush=True)
-            try:
-                workflow["review_html"] = _launch_review_html_update(
-                    daily_review_path, data_date=daily_review_date,
-                    background_root=Path(background_root) if background_root else state_root / "background")
-            except Exception as exc:
-                workflow["review_html"] = {"status": "failed", "reason": type(exc).__name__}
     except Exception as exc:
         workflow["market"] = {"status": "failed", "reason": type(exc).__name__}
     if workflow["market"]["status"] == "completed":
@@ -273,6 +267,19 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
             workflow["candidates"] = {"status": "failed", "reason": type(exc).__name__}
     else:
         workflow["candidates"] = {"status": "skipped", "reason": "market_refresh_failed"}
+
+    # The market HTML is intentionally emitted before the candidate scan, but
+    # its observation-list worker must start only after the candidate scan has
+    # reached a terminal state.  The scan writes same-day sector snapshots
+    # that the observation analysis consumes; launching earlier creates a
+    # read/write race and silently turns valid sector dimensions into nulls.
+    if daily_review_path:
+        try:
+            workflow["review_html"] = _launch_review_html_update(
+                daily_review_path, data_date=daily_review_date,
+                background_root=Path(background_root) if background_root else state_root / "background")
+        except Exception as exc:
+            workflow["review_html"] = {"status": "failed", "reason": type(exc).__name__}
 
     if not daily_review_path:
         workflow["review_html"] = {"status": "skipped", "reason": "review_html_unavailable"}

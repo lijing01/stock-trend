@@ -23,6 +23,7 @@ from analysis import market_regime
 from scans import stock_scanner
 from core.resolve_code import resolve_suffix
 from core.eastmoney_utils import EM_HEADERS, build_secid, rotate_push2_host
+from fetchers import sector_data
 
 SCHEMA = "yaml-observation-analysis/v1"
 DIMENSIONS = (
@@ -117,6 +118,46 @@ def _fetch_eastmoney_name(code):
         return None
 
 
+def _fetch_eastmoney_profile(code):
+    """Resolve same-source identity metadata needed for current-day mapping.
+
+    ``f100`` is used only to discover an industry name.  The name is never
+    accepted as membership evidence until the sector constituent endpoint
+    verifies that the code is present in the matched same-day sector.
+    """
+    suffix = resolve_suffix(code)
+    if not suffix:
+        return None
+    secid = build_secid(f"{code}{suffix}")
+    if not secid:
+        return None
+
+    def _fetch(host):
+        url = (f"https://{host}/api/qt/stock/get?secid={secid}"
+               "&fields=f57,f58,f100")
+        request = urllib.request.Request(url, headers=EM_HEADERS)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise RuntimeError("empty_security_profile")
+        returned_code = str(data.get("f57") or "").strip()
+        name = _display_name(data.get("f58"), code)
+        industry = str(data.get("f100") or "").strip()
+        if returned_code and returned_code != code:
+            raise RuntimeError("security_code_mismatch")
+        if not industry:
+            raise RuntimeError("security_industry_missing")
+        return {"name": name, "industry": industry,
+                "provider": "eastmoney_stock_quote", "provider_host": host}
+
+    try:
+        result, _ = rotate_push2_host(_fetch, max_retries=2)
+        return result
+    except Exception:
+        return None
+
+
 def resolve_observation_name(code, data_date):
     """Return display-only identity metadata for a valid observation code.
 
@@ -201,10 +242,126 @@ def _read_exact_date_rankings(data_date):
     if meta.get("complete") is False or meta.get("provider") not in (
             None, "", "eastmoney"):
         return {}
+    # The persisted ranking payload contains raw change/width/flow fields but
+    # not the derived hot score used by stock_scanner.  Compute it against the
+    # complete same-date ranking set so observation scores do not silently
+    # fall back to 50.  Keep every provider sector code: rank_hot_sectors()
+    # intentionally de-duplicates child boards for candidate selection, but a
+    # watchlist lookup must not lose a valid industry merely because it is a
+    # duplicate display row.
+    raw_sectors = [dict(sector) for sector in rankings.get("sectors", [])
+                   if isinstance(sector, dict) and sector.get("code")]
+    for sector in raw_sectors:
+        sector["absolute_hot_score"] = sector_data.compute_hot_score(sector)
+    scores = [sector["absolute_hot_score"] for sector in raw_sectors]
+    lo, hi = (min(scores), max(scores)) if scores else (0, 0)
+    for sector in raw_sectors:
+        sector["hot_score"] = round(
+            (sector["absolute_hot_score"] - lo) / (hi - lo) * 100, 1
+        ) if hi > lo else sector["absolute_hot_score"]
     return {
         sector.get("code"): sector
-        for sector in rankings.get("sectors", [])
-        if isinstance(sector, dict) and sector.get("code")
+        for sector in raw_sectors
+    }
+
+
+def _expected_sector_size(ranking):
+    """Return the provider's expected constituent count when available."""
+    try:
+        total = int(ranking.get("total_count") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total > 0:
+        return total
+    try:
+        return int(ranking.get("up_count") or 0) + int(
+            ranking.get("down_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sector_snapshot_complete(stocks, ranking):
+    """Require a full same-day cohort before calculating relative strength."""
+    expected = _expected_sector_size(ranking)
+    return bool(stocks) and (not expected or len(stocks) >= expected)
+
+
+def _historical_sector_hints(code, data_date):
+    """Find prior same-source sector codes as lookup hints only.
+
+    The returned codes are never used as current membership evidence; the
+    current-day constituent endpoint must still contain ``code`` before a
+    membership is accepted.
+    """
+    hints = []
+    history_root = SECTOR_SNAPSHOT_DIR
+    try:
+        paths = sorted(history_root.glob("*/*.json"), reverse=True)
+    except OSError:
+        return hints
+    for path in paths:
+        if path.parent.name == data_date:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("data_date") == data_date:
+            continue
+        if any(isinstance(stock, dict) and stock.get("code") == code
+               for stock in payload.get("stocks", [])):
+            hints.append(path.stem)
+    return list(dict.fromkeys(hints))
+
+
+def _same_day_sector_membership(code, data_date, rankings):
+    """Fetch and verify one current-day industry membership, if possible.
+
+    This path is deliberately disabled for historical replay.  It is also
+    intentionally industry-only: concept membership has many-to-many and
+    cross-source naming ambiguity that should remain unavailable rather than
+    being guessed.
+    """
+    if data_date != datetime.now().strftime("%Y-%m-%d"):
+        return None
+    profile = _fetch_eastmoney_profile(code) or {}
+    matches = [
+        (sector_code, ranking)
+        for sector_code, ranking in rankings.items()
+        if ranking.get("type") == "industry"
+        and profile.get("industry")
+        and str(ranking.get("name") or "").strip() == profile.get("industry")
+    ]
+    # Some East Money quote hosts currently return only f57/f58 and omit the
+    # industry field.  A prior same-source mapping may identify a sector code
+    # to query, but the current full constituent response remains mandatory.
+    if len(matches) != 1:
+        hints = set(_historical_sector_hints(code, data_date))
+        matches = [
+            (sector_code, ranking)
+            for sector_code, ranking in rankings.items()
+            if sector_code in hints and ranking.get("type") == "industry"
+        ]
+    if len(matches) != 1:
+        return None
+    sector_code, ranking = matches[0]
+    expected = max(1, _expected_sector_size(ranking))
+    try:
+        stocks = sector_data.get_sector_stocks(
+            sector_code, top_n=expected, as_of_date=data_date)
+    except Exception:
+        return None
+    if not _sector_snapshot_complete(stocks, ranking):
+        return None
+    target = next((stock for stock in stocks if stock.get("code") == code), None)
+    if not target:
+        return None
+    return {
+        "sector_code": sector_code,
+        "ranking": ranking,
+        "stocks": stocks,
+        "target": target,
+        "name": profile.get("name") or target.get("name") or code,
     }
 
 
@@ -220,18 +377,23 @@ def build_candidates(codes, data_date):
     found = {code: [] for code in codes}
     snapshots = SECTOR_SNAPSHOT_DIR / data_date
     rankings = _read_exact_date_rankings(data_date)
-    for path in sorted(snapshots.glob("*.json")):
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", path.stem):
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if payload.get("data_date") != data_date:
-            continue
-        sector_code = path.stem
-        ranking = rankings.get(sector_code, {})
-        for stock in payload.get("stocks", []):
+    sector_stocks = {}
+
+    def _add_sector_snapshot(sector_code, ranking, stocks, source):
+        if not stocks:
+            return
+        sector_stocks[sector_code] = list(stocks)
+        membership_quality = (
+            "same_day_verified"
+            if data_date == datetime.now().strftime("%Y-%m-%d")
+            else "historical_verified"
+        )
+        for code in wanted:
+            found[code] = [
+                pair for pair in found.get(code, [])
+                if pair[1].get("code") != sector_code
+            ]
+        for stock in stocks:
             if not isinstance(stock, dict) or stock.get("code") not in wanted:
                 continue
             code = stock["code"]
@@ -247,15 +409,81 @@ def build_candidates(codes, data_date):
                 stock={
                     **stock, "membership_source": "historical_snapshot",
                     "membership_data_date": data_date,
-                    "membership_quality": "historical_verified",
-                    "membership_provider": payload.get("provider", ""),
+                    "membership_quality": membership_quality,
+                    "membership_provider": "eastmoney",
                     "membership_fetch_evidence": {
-                        "status": "cache_valid", "source": str(path),
+                        "status": "cache_valid", "source": str(source),
                         "data_date": data_date,
                     },
                 },
             )
             found[code].append((stock, membership))
+
+    for path in sorted(snapshots.glob("*.json")):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", path.stem):
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if payload.get("data_date") != data_date:
+            continue
+        _add_sector_snapshot(
+            path.stem, rankings.get(path.stem, {}),
+            payload.get("stocks", []), path,
+        )
+
+    # Existing candidate scans intentionally fetch a bounded Top-N.  Refresh
+    # only the observed sectors whose cached cohort is incomplete, and only
+    # for today's date.  Historical replay remains cache-only.
+    sectors_to_refresh = set()
+    for code in codes:
+        for _, membership in found.get(code, []):
+            sector_code = membership.get("code", "")
+            ranking = rankings.get(sector_code, {})
+            if sector_code and not _sector_snapshot_complete(
+                    sector_stocks.get(sector_code, []), ranking):
+                sectors_to_refresh.add(sector_code)
+    for sector_code in sorted(sectors_to_refresh):
+        ranking = rankings.get(sector_code, {})
+        expected = max(1, _expected_sector_size(ranking))
+        if data_date != datetime.now().strftime("%Y-%m-%d"):
+            continue
+        try:
+            refreshed = sector_data.get_sector_stocks(
+                sector_code, top_n=expected, as_of_date=data_date)
+        except Exception:
+            continue
+        if _sector_snapshot_complete(refreshed, ranking):
+            _add_sector_snapshot(
+                sector_code, ranking, refreshed,
+                SECTOR_SNAPSHOT_DIR / data_date / f"{sector_code}.json",
+            )
+
+    # A watchlist name may belong to an industry never selected by the
+    # candidate scan.  Resolve and verify that one industry on the current
+    # date, without attempting a broad all-sector crawl.
+    for code in codes:
+        if found.get(code):
+            continue
+        resolved = _same_day_sector_membership(code, data_date, rankings)
+        if not resolved:
+            continue
+        _add_sector_snapshot(
+            resolved["sector_code"], resolved["ranking"], resolved["stocks"],
+            SECTOR_SNAPSHOT_DIR / data_date / f"{resolved['sector_code']}.json",
+        )
+
+    peer_cohorts = {
+        sector_code: sorted(
+            float(stock.get("change_pct"))
+            for stock in stocks
+            if isinstance(stock, dict)
+            and isinstance(stock.get("change_pct"), (int, float))
+        )
+        for sector_code, stocks in sector_stocks.items()
+        if _sector_snapshot_complete(stocks, rankings.get(sector_code, {}))
+    }
     output = {}
     for code in codes:
         matches = found.get(code) or []
@@ -268,6 +496,7 @@ def build_candidates(codes, data_date):
                 },
                 "metadata_source": "unavailable", "sector_status": "missing",
                 "error": "缺少本依据日证券元数据/行业成分快照",
+                "peer_cohorts": peer_cohorts,
             }
             continue
         stock, _ = matches[0]
@@ -288,13 +517,19 @@ def build_candidates(codes, data_date):
             "sector_hot_score": primary.get("hot_score", 50),
             "sector_actionable": False,
         }
+        primary_code = primary.get("code", "")
+        primary_complete = _sector_snapshot_complete(
+            sector_stocks.get(primary_code, []), rankings.get(primary_code, {}))
+        ranking_same_day = any(
+            m.get("ranking_data_date") == data_date for m in memberships)
         output[code] = {
             "candidate": candidate,
             "metadata_source": "sector_constituent_snapshot",
             "error": "证券名称缺失" if not name else "",
-            "sector_status": "ready" if any(
-                m.get("ranking_data_date") == data_date for m in memberships
-            ) else "ranking_missing",
+            "sector_status": "ready" if primary_complete and ranking_same_day
+            else "peer_incomplete" if primary_code and ranking_same_day
+            else "ranking_missing",
+            "peer_cohorts": peer_cohorts,
         }
     return output
 
@@ -354,6 +589,9 @@ def _row(source, data_date, candidate_result=None, scored=None):
     if candidate_result.get("sector_status") in ("ranking_missing", "missing"):
         if candidate_result.get("sector_status") == "ranking_missing":
             reasons.append("缺少本依据日行业排行证据")
+        dimensions["sector_strength"] = None
+    elif candidate_result.get("sector_status") == "peer_incomplete":
+        reasons.append("sector_peer_coverage_incomplete")
         dimensions["sector_strength"] = None
     quality = scored.get("data_quality") or {}
     if quality and not quality.get("eligible", False):
@@ -445,7 +683,8 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
                     require_wyckoff_gate=False,
                     as_of_date=data_date,
                     capital_expected_date=capital_expected_date or data_date,
-                    top=1, min_candidates=1, disable_early_stop=True)
+                    top=1, min_candidates=1, disable_early_stop=True,
+                    peer_cohorts=candidate_result.get("peer_cohorts"))
                 scored = next((row for row in rows
                                if row.get("code") == entry["code"]), None)
             except Exception as exc:

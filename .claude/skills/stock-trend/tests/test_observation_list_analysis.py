@@ -148,6 +148,54 @@ class ObservationAnalysisTests(unittest.TestCase):
             self.assertEqual(result["items"][0]["status"], "ready")
             self.assertEqual(calls[0]["as_of_date"], "2020-01-02")
 
+    def test_complete_same_date_cohort_is_carried_into_scoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sector_root = root / "sector_stocks" / "history"
+            snapshot_dir = sector_root / "2026-09-22"
+            snapshot_dir.mkdir(parents=True)
+            (snapshot_dir / "BK1.json").write_text(json.dumps({
+                "data_date": "2026-09-22", "provider": "eastmoney",
+                "stocks": [
+                    {"code": "600519", "name": "贵州茅台", "change_pct": -1.0},
+                    {"code": "000001", "name": "平安银行", "change_pct": 2.0},
+                ],
+            }), encoding="utf-8")
+            ranking_path = root / "rankings.json"
+            ranking_path.write_text(json.dumps({
+                "data_date": "2026-09-22",
+                "rankings": {"meta": {"complete": True, "provider": "eastmoney"},
+                             "sectors": [
+                                 {"code": "BK1", "name": "测试行业", "type": "industry",
+                                  "change_pct": 1.0, "up_count": 2, "down_count": 0,
+                                  "total_count": 2, "main_force_net": 100000000},
+                                 {"code": "BK2", "name": "对照行业", "type": "industry",
+                                  "change_pct": -1.0, "up_count": 1, "down_count": 3,
+                                  "total_count": 4, "main_force_net": -100000000},
+                             ]},
+            }), encoding="utf-8")
+            with patch.object(observation, "SECTOR_SNAPSHOT_DIR", sector_root), \
+                    patch.object(observation, "RANKING_CACHE", ranking_path):
+                built = observation.build_candidates(["600519", "000001"],
+                                                     "2026-09-22")
+            self.assertEqual(built["600519"]["sector_status"], "ready")
+            self.assertEqual(built["000001"]["sector_status"], "ready")
+            self.assertEqual(built["600519"]["peer_cohorts"]["BK1"], [-1.0, 2.0])
+            membership = built["600519"]["candidate"]["sector_memberships"][0]
+            self.assertNotEqual(membership["hot_score"], 50)
+
+    def test_incomplete_peer_snapshot_is_not_scored(self):
+        source = {"code": "600519", "date": "2026-09-22", "entry_phase": "吸筹"}
+        result = observation._row(
+            source, "2026-09-22",
+            {"sector_status": "peer_incomplete", "candidate": {}},
+            {"raw_dimensions": {key: 60.0 for key in observation.DIMENSIONS},
+             "data_quality": {"eligible": True, "reasons": []}},
+        )
+        self.assertIsNone(result["raw_dimensions"]["sector_strength"])
+        self.assertIsNone(result["raw_composite_score"])
+        self.assertIn("sector_peer_coverage_incomplete", result["reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -334,8 +334,8 @@ class TodayTests(unittest.TestCase):
             result = self.run_job()
 
         self.assertEqual(calls, ["analysis/market_regime.py", "scans/daily_candidates.py"])
-        self.assertEqual(events, ["analysis/market_regime.py", "review_html",
-                                  "scans/daily_candidates.py"])
+        self.assertEqual(events, ["analysis/market_regime.py",
+                                  "scans/daily_candidates.py", "review_html"])
         self.assertEqual(queued, [(str(daily_path), {
             "data_date": "2026-09-09",
             "background_root": self.root / "background"})])
