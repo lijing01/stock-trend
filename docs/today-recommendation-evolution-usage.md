@@ -46,6 +46,41 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
 
 后台目录 `.cache/stock-trend/evolution/background/<task_id>/` 保存 `manifest.json`、`status.json`、`checkpoints.json`、`worker.log` 和 `result.json`。后台使用冻结的评价日期/交易日列表；每日消融、核心后处理、成熟评价分别使用 10 秒、300 秒、20 秒预算。超出预算会写入 `timed_out` 或 `partial`，可通过 `--resume` 继续未完成阶段；已完成且输入摘要未变的阶段会复用检查点。close 同一次运行共享沪深300、板块和个股序列，避免对每条历史记录重复发起相同资源请求。
 
+## 投资胜率证据链修复：日常如何生效
+
+P0–P5 是一次性的工程修复阶段，不会在每次报告后从头执行。修复后的证据收集、门控和评价按下表运行：
+
+| 操作 | 自动执行的部分 | 不会自动执行的部分 |
+| --- | --- | --- |
+| 单独运行“每日复盘” (`analysis/market_regime.py`) | 刷新市场环境并生成复盘报告；非盘中结果保存带来源证据的市场历史，其中只有完整且可评分的数据进入成交额及涨停情绪基线 | 候选扫描、研究快照、前向评价、消融研究、策略监控 |
+| 运行“今日推荐”统一入口 (`bridge/run_today.py`) | 先运行每日复盘，再扫描候选并记录正式/研究证据与门控审计；交易日历可用时，启动 `close → weekly → monitor`；符合收盘最终扫描条件时，另运行每日消融和成熟样本评价 | P0 全量缺口审计、策略发布 |
+| 只运行 `/candidates` | 候选扫描及其门控审计、适用时的快照保存 | 统一入口的复盘、后台评价、周度研究和监控 |
+
+没有安装定时器。只有实际调用相应入口，才会发生该次处理；“今日推荐”返回 `report_ready` 只表示报告已就绪，后台结果应继续用 `workflow.postprocess.task_id` 查询。`weekly` 按周复用已有有效结果，不保证每次调用都重算。盘中每日消融和成熟评价会跳过，`close` 等核心后处理仍可评价上一个已完成交易日；缺少可用交易日历时这些后处理会跳过。市场刷新失败时，候选扫描也会跳过。
+
+收盘后日常运行统一入口：
+
+```bash
+/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 \
+  .claude/skills/stock-trend/scripts/bridge/run_today.py --json
+
+# 将 TASK_ID 替换为上一步输出的 workflow.postprocess.task_id
+/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 \
+  .claude/skills/stock-trend/scripts/bridge/run_today.py --status TASK_ID --json
+```
+
+若只要市场复盘，可单独运行 `/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 .claude/skills/stock-trend/scripts/analysis/market_regime.py --json`。P0 缺口审计是独立的按日期范围运行命令，适合检查市场基线、快照链接、成熟状态和缺失原因；它不会由上述两种日常入口自动调用：
+
+```bash
+/Users/jing.li7/.pyenv/versions/3.10.0/bin/python3 \
+  .claude/skills/stock-trend/scripts/analysis/evolution_job.py \
+  audit --start-date 2026-09-08 --as-of 2026-09-23 --json
+```
+
+查看研究结果时，区分正式推荐、冻结研究候选和观察池的分母。20 日主窗口达到至少 20 个成熟日期、100 个去重有效事件，且每项消融比较覆盖率达到 90% 之前，`continue_accumulating` 表示继续积累证据，不表示胜率已提高。消融报告同时给出绝对收益、沪深300超额、胜率、MAE、日期分布和市场分层；正式门控仍按市场、数据质量、板块持续性、资金和买点健康逐项执行。发布实验策略需满足完整样本外证据并显式人工审核，不会随日常运行自动发布。
+
+修复范围与验收门槛见 [投资胜率证据链修复计划](../.omx/plans/2026-09-23-win-rate-evidence-repair.md)。
+
 ## 六维分数贡献对照
 
 正式推荐使用动量、量价、资金、基本面、板块强度和维科夫结构六维权重。后台每日只在冻结的正式选择范围内做六个预登记单项消融：移除一个维度后按剩余权重归一化，保留正式资格、分桶和买点奖励，仅观察层内 Top 1/3/5 的换位。每日产物位于 `.cache/stock-trend/evolution/factor_ablation/daily/<依据日>/`，周度配对评价位于 `weekly/<ISO周>/`。
