@@ -7,7 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from analysis.evolution_job import monitoring_snapshot, run_close, run_weekly
+from analysis.evolution_job import (_monitoring_coverage, monitoring_snapshot,
+                                    run_close, run_weekly)
 from backtesting.recommendation_experiments import _bootstrap, default_experiment
 from core.candidate_research_snapshot import build_research_snapshot, save_research_snapshot
 from core.evolution_registry import (load_active_policy, publish_experiment, register_experiment,
@@ -19,6 +20,26 @@ from core.recommendation_snapshot import build_snapshot, content_sha256
 
 
 class T(unittest.TestCase):
+    def test_monitoring_coverage_tracks_absolute_return_and_mae_separately(self):
+        items = [{
+            "record_id": "r1", "recommendation_date": "2026-09-01",
+            "market": "SH", "code": "600000",
+            "windows": {"20": {"status": "complete", "hs300_alpha": .02,
+                                  "signal_return": -.01, "mae": -.08,
+                                  "exit_date": "2026-09-01"}},
+        }, {
+            "record_id": "r2", "recommendation_date": "2026-09-02",
+            "market": "SH", "code": "600001",
+            "windows": {"20": {"status": "complete", "hs300_alpha": .01,
+                                  "signal_return": .03, "exit_date": "2026-09-02"}},
+        }]
+        result = _monitoring_coverage(items, ["2026-09-01", "2026-09-02"], "2026-09-02")
+        self.assertEqual(result["complete_outcomes"], 2)
+        self.assertEqual(result["absolute_return_outcomes"], 2)
+        self.assertEqual(result["mae_outcomes"], 1)
+        self.assertEqual(result["absolute_return_coverage"], 1.0)
+        self.assertEqual(result["mae_coverage"], .5)
+
     @staticmethod
     def _frozen_definition(sessions=None):
         sessions = sessions or [

@@ -136,6 +136,33 @@ class FactorAblationTests(unittest.TestCase):
         self.assertEqual(conflict["duplicate_outcome_identities"], 1)
         self.assertEqual(conflict["comparisons"]["remove_momentum"]["20"]["1"]["paired_dates"], 0)
 
+    def test_primary_report_keeps_absolute_return_mae_and_market_strata(self):
+        research, official = fixture()
+        daily = run_daily_ablation(research, official)
+        outcomes = []
+        for number, (code, record_id) in enumerate(daily["record_ids"].items()):
+            outcomes.append({
+                "record_id": record_id, "code": code,
+                "recommendation_date": DAY,
+                "research_snapshot_sha256": daily["research_snapshot_sha256"],
+                "contract_id": DEFAULT_CONTRACT_ID,
+                "evaluation_as_of": "2026-10-26",
+                "dimensions": {"market_regime_band": "weak_<60" if number == 0 else "strong_80_plus"},
+                "windows": {"20": {"status": "complete",
+                                   "hs300_alpha": .1 if number else 0,
+                                   "signal_return": .05 if number else -.02,
+                                   "mae": -.03 if number else -.08}},
+            })
+        result = evaluate_ablation_days([daily], outcomes, "2026-10-26")
+        report = result["primary_report"]["remove_momentum"]
+        metrics = report["metrics"]
+        self.assertAlmostEqual(metrics["baseline"]["absolute_return_mean"], .015)
+        self.assertAlmostEqual(metrics["baseline"]["win_rate"], .5)
+        self.assertAlmostEqual(metrics["baseline"]["mae_mean"], -.055)
+        self.assertIn("weak_<60", report["market_stratification"]["baseline"])
+        self.assertEqual(report["date_distribution"], [DAY])
+        self.assertEqual(result["coverage_gate"]["minimum"], .9)
+
 
 if __name__ == "__main__":
     unittest.main()

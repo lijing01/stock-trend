@@ -37,6 +37,7 @@ def definition():
             "top_k": list(TOP_K), "windows": [5, 10, 20, 60],
             "primary_window": 20, "confirmation_window": 60,
             "minimum_mature_dates": 20, "minimum_unique_alpha_events": 100,
+            "minimum_comparison_coverage": .90,
             "evaluation_contract_id": DEFAULT_CONTRACT_ID,
             "changes": ["within_bucket_ranking"],
             "five_day_role": "data_quality_and_anomaly_only",
@@ -404,9 +405,23 @@ def _outcome_index(items, cutoff, contract_id):
 
 
 def _complete_alpha(day, codes, mapping, snapshot_hash, index, contract_id, window):
+    metrics, reason = _complete_metrics(
+        day, codes, mapping, snapshot_hash, index, contract_id, window)
+    if reason:
+        return None, reason
+    return metrics["hs300_alpha_mean"], None
+
+
+def _complete_metrics(day, codes, mapping, snapshot_hash, index, contract_id, window):
+    """Load one side of a paired comparison using the immutable outcome key.
+
+    Alpha is the maturity requirement.  Absolute return and MAE are retained
+    as independently counted diagnostics because older outcome rows may have
+    a valid benchmark alpha without either optional field.
+    """
     if not codes:
         return None, "no_recommendations"
-    values = []
+    rows = []
     for code in codes:
         record_id = mapping.get(code)
         outcome = index.get((record_id, snapshot_hash, contract_id))
@@ -416,8 +431,62 @@ def _complete_alpha(day, codes, mapping, snapshot_hash, index, contract_id, wind
         alpha = _number(result.get("hs300_alpha"))
         if result.get("status") != "complete" or alpha is None:
             return None, "outcome_pending_or_invalid_alpha"
-        values.append(alpha)
-    return sum(values) / len(values), None
+        dimensions = outcome.get("dimensions") or {}
+        market_band = (dimensions.get("market_regime_band")
+                       or outcome.get("market_regime_band") or "unknown")
+        rows.append({
+            "code": str(code),
+            "record_id": record_id,
+            "hs300_alpha": alpha,
+            "signal_return": _number(result.get("signal_return")),
+            "mae": _number(result.get("mae")),
+            "market_regime_band": str(market_band),
+        })
+    def mean(field):
+        values = [row[field] for row in rows if row[field] is not None]
+        return sum(values) / len(values) if values else None
+    returns = [row["signal_return"] for row in rows if row["signal_return"] is not None]
+    alphas = [row["hs300_alpha"] for row in rows]
+    return {
+        "rows": rows,
+        "event_count": len(rows),
+        "hs300_alpha_mean": sum(alphas) / len(alphas),
+        "absolute_return_mean": mean("signal_return"),
+        "mae_mean": mean("mae"),
+        "return_count": len(returns),
+        "mae_count": sum(row["mae"] is not None for row in rows),
+        "win_rate": (sum(value > 0 for value in returns) / len(returns)
+                     if returns else None),
+    }, None
+
+
+def _summarize_metric_rows(rows):
+    """Summarize measured rows without treating missing optional fields as zero."""
+    rows = [row for row in rows if isinstance(row, dict)]
+    def values(field):
+        return [value for value in (_number(row.get(field)) for row in rows)
+                if value is not None]
+    alphas, returns, maes = values("hs300_alpha"), values("signal_return"), values("mae")
+    return {
+        "event_count": len(rows),
+        "alpha_count": len(alphas),
+        "alpha_mean": sum(alphas) / len(alphas) if alphas else None,
+        "absolute_return_count": len(returns),
+        "absolute_return_mean": sum(returns) / len(returns) if returns else None,
+        "win_count": sum(value > 0 for value in returns),
+        "win_rate": sum(value > 0 for value in returns) / len(returns) if returns else None,
+        "mae_count": len(maes),
+        "mae_mean": sum(maes) / len(maes) if maes else None,
+        "mae_worst": min(maes) if maes else None,
+    }
+
+
+def _market_stratification(rows):
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("market_regime_band") or "unknown"), []).append(row)
+    return {band: _summarize_metric_rows(values)
+            for band, values in sorted(grouped.items())}
 
 
 def evaluate_ablation_days(daily_artifacts, outcome_items, cutoff,
@@ -443,24 +512,48 @@ def evaluate_ablation_days(daily_artifacts, outcome_items, cutoff,
         for window in (5, 20, 60):
             window_results = {}
             for k in TOP_K:
-                pairs, missing = [], {}
+                pairs, missing, metric_rows = [], {}, []
                 for item in daily:
                     day = item["recommendation_date"]
                     mapping = item.get("record_ids") or {}
                     snapshot_hash = item.get("research_snapshot_sha256")
-                    baseline, baseline_reason = _complete_alpha(
+                    baseline, baseline_reason = _complete_metrics(
                         day, item["baseline"]["top_k"][str(k)], mapping,
                         snapshot_hash, index, contract_id, window)
-                    treatment, treatment_reason = _complete_alpha(
+                    treatment, treatment_reason = _complete_metrics(
                         day, item["treatments"][label]["top_k"][str(k)], mapping,
                         snapshot_hash, index, contract_id, window)
                     if baseline_reason or treatment_reason:
                         reason = baseline_reason or treatment_reason
                         missing[reason] = missing.get(reason, 0) + 1
                     else:
-                        pairs.append({"date": day, "baseline_alpha": baseline,
-                                      "treatment_alpha": treatment,
-                                      "delta": treatment - baseline})
+                        base_rows = [dict(row, date=day, side="baseline")
+                                     for row in baseline["rows"]]
+                        trial_rows = [dict(row, date=day, side="treatment")
+                                      for row in treatment["rows"]]
+                        metric_rows.extend(base_rows + trial_rows)
+                        pairs.append({
+                            "date": day,
+                            "baseline_alpha": baseline["hs300_alpha_mean"],
+                            "treatment_alpha": treatment["hs300_alpha_mean"],
+                            "delta": treatment["hs300_alpha_mean"] - baseline["hs300_alpha_mean"],
+                            "baseline_absolute_return": baseline["absolute_return_mean"],
+                            "treatment_absolute_return": treatment["absolute_return_mean"],
+                            "absolute_return_delta": (
+                                treatment["absolute_return_mean"] - baseline["absolute_return_mean"]
+                                if baseline["absolute_return_mean"] is not None
+                                and treatment["absolute_return_mean"] is not None else None),
+                            "baseline_mae": baseline["mae_mean"],
+                            "treatment_mae": treatment["mae_mean"],
+                            "mae_delta": (
+                                treatment["mae_mean"] - baseline["mae_mean"]
+                                if baseline["mae_mean"] is not None
+                                and treatment["mae_mean"] is not None else None),
+                        })
+                baseline_rows = [row for row in metric_rows if row["side"] == "baseline"]
+                treatment_rows = [row for row in metric_rows if row["side"] == "treatment"]
+                baseline_metrics = _summarize_metric_rows(baseline_rows)
+                treatment_metrics = _summarize_metric_rows(treatment_rows)
                 window_results[str(k)] = {
                     "paired_dates": len(pairs), "missing": missing,
                     "coverage_rate": (len(pairs) / len(daily) if daily else None),
@@ -471,6 +564,30 @@ def evaluate_ablation_days(daily_artifacts, outcome_items, cutoff,
                         sum(pair["treatment_alpha"] > 0 for pair in pairs) / len(pairs)
                         - sum(pair["baseline_alpha"] > 0 for pair in pairs) / len(pairs)
                         if pairs else None),
+                    "metrics": {
+                        "baseline": baseline_metrics,
+                        "treatment": treatment_metrics,
+                        "delta": {
+                            "absolute_return_mean": (
+                                treatment_metrics["absolute_return_mean"]
+                                - baseline_metrics["absolute_return_mean"]
+                                if baseline_metrics["absolute_return_mean"] is not None
+                                and treatment_metrics["absolute_return_mean"] is not None else None),
+                            "win_rate": (
+                                treatment_metrics["win_rate"] - baseline_metrics["win_rate"]
+                                if baseline_metrics["win_rate"] is not None
+                                and treatment_metrics["win_rate"] is not None else None),
+                            "mae_mean": (
+                                treatment_metrics["mae_mean"] - baseline_metrics["mae_mean"]
+                                if baseline_metrics["mae_mean"] is not None
+                                and treatment_metrics["mae_mean"] is not None else None),
+                        },
+                    },
+                    "market_stratification": {
+                        "baseline": _market_stratification(baseline_rows),
+                        "treatment": _market_stratification(treatment_rows),
+                    },
+                    "date_distribution": [pair["date"] for pair in pairs],
                 }
             by_k[str(window)] = window_results
         # Keep the mature 20-day window directly addressable while retaining
@@ -480,6 +597,34 @@ def evaluate_ablation_days(daily_artifacts, outcome_items, cutoff,
             "20": by_k.get("20", {}),
             "windows": by_k,
         }
+    minimum_coverage = definition()["minimum_comparison_coverage"]
+    coverage_gate = {}
+    for label, comparison in result["comparisons"].items():
+        primary = (comparison.get("windows") or {}).get("20") or {}
+        coverage_gate[label] = {
+            str(k): ((primary.get(str(k)) or {}).get("coverage_rate") is not None
+                     and (primary.get(str(k)) or {}).get("coverage_rate") >= minimum_coverage)
+            for k in TOP_K
+        }
+    result["coverage_gate"] = {
+        "minimum": minimum_coverage,
+        "by_comparison": coverage_gate,
+        "all_comparisons_ready": bool(daily) and all(
+            all(values.values()) for values in coverage_gate.values()),
+    }
+    # A compact, machine-readable report for the primary Top-5/20-session
+    # comparison.  The full 5/10/20/60-day detail remains under each window.
+    result["primary_report"] = {
+        label: {
+            "metrics": (((comparison.get("windows") or {}).get("20") or {})
+                        .get("5") or {}).get("metrics", {}),
+            "market_stratification": (((comparison.get("windows") or {}).get("20") or {})
+                                       .get("5") or {}).get("market_stratification", {}),
+            "date_distribution": (((comparison.get("windows") or {}).get("20") or {})
+                                   .get("5") or {}).get("date_distribution", []),
+        }
+        for label, comparison in result["comparisons"].items()
+    }
     event_rows = []
     selected_keys = set()
     for item in daily:
@@ -517,7 +662,8 @@ def evaluate_ablation_days(daily_artifacts, outcome_items, cutoff,
     result["mature_paired_dates"] = mature_dates
     if (mature_dates >= definition()["minimum_mature_dates"] and
             result["mature_unique_alpha_events"] >=
-            definition()["minimum_unique_alpha_events"]):
+            definition()["minimum_unique_alpha_events"] and
+            result["coverage_gate"]["all_comparisons_ready"]):
         result["status"] = "completed"
         result["conclusion_scope"] = "research_diagnostics_only_holdout_pending"
     return result

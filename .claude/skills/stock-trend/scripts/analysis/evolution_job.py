@@ -48,7 +48,8 @@ PRE_REGISTERED_DEGRADATION = {"data_failure_rate": .20, "minimum_coverage": .90,
 MONITORING_CONTRACT = {"schema_version": "recommendation-evolution-monitor/v1",
                        "thresholds": PRE_REGISTERED_DEGRADATION,
                        "primary_window": 20, "recent_close_sessions": 5,
-                       "outcome_cohort_sessions": 60}
+                       "outcome_cohort_sessions": 60,
+                       "metrics": ["signal_return", "hs300_alpha", "mae", "coverage"]}
 _FAILURE_CLASSES = ("contract", "interface", "schema", "digest", "active_pointer")
 
 
@@ -262,7 +263,7 @@ def _close_run_days(job_root):
 def _monitoring_coverage(items, expected_days, as_of):
     """Calculate monitor denominators from real frozen evaluation rows."""
     required = ("record_id", "recommendation_date", "market", "code")
-    complete, due, intact = 0, 0, 0
+    complete, absolute_complete, mae_complete, due, intact = 0, 0, 0, 0, 0
     recommendation_days = set()
     for item in items:
         if not isinstance(item.get("recommendation_date"), str) \
@@ -281,13 +282,25 @@ def _monitoring_coverage(items, expected_days, as_of):
         if status == "complete" and isinstance(value, (int, float)) \
                 and not isinstance(value, bool) and math.isfinite(value):
             complete += 1
+        if status == "complete":
+            absolute = window.get("signal_return")
+            if isinstance(absolute, (int, float)) and not isinstance(absolute, bool) \
+                    and math.isfinite(absolute):
+                absolute_complete += 1
+            mae = window.get("mae")
+            if isinstance(mae, (int, float)) and not isinstance(mae, bool) \
+                    and math.isfinite(mae):
+                mae_complete += 1
     expected = set(expected_days or [])
     return {
         "recommendation_date_coverage": (len(recommendation_days & expected) / len(expected)
                                          if expected else None),
         "research_record_integrity": intact / len(items) if items else None,
         "mature_outcome_coverage": complete / due if due else None,
+        "absolute_return_coverage": absolute_complete / due if due else None,
+        "mae_coverage": mae_complete / due if due else None,
         "due_outcomes": due, "complete_outcomes": complete,
+        "absolute_return_outcomes": absolute_complete, "mae_outcomes": mae_complete,
     }
 
 
@@ -327,6 +340,21 @@ def monitoring_snapshot(job_root=DEFAULT_ROOT, attribution_root=DEFAULT_EVALUATI
         for item in monitor_items
     ])
     alpha = alpha_summary["mean_alpha"]
+    absolute_returns = [x.get("signal_return") for x in complete
+                        if x.get("status") == "complete"
+                        and isinstance(x.get("signal_return"), (int, float))
+                        and not isinstance(x.get("signal_return"), bool)
+                        and math.isfinite(x.get("signal_return"))]
+    maes = [x.get("mae") for x in complete
+            if x.get("status") == "complete"
+            and isinstance(x.get("mae"), (int, float))
+            and not isinstance(x.get("mae"), bool)
+            and math.isfinite(x.get("mae"))]
+    absolute_return = (sum(absolute_returns) / len(absolute_returns)
+                       if absolute_returns else None)
+    win_rate = (sum(value > 0 for value in absolute_returns) / len(absolute_returns)
+                if absolute_returns else None)
+    mean_mae = sum(maes) / len(maes) if maes else None
     failure_rate = failed / len(recent) if recent else None
     coverage = _monitoring_coverage(monitor_items, expected[-60:], as_of or "")
     insufficient = []
@@ -367,6 +395,11 @@ def monitoring_snapshot(job_root=DEFAULT_ROOT, attribution_root=DEFAULT_EVALUATI
     return _package("monitor", {"status": status,
              "active_policy": load_active_policy(release_root), "monitoring_contract": MONITORING_CONTRACT,
              "thresholds": PRE_REGISTERED_DEGRADATION,
+             "mature_mean_signal_return": absolute_return,
+             "mature_win_rate": win_rate,
+             "mature_mean_mae": mean_mae,
+             "absolute_return_events": len(absolute_returns),
+             "mae_events": len(maes),
              "data_failure_rate": failure_rate, "mature_mean_hs300_alpha": alpha,
              "mature_events": len(mature),
              "mature_dates": alpha_summary["mature_dates"],
