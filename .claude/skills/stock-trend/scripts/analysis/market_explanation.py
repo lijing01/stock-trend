@@ -54,6 +54,7 @@ def _source_metadata(ctx, component_id):
     provider = component.get("provider")
     data_date = component.get("data_date")
     fetched_at = component.get("fetched_at")
+    source_timestamp = component.get("source_timestamp")
     reasons = []
 
     if component_id == "capital":
@@ -65,6 +66,7 @@ def _source_metadata(ctx, component_id):
             provider = capital_context.get("provider") or provider
             data_date = capital_context.get("data_date") or data_date
             fetched_at = capital_context.get("fetched_at") or fetched_at
+            source_timestamp = capital_context.get("source_timestamp") or source_timestamp
         elif "主力" in detail:
             metric = "market_main_force_net_inflow"
             source_kind = explicit or "primary"
@@ -79,6 +81,31 @@ def _source_metadata(ctx, component_id):
             "zt_emotion": "limit_up_emotion",
         }.get(component_id, component_id)
         source_kind = explicit or "unknown"
+
+    if component_id == "volume":
+        amount_evidence = ctx.get("amount_evidence") or {}
+        provider = provider or amount_evidence.get("provider")
+        data_date = data_date or amount_evidence.get("data_date")
+        fetched_at = fetched_at or amount_evidence.get("fetched_at")
+        source_timestamp = source_timestamp or amount_evidence.get("source_timestamp")
+        source_kind = explicit or amount_evidence.get("source_kind") or source_kind
+        reasons.extend(str(reason) for reason in amount_evidence.get("reasons") or [])
+
+    if component_id == "zt_emotion":
+        zt_evidence = ctx.get("zt_evidence") or {}
+        provider = provider or zt_evidence.get("provider")
+        data_date = data_date or zt_evidence.get("data_date")
+        fetched_at = fetched_at or zt_evidence.get("fetched_at")
+        source_timestamp = source_timestamp or zt_evidence.get("source_timestamp")
+        reasons.extend(str(reason) for reason in zt_evidence.get("reasons") or [])
+
+    if component_id in {"breadth", "capital"}:
+        activity_evidence = ctx.get("activity_evidence") or {}
+        provider = provider or activity_evidence.get("provider")
+        data_date = data_date or activity_evidence.get("data_date")
+        fetched_at = fetched_at or activity_evidence.get("fetched_at")
+        source_timestamp = source_timestamp or activity_evidence.get("source_timestamp")
+        reasons.extend(str(reason) for reason in activity_evidence.get("reasons") or [])
 
     if component_id == "index_trend":
         diagnostics = ctx.get("index_data_quality") or {}
@@ -95,12 +122,23 @@ def _source_metadata(ctx, component_id):
                         for source in sources
                     ) else "primary"
                 )
+            timestamps = [
+                item.get("fetched_at") for item in diagnostics.values()
+                if isinstance(item, dict) and item.get("fetched_at")
+            ]
+            fetched_at = fetched_at or (max(timestamps) if timestamps else None)
+            source_timestamps = [
+                item.get("source_timestamp") for item in diagnostics.values()
+                if isinstance(item, dict) and item.get("source_timestamp")
+            ]
+            source_timestamp = source_timestamp or (
+                max(source_timestamps) if source_timestamps else None)
         elif not data_date:
             reasons.append("legacy_context_evidence_unknown")
 
     if not data_date:
         data_date = ctx.get("data_date") or None
-    if not fetched_at:
+    if not source_timestamp:
         reasons.append("source_timestamp_missing")
 
     return {
@@ -108,13 +146,16 @@ def _source_metadata(ctx, component_id):
         "provider": provider or "unknown",
         "data_date": data_date,
         "fetched_at": fetched_at,
+        "source_timestamp": source_timestamp,
         "source_kind": source_kind,
         "reasons": reasons,
     }
 
 
 def _freshness(meta, expected_date):
-    if not meta.get("fetched_at"):
+    # fetched_at is our local collection time. A provider timestamp is needed
+    # before claiming fresh; missing provider timestamps remain unknown.
+    if not meta.get("source_timestamp"):
         return "unknown"
     if meta.get("data_date") == expected_date:
         return "fresh"
@@ -185,6 +226,7 @@ def _component_explanation(ctx, component_id, expected_date, used_weight):
         "provider": meta["provider"],
         "data_date": meta.get("data_date"),
         "fetched_at": meta.get("fetched_at"),
+        "source_timestamp": meta.get("source_timestamp"),
         "usage": usage,
         "reasons": _dedupe(reasons),
     }
@@ -206,6 +248,22 @@ def _component_explanation(ctx, component_id, expected_date, used_weight):
                     (item.get("data_date") if isinstance(item, dict) else None)
                     or ((ctx.get("index_data_quality") or {}).get(code) or {}).get("data_date")
                     or None
+                ),
+                "fetched_at": (
+                    ((ctx.get("index_data_quality") or {}).get(code) or {}).get("fetched_at")
+                    or (item.get("fetched_at") if isinstance(item, dict) else None)
+                ),
+                "source_timestamp": (
+                    ((ctx.get("index_data_quality") or {}).get(code) or {}).get("source_timestamp")
+                    or (item.get("source_timestamp") if isinstance(item, dict) else None)
+                ),
+                "record_count": (
+                    ((ctx.get("index_data_quality") or {}).get(code) or {}).get("record_count")
+                    or (item.get("record_count") if isinstance(item, dict) else None)
+                ),
+                "amount_available_days": (
+                    ((ctx.get("index_data_quality") or {}).get(code) or {}).get("amount_available_days")
+                    or (item.get("amount_available_days") if isinstance(item, dict) else None)
                 ),
                 "usage": "scorable" if (
                     isinstance(item, dict)

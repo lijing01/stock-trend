@@ -239,6 +239,66 @@ def test_collect_context_rejects_stale_turnover_leg():
          ctx["components"]["volume"]["detail"])
 
 
+def test_amount_evidence_requires_aligned_history():
+    print("\n--- amount evidence ---")
+    rows = {
+        "000001.SH": [
+            {"trade_date": "20260806", "amount": 1e9},
+            {"trade_date": "20260807", "amount": 1.2e9},
+        ],
+        "399106.SZ": [
+            {"trade_date": "20260807", "amount": 1.4e9},
+        ],
+    }
+    diagnostics = {
+        "000001.SH": {"source": "eastmoney", "record_count": 2,
+                       "data_date": "20260807", "fetched_at": "2026-08-07T15:10:00+08:00"},
+        "399106.SZ": {"source": "tencent", "record_count": 1,
+                       "data_date": "20260807", "fetched_at": "2026-08-07T15:10:01+08:00"},
+    }
+    evidence = mr.build_amount_evidence(rows, diagnostics, "2026-08-07")
+    test("仅保留两市同日成交额", evidence["complete_dates"] == ["2026-08-07"], str(evidence))
+    test("不足基线天数保持partial", evidence["baseline_status"] == "partial", str(evidence))
+    test("记录腾讯无历史成交额", "provider_no_historical_amount" in
+         evidence["per_index"]["399106.SZ"]["reasons"], str(evidence))
+    test("记录单边/日期对齐缺口", "amount_dates_not_aligned" in evidence["reasons"], str(evidence))
+
+
+def test_history_idempotence_and_conflict_audit():
+    print("\n--- history atomicity and conflict ---")
+    old_history = mr.HISTORY_FILE
+    old_result = mr.get_last_history_write_result()
+    with tempfile.TemporaryDirectory() as tmp:
+        mr.HISTORY_FILE = Path(tmp) / "market_regime_history.json"
+        entry = {
+            "date": "2026-08-07", "regime_score": 55.0, "label": "弱势",
+            "amount_yi": 1000.0, "intraday": False,
+            "component_evidence": {"volume": {
+                "completeness": "complete", "usage": "scorable",
+                "provider": "eastmoney", "data_date": "2026-08-07",
+            }},
+            "fetched_at": "2026-08-07T15:10:00+08:00",
+        }
+        first = mr.save_history(entry)
+        first_payload = json.loads(mr.HISTORY_FILE.read_text(encoding="utf-8"))
+        changed_timestamp = {**entry, "fetched_at": "2026-08-07T15:11:00+08:00"}
+        second = mr.save_history(changed_timestamp)
+        test("首次收盘历史写入成功", first is True)
+        test("相同事实仅采集时间变化幂等", second is True and
+             mr.get_last_history_write_result()["status"] == "unchanged")
+        conflict = {**entry, "regime_score": 56.0}
+        third = mr.save_history(conflict)
+        result = mr.get_last_history_write_result()
+        current_payload = json.loads(mr.HISTORY_FILE.read_text(encoding="utf-8"))
+        conflict_path = Path(result.get("path", ""))
+        test("同日不同事实拒绝覆盖", third is False and result["status"] == "conflict")
+        test("冲突证据单独留痕", conflict_path.exists() and
+             "incoming" in json.loads(conflict_path.read_text(encoding="utf-8")))
+        test("正式历史保持原值", current_payload == first_payload, str(current_payload))
+    mr.HISTORY_FILE = old_history
+    mr.LAST_HISTORY_WRITE_RESULT = old_result
+
+
 # ──────────────── score_breadth ────────────────
 
 
@@ -769,6 +829,7 @@ def main():
     test_volume()
     test_index_fallback_and_amount()
     test_collect_context_rejects_stale_turnover_leg()
+    test_amount_evidence_requires_aligned_history()
     test_breadth()
     test_zt()
     test_capital()
@@ -777,6 +838,7 @@ def main():
     test_observation_list_html()
     test_index_metrics()
     test_persistence()
+    test_history_idempotence_and_conflict_audit()
     test_persistence_rejects_malformed_and_weekend_dates()
     test_load_context_drops_retired_portfolio_fields()
     test_session_elapsed_fraction()

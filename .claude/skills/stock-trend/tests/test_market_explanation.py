@@ -148,6 +148,23 @@ class MarketExplanationTests(unittest.TestCase):
             self.assertEqual(evidence["freshness"], "unknown")
             self.assertIsNone(evidence["fetched_at"])
 
+    def test_local_fetch_time_without_provider_timestamp_stays_unknown(self):
+        ctx = fixture_close_context()
+        for component in ctx["components"].values():
+            component["fetched_at"] = "2026-09-07T15:10:00+08:00"
+            component["source_timestamp"] = None
+        for item in ctx["index_data_quality"].values():
+            item["fetched_at"] = "2026-09-07T15:10:00+08:00"
+            item["source_timestamp"] = None
+
+        result = build_market_explanation(ctx, "2026-09-07")
+
+        self.assertTrue(all(
+            component["evidence"]["freshness"] == "unknown"
+            for component in result["components"]
+        ))
+        self.assertIn("source_timestamp_unknown", result["quality_notes"])
+
     def test_partial_index_failure_records_expected_and_available_counts(self):
         ctx = fixture_close_context()
         ctx["indices"]["399001.SZ"].update({"close": None})

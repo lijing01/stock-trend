@@ -23,6 +23,8 @@ Usage:
 """
 
 import argparse
+import copy
+import hashlib
 import html as html_lib
 import json
 import os
@@ -40,6 +42,8 @@ CACHE_DIR = Path(os.environ.get("STOCK_TREND_CACHE_DIR", str(PROJECT_ROOT / ".ca
 REPORTS_DIR = PROJECT_ROOT / "reports" / "lists"
 CONTEXT_FILE = CACHE_DIR / "market_regime.json"
 HISTORY_FILE = CACHE_DIR / "market_regime_history.json"
+MARKET_HISTORY_SCHEMA_VERSION = "market-regime-history/v2"
+HISTORY_CONFLICT_DIR_NAME = "market_regime_history_conflicts"
 OBSERVATION_LIST_FILE = Path(os.environ.get(
     "STOCK_TREND_OBSERVATION_LIST_FILE",
     str(PROJECT_ROOT / ".claude" / "skills" / "stock-trend" / "data" / "observation_list.yaml"),
@@ -84,6 +88,29 @@ def _safe_float(v) -> float:
 
 def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, v))
+
+
+def _iso_date_from_value(value) -> str | None:
+    """Normalize provider compact/ISO dates without inventing a date."""
+    text = str(value or "")
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    return _verified_history_date(text)
+
+
+def _observed_at() -> str:
+    """Local collection timestamp; it is not a provider event timestamp."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _amount_dates(records: list[dict]) -> list[str]:
+    dates = {
+        normalized for row in records or []
+        if _safe_float(row.get("amount")) > 0
+        for normalized in [_iso_date_from_value(row.get("trade_date"))]
+        if normalized
+    }
+    return sorted(dates)
 
 
 # ──────────────── 盘中会话时钟 ────────────────
@@ -157,7 +184,29 @@ def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2,
     from core.eastmoney_utils import build_secid, rotate_em_host
     status = diagnostics if diagnostics is not None else {}
     errors = []
+    fetched_at = _observed_at()
     secid = build_secid(code)
+
+    def record_success(source: str, records: list[dict]) -> list[dict]:
+        normalized_dates = [
+            _iso_date_from_value(row.get("trade_date"))
+            for row in records
+        ]
+        normalized_dates = [value for value in normalized_dates if value]
+        status.update({
+            "source": source,
+            "provider": source,
+            "record_count": len(records),
+            "data_date": normalized_dates[-1] if normalized_dates else "",
+            "data_date_raw": records[-1].get("trade_date") if records else "",
+            "fetched_at": fetched_at,
+            "source_timestamp": None,
+            "amount_available_days": len(_amount_dates(records)),
+            "amount_dates": _amount_dates(records),
+            "errors": errors,
+        })
+        return records
+
     if secid:
         for _attempt in range(max(1, retries)):
             try:
@@ -165,13 +214,7 @@ def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2,
                     lambda h: fetch_eastmoney(secid, freq="D", lmt=lmt, host=h))
                 records = _sort_kline(records)
                 if records:
-                    status.update({
-                        "source": "eastmoney",
-                        "record_count": len(records),
-                        "data_date": records[-1]["trade_date"],
-                        "errors": errors,
-                    })
-                    return records
+                    return record_success("eastmoney", records)
             except Exception as exc:
                 errors.append(f"eastmoney: {exc}")
                 continue
@@ -179,30 +222,21 @@ def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2,
         records, _name = fetch_tencent_a_stock(code, "D")
         records = _sort_kline(records)[-lmt:]
         if records:
-            status.update({
-                "source": "tencent",
-                "record_count": len(records),
-                "data_date": records[-1]["trade_date"],
-                "errors": errors,
-            })
-            return records
+            return record_success("tencent", records)
     except Exception as exc:
         errors.append(f"tencent: {exc}")
     try:
         records, _name = fetch_baostock(code, "D")
         records = _sort_kline(records)[-lmt:]
         if records:
-            status.update({
-                "source": "baostock",
-                "record_count": len(records),
-                "data_date": records[-1]["trade_date"],
-                "errors": errors,
-            })
-            return records
+            return record_success("baostock", records)
     except Exception as exc:
         errors.append(f"baostock: {exc}")
-    status.update({"source": "error", "record_count": 0,
-                   "data_date": "", "errors": errors})
+    status.update({"source": "error", "provider": "error", "record_count": 0,
+                   "data_date": "", "data_date_raw": "",
+                   "fetched_at": fetched_at, "source_timestamp": None,
+                   "amount_available_days": 0, "amount_dates": [],
+                   "errors": errors})
     return []
 
 
@@ -255,13 +289,33 @@ def fetch_zt_stats() -> dict:
 
     直连 AKShare 涨停池，避免构建全市场板块映射。
     """
+    data_date = datetime.now().date().isoformat()
+    fetched_at = _observed_at()
+
+    def result(count=0, streak_count=0, max_streak=0, *, completeness="missing", reasons=None):
+        return {
+            "count": count,
+            "streak_count": streak_count,
+            "max_streak": max_streak,
+            "evidence": {
+                "schema_version": "market-component-evidence/v1",
+                "provider": "akshare",
+                "data_date": data_date,
+                "fetched_at": fetched_at,
+                "source_timestamp": None,
+                "completeness": completeness,
+                "usage": "scorable" if completeness == "complete" else "unavailable",
+                "reasons": list(reasons or []),
+            },
+        }
+
     if not HAS_AKSHARE:
-        return {"count": 0, "streak_count": 0, "max_streak": 0}
+        return result(reasons=["akshare_unavailable"])
     try:
-        dt = datetime.now().strftime("%Y%m%d")
+        dt = data_date.replace("-", "")
         df = ak.stock_zt_pool_em(date=dt)
         if df is None or df.empty:
-            return {"count": 0, "streak_count": 0, "max_streak": 0}
+            return result(reasons=["provider_returned_empty"])
         streaks = []
         for v in df.get("连板数", []):
             try:
@@ -269,13 +323,14 @@ def fetch_zt_stats() -> dict:
             except (TypeError, ValueError):
                 streaks.append(1)
         streaks = [s if s >= 1 else 1 for s in streaks]
-        return {
-            "count": len(streaks),
-            "streak_count": sum(1 for s in streaks if s >= 2),
-            "max_streak": max(streaks) if streaks else 0,
-        }
-    except Exception:
-        return {"count": 0, "streak_count": 0, "max_streak": 0}
+        return result(
+            count=len(streaks),
+            streak_count=sum(1 for s in streaks if s >= 2),
+            max_streak=max(streaks) if streaks else 0,
+            completeness="complete",
+        )
+    except Exception as exc:
+        return result(reasons=[f"provider_error:{type(exc).__name__}"])
 
 
 def fetch_market_activity() -> dict | None:
@@ -298,7 +353,21 @@ def fetch_market_activity() -> dict | None:
         main_force_yi = sum(float(x.get("f62") or 0) for x in items) / 1e8
         if up + down <= 0:
             return None
-        return {"up": up, "down": down, "main_force_yi": round(main_force_yi, 1)}
+        return {
+            "up": up,
+            "down": down,
+            "main_force_yi": round(main_force_yi, 1),
+            "evidence": {
+                "schema_version": "market-component-evidence/v1",
+                "provider": "eastmoney",
+                "data_date": datetime.now().date().isoformat(),
+                "fetched_at": _observed_at(),
+                "source_timestamp": None,
+                "completeness": "complete",
+                "usage": "scorable",
+                "reasons": ["provider_event_timestamp_missing"],
+            },
+        }
     except Exception:
         return None
 
@@ -329,16 +398,22 @@ def score_index_trend(index_metrics: dict[str, dict]) -> dict:
             "data_status": "good"}
 
 
-def score_volume(today_amount_yi: float | None, amount_history_yi: list[float]) -> dict:
+def score_volume(today_amount_yi: float | None, amount_history_yi: list[float],
+                 amount_evidence: dict | None = None) -> dict:
     """成交额分: 两市成交额 vs 近20日均额."""
     if not today_amount_yi or today_amount_yi <= 0:
         return {"score": 50.0, "detail": "成交额不可用", "data_status": "missing"}
     hist = [a for a in amount_history_yi if a > 0][-20:]
-    if len(hist) < MIN_AMOUNT_HISTORY_DAYS:
+    evidence_status = (amount_evidence or {}).get("baseline_status")
+    if len(hist) < MIN_AMOUNT_HISTORY_DAYS or evidence_status not in (None, "good"):
+        reason = (
+            f"成交额来源对齐不足({(amount_evidence or {}).get('amount_available_days', len(hist))}天)"
+            if evidence_status not in (None, "good") else
+            f"成交额历史不足 {len(hist)}/{MIN_AMOUNT_HISTORY_DAYS}"
+        )
         return {
             "score": 50.0,
-            "detail": f"两市 {today_amount_yi:.0f}亿,成交额历史不足 "
-                      f"{len(hist)}/{MIN_AMOUNT_HISTORY_DAYS}",
+            "detail": f"两市 {today_amount_yi:.0f}亿,{reason}",
             "data_status": "partial",
         }
     base = sum(hist) / len(hist)
@@ -373,7 +448,8 @@ def score_breadth(breadth: dict | None, industry_sectors: list[dict]) -> dict:
     }
 
 
-def score_zt_emotion(zt: dict, history_counts: list[int]) -> dict:
+def score_zt_emotion(zt: dict, history_counts: list[int],
+                      zt_evidence: dict | None = None) -> dict:
     """涨停情绪分: 涨停家数 vs 近20日均值 + 连板高度."""
     count = zt.get("count", 0)
     max_streak = zt.get("max_streak", 0)
@@ -394,11 +470,14 @@ def score_zt_emotion(zt: dict, history_counts: list[int]) -> dict:
     elif max_streak >= 2:
         bonus = 5
     score = _clamp(base_score + bonus)
-    return {
+    result = {
         "score": round(score, 1),
         "detail": f"涨停 {count}家(连板{streak_count},最高{max_streak}板;{vs})+连板加成{bonus}",
         "data_status": "good" if len(hist) >= 5 else "partial",
     }
+    if zt_evidence and zt_evidence.get("completeness") != "complete":
+        result["data_status"] = "missing" if count <= 0 else "partial"
+    return result
 
 
 def score_capital(market_activity: dict | None) -> dict:
@@ -549,13 +628,17 @@ def _last_close_context(history: dict, data_date: str) -> dict | None:
 
 
 def previous_amounts(history: dict, before_date: str,
-                     fetched: dict | None = None) -> list[float]:
+                     fetched: dict | None = None, *,
+                     require_evidence: bool = False,
+                     fetched_dates: set[str] | None = None) -> list[float]:
     """Return prior turnover values, preferring freshly fetched dates."""
     before_key = _verified_history_date(before_date)
     if before_key is None:
         return []
     by_date = {}
     for history_date, entry in sorted(_baseline_history(history, before_key).items()):
+        if require_evidence and not _history_amount_eligible(entry):
+            continue
         amount = _safe_float(entry.get("amount_yi"))
         if amount > 0:
             by_date[history_date] = amount
@@ -565,7 +648,9 @@ def previous_amounts(history: dict, before_date: str,
                    if len(text) == 8 and text.isdigit() else text)
         iso_date = _verified_history_date(compact)
         amount = _safe_float(raw_amount)
-        if iso_date and iso_date < before_key and amount > 0:
+        if (iso_date and iso_date < before_key and amount > 0
+                and (not require_evidence
+                     or iso_date in (fetched_dates or set()))):
             by_date[iso_date] = amount
     return [by_date[key] for key in sorted(by_date)]
 
@@ -591,30 +676,296 @@ def complete_market_amounts(index_rows: dict) -> dict[str, float]:
     }
 
 
+def build_amount_evidence(index_rows: dict, index_diagnostics: dict | None = None,
+                          data_date: str = "") -> dict:
+    """Build auditable two-market turnover provenance.
+
+    A date is baseline-eligible only when both the Shanghai and Shenzhen
+    indices expose a positive amount for that exact trade date.  Provider
+    fallback records are retained for diagnosis, but never promoted to a
+    complete history merely because one side has a value.
+    """
+    diagnostics = index_diagnostics or {}
+    per_index = {}
+    date_sets = []
+    provider_names = []
+    fetched_values = []
+    reasons = []
+    for code in AMOUNT_INDEX_CODES:
+        records = list(index_rows.get(code, []) or [])
+        diag = diagnostics.get(code) if isinstance(diagnostics, dict) else {}
+        diag = diag if isinstance(diag, dict) else {}
+        dates = _amount_dates(records)
+        date_sets.append(set(dates))
+        provider = str(diag.get("provider") or diag.get("source") or "unknown")
+        provider_names.append(provider)
+        if diag.get("fetched_at"):
+            fetched_values.append(str(diag["fetched_at"]))
+        item_reasons = []
+        if not records:
+            item_reasons.append("index_history_missing")
+        if not dates:
+            item_reasons.append("amount_missing")
+        if provider in {"tencent", "tencent_a"} and len(dates) <= 1:
+            item_reasons.append("provider_no_historical_amount")
+        if diag.get("errors"):
+            item_reasons.append("fallback_or_provider_errors")
+        per_index[code] = {
+            "provider": provider,
+            "data_date": _iso_date_from_value(diag.get("data_date")),
+            "fetched_at": diag.get("fetched_at"),
+            "source_timestamp": diag.get("source_timestamp"),
+            "record_count": int(diag.get("record_count") or len(records)),
+            "amount_available_days": len(dates),
+            "amount_dates": dates,
+            "completeness": "complete" if dates and not item_reasons else (
+                "partial" if dates else "missing"),
+            "usage": "reference_only" if item_reasons else "scorable",
+            "reasons": sorted(set(item_reasons)),
+            "errors": list(diag.get("errors") or []),
+        }
+
+    common_dates = set.intersection(*date_sets) if date_sets else set()
+    union_dates = set.union(*date_sets) if date_sets else set()
+    if not common_dates:
+        if union_dates:
+            reasons.append("single_market_amount_missing_or_date_mismatch")
+        else:
+            reasons.append("amount_history_missing")
+    elif len(common_dates) < MIN_AMOUNT_HISTORY_DAYS:
+        reasons.append("amount_history_insufficient")
+    if union_dates and common_dates != union_dates:
+        reasons.append("amount_dates_not_aligned")
+    if any(reason == "provider_no_historical_amount"
+           for item in per_index.values() for reason in item["reasons"]):
+        reasons.append("fallback_provider_lacks_historical_amount")
+    if any(reason == "fallback_or_provider_errors"
+           for item in per_index.values() for reason in item["reasons"]):
+        reasons.append("provider_fallback_used")
+
+    source_kind = "primary"
+    if any(provider in {"tencent", "baostock", "tencent_a"}
+           for provider in provider_names):
+        source_kind = "alternative"
+    if any(provider == "unknown" for provider in provider_names):
+        source_kind = "unknown"
+    baseline_status = "good" if len(common_dates) >= MIN_AMOUNT_HISTORY_DAYS else "partial"
+    completeness = "complete" if baseline_status == "good" else (
+        "partial" if common_dates or union_dates else "missing")
+    return {
+        "schema_version": "market-amount-evidence/v1",
+        "provider": "+".join(dict.fromkeys(provider_names)) or "unknown",
+        "source_kind": source_kind,
+        "data_date": _iso_date_from_value(data_date),
+        "fetched_at": max(fetched_values) if fetched_values else None,
+        "source_timestamp": None,
+        "per_index": per_index,
+        "complete_dates": sorted(common_dates),
+        "union_dates": sorted(union_dates),
+        "amount_available_days": len(common_dates),
+        "completeness": completeness,
+        "baseline_status": baseline_status,
+        "usage": "scorable" if baseline_status == "good" else "reference_only",
+        "reasons": sorted(set(reasons)),
+    }
+
+
+def _history_amount_eligible(entry: dict) -> bool:
+    evidence = entry.get("amount_evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = (entry.get("component_evidence") or {}).get("volume") or {}
+    return (
+        isinstance(evidence, dict)
+        and evidence.get("completeness") == "complete"
+        and evidence.get("usage") == "scorable"
+        and _safe_float(entry.get("amount_yi")) > 0
+    )
+
+
+def _history_zt_eligible(entry: dict) -> bool:
+    evidence = entry.get("zt_evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = (entry.get("component_evidence") or {}).get("zt_emotion") or {}
+    return (
+        isinstance(evidence, dict)
+        and evidence.get("completeness") == "complete"
+        and evidence.get("usage") == "scorable"
+        and isinstance(entry.get("zt"), dict)
+        and _safe_float((entry.get("zt") or {}).get("count")) >= 0
+    )
+
+
 def should_save_history(ctx: dict) -> bool:
     """盘中快照不写历史基线(避免 partial 数据污染);全天/收盘后条目才写."""
     return not bool(ctx.get("intraday", False))
 
 
+_HISTORY_RUNTIME_FIELDS = {
+    "content_sha256", "schema_version", "fetched_at", "generated_at", "recorded_at", "saved_at",
+}
+LAST_HISTORY_WRITE_RESULT = {"status": "not_attempted"}
+
+
+def _history_decision_projection(value):
+    if isinstance(value, dict):
+        return {
+            key: _history_decision_projection(child)
+            for key, child in value.items()
+            if key not in _HISTORY_RUNTIME_FIELDS
+        }
+    if isinstance(value, list):
+        return [_history_decision_projection(child) for child in value]
+    return value
+
+
+def _history_digest(value: dict) -> str:
+    projection = _history_decision_projection(value)
+    payload = json.dumps(
+        projection, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _atomic_json_write(path: Path, value: dict | list) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    payload = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(payload)
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _record_history_conflict(history_path: Path, entry_date: str,
+                             existing: dict, incoming: dict,
+                             existing_digest: str, incoming_digest: str) -> Path:
+    conflict_dir = history_path.parent / HISTORY_CONFLICT_DIR_NAME
+    conflict_dir.mkdir(parents=True, exist_ok=True)
+    target = conflict_dir / f"{entry_date}-{incoming_digest[:16]}.json"
+    payload = {
+        "schema_version": "market-regime-history-conflict/v1",
+        "recorded_at": _observed_at(),
+        "history_path": str(history_path),
+        "date": entry_date,
+        "existing_content_sha256": existing_digest,
+        "incoming_content_sha256": incoming_digest,
+        "existing": existing,
+        "incoming": incoming,
+    }
+    if target.exists():
+        return target
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(conflict_dir), prefix=f".{target.name}.", suffix=".tmp")
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+            handle.write(b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, target)
+        except FileExistsError:
+            pass
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return target
+
+
+def get_last_history_write_result() -> dict:
+    return copy.deepcopy(LAST_HISTORY_WRITE_RESULT)
+
+
 def save_history(entry: dict) -> bool:
+    global LAST_HISTORY_WRITE_RESULT
     if not isinstance(entry, dict):
+        LAST_HISTORY_WRITE_RESULT = {"status": "invalid"}
         return False
     entry_date = _verified_history_date(entry.get("date"))
     if entry_date is None:
+        LAST_HISTORY_WRITE_RESULT = {"status": "invalid", "reason": "invalid_date"}
         return False
     history = load_history()
-    stored = dict(entry)
+    stored = copy.deepcopy(entry)
     stored["date"] = entry_date
     stored.setdefault("intraday", False)
+    stored.setdefault("schema_version", MARKET_HISTORY_SCHEMA_VERSION)
+    incoming_digest = _history_digest(stored)
+    stored["content_sha256"] = incoming_digest
+    previous = history.get(entry_date)
+    if isinstance(previous, dict):
+        existing_digest = _history_digest(previous)
+        if existing_digest == incoming_digest:
+            # Upgrade legacy entries with the auditable envelope without
+            # treating a rerun with a different collection timestamp as a
+            # conflict.
+            if previous.get("content_sha256") != incoming_digest or not previous.get("schema_version"):
+                history[entry_date] = stored
+                items = sorted(history.items(), key=lambda kv: kv[0])[-HISTORY_MAX_DAYS:]
+                try:
+                    _atomic_json_write(HISTORY_FILE, dict(items))
+                except Exception as exc:
+                    LAST_HISTORY_WRITE_RESULT = {"status": "error", "reason": type(exc).__name__}
+                    return False
+            LAST_HISTORY_WRITE_RESULT = {
+                "status": "unchanged", "date": entry_date,
+                "content_sha256": incoming_digest,
+            }
+            return True
+        try:
+            conflict = _record_history_conflict(
+                Path(HISTORY_FILE), entry_date, previous, stored,
+                existing_digest, incoming_digest)
+            LAST_HISTORY_WRITE_RESULT = {
+                "status": "conflict", "date": entry_date,
+                "content_sha256": incoming_digest, "path": str(conflict),
+            }
+        except Exception as exc:
+            LAST_HISTORY_WRITE_RESULT = {
+                "status": "conflict_error", "date": entry_date,
+                "content_sha256": incoming_digest, "reason": type(exc).__name__,
+            }
+        return False
     history[entry_date] = stored
     # prune to newest N
     items = sorted(history.items(), key=lambda kv: kv[0])[-HISTORY_MAX_DAYS:]
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        HISTORY_FILE.write_text(
-            json.dumps(dict(items), ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_json_write(HISTORY_FILE, dict(items))
+        LAST_HISTORY_WRITE_RESULT = {
+            "status": "created", "date": entry_date,
+            "content_sha256": incoming_digest,
+        }
         return True
-    except Exception:
+    except Exception as exc:
+        LAST_HISTORY_WRITE_RESULT = {
+            "status": "error", "date": entry_date,
+            "content_sha256": incoming_digest, "reason": type(exc).__name__,
+        }
         return False
 
 
@@ -994,25 +1345,107 @@ def collect_context(now=None) -> dict:
     data_date = max(index_dates) if index_dates else ""
     raw_date = data_date.replace("-", "") if data_date else ""
     today_amount_yi = amount_hist.get(raw_date) if raw_date else None
+    amount_evidence = build_amount_evidence(
+        index_rows, index_diagnostics, data_date=data_date)
 
     sectors = fetch_sector_rankings()
     zt = fetch_zt_stats()
     activity = fetch_market_activity()
 
+    zt_evidence = (zt.get("evidence") or {}) if isinstance(zt, dict) else {}
+    if not zt_evidence:
+        zt_evidence = {
+            "schema_version": "market-component-evidence/v1",
+            "provider": "unknown",
+            "data_date": data_date or None,
+            "fetched_at": None,
+            "source_timestamp": None,
+            "completeness": "missing",
+            "usage": "unavailable",
+            "reasons": ["legacy_or_unverified_zt_payload"],
+        }
+    activity_evidence = (activity.get("evidence") or {}) if isinstance(activity, dict) else {}
+    if not activity_evidence:
+        activity_evidence = {
+            "schema_version": "market-component-evidence/v1",
+            "provider": "unknown",
+            "data_date": data_date or None,
+            "fetched_at": None,
+            "source_timestamp": None,
+            "completeness": "missing",
+            "usage": "unavailable",
+            "reasons": ["legacy_or_unverified_activity_payload"],
+        }
+
     history = load_history()
-    amount_history_yi = previous_amounts(history, data_date, amount_hist)
+    amount_history_yi = previous_amounts(
+        history, data_date, amount_hist,
+        require_evidence=True,
+        fetched_dates=set(amount_evidence.get("complete_dates") or []),
+    )
     history_zt_counts = [
         int(h.get("zt", {}).get("count", 0))
         for h in _baseline_history(history, data_date).values()
+        if _history_zt_eligible(h)
     ]
 
     components = {
         "index_trend": score_index_trend(index_metrics),
-        "volume": score_volume(today_amount_yi, amount_history_yi),
+        "volume": score_volume(today_amount_yi, amount_history_yi, amount_evidence),
         "breadth": score_breadth(activity, sectors),
-        "zt_emotion": score_zt_emotion(zt, history_zt_counts),
+        "zt_emotion": score_zt_emotion(zt, history_zt_counts, zt_evidence),
         "capital": score_capital(activity),
     }
+
+    index_providers = [
+        str((index_diagnostics.get(code) or {}).get("provider")
+            or (index_diagnostics.get(code) or {}).get("source") or "unknown")
+        for code in TREND_INDEX_CODES
+    ]
+    index_fetched_at = [
+        str((index_diagnostics.get(code) or {}).get("fetched_at"))
+        for code in TREND_INDEX_CODES
+        if (index_diagnostics.get(code) or {}).get("fetched_at")
+    ]
+    index_source_kind = (
+        "unknown" if any(value == "unknown" for value in index_providers)
+        else "alternative" if any(value not in {"eastmoney", "akshare"}
+                                   for value in index_providers)
+        else "primary"
+    )
+    components["index_trend"].update({
+        "metric": "index_ma20_state",
+        "provider": "+".join(dict.fromkeys(index_providers)),
+        "source_kind": index_source_kind,
+        "data_date": data_date or None,
+        "fetched_at": max(index_fetched_at) if index_fetched_at else None,
+        "source_timestamp": None,
+    })
+    components["volume"].update({
+        "metric": "turnover_vs_20d_avg",
+        "provider": amount_evidence.get("provider", "unknown"),
+        "source_kind": amount_evidence.get("source_kind", "unknown"),
+        "data_date": amount_evidence.get("data_date"),
+        "fetched_at": amount_evidence.get("fetched_at"),
+        "source_timestamp": amount_evidence.get("source_timestamp"),
+    })
+    for key, metric in (("breadth", "market_breadth"), ("capital", "market_main_force_net_inflow")):
+        components[key].update({
+            "metric": metric,
+            "provider": activity_evidence.get("provider", "unknown"),
+            "source_kind": "primary" if activity_evidence.get("provider") == "eastmoney" else "unknown",
+            "data_date": activity_evidence.get("data_date") or data_date or None,
+            "fetched_at": activity_evidence.get("fetched_at"),
+            "source_timestamp": activity_evidence.get("source_timestamp"),
+        })
+    components["zt_emotion"].update({
+        "metric": "limit_up_emotion",
+        "provider": zt_evidence.get("provider", "unknown"),
+        "source_kind": "primary" if zt_evidence.get("provider") == "akshare" else "unknown",
+        "data_date": zt_evidence.get("data_date") or data_date or None,
+        "fetched_at": zt_evidence.get("fetched_at"),
+        "source_timestamp": zt_evidence.get("source_timestamp"),
+    })
     regime = compute_regime(components)
 
     # ── 盘中混合: 昨收锚 + 盘中外推(避免半日数据对全天基线误判弱势) ──
@@ -1040,11 +1473,27 @@ def collect_context(now=None) -> dict:
                     activity["main_force_yi"] / max(fraction, FLOOR_FRACTION))
             ext_components = {
                 "index_trend": components["index_trend"],
-                "volume": score_volume(est_amount, amount_history_yi),
+                "volume": score_volume(est_amount, amount_history_yi, amount_evidence),
                 "breadth": score_breadth(est_activity, sectors),
-                "zt_emotion": score_zt_emotion(est_zt, history_zt_counts),
+                "zt_emotion": score_zt_emotion(est_zt, history_zt_counts, zt_evidence),
                 "capital": score_capital(est_activity),
             }
+            for key, source in (("volume", amount_evidence), ("zt_emotion", zt_evidence)):
+                ext_components[key].update({
+                    "provider": source.get("provider", "unknown"),
+                    "source_kind": source.get("source_kind", "unknown"),
+                    "data_date": source.get("data_date") or data_date or None,
+                    "fetched_at": source.get("fetched_at"),
+                    "source_timestamp": source.get("source_timestamp"),
+                })
+            for key in ("breadth", "capital"):
+                ext_components[key].update({
+                    "provider": activity_evidence.get("provider", "unknown"),
+                    "source_kind": "primary" if activity_evidence.get("provider") == "eastmoney" else "unknown",
+                    "data_date": activity_evidence.get("data_date") or data_date or None,
+                    "fetched_at": activity_evidence.get("fetched_at"),
+                    "source_timestamp": activity_evidence.get("source_timestamp"),
+                })
             ext_regime = compute_regime(ext_components)
             amount_yi_display = round(est_amount, 0)
             zt_display = est_zt
@@ -1102,17 +1551,19 @@ def collect_context(now=None) -> dict:
         ),
         "regime": regime,
         "components": components,
+        "amount_evidence": amount_evidence,
+        "zt_evidence": zt_evidence,
+        "activity_evidence": activity_evidence,
         "intraday_evidence": intraday_evidence,
         "capital_context": {
             "metric": "market_main_force_net_inflow" if (
                 activity and activity.get("main_force_yi") is not None
             ) else "capital_flow",
-            "source_kind": "primary" if (
-                activity and activity.get("main_force_yi") is not None
-            ) else "unknown",
-            "provider": "unknown",
-            "data_date": None,
-            "fetched_at": None,
+            "source_kind": "primary" if activity_evidence.get("provider") == "eastmoney" else "unknown",
+            "provider": activity_evidence.get("provider", "unknown"),
+            "data_date": activity_evidence.get("data_date") or data_date or None,
+            "fetched_at": activity_evidence.get("fetched_at"),
+            "source_timestamp": activity_evidence.get("source_timestamp"),
         },
         "amount_yi": amount_yi_display,
         "zt": zt_display,
@@ -1125,8 +1576,14 @@ def collect_context(now=None) -> dict:
                 "pct_chg": m.get("pct_chg"),
                 "above_ma20": m.get("above_ma20"),
                 "ma20_rising": m.get("ma20_rising"),
-                "data_date": index_diagnostics.get(code, {}).get("data_date"),
+                "data_date": _iso_date_from_value(index_diagnostics.get(code, {}).get("data_date")),
                 "source": index_diagnostics.get(code, {}).get("source"),
+                "provider": index_diagnostics.get(code, {}).get("provider")
+                            or index_diagnostics.get(code, {}).get("source"),
+                "fetched_at": index_diagnostics.get(code, {}).get("fetched_at"),
+                "source_timestamp": index_diagnostics.get(code, {}).get("source_timestamp"),
+                "record_count": index_diagnostics.get(code, {}).get("record_count", 0),
+                "amount_available_days": index_diagnostics.get(code, {}).get("amount_available_days", 0),
             }
             for code, m in index_metrics.items()
         },
@@ -1149,6 +1606,9 @@ def build_agent_output(ctx: dict) -> dict:
         "components": ctx["components"],
         "market_explanation": ctx.get("market_explanation"),
         "indices": ctx.get("indices", {}),
+        "amount_evidence": ctx.get("amount_evidence", {}),
+        "zt_evidence": ctx.get("zt_evidence", {}),
+        "activity_evidence": ctx.get("activity_evidence", {}),
         "capital_context": ctx.get("capital_context", {}),
         "intraday_evidence": ctx.get("intraday_evidence"),
         "amount_yi": ctx["amount_yi"],
@@ -1192,6 +1652,11 @@ def main():
         # 持久化: 盘中快照不写 history(避免 partial 污染基线),但 context 仍写
         # (candidates 盘中需要当日 regime 分档)
         if should_save_history(ctx):
+            component_evidence = {
+                str(item.get("id")): copy.deepcopy(item.get("evidence") or {})
+                for item in (ctx.get("market_explanation") or {}).get("components", [])
+                if isinstance(item, dict) and item.get("id")
+            }
             history_entry = {
                 "date": ctx["data_date"],
                 "regime_score": ctx["regime"]["score"],
@@ -1200,8 +1665,15 @@ def main():
                 "amount_yi": ctx["amount_yi"],
                 "zt": ctx["zt"],
                 "intraday": False,
+                "component_evidence": component_evidence,
+                "amount_evidence": copy.deepcopy(ctx.get("amount_evidence") or {}),
+                "zt_evidence": copy.deepcopy(ctx.get("zt_evidence") or {}),
+                "activity_evidence": copy.deepcopy(ctx.get("activity_evidence") or {}),
             }
-            save_history(history_entry)
+            saved = save_history(history_entry)
+            ctx["history_persistence"] = get_last_history_write_result()
+            if not saved and ctx["history_persistence"].get("status") == "error":
+                ctx["history_persistence"]["status"] = "write_error"
         save_context(ctx)
 
     now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
