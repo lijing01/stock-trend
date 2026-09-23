@@ -18,10 +18,18 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 if str(SCRIPT_ROOT) not in sys.path: sys.path.insert(0, str(SCRIPT_ROOT))
 
 from analysis.recommendation_attribution import track_official_history
-from analysis.recommendation_diagnostics import (build_diagnostics, load_candidate_signal_items,
-                                                  load_primary_research_snapshots, save_diagnostics,
+from analysis.recommendation_diagnostics import (build_diagnostics,
+                                                  build_p0_audit, load_candidate_signal_items,
+                                                  load_market_regime_history,
+                                                  load_official_recommendation_history,
+                                                  load_p0_research_inventory,
+                                                  load_primary_research_snapshots, p0_trading_days,
+                                                  save_diagnostics, save_p0_audit,
                                                   DEFAULT_RESEARCH_ROOT,
-                                                  DEFAULT_ROOT as DEFAULT_DIAGNOSTICS_ROOT)
+                                                  DEFAULT_ROOT as DEFAULT_DIAGNOSTICS_ROOT,
+                                                  DEFAULT_MARKET_HISTORY,
+                                                  DEFAULT_RECOMMENDATION_ROOT,
+                                                  DEFAULT_P0_AUDIT_ROOT)
 from analysis.evolution_proposals import build_proposal_run, save_proposal_run
 from backtesting.recommendation_experiments import default_experiment, run_walk_forward, save_experiment
 from core.cache_utils import CACHE_DIR
@@ -213,6 +221,24 @@ def run_weekly(as_of, research_root=DEFAULT_RESEARCH_ROOT,
     return _package("weekly", content)
 
 
+def run_p0_audit(start_date, end_date, market_history_path=DEFAULT_MARKET_HISTORY,
+                 recommendation_root=DEFAULT_RECOMMENDATION_ROOT,
+                 research_root=DEFAULT_RESEARCH_ROOT,
+                 attribution_root=DEFAULT_EVALUATION_ROOT, contract_id=None,
+                 output_root=DEFAULT_P0_AUDIT_ROOT):
+    """Freeze and audit existing evidence without mutating its sources."""
+    days = p0_trading_days(start_date, end_date)
+    audit = build_p0_audit(
+        days,
+        load_market_regime_history(market_history_path),
+        load_official_recommendation_history(recommendation_root, start_date, end_date),
+        load_p0_research_inventory(research_root, start_date, end_date),
+        load_candidate_signal_items(attribution_root, contract_id, as_of=end_date),
+    )
+    audit["tracking"] = save_p0_audit(audit, output_root)
+    return audit
+
+
 def _close_run_days(job_root):
     """Return the last completed attempt per business day, never filename order."""
     attempts = []
@@ -355,16 +381,30 @@ def monitoring_snapshot(job_root=DEFAULT_ROOT, attribution_root=DEFAULT_EVALUATI
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="P4 recommendation evolution run and release manager")
-    parser.add_argument("command", choices=("close", "weekly", "monitor", "publish", "rollback"))
+    parser.add_argument("command", choices=("audit", "close", "weekly", "monitor", "publish", "rollback"))
     parser.add_argument("--as-of", default=date.today().isoformat()); parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--start-date", default="2026-09-08")
     parser.add_argument("--contract-id"); parser.add_argument("--experiment-id"); parser.add_argument("--evidence", default="manual_release")
     parser.add_argument("--research-root")
     parser.add_argument("--attribution-root")
     parser.add_argument("--diagnostics-root")
     parser.add_argument("--proposal-root")
     parser.add_argument("--trading-sessions", help="JSON file or JSON array for monitor calendar")
+    parser.add_argument("--market-history-root", default=str(DEFAULT_MARKET_HISTORY))
+    parser.add_argument("--recommendation-root", default=str(DEFAULT_RECOMMENDATION_ROOT))
+    parser.add_argument("--output-root")
     parser.add_argument("--json", action="store_true"); args = parser.parse_args(argv)
-    if args.command == "close":
+    if args.command == "audit":
+        run = run_p0_audit(
+            args.start_date, args.as_of,
+            market_history_path=args.market_history_root,
+            recommendation_root=args.recommendation_root,
+            research_root=args.research_root or DEFAULT_RESEARCH_ROOT,
+            attribution_root=args.attribution_root or DEFAULT_EVALUATION_ROOT,
+            contract_id=args.contract_id,
+            output_root=args.output_root or DEFAULT_P0_AUDIT_ROOT,
+        )
+    elif args.command == "close":
         run = run_close(args.as_of, dry_run=args.dry_run,
                         research_root=args.research_root or DEFAULT_RESEARCH_ROOT,
                         attribution_root=args.attribution_root or DEFAULT_EVALUATION_ROOT)
@@ -396,7 +436,12 @@ def main(argv=None):
         else:
             run = rollback_active_policy({"summary": args.evidence})
     if args.command in ("close", "weekly", "monitor") and not args.dry_run: run["persistence"] = _save(run)
-    print(json.dumps(run, ensure_ascii=False, sort_keys=True) if args.json else run.get("content", run).get("status"))
+    if args.json:
+        print(json.dumps(run, ensure_ascii=False, sort_keys=True))
+    elif args.command == "audit":
+        print(run.get("audit_id", ""))
+    else:
+        print(run.get("content", run).get("status"))
     return 0
 
 

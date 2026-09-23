@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import sys
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -11,7 +12,8 @@ from analysis.evolution_proposals import (build_proposal_run, claim_weekly_attem
                                            record_weekly_attempt_response, resume_weekly_attempt,
                                            save_proposal_run, validate_proposals)
 from analysis.recommendation_diagnostics import (
-    build_diagnostics, load_candidate_signal_items, load_primary_research_snapshots, save_diagnostics,
+    build_diagnostics, build_p0_audit, load_candidate_signal_items,
+    load_primary_research_snapshots, save_diagnostics, save_p0_audit,
 )
 from core.recommendation_snapshot import content_sha256
 from core.evolution_contract import build_evaluation_contract
@@ -63,6 +65,65 @@ class T(unittest.TestCase):
         self.assertAlmostEqual(group["mean_hs300_alpha"], .08)
         self.assertAlmostEqual(group["mean_mae"], -.04)
         self.assertIn("相关", result["content"]["correlation_notice"])
+
+    def test_p0_audit_separates_denominators_and_deduplicates_events(self):
+        days = ["2026-09-08", "2026-09-09"]
+        official = {
+            "2026-09-08": {"content": {"scan_status": "complete", "policy": {"mode": "observation"},
+                "buckets": {"actionable": [{"code": "600000"}], "observation": [{"code": "600001"}, {"code": "600002"}]}}},
+            "2026-09-09": {"content": {"scan_status": "complete", "policy": {"mode": "waiting_trigger"},
+                "buckets": {"waiting_trigger": [{"code": "600003"}]}}},
+        }
+        research = {
+            "2026-09-08": {"status": "formal", "link_status": "linked", "snapshot_type": "formal",
+                "content": {"records": [{"code": "600000"}], "selection_scope": {"codes": ["600000"]}}},
+            "2026-09-09": {"status": "provisional", "link_status": "provisional", "snapshot_type": "provisional",
+                "content": {"records": [{"code": "600003"}], "selection_scope": {"codes": ["600003"]}}},
+        }
+        outcomes = [
+            {"record_id": "r1", "recommendation_date": "2026-09-08", "market": "SH", "code": "600000",
+             "windows": {"5": {"status": "complete", "hs300_alpha": .1, "entry_date": "2026-09-09", "exit_date": "2026-09-15"},
+                         "10": {"status": "pending"}, "20": {"status": "pending"}}},
+            {"record_id": "r2", "recommendation_date": "2026-09-09", "market": "SH", "code": "600000",
+             "windows": {"5": {"status": "complete", "hs300_alpha": .2, "entry_date": "2026-09-10", "exit_date": "2026-09-16"},
+                         "10": {"status": "data_error", "reason": "historical_data_missing"},
+                         "20": {"status": "data_error", "reason": "hs300_entry_missing"}}},
+        ]
+        result = build_p0_audit(
+            days,
+            {"2026-09-08": {"amount_yi": 100, "zt": {"count": 10}}},
+            official, research, outcomes,
+        )
+        content = result["content"]
+        self.assertEqual(content["summary"]["formal_recommendation_denominator"], 2)
+        self.assertEqual(content["summary"]["frozen_research_candidate_denominator"], 1)
+        self.assertEqual(content["summary"]["frozen_research_candidate_unknown_dates"], ["2026-09-09"])
+        self.assertEqual(content["summary"]["observation_pool_denominator"], 2)
+        self.assertEqual(content["summary"]["research_snapshot_link_statuses"],
+                         {"linked": 1, "provisional": 1})
+        self.assertEqual(content["summary"]["deduplicated_events"]["5"], 1)
+        self.assertEqual(content["summary"]["valid_alpha_events"]["5"], 1)
+        self.assertEqual(content["summary"]["window_status_counts"]["20"],
+                         {"data_error": 1, "pending": 1})
+        self.assertEqual(content["summary"]["hs300_alpha_missing_reasons"]["20"]["data_error_other"], 1)
+
+    def test_p0_audit_save_is_content_addressed_and_idempotent(self):
+        result = build_p0_audit(["2026-09-08"], {}, {}, {}, [])
+        with tempfile.TemporaryDirectory() as root:
+            first = save_p0_audit(result, root)
+            second = save_p0_audit(result, root)
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(second["status"], "unchanged")
+
+    def test_p0_baseline_fixture_preserves_missing_and_partial_facts(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "p0_baseline_20260908_20260923.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["date_range"], {"start": "2026-09-08", "end": "2026-09-23"})
+        self.assertEqual(len(fixture["trading_days"]), 12)
+        self.assertEqual(fixture["summary"]["market_history_available_days"], 2)
+        self.assertEqual(fixture["summary"]["formal_recommendation_denominator"], 4)
+        self.assertEqual(fixture["summary"]["frozen_research_candidate_unknown_dates"][-1], "2026-09-23")
+        self.assertEqual(fixture["daily"][-1]["research"]["status"], "provisional")
 
     def test_ineligible_and_provisional_samples_are_not_used(self):
         result = build_diagnostics([_snapshot(formal=False)], [_outcome()])

@@ -1,0 +1,51 @@
+{
+  "schema_version": "recommendation-p0-baseline-fixture/v1",
+  "frozen_at": "2026-09-23",
+  "date_range": {"start": "2026-09-08", "end": "2026-09-23"},
+  "trading_days": [
+    "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11",
+    "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17",
+    "2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23"
+  ],
+  "summary": {
+    "market_history_available_days": 2,
+    "amount_baseline_days": 2,
+    "zt_baseline_days": 2,
+    "market_partial_dates": ["2026-09-08", "2026-09-09", "2026-09-22", "2026-09-23"],
+    "formal_recommendation_denominator": 4,
+    "frozen_research_candidate_denominator": 84,
+    "frozen_research_candidate_unknown_dates": [
+      "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11",
+      "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17",
+      "2026-09-18", "2026-09-23"
+    ],
+    "observation_pool_denominator": 233,
+    "research_snapshot_link_statuses": {"linked": 11, "missing": 1},
+    "window_status_counts": {
+      "5": {"complete": 368, "data_error": 325, "excluded": 3945, "pending": 1023},
+      "10": {"complete": 161, "data_error": 325, "excluded": 3945, "pending": 1230},
+      "20": {"data_error": 325, "excluded": 3945, "pending": 1391}
+    },
+    "hs300_alpha_missing_reasons": {
+      "5": {"background_stage_timeout": 3, "excluded_research_population": 3945, "historical_data_missing": 267, "pending": 1023, "sector_data_error": 55},
+      "10": {"background_stage_timeout": 3, "excluded_research_population": 3945, "historical_data_missing": 267, "pending": 1230, "sector_data_error": 55},
+      "20": {"background_stage_timeout": 3, "excluded_research_population": 3945, "historical_data_missing": 267, "pending": 1391, "sector_data_error": 55}
+    },
+    "deduplicated_events": {"5": 298, "10": 161, "20": 0},
+    "valid_alpha_events": {"5": 298, "10": 161, "20": 0}
+  },
+  "daily": [
+    {"date": "2026-09-08", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 7, "reason": "regime_data_partial"}, "research": {"status": "formal", "link": "linked", "records": 684, "scope": "missing"}},
+    {"date": "2026-09-09", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 0, "reason": "regime_stale"}, "research": {"status": "formal", "link": "linked", "records": 649, "scope": "missing"}},
+    {"date": "2026-09-10", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 30, "reason": "regime_weak"}, "research": {"status": "formal", "link": "linked", "records": 335, "scope": "missing"}},
+    {"date": "2026-09-11", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 30, "reason": "regime_weak"}, "research": {"status": "formal", "link": "linked", "records": 196, "scope": "missing"}},
+    {"date": "2026-09-14", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 0, "reason": "regime_missing"}, "research": {"status": "formal", "link": "linked", "records": 0, "scope": "missing"}},
+    {"date": "2026-09-15", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 30, "reason": "regime_weak"}, "research": {"status": "formal", "link": "linked", "records": 319, "scope": "missing"}},
+    {"date": "2026-09-16", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 20, "reason": "regime_weak"}, "research": {"status": "formal", "link": "linked", "records": 620, "scope": "missing"}},
+    {"date": "2026-09-17", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 30, "reason": "regime_weak"}, "research": {"status": "formal", "link": "linked", "records": 624, "scope": "missing"}},
+    {"date": "2026-09-18", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "observation", "denominator": 0, "observation": 30, "reason": "regime_weak"}, "research": {"status": "formal", "link": "linked", "records": 704, "scope": "missing"}},
+    {"date": "2026-09-21", "market": {"history": false, "amount": false, "zt": false}, "formal": {"mode": "waiting_trigger", "denominator": 4, "observation": 26, "reason": null}, "research": {"status": "formal", "link": "linked", "records": 654, "scope": "known", "frozen_candidates": 42}},
+    {"date": "2026-09-22", "market": {"history": true, "amount": true, "zt": true, "amount_yi": 21356.0, "zt_count": 63}, "formal": {"mode": "observation", "denominator": 0, "observation": 30, "reason": "regime_data_partial"}, "research": {"status": "formal", "link": "linked", "records": 876, "scope": "known", "frozen_candidates": 42}},
+    {"date": "2026-09-23", "market": {"history": true, "amount": true, "zt": true, "amount_yi": 17650.0, "zt_count": 51}, "formal": {"mode": null, "denominator": 0, "observation": 0, "reason": null}, "research": {"status": "provisional", "link": "missing", "records": 1030, "scope": "missing"}}
+  ]
+}

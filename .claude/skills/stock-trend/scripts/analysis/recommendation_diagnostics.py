@@ -12,7 +12,7 @@ import math
 import os
 import sys
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,13 +22,18 @@ if str(SCRIPT_ROOT) not in sys.path:
 from core.cache_utils import CACHE_DIR
 from core.evolution_contract import PRIMARY_WINDOW, build_evaluation_contract
 from core.evolution_storage import LEGACY_RESEARCH_ROOT, input_manifest, load_research_snapshot, storage_root
-from core.recommendation_snapshot import canonical_json, content_sha256
+from core.recommendation_snapshot import canonical_json, content_sha256, load_official_snapshot
 from core.research_events import assign_research_events, summarize_daily_alpha
 
 
 SCHEMA_VERSION = "recommendation-diagnostics/v1"
 DEFAULT_RESEARCH_ROOT = storage_root("research")
 DEFAULT_ROOT = storage_root("diagnostics")
+P0_AUDIT_SCHEMA_VERSION = "recommendation-p0-audit/v1"
+P0_WINDOWS = (5, 10, 20)
+DEFAULT_MARKET_HISTORY = Path(CACHE_DIR) / "market_regime_history.json"
+DEFAULT_RECOMMENDATION_ROOT = Path(CACHE_DIR) / "recommendation_history"
+DEFAULT_P0_AUDIT_ROOT = storage_root("diagnostics") / "p0"
 MIN_GROUP_EVENTS = 30
 
 
@@ -500,6 +505,437 @@ def load_candidate_signal_items(root, contract_id=None, as_of=None):
     return items
 
 
+def p0_trading_days(start_date, end_date, trading_days=None):
+    """Return the immutable date axis used by the P0 audit.
+
+    A supplied calendar is preferred.  Without one, weekdays are used only as
+    a conservative audit axis; missing exchange holidays remain visible as
+    missing facts rather than being silently removed or backfilled.
+    """
+    start = _cutoff(start_date)
+    end = _cutoff(end_date)
+    if not start or not end or start > end:
+        raise ValueError("invalid_p0_date_range")
+    if trading_days is not None:
+        values = sorted({_day(value) for value in trading_days if _day(value)})
+        return [value for value in values if start <= value <= end]
+    cursor = date.fromisoformat(start)
+    last = date.fromisoformat(end)
+    values = []
+    while cursor <= last:
+        if cursor.weekday() < 5:
+            values.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return values
+
+
+def _p0_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def load_market_regime_history(path=DEFAULT_MARKET_HISTORY):
+    """Read market history without repairing or rewriting any entry."""
+    payload = _p0_json(path)
+    if not isinstance(payload, dict):
+        return {}
+    return {str(day): value for day, value in payload.items()
+            if isinstance(value, dict)}
+
+
+def load_official_recommendation_history(root=DEFAULT_RECOMMENDATION_ROOT,
+                                         start_date=None, end_date=None):
+    """Load formal recommendation snapshots keyed by date, read-only."""
+    root = Path(root)
+    days = p0_trading_days(start_date, end_date) if start_date and end_date else None
+    if days is None:
+        days = sorted(path.stem for path in root.glob("????-??-??.json"))
+    result = {}
+    for day in days:
+        path = root / f"{day}.json"
+        if not path.exists():
+            continue
+        try:
+            snapshot = load_official_snapshot(path)
+            content = snapshot.get("content") or {}
+            result[day] = {
+                "status": "loaded",
+                "content": content,
+                "content_sha256": snapshot.get("content_sha256"),
+            }
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            result[day] = {"status": "invalid", "reason": type(exc).__name__}
+    return result
+
+
+def load_p0_research_inventory(root=DEFAULT_RESEARCH_ROOT,
+                               start_date=None, end_date=None):
+    """Index formal/provisional research snapshots while preserving gaps."""
+    root = Path(root)
+    days = p0_trading_days(start_date, end_date) if start_date and end_date else []
+    roots = [root]
+    if root == DEFAULT_RESEARCH_ROOT and LEGACY_RESEARCH_ROOT != root:
+        roots.append(LEGACY_RESEARCH_ROOT)
+    inventory = {}
+    for day in days:
+        formal_path = None
+        for candidate_root in roots:
+            path = candidate_root / day / "formal" / "primary.json"
+            if path.exists():
+                formal_path = path
+                break
+        if formal_path is not None:
+            try:
+                run_id = formal_path.read_text(encoding="utf-8").strip()
+                snapshot = load_research_snapshot(formal_path.parent / (run_id + ".json"))
+                content = snapshot.get("content") or {}
+                official = content.get("official_snapshot") or {}
+                inventory[day] = {
+                    "status": "formal",
+                    "snapshot_type": content.get("snapshot_type") or "formal",
+                    "link_status": official.get("link_status") or "missing",
+                    "content": content,
+                    "content_sha256": snapshot.get("content_sha256"),
+                }
+                continue
+            except (OSError, ValueError, json.JSONDecodeError):
+                inventory[day] = {"status": "invalid", "link_status": "invalid"}
+                continue
+        provisional = []
+        for candidate_root in roots:
+            provisional.extend(sorted((candidate_root / day / "provisional").glob("*.json")))
+        if provisional:
+            loaded = None
+            for path in provisional:
+                try:
+                    loaded = load_research_snapshot(path)
+                    break
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+            if loaded is not None:
+                content = loaded.get("content") or {}
+                inventory[day] = {
+                    "status": "provisional",
+                    "snapshot_type": content.get("snapshot_type") or "provisional",
+                    "link_status": "missing",
+                    "content": content,
+                    "content_sha256": loaded.get("content_sha256"),
+                }
+                continue
+        inventory[day] = {"status": "missing", "link_status": "missing"}
+    return inventory
+
+
+def _p0_content(value):
+    return value.get("content") if isinstance(value, dict) and isinstance(value.get("content"), dict) else value
+
+
+def _p0_bucket_counts(content):
+    buckets = content.get("buckets") or {}
+    counts = {}
+    for name, values in buckets.items():
+        counts[str(name)] = len(values) if isinstance(values, list) else 0
+    for name in ("actionable", "waiting_trigger", "next_day_confirmation", "observation",
+                 "unenriched_observation", "data_rejected"):
+        counts.setdefault(name, 0)
+    return counts
+
+
+def _p0_finite(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _p0_alpha_reason(window):
+    status = str((window or {}).get("status") or "missing")
+    value = (window or {}).get("hs300_alpha")
+    if status == "complete" and _p0_finite(value):
+        return None
+    if status == "complete":
+        return "hs300_alpha_missing"
+    if status == "pending":
+        return "pending"
+    if status == "excluded":
+        return "excluded_research_population"
+    if status == "data_error":
+        reason = str((window or {}).get("reason") or "unknown")
+        if reason == "historical_data_missing":
+            return "historical_data_missing"
+        if reason == "background_stage_timeout":
+            return "background_stage_timeout"
+        if reason.startswith("获取板块"):
+            return "sector_data_error"
+        return "data_error_other"
+    return "window_missing"
+
+
+def _p0_event_inputs(items, window):
+    rows = []
+    for number, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        outcome = (item.get("windows") or {}).get(str(window)) or {}
+        if outcome.get("status") == "excluded":
+            continue
+        if not outcome.get("entry_date") or not outcome.get("exit_date"):
+            continue
+        day = _day(item.get("recommendation_date"))
+        if not day:
+            continue
+        rows.append({
+            "record_id": _p0_record_id(item, window, number),
+            "market": str(item.get("market") or item.get("exchange") or "default"),
+            "code": str(item.get("code") or ""),
+            "recommendation_date": day,
+            "entry_date": outcome.get("entry_date"),
+            "exit_date": outcome.get("exit_date") or outcome.get("mark_date"),
+            "market_sessions": item.get("market_sessions"),
+        })
+    return rows
+
+
+def _p0_record_id(item, window, number=0):
+    day = _day(item.get("recommendation_date")) or "unknown"
+    return str(item.get("record_id") or
+               f"{day}:{item.get('market') or 'default'}:{item.get('code') or number}:{window}")
+
+
+def _p0_event_context(items, window):
+    event_inputs = _p0_event_inputs(items, window)
+    assigned = assign_research_events(event_inputs, window)
+    event_by_record = assigned["record_to_event"]
+    anchors = {event["record_id"] for event in assigned["events"]}
+    anchor_dates = defaultdict(int)
+    for event in assigned["events"]:
+        anchor_dates[event["recommendation_date"]] += 1
+    valid_alpha = set()
+    for number, item in enumerate(items):
+        outcome = (item.get("windows") or {}).get(str(window)) or {}
+        record_id = _p0_record_id(item, window, number)
+        if (record_id in anchors and outcome.get("status") == "complete"
+                and _p0_finite(outcome.get("hs300_alpha"))):
+            valid_alpha.add(event_by_record.get(record_id))
+    return {
+        "event_by_record": event_by_record,
+        "anchor_ids": anchors,
+        "anchor_dates": anchor_dates,
+        "valid_alpha_ids": {value for value in valid_alpha if value},
+        "invalid_event_records": len(assigned["invalid"]),
+        "event_record_count": len(event_inputs),
+    }
+
+
+def _p0_window_audit(items, window, event_context=None):
+    statuses = defaultdict(int)
+    missing_reasons = defaultdict(int)
+    for item in items:
+        outcome = (item.get("windows") or {}).get(str(window)) or {}
+        status = str(outcome.get("status") or "missing")
+        statuses[status] += 1
+        reason = _p0_alpha_reason(outcome)
+        if reason:
+            missing_reasons[reason] += 1
+    context = event_context or _p0_event_context(items, window)
+    event_by_record = context["event_by_record"]
+    event_anchors = context["anchor_ids"]
+    anchor_dates = defaultdict(int)
+    for number, item in enumerate(items):
+        record_id = _p0_record_id(item, window, number)
+        event_id = event_by_record.get(record_id)
+        if record_id in event_anchors:
+            anchor_dates[_day(item.get("recommendation_date"))] += 1
+    local_event_ids = set()
+    valid_alpha_events = set()
+    for number, item in enumerate(items):
+        outcome = (item.get("windows") or {}).get(str(window)) or {}
+        record_id = _p0_record_id(item, window, number)
+        event_id = event_by_record.get(record_id)
+        if record_id in event_anchors and event_id:
+            local_event_ids.add(event_id)
+            if outcome.get("status") == "complete" and _p0_finite(outcome.get("hs300_alpha")):
+                valid_alpha_events.add(event_id)
+    return {
+        "records": len(items),
+        "status_counts": dict(sorted(statuses.items())),
+        "pending": statuses["pending"],
+        "data_error": statuses["data_error"],
+        "complete": statuses["complete"],
+        "excluded": statuses["excluded"],
+        "missing": statuses["missing"],
+        "hs300_alpha_missing_reasons": dict(sorted(missing_reasons.items())),
+        "deduplicated_events": len(local_event_ids),
+        "deduplicated_event_dates": dict(sorted(anchor_dates.items())),
+        "valid_alpha_events": len(valid_alpha_events),
+        "invalid_event_records": context["invalid_event_records"],
+        "event_record_count": context["event_record_count"],
+    }
+
+
+def build_p0_audit(trading_days, market_history, official_history,
+                   research_inventory, candidate_signal_items,
+                   windows=P0_WINDOWS):
+    """Build a deterministic P0 gap audit from frozen, read-only inputs."""
+    days = sorted({_day(day) for day in trading_days if _day(day)})
+    items_by_day = defaultdict(list)
+    for item in candidate_signal_items or []:
+        day = _day(item.get("recommendation_date")) if isinstance(item, dict) else None
+        if day in days:
+            items_by_day[day].append(item)
+    all_items = [item for day in days for item in items_by_day[day]]
+    event_contexts = {str(window): _p0_event_context(all_items, window)
+                      for window in windows}
+    rows = []
+    link_statuses = defaultdict(int)
+    window_totals = {str(window): defaultdict(int) for window in windows}
+    alpha_totals = {str(window): defaultdict(int) for window in windows}
+    event_totals = {str(window): 0 for window in windows}
+    valid_event_totals = {str(window): 0 for window in windows}
+    formal_total = observation_total = 0
+    frozen_known_total = 0
+    frozen_unknown_dates = []
+    market_partial_dates = []
+    for day in days:
+        market = market_history.get(day) if isinstance(market_history, dict) else None
+        market = market if isinstance(market, dict) else {}
+        official_entry = official_history.get(day) if isinstance(official_history, dict) else None
+        official = _p0_content(official_entry or {}) if official_entry else None
+        official_status = (official_entry or {}).get("status", "missing") if official_entry else "missing"
+        bucket_counts = _p0_bucket_counts(official or {}) if official else _p0_bucket_counts({})
+        formal_count = sum(bucket_counts.get(name, 0) for name in
+                           ("actionable", "waiting_trigger", "next_day_confirmation"))
+        observation_count = sum(bucket_counts.get(name, 0) for name in
+                                ("observation", "unenriched_observation"))
+        formal_total += formal_count
+        observation_total += observation_count
+        research = research_inventory.get(day) if isinstance(research_inventory, dict) else None
+        research = research or {"status": "missing", "link_status": "missing"}
+        link_status = str(research.get("link_status") or research.get("status") or "missing")
+        link_statuses[link_status] += 1
+        research_content = _p0_content(research) or {}
+        market_context = research_content.get("market_regime") or {}
+        partial_components = sorted(set((market.get("partial_components") or []))
+                                     | set((market_context.get("partial_components") or [])))
+        missing_components = sorted(set((market.get("missing_components") or []))
+                                    | set((market_context.get("missing_components") or [])))
+        market_quality = market_context.get("data_quality")
+        if partial_components or market_quality == "partial":
+            market_partial_dates.append(day)
+        scope = research_content.get("selection_scope")
+        if (research.get("status") == "formal" and link_status == "linked"
+                and isinstance(scope, dict) and isinstance(scope.get("codes"), list)):
+            frozen_count = len(scope["codes"])
+            scope_status = "known"
+            frozen_known_total += frozen_count
+        else:
+            frozen_count = None
+            scope_status = "missing"
+            frozen_unknown_dates.append(day)
+        day_items = items_by_day.get(day, [])
+        day_windows = {}
+        for window in windows:
+            audit = _p0_window_audit(day_items, window, event_contexts[str(window)])
+            day_windows[str(window)] = audit
+            for key, value in audit["status_counts"].items():
+                window_totals[str(window)][key] += value
+            for key, value in audit["hs300_alpha_missing_reasons"].items():
+                alpha_totals[str(window)][key] += value
+            event_totals[str(window)] = len(event_contexts[str(window)]["anchor_ids"])
+            valid_event_totals[str(window)] = len(event_contexts[str(window)]["valid_alpha_ids"])
+        rows.append({
+            "date": day,
+            "market": {
+                "history_available": bool(market),
+                "amount_available": _p0_finite(market.get("amount_yi")),
+                "zt_available": isinstance(market.get("zt"), dict) and _p0_finite((market.get("zt") or {}).get("count")),
+                "amount_yi": market.get("amount_yi") if _p0_finite(market.get("amount_yi")) else None,
+                "zt_count": (market.get("zt") or {}).get("count") if isinstance(market.get("zt"), dict) else None,
+                "intraday": bool(market.get("intraday", False)),
+                "data_quality": market_quality,
+                "partial_components": partial_components,
+                "missing_components": missing_components,
+            },
+            "formal_recommendation": {
+                "snapshot_status": official_status,
+                "scan_status": (official or {}).get("scan_status") if official else None,
+                "policy_mode": ((official or {}).get("policy") or {}).get("mode") if official else None,
+                "policy_reasons": sorted(((official or {}).get("policy") or {}).get("reasons") or []) if official else [],
+                "bucket_counts": bucket_counts,
+                "denominator": formal_count,
+            },
+            "research_snapshot": {
+                "status": research.get("status", "missing"),
+                "snapshot_type": research.get("snapshot_type"),
+                "link_status": link_status,
+                "records": len(research_content.get("records") or []),
+                "selection_scope_status": scope_status,
+                "frozen_candidate_denominator": frozen_count,
+            },
+            "observation_pool": {"denominator": observation_count},
+            "windows": day_windows,
+        })
+    summary = {
+        "market_history_available_days": sum(1 for row in rows if row["market"]["history_available"]),
+        "amount_baseline_days": sum(1 for row in rows if row["market"]["amount_available"]),
+        "zt_baseline_days": sum(1 for row in rows if row["market"]["zt_available"]),
+        "market_partial_dates": market_partial_dates,
+        "formal_recommendation_denominator": formal_total,
+        "frozen_research_candidate_denominator": frozen_known_total,
+        "frozen_research_candidate_unknown_dates": frozen_unknown_dates,
+        "observation_pool_denominator": observation_total,
+        "research_snapshot_link_statuses": dict(sorted(link_statuses.items())),
+        "window_status_counts": {window: dict(sorted(values.items()))
+                                 for window, values in window_totals.items()},
+        "hs300_alpha_missing_reasons": {window: dict(sorted(values.items()))
+                                         for window, values in alpha_totals.items()},
+        "deduplicated_events": event_totals,
+        "valid_alpha_events": valid_event_totals,
+        "denominator_definitions": {
+            "formal_recommendation": "actionable + waiting_trigger + next_day_confirmation from immutable official snapshot",
+            "frozen_research_candidates": "selection_scope.codes only; missing scope remains unknown",
+            "observation_pool": "observation + unenriched_observation from immutable official snapshot",
+        },
+    }
+    content = {
+        "schema_version": P0_AUDIT_SCHEMA_VERSION,
+        "audit_kind": "p0_baseline_gap_audit",
+        "date_range": {"start": days[0] if days else None, "end": days[-1] if days else None},
+        "trading_days": days,
+        "rows": rows,
+        "summary": summary,
+        "input": {
+            "market_history_records": sum(1 for day in days if day in (market_history or {})),
+            "official_snapshots": sum(1 for day in days if day in (official_history or {})),
+            "research_inventory_records": sum(1 for day in days if day in (research_inventory or {})),
+            "candidate_signal_items": sum(len(items_by_day[day]) for day in days),
+            "windows": [int(window) for window in windows],
+        },
+        "disclaimer": "P0为证据链审计，不代表策略胜率或投资建议。",
+    }
+    return {"schema_version": P0_AUDIT_SCHEMA_VERSION,
+            "audit_id": content_sha256(content)[:16],
+            "content_sha256": content_sha256(content), "content": content}
+
+
+def save_p0_audit(snapshot, root=DEFAULT_P0_AUDIT_ROOT):
+    """Persist an audit by content hash; identical reruns are unchanged."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / (snapshot["audit_id"] + ".json")
+    payload = canonical_json(snapshot) + b"\n"
+    if path.exists():
+        return {"status": "unchanged", "path": str(path), "audit_id": snapshot["audit_id"]}
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(payload)
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        pass
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"status": "created", "path": str(path), "audit_id": snapshot["audit_id"]}
+
+
 def save_diagnostics(snapshot, root=DEFAULT_ROOT):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -520,14 +956,35 @@ def save_diagnostics(snapshot, root=DEFAULT_ROOT):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Build deterministic candidate diagnostics")
+    parser.add_argument("--p0", action="store_true", help="build the P0 baseline gap audit")
     parser.add_argument("--research-root", default=str(DEFAULT_RESEARCH_ROOT))
     parser.add_argument("--attribution-root", default=str(Path(CACHE_DIR) / "evolution" / "evaluations"))
+    parser.add_argument("--market-history-root", default=str(DEFAULT_MARKET_HISTORY))
+    parser.add_argument("--recommendation-root", default=str(DEFAULT_RECOMMENDATION_ROOT))
+    parser.add_argument("--start-date", default="2026-09-08")
     parser.add_argument("--contract-id")
     parser.add_argument("--as-of")
     parser.add_argument("--output-root", default=str(DEFAULT_ROOT))
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    if args.p0:
+        if not args.as_of:
+            raise ValueError("p0_as_of_required")
+        days = p0_trading_days(args.start_date, args.as_of)
+        audit = build_p0_audit(
+            days,
+            load_market_regime_history(args.market_history_root),
+            load_official_recommendation_history(args.recommendation_root,
+                                                 args.start_date, args.as_of),
+            load_p0_research_inventory(args.research_root, args.start_date, args.as_of),
+            load_candidate_signal_items(args.attribution_root, args.contract_id, as_of=args.as_of),
+        )
+        if args.save:
+            audit["tracking"] = save_p0_audit(audit, Path(args.output_root) / "p0")
+        print(json.dumps(audit, ensure_ascii=False, sort_keys=True) if args.json
+              else audit["audit_id"])
+        return 0
     snapshot = build_diagnostics(
         load_primary_research_snapshots(args.research_root, as_of=args.as_of),
         load_candidate_signal_items(args.attribution_root, args.contract_id, as_of=args.as_of),
