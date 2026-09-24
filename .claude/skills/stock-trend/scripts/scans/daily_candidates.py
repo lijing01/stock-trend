@@ -366,6 +366,10 @@ _MARKET_GATE_BLOCK_REASONS = frozenset({
     "regime_missing", "regime_stale", "regime_data_missing",
     "regime_data_quality_unknown", "regime_data_partial", "regime_weak",
 })
+_OBSERVATION_MARKET_ONLY_REASONS = (
+    _MARKET_GATE_BLOCK_REASONS
+    | {"recommendation_limit", "intraday_provisional"}
+)
 
 
 def _market_gate_pass(policy):
@@ -376,6 +380,31 @@ def _market_gate_pass(policy):
         policy.get("mode") in {"actionable", "waiting_trigger"}
         and not reasons.intersection(_MARKET_GATE_BLOCK_REASONS)
     )
+
+
+def observation_display_groups(items):
+    """Group observations by blocker type and rank each group by priority."""
+    groups = [
+        {
+            "key": "market_or_limit",
+            "title": "仅受市场环境或推荐名额限制",
+            "items": [],
+        },
+        {"key": "other_reasons", "title": "其他观察原因", "items": []},
+    ]
+    for item in items or []:
+        reasons = set(item.get("observation_reasons") or [])
+        group = (
+            groups[0]
+            if reasons and reasons <= _OBSERVATION_MARKET_ONLY_REASONS
+            else groups[1]
+        )
+        group["items"].append(item)
+    for group in groups:
+        group["items"].sort(key=lambda item: (
+            -candidate_rank_score(item), str(item.get("code") or "")
+        ))
+    return groups
 
 
 def _data_quality_gate_pass(item, min_score):
@@ -2975,8 +3004,8 @@ def _news_risk_display(article):
     return risk if not details else f"{risk}（{'、'.join(details)}）"
 
 
-def _append_candidate_table(lines, title, items, empty_text):
-    lines.extend(["", f"## {title}", ""])
+def _append_candidate_table(lines, title, items, empty_text, *, heading_level=2):
+    lines.extend(["", f"{'#' * heading_level} {title}", ""])
     if not items:
         lines.append(f"> {empty_text}")
         return
@@ -3009,6 +3038,29 @@ def _append_candidate_table(lines, title, items, empty_text):
             f"新闻 {float(news.get('score', 0) or 0):+.2f} · {news.get('status', 'disabled')} | "
             f"{quality.get('coverage', 0):.0%} | "
             f"{detail} |"
+        )
+
+
+def _append_observation_pool_tables(lines, items):
+    lines.extend([
+        "",
+        f"## 观察池（共 {len(items)} 只）",
+        "",
+        "> 先按观察原因分组，组内按优先分由高到低；高分不代表已取得推荐资格。",
+    ])
+    if not items:
+        lines.extend(["", "> 观察池为空。"])
+        return
+    for group in observation_display_groups(items):
+        group_items = group["items"]
+        if not group_items:
+            continue
+        _append_candidate_table(
+            lines,
+            f"{group['title']}（{len(group_items)}）",
+            group_items,
+            "该组为空。",
+            heading_level=3,
         )
 
 
@@ -4283,8 +4335,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     _append_candidate_table(
         lines, "次日确认观察（非推荐）", buckets.get("next_day_confirmation", []),
         "暂无可供次日确认的观察标的。")
-    _append_candidate_table(
-        lines, "观察池", buckets["observation"], "观察池为空。")
+    _append_observation_pool_tables(lines, buckets["observation"])
     _append_candidate_table(
         lines, "数据失效/待修复", buckets.get("data_rejected", []),
         "无数据失效候选。")
@@ -4433,29 +4484,62 @@ def _html_candidate_section(title, items, rows, empty_text):
     )
 
 
-def render_observation_pool_html(items, *, source_date=None, source_report=None):
-    """Render the candidate observation pool for embedding in daily review."""
-    rows = _html_candidate_rows(items, buy_level_display="observation")
-    intro = (
+def _observation_pool_intro_html():
+    return (
         "<div class='observation-buy-level-note' role='note'>"
         "<strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>"
         "市场环境、数据质量、板块持续性和维科夫筛选仍是硬门槛；"
-        "只有“今日可执行”区域具备推荐资格。</div>"
+        "只有“今日可执行”区域具备推荐资格。"
+        "观察池先按原因分组，再按组内优先分由高到低排列；"
+        "高分不代表已取得推荐资格。"
+        "</div>"
         "<div class='buy-level-legend observation-buy-level-legend' "
         "aria-label='观察池潜在维科夫买点分级图例'>"
         "<span class='level-1'>潜在一级 · Spring/Test</span>"
         "<span class='level-2'>潜在二级 · SOS 后 LPS</span>"
         "<span class='level-3'>潜在三级 · JAC/BU 后再确认</span></div>"
-        if items else ""
     )
+
+
+def _html_observation_pool_content(items, empty_text):
+    if not items:
+        return f"<p class='empty-state'>{escape(empty_text)}</p>"
+    sections = []
+    for group in observation_display_groups(items):
+        group_items = group["items"]
+        if not group_items:
+            continue
+        rows = _html_candidate_rows(
+            group_items, buy_level_display="observation")
+        sections.append(
+            "<div class='observation-subgroup'><h3>"
+            f"{escape(group['title'])} "
+            f"<span class='section-count'>{len(group_items)}</span>"
+            f"</h3>{_html_candidate_table(rows)}</div>"
+        )
+    return _observation_pool_intro_html() + "".join(sections)
+
+
+def _html_observation_pool_section(items):
+    return (
+        "<section class='candidate-section observation-section'><h2>"
+        f"观察池 <span class='section-count'>{len(items)}</span></h2>"
+        + _html_observation_pool_content(
+            items, "当前没有通过数据与板块观察门槛的标的。")
+        + "</section>"
+    )
+
+
+def render_observation_pool_html(items, *, source_date=None, source_report=None):
+    """Render the candidate observation pool for embedding in daily review."""
     provenance = f"候选依据日：{escape(str(source_date or '未记录'))}。"
     if source_report:
         provenance += (" 来源：<a href='" + escape(str(source_report), quote=True)
                        + "'>候选报告</a>。")
-    contents = _html_candidate_table(rows) if items else (
-        "<p class='empty-state'>当前没有通过数据与板块观察门槛的标的。</p>")
+    contents = _html_observation_pool_content(
+        items, "当前没有通过数据与板块观察门槛的标的。")
     return ("<p class='dt candidate-observation-provenance'>" + provenance + "</p>"
-            + intro + contents)
+            + contents)
 
 
 def save_observation_pool_artifact(output, *, source_report=None):
@@ -4614,8 +4698,6 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         buckets["actionable"], buy_level_display="actionable")
     waiting_rows = _html_candidate_rows(buckets["waiting_trigger"])
     confirmation_rows = _html_candidate_rows(buckets.get("next_day_confirmation", []))
-    observation_rows = _html_candidate_rows(
-        buckets["observation"], buy_level_display="observation")
     rejected_rows = _html_candidate_rows(buckets.get("data_rejected", []))
     unenriched_rows = _html_candidate_rows(
         buckets.get("unenriched_observation", []))
@@ -4720,18 +4802,6 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         + "</details></section>"
         if unenriched_items else ""
     )
-    observation_intro_html = (
-        "<div class='observation-buy-level-note' role='note'>"
-        "<strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>"
-        "市场环境、数据质量、板块持续性和维科夫筛选仍是硬门槛；"
-        "只有“今日可执行”区域具备推荐资格。</div>"
-        "<div class='buy-level-legend observation-buy-level-legend' "
-        "aria-label='观察池潜在维科夫买点分级图例'>"
-        "<span class='level-1'>潜在一级 · Spring/Test</span>"
-        "<span class='level-2'>潜在二级 · SOS 后 LPS</span>"
-        "<span class='level-3'>潜在三级 · JAC/BU 后再确认</span></div>"
-        if buckets.get("observation") else ""
-    )
     actionable_section_html = _html_candidate_section(
         "今日可执行" + tier_suffix,
         buckets["actionable"], actionable_rows,
@@ -4747,10 +4817,8 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         "次日确认观察（非推荐）", confirmation_items, confirmation_rows,
         "当前没有需要次日确认的标的。",
     )
-    observation_section_html = _html_candidate_section(
-        "观察池", buckets["observation"], observation_rows,
-        "当前没有通过数据与板块观察门槛的标的。",
-    )
+    observation_section_html = _html_observation_pool_section(
+        buckets["observation"])
     actionable_legend_html = (
         "<div class='buy-level-legend' aria-label='维科夫买点分级图例'>"
         "<span class='level-1'>一级 · Spring/Test</span>"
@@ -4874,7 +4942,6 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {actionable_section_html}
 {waiting_section_html}
 {confirmation_section_html}
-{observation_intro_html}
 {observation_section_html}
 {rejected_details_html}
 {unenriched_details_html}

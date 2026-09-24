@@ -1903,6 +1903,62 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(tracking["status"], "blocked_scope_incomplete")
         self.assertIsNone(tracking["path"])
 
+    def test_observation_reports_group_reasons_then_sort_by_priority(self):
+        market_high = candidate("MKT-HI", adjusted_score=61.0)
+        market_high["execution_priority_score"] = 61.0
+        market_high["observation_reasons"] = ["regime_data_partial"]
+        market_tie_b = candidate("MKT-B", adjusted_score=50.0)
+        market_tie_b["execution_priority_score"] = 50.0
+        market_tie_b["observation_reasons"] = ["recommendation_limit"]
+        market_tie_a = candidate("MKT-A", adjusted_score=50.0)
+        market_tie_a["execution_priority_score"] = 50.0
+        market_tie_a["observation_reasons"] = ["intraday_provisional"]
+        blocker_high = candidate("BLK-HI", adjusted_score=75.0)
+        blocker_high["execution_priority_score"] = 75.0
+        blocker_high["observation_reasons"] = ["single_day_pulse"]
+        blocker_low = candidate("BLK-LOW", adjusted_score=40.0)
+        blocker_low["execution_priority_score"] = 40.0
+        blocker_low["observation_reasons"] = ["entry_wait_pullback"]
+        items = [
+            blocker_high, market_tie_b, blocker_low, market_high, market_tie_a,
+        ]
+        original_codes = [item["code"] for item in items]
+
+        groups = dc.observation_display_groups(items)
+        expected_codes = [
+            "MKT-HI", "MKT-A", "MKT-B", "BLK-HI", "BLK-LOW",
+        ]
+        self.assertEqual(
+            [[item["code"] for item in group["items"]] for group in groups],
+            [expected_codes[:3], expected_codes[3:]],
+        )
+        self.assertEqual([item["code"] for item in items], original_codes)
+
+        policy = {
+            "mode": "observation", "max_recommendations": 0,
+            "reasons": ["regime_data_partial"],
+        }
+        buckets = {
+            "actionable": [], "waiting_trigger": [],
+            "next_day_confirmation": [], "observation": items,
+            "data_rejected": [], "unenriched_observation": [],
+        }
+        markdown = generate_report(items, [], 0, policy, buckets)
+        candidate_html = dc._generate_html(
+            items, [], 0, "20260924-160000", policy, buckets)
+        review_html = dc.render_observation_pool_html(
+            items, source_date="2026-09-24")
+        for rendered in (markdown, candidate_html, review_html):
+            positions = [rendered.index(f"测试{code}") for code in expected_codes]
+            self.assertEqual(positions, sorted(positions))
+            self.assertIn("仅受市场环境或推荐名额限制", rendered)
+            self.assertIn("其他观察原因", rendered)
+            self.assertIn("高分不代表已取得推荐资格", rendered)
+
+        only_market_html = dc.render_observation_pool_html(
+            [market_high], source_date="2026-09-24")
+        self.assertNotIn("其他观察原因", only_market_html)
+
     def test_outputs_keep_quality_score_and_expose_execution_priority(self):
         item = _set_buy_level(
             candidate("l2", adjusted_score=78.0), "lps")
