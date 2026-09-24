@@ -62,6 +62,7 @@ RETIRED_CONTEXT_KEYS = (
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from analysis.wyckoff import format_minor_phase_text
+from core.recommendation_snapshot import content_sha256
 
 try:
     import akshare as ak
@@ -1034,6 +1035,97 @@ def load_context() -> dict | None:
     except Exception:
         pass
     return None
+
+
+def _normalize_legacy_northbound_partial(context: dict) -> dict:
+    """Promote only the retired northbound fallback with a valid main-force score."""
+    regime = context.get("regime") or {}
+    capital = (context.get("components") or {}).get("capital") or {}
+    detail = str(capital.get("detail") or "")
+    partial_components = list(regime.get("partial_components") or [])
+    main_force = capital.get("score") is not None and "全市场主力净流入" in detail
+    legacy_marker = "北向不可用降级" in detail
+    if (
+        capital.get("data_status") == "partial"
+        and partial_components == ["capital"]
+        and main_force
+        and legacy_marker
+    ):
+        normalized = copy.deepcopy(context)
+        normalized_capital = normalized["components"]["capital"]
+        normalized_capital["data_status"] = "good"
+        normalized_capital["detail"] = detail.replace("(北向不可用降级)", "")
+        normalized_regime = normalized["regime"]
+        normalized_regime["partial_components"] = []
+        if not normalized_regime.get("missing_components"):
+            normalized_regime["data_quality"] = "good"
+        return normalized
+    return context
+
+
+def _normalize_legacy_intraday_quality(context: dict, today: str) -> dict:
+    """Restore audit fields from frozen components without changing blended score."""
+    regime = context.get("regime") or {}
+    if (regime.get("data_quality") is not None
+            or not (regime.get("intraday") is True
+                    or context.get("intraday") is True)
+            or context.get("data_date") != today):
+        return context
+    components = context.get("components")
+    if not isinstance(components, dict) or not components:
+        return context
+    derived = compute_regime(components)
+    normalized = copy.deepcopy(context)
+    normalized_regime = normalized.setdefault("regime", {})
+    for key in (
+        "data_quality", "missing_components", "partial_components",
+        "score_lower", "score_upper", "normalization_denominator",
+        "raw_weighted_total",
+    ):
+        if key in derived:
+            normalized_regime[key] = copy.deepcopy(derived[key])
+    return normalized
+
+
+def load_recommendation_context(path=None, *, today=None) -> dict | None:
+    """Read a market context and project its recommendation view in memory."""
+    try:
+        source = Path(path) if path is not None else CACHE_DIR / "market_regime.json"
+        if not source.exists():
+            return None
+        raw_context = json.loads(source.read_text(encoding="utf-8"))
+        context = _normalize_legacy_northbound_partial(raw_context)
+        context = _normalize_legacy_intraday_quality(
+            context, today or datetime.now().date().isoformat())
+        regime = context.get("regime", {})
+        # A legacy explanation may describe the retired partial status.
+        explanation = None if context is not raw_context else context.get("market_explanation")
+        if not isinstance(explanation, dict):
+            try:
+                from analysis.market_explanation import build_market_explanation
+                explanation = build_market_explanation(
+                    context, context.get("data_date") or datetime.now().date().isoformat())
+            except (TypeError, ValueError):
+                explanation = None
+        return {
+            "score": regime.get("score"),
+            "label": regime.get("label", ""),
+            "data_date": context.get("data_date", ""),
+            "context_sha256": content_sha256(context),
+            "advice": regime.get("advice", ""),
+            "data_quality": regime.get("data_quality", "unknown"),
+            "missing_components": regime.get("missing_components", []),
+            "partial_components": regime.get("partial_components", []),
+            "score_lower": regime.get("score_lower"),
+            "score_upper": regime.get("score_upper"),
+            "hs300_change": (
+                context.get("indices", {}).get("000300.SH", {}).get("pct_chg")
+            ),
+            "capital_score": context.get("components", {}).get("capital", {}).get("score"),
+            "market_explanation": copy.deepcopy(explanation),
+        }
+    except Exception:
+        return None
 
 
 # ──────────────── 报告 ────────────────

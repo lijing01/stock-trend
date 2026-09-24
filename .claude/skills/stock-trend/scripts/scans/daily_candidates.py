@@ -47,8 +47,7 @@ from analysis.wyckoff import (
     classify_entry_timing,
     format_minor_phase_text,
 )
-from analysis.market_explanation import build_market_explanation
-from analysis.market_regime import compute_regime
+from analysis.market_regime import load_recommendation_context
 from analysis.market_style import annotate_candidates_for_shadow
 from core.recommendation_quality import (
     NON_PROVIDER_STATUSES as NON_PROVIDER_ENRICHMENT_STATUSES,
@@ -3021,114 +3020,9 @@ def _append_candidate_table(lines, title, items, empty_text):
         )
 
 
-def _normalize_legacy_northbound_partial(context):
-    """Promote the retired northbound fallback in old same-day caches.
-
-    Before the market-funds policy change, a valid main-force value was
-    labelled ``capital=partial`` solely because northbound data was absent.
-    Keep genuine missing/partial components conservative while allowing an
-    old cache with that exact legacy marker to use the current policy.
-    """
-    if not isinstance(context, dict):
-        return context
-    regime = context.get("regime") or {}
-    capital = (context.get("components") or {}).get("capital") or {}
-    detail = str(capital.get("detail") or "")
-    partial_components = list(regime.get("partial_components") or [])
-    main_force = capital.get("score") is not None and "全市场主力净流入" in detail
-    legacy_marker = "北向不可用降级" in detail
-    if (
-        capital.get("data_status") == "partial"
-        and partial_components == ["capital"]
-        and main_force
-        and legacy_marker
-    ):
-        normalized = copy.deepcopy(context)
-        normalized_capital = normalized["components"]["capital"]
-        normalized_capital["data_status"] = "good"
-        normalized_capital["detail"] = detail.replace("(北向不可用降级)", "")
-        normalized_regime = normalized["regime"]
-        normalized_regime["partial_components"] = []
-        if not normalized_regime.get("missing_components"):
-            normalized_regime["data_quality"] = "good"
-        return normalized
-    return context
-
-
-def _normalize_legacy_intraday_quality(context):
-    """Derive missing intraday quality fields in memory only.
-
-    A short-lived cache format briefly replaced the full intraday regime with
-    only blended score/label/advice.  Rebuild only the quality/audit fields
-    from today's frozen components; retain the cached blended score and never
-    write the migration back to disk.
-    """
-    if not isinstance(context, dict):
-        return context
-    regime = context.get("regime") or {}
-    data_date = context.get("data_date")
-    if (regime.get("data_quality") is not None
-            or not (regime.get("intraday") is True
-                    or context.get("intraday") is True)
-            or data_date != datetime.now().date().isoformat()):
-        return context
-    components = context.get("components")
-    if not isinstance(components, dict) or not components:
-        return context
-    derived = compute_regime(components)
-    normalized = copy.deepcopy(context)
-    normalized_regime = normalized.setdefault("regime", {})
-    for key in (
-        "data_quality", "missing_components", "partial_components",
-        "score_lower", "score_upper", "normalization_denominator",
-        "raw_weighted_total",
-    ):
-        if key in derived:
-            normalized_regime[key] = copy.deepcopy(derived[key])
-    return normalized
-
-
 def load_regime_context():
-    """Return market-regime summary line if today's context exists."""
-    try:
-        p = CACHE_DIR / "market_regime.json"
-        if not p.exists():
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            raw_context = json.load(f)
-        d = _normalize_legacy_northbound_partial(raw_context)
-        d = _normalize_legacy_intraday_quality(d)
-        r = d.get("regime", {})
-        # A legacy explanation carries the retired partial/alternative status;
-        # rebuild it from the normalized context instead of exposing stale
-        # evidence alongside the current recommendation policy.
-        explanation = None if d is not raw_context else d.get("market_explanation")
-        if not isinstance(explanation, dict):
-            try:
-                basis_date = d.get("data_date")
-                explanation = build_market_explanation(
-                    d, basis_date or datetime.now().date().isoformat())
-            except (TypeError, ValueError):
-                explanation = None
-        return {
-            "score": r.get("score"),
-            "label": r.get("label", ""),
-            "data_date": d.get("data_date", ""),
-            "context_sha256": content_sha256(d),
-            "advice": r.get("advice", ""),
-            "data_quality": r.get("data_quality", "unknown"),
-            "missing_components": r.get("missing_components", []),
-            "partial_components": r.get("partial_components", []),
-            "score_lower": r.get("score_lower"),
-            "score_upper": r.get("score_upper"),
-            "hs300_change": (
-                d.get("indices", {}).get("000300.SH", {}).get("pct_chg")
-            ),
-            "capital_score": d.get("components", {}).get("capital", {}).get("score"),
-            "market_explanation": copy.deepcopy(explanation),
-        }
-    except Exception:
-        return None
+    """Return the recommendation view of the persisted market context."""
+    return load_recommendation_context(CACHE_DIR / "market_regime.json")
 
 
 def _load_style_shadow(path, regime):
@@ -4405,10 +4299,11 @@ def _phase_d_lps_shadow_html(shadow):
                f"证据不足 {shadow.get('insufficient_evidence_count', 0)}，"
                f"增强证据未完整 {shadow['evidence_incomplete_count']}。</p>")
     if rows:
-        content += ("<table><thead><tr><th>标的</th><th>状态</th><th>状态说明</th><th>SOS</th><th>LPS</th>"
+        content += ("<div class='phase-d-lps-table-wrap'><table class='phase-d-lps-table'>"
+                    "<thead><tr><th>标的</th><th>状态</th><th>状态说明</th><th>SOS</th><th>LPS</th>"
                     "<th>回踩状态/候选价区</th><th>原箱体</th><th>BU量价与量能比率</th>"
                     "<th>健康状态/原因码</th><th>结构失效位</th><th>正式门控原因</th>"
-                    "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+                    "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
     else:
         content += "<p class='dt'>本轮没有同一箱体内已确认 SOS 的观察对象。</p>"
     return ("<details class='secondary-panel'><summary>Phase D/LPS 观察 · 影子观察，不参与推荐"
@@ -5015,6 +4910,21 @@ h1{{font-size:24px}}
 table{{width:100%;border-collapse:collapse;margin:12px 0;border-radius:8px;overflow:hidden}}
 th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:14px}}
 th{{background:#1d4ed8;color:#fff;font-size:13px}}
+.phase-d-lps-table-wrap{{overflow-x:auto;margin:12px 0}}
+.phase-d-lps-table{{table-layout:fixed;min-width:2230px;margin:0}}
+.phase-d-lps-table th,.phase-d-lps-table td{{vertical-align:top;white-space:normal;overflow-wrap:anywhere}}
+.phase-d-lps-table th:nth-child(1),.phase-d-lps-table td:nth-child(1){{width:130px}}
+.phase-d-lps-table th:nth-child(2),.phase-d-lps-table td:nth-child(2){{width:170px}}
+.phase-d-lps-table th:nth-child(3),.phase-d-lps-table td:nth-child(3){{width:230px}}
+.phase-d-lps-table th:nth-child(4),.phase-d-lps-table td:nth-child(4),
+.phase-d-lps-table th:nth-child(5),.phase-d-lps-table td:nth-child(5){{width:150px}}
+.phase-d-lps-table th:nth-child(6),.phase-d-lps-table td:nth-child(6){{width:230px}}
+.phase-d-lps-table th:nth-child(7),.phase-d-lps-table td:nth-child(7){{width:150px}}
+.phase-d-lps-table th:nth-child(8),.phase-d-lps-table td:nth-child(8){{width:340px}}
+.phase-d-lps-table th:nth-child(9),.phase-d-lps-table td:nth-child(9){{width:180px}}
+.phase-d-lps-table th:nth-child(10),.phase-d-lps-table td:nth-child(10){{width:140px}}
+.phase-d-lps-table th:nth-child(11),.phase-d-lps-table td:nth-child(11){{width:360px}}
+.phase-d-lps-table td:nth-child(11){{line-height:1.6}}
 .candidate-table-wrap{{overflow-x:auto;margin:12px 0}}
 .candidate-table-wrap .candidate-table{{margin:0}}
 .candidate-table{{table-layout:fixed;min-width:1080px}}

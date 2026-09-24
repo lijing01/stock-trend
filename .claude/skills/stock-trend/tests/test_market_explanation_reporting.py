@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from analysis.market_explanation import build_market_explanation
 from analysis import market_regime as mr
+from core.recommendation_snapshot import content_sha256
 from reporting.market_explanation import render_market_explanation
 from scans import daily_candidates as dc
 
@@ -121,6 +122,49 @@ class TestMarketExplanationReporting(unittest.TestCase):
         self.assertIn("market_explanation", loaded)
         self.assertIn("legacy_context_evidence_unknown",
                       loaded["market_explanation"]["quality_notes"])
+
+    def test_recommendation_context_preserves_full_raw_digest_and_projection(self):
+        ctx = explanation_context()
+        ctx["plan"] = {"legacy": True}
+        ctx["regime"]["partial_components"] = ["capital", "volume"]
+        ctx["indices"]["000300.SH"]["pct_chg"] = -0.2
+        explanation = build_market_explanation(ctx, "2026-09-07")
+        ctx["market_explanation"] = explanation
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market_regime.json"
+            original = json.dumps(ctx, ensure_ascii=False)
+            path.write_text(original, encoding="utf-8")
+            loaded = mr.load_recommendation_context(path, today="2026-09-07")
+            with patch.object(mr, "CACHE_DIR", Path(tmp)):
+                self.assertEqual(
+                    mr.load_recommendation_context(today="2026-09-07"), loaded)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+        self.assertEqual(loaded["context_sha256"], content_sha256(ctx))
+        self.assertEqual(loaded["score"], 53.4)
+        self.assertEqual(loaded["hs300_change"], -0.2)
+        self.assertEqual(loaded["capital_score"], 69.4)
+        self.assertEqual(loaded["market_explanation"], explanation)
+        self.assertEqual(loaded["partial_components"], ["capital", "volume"])
+
+    def test_recommendation_context_intraday_migration_uses_supplied_date(self):
+        ctx = {
+            "data_date": "2026-09-07", "intraday": True,
+            "regime": {"score": 77.5},
+            "components": {
+                key: {"score": 50.0, "data_status": "good"}
+                for key in ("index_trend", "volume", "breadth", "zt_emotion", "capital")
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market_regime.json"
+            path.write_text(json.dumps(ctx), encoding="utf-8")
+            loaded = mr.load_recommendation_context(path, today="2026-09-07")
+            stale = mr.load_recommendation_context(path, today="2026-09-08")
+
+        self.assertEqual(loaded["score"], 77.5)
+        self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(stale["data_quality"], "unknown")
 
     def test_official_snapshot_uses_legacy_market_regime_projection(self):
         explanation = build_market_explanation(

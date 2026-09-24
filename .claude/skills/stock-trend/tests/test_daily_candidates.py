@@ -39,6 +39,7 @@ from scans.daily_candidates import (
 )
 from scans import daily_candidates as dc
 from scans import stock_scanner as sc
+from core.recommendation_snapshot import content_sha256
 
 
 def candidate(code, eligible=True, adjusted_score=80.0,
@@ -2982,13 +2983,21 @@ class TestRecommendationPolicy(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir)
-            (cache_dir / "market_regime.json").write_text(
-                json.dumps(context), encoding="utf-8")
+            path = cache_dir / "market_regime.json"
+            original = json.dumps(context)
+            path.write_text(original, encoding="utf-8")
             with patch.object(dc, "CACHE_DIR", cache_dir):
                 loaded = dc.load_regime_context()
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
 
         self.assertEqual(loaded["data_quality"], "good")
         self.assertEqual(loaded["partial_components"], [])
+        normalized = copy.deepcopy(context)
+        normalized["components"]["capital"]["data_status"] = "good"
+        normalized["components"]["capital"]["detail"] = "全市场主力净流入 +10.0亿"
+        normalized["regime"]["partial_components"] = []
+        normalized["regime"]["data_quality"] = "good"
+        self.assertEqual(loaded["context_sha256"], content_sha256(normalized))
         self.assertNotIn(
             "regime_data_partial",
             loaded["market_explanation"]["blocking_reasons"],
@@ -3042,8 +3051,19 @@ class TestRecommendationPolicy(unittest.TestCase):
                 loaded = dc.load_regime_context()
             self.assertEqual(path.read_text(encoding="utf-8"), original)
         self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(loaded["score"], 50.0)
         self.assertEqual(loaded["missing_components"], [])
         self.assertEqual(loaded["partial_components"], [])
+
+    def test_missing_or_invalid_regime_context_downgrades_safely(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            with patch.object(dc, "CACHE_DIR", cache_dir):
+                self.assertIsNone(dc.load_regime_context())
+                (cache_dir / "market_regime.json").write_text("{broken", encoding="utf-8")
+                self.assertIsNone(dc.load_regime_context())
+        self.assertEqual(build_recommendation_policy(None, "2026-08-06")["mode"],
+                         "observation")
 
     def test_weak_regime_allows_observation_only(self):
         regime = {"score": 59, "data_date": "2026-08-06"}
