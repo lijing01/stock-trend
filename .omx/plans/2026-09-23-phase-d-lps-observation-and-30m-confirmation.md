@@ -6,7 +6,7 @@
 
 第一版为影子观察。保持正式 `recommendations`、`waiting_trigger`、`observation`、买点奖励、市场/数据/板块硬门槛、推荐历史快照及发布指针的结果不变。影子状态不能把正式观察对象升级为推荐。市场环境不允许时，影子视图仍可列出研究对象，但逐行标明正式阻断原因。
 
-依据：[用户 SOP](</Users/jing.li7/Downloads/wyckoff_daily_phaseD_SOS_LPS_SOP.md>)。现有买点状态在 `analysis/wyckoff.py:1644-1810,2051-2376`；正式分桶在 `scans/daily_candidates.py:3609-3700`；JSON 与报告入口在 `scans/daily_candidates.py:2982,4225,4491`。现有 K 线 CLI 仅接受 D/W：`fetchers/kline.py:248`、`fetchers/kline_eastmoney.py:317`。
+依据：用户提供的 Wyckoff Phase D/SOS/LPS SOP（源文件未纳入仓库；SHA-256 `1030279e7562030e291debbcd4d9d2d0ab040eead1125d4d9e7120abdcf5cb2c`）。现有买点状态在 `analysis/wyckoff.py:1644-1810,2051-2376`；正式分桶在 `scans/daily_candidates.py:3609-3700`；JSON 与报告入口在 `scans/daily_candidates.py:2982,4225,4491`。现有 K 线 CLI 仅接受 D/W：`fetchers/kline.py:248`、`fetchers/kline_eastmoney.py:317`。
 
 ## 交付 1：独立 Phase D/LPS 观察视图
 

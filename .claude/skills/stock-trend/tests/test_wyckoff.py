@@ -158,6 +158,11 @@ class TestConfirmedLpsHealth(unittest.TestCase):
         health = evaluate_confirmed_lps_health(*args)
         self.assertEqual(health["state"], "confirmed_holding")
         self.assertEqual(health["structural_floor"], 10.65)
+        self.assertEqual(health["event_identity"], {
+            "event": "lps", "event_date": "20260907",
+            "confirmation_date": "20260908", "range_id": "minor_191",
+            "status": "confirmed", "event_index": 2, "detected_index": 3,
+        })
 
     def test_close_below_trigger_but_above_range_floor_is_weakened(self):
         args = self._fixture(11.5)
@@ -595,6 +600,17 @@ class TestSosLps(unittest.TestCase):
         self.assertEqual(lps["event_index"], 52)
         self.assertEqual(lps["detected_index"], 53)
         self.assertEqual(lps["parent_event"], "sos")
+        self.assertEqual(lps["low"], 110.2)
+        self.assertEqual(lps["high"], 112.0)
+        self.assertEqual(lps["close"], 111.2)
+        self.assertEqual(lps["volume"], 70.0)
+        self.assertEqual(lps["sos_volume"], 150.0)
+        self.assertEqual(lps["sos_atr"], 2.0)
+        self.assertEqual(lps["tr_resistance"], 110.0)
+        self.assertEqual(lps["volume_vs_sos_ratio"], round(70.0 / 150.0, 4))
+        self.assertEqual(lps["volume_vs_avg5_ratio"], round(70.0 / 112.0, 4))
+        self.assertEqual(lps["volume_vs_avg10_ratio"], round(70.0 / 106.0, 4))
+        self.assertEqual(lps["volume_vs_tr_median_ratio"], 0.7)
         rows = [
             {"open": ohlcv["open"][i], "high": ohlcv["high"][i],
              "low": ohlcv["low"][i], "close": ohlcv["close"][i],

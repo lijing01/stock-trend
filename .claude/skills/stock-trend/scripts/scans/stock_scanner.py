@@ -2281,7 +2281,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                trade_plan_policy=None, top=30, min_candidates=20,
                min_score=50, capital_expected_date="",
                defer_enrichment=False, disable_early_stop=False,
-               require_wyckoff_gate=True, peer_cohorts=None):
+               require_wyckoff_gate=True, peer_cohorts=None,
+               include_phase_d_lps_context=False):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -3015,33 +3016,128 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     "confirmed_event": copy.deepcopy(
                         wk.get("confirmed_event") or {}),
                     "event_health": event_health,
-                    # Temporary context for the daily Phase D/LPS shadow view.
-                    # The daily scan consumes and removes this before any
-                    # candidate, research, or recommendation artifact is saved.
-                    "_phase_d_lps_context": {
+                }
+                if include_phase_d_lps_context:
+                    signal = wk.get("signal") or {}
+                    short_event = short_term.get("event") or ""
+                    signal_event = signal.get("event") or ""
+                    event_type = str(short_event or signal_event).lower()
+                    short_event_date = short_term.get("event_date") or ""
+                    signal_event_date = signal.get("event_date") or ""
+                    event_date = short_event_date or signal_event_date
+                    short_confirmation_date = (
+                        short_term.get("confirmation_date") or "")
+                    signal_confirmation_date = signal.get("detected_date") or ""
+                    confirmation_date = (
+                        short_confirmation_date or signal_confirmation_date)
+                    short_range_id = short_term.get("range_id") or ""
+                    signal_range_id = signal.get("range_id") or ""
+                    range_id = short_range_id or signal_range_id
+                    short_signal_status = short_term.get("signal_status") or ""
+                    signal_status = signal.get("status") or ""
+                    short_event_index = short_term.get("event_index")
+                    signal_event_index = signal.get("event_index")
+                    short_detected_index = short_term.get("detected_index")
+                    signal_detected_index = signal.get("detected_index")
+                    identity_conflict = any((left and right and left != right)
+                                            for left, right in (
+                                                (short_event, signal_event),
+                                                (short_event_date, signal_event_date),
+                                                (short_confirmation_date,
+                                                 signal_confirmation_date),
+                                                (short_range_id, signal_range_id),
+                                                (short_signal_status, signal_status),
+                                            )) or any(
+                        left is not None and right is not None and left != right
+                        for left, right in (
+                            (short_event_index, signal_event_index),
+                            (short_detected_index, signal_detected_index),
+                        )
+                    )
+                    event_matches = [
+                        event for event in (wk.get("event_history") or [])
+                        if isinstance(event, dict)
+                        and not identity_conflict
+                        and event.get("type") == event_type
+                        and event.get("event_date") == event_date
+                        and event.get("detected_date") == confirmation_date
+                        and event.get("range_id") == range_id
+                    ]
+                    active_identity = {}
+                    matched_event = (
+                        event_matches[0] if len(event_matches) == 1 else None
+                    )
+                    identity_matches_history = bool(
+                        matched_event
+                        and (short_signal_status or signal_status)
+                        and all(
+                            not status or status == matched_event.get("status")
+                            for status in (short_signal_status, signal_status)
+                        )
+                        and all(
+                            index is None or index == matched_event.get(key)
+                            for key, index in (
+                                ("event_index", short_event_index),
+                                ("event_index", signal_event_index),
+                                ("detected_index", short_detected_index),
+                                ("detected_index", signal_detected_index),
+                            )
+                        )
+                    )
+                    if (not identity_conflict and event_type and event_date
+                            and confirmation_date and range_id
+                            and identity_matches_history):
+                        active_identity = {
+                            "event": event_type,
+                            "event_date": event_date,
+                            "confirmation_date": confirmation_date,
+                            "range_id": range_id,
+                            "status": matched_event.get("status", ""),
+                            "event_index": matched_event.get("event_index"),
+                            "detected_index": matched_event.get("detected_index"),
+                            "identity_complete": (
+                                isinstance(matched_event.get("event_index"), int)
+                                and isinstance(matched_event.get("detected_index"), int)
+                            ),
+                        }
+                    else:
+                        active_identity = {
+                            "event": event_type,
+                            "event_date": event_date,
+                            "confirmation_date": confirmation_date,
+                            "range_id": range_id,
+                            "signal_status": signal_status or short_signal_status,
+                            "identity_complete": False,
+                        }
+                    wk_meta = wk.get("meta") or {}
+                    item["wyckoff"]["_phase_d_lps_context"] = {
                         "short_term": {
-                            "event": short_term.get("event")
-                            or (wk.get("signal") or {}).get("event", ""),
-                            "signal_status": short_term.get("signal_status", ""),
+                            **active_identity,
+                            "signal_status": signal_status or short_signal_status,
                             "sub_phase": short_term.get("sub_phase", ""),
                             "current_state": short_term.get("current_state", ""),
-                            "event_date": short_term.get("event_date", ""),
-                            "confirmation_date": short_term.get("confirmation_date", ""),
                             "signal_age_bars": short_term.get("signal_age_bars"),
-                            "range_id": (wk.get("signal") or {}).get("range_id", ""),
                         },
+                        "as_of_date": wk_meta.get("calc_date") or as_of_date,
+                        "as_of_index": (
+                            int(wk_meta["kline_days"]) - 1
+                            if isinstance(wk_meta.get("kline_days"), int)
+                            and wk_meta.get("kline_days") > 0 else None
+                        ),
                         "event_history": [
                             copy.deepcopy(event)
                             for event in (wk.get("event_history") or [])
-                            if event.get("type") in {"sos", "bu", "lps", "spring"}
+                            if isinstance(event, dict)
+                            and event.get("type") in {"sos", "bu", "lps", "spring"}
                         ],
                         "ranges": [
                             {
-                                "id": trading_range.get("id", ""),
-                                "support": trading_range.get("support"),
-                                "resistance": trading_range.get("resistance"),
+                                "id": row.get("id", ""),
+                                "support": row.get("support"),
+                                "resistance": row.get("resistance"),
                             }
-                            for trading_range in (wk.get("ranges") or [])
+                            for row in (wk.get("ranges") or [])
+                            if isinstance(row, dict)
                         ],
                         "range": {
                             "id": (wk.get("range") or {}).get("id", ""),
@@ -3049,8 +3145,13 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                             "resistance": (wk.get("range") or {}).get("resistance"),
                         },
                         "event_health": copy.deepcopy(event_health),
-                    },
-                }
+                        "event_health_identity": (
+                            copy.deepcopy(
+                                event_health.get("event_identity") or {})
+                            if active_identity.get("identity_complete")
+                            and isinstance(event_health, dict) else {}
+                        ),
+                    }
                 if isinstance(entry_timing, dict) and entry_timing:
                     item["wyckoff"]["entry_timing"] = copy.deepcopy(
                         entry_timing)

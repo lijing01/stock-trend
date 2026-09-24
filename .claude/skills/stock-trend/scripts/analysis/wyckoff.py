@@ -517,6 +517,21 @@ def find_event_trading_range(event: dict | None,
     )
 
 
+def _event_health_identity(event: dict | None) -> dict:
+    """Bind evaluated health to the source event's full identity."""
+    if not isinstance(event, dict):
+        return {}
+    return {
+        "event": event.get("type", ""),
+        "event_date": event.get("event_date", ""),
+        "confirmation_date": event.get("detected_date", ""),
+        "range_id": event.get("range_id", ""),
+        "status": event.get("status", ""),
+        "event_index": event.get("event_index"),
+        "detected_index": event.get("detected_index"),
+    }
+
+
 def evaluate_confirmed_lps_health(event: dict | None,
                                   event_range: dict | None,
                                   ohlcv: dict,
@@ -530,6 +545,7 @@ def evaluate_confirmed_lps_health(event: dict | None,
     result = {
         "rule_version": LPS_EVENT_HEALTH_RULE_VERSION,
         "event_type": "lps",
+        "event_identity": _event_health_identity(event),
         "state": "state_unknown",
         "reason_code": LPS_STATE_UNKNOWN_REASON_CODE,
         "event_range_id": event.get("range_id", "") if isinstance(event, dict) else "",
@@ -624,6 +640,7 @@ def _event_health_result(event: dict | None, event_type: str,
     return {
         "rule_version": EVENT_HEALTH_RULE_VERSION,
         "event_type": event_type,
+        "event_identity": _event_health_identity(event),
         "state": "state_unknown",
         "reason_code": unknown_reason_code,
         "event_range_id": event.get("range_id", "")
@@ -1733,10 +1750,10 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
                     trading_range.get("level", "single"), trading_range, 0.78,
                 )
                 lps_event.update({
+                    **evidence,
                     "parent_event": "sos",
                     "parent_event_index": sos_event["event_index"],
                     "candidate_event_index": j,
-                    "breakout_atr": evidence["breakout_atr"],
                     "confirmation": "reclaim_bu_high" if closes[confirmation_idx] > highs[j]
                     else "two_closes_above_resistance",
                 })
@@ -1798,12 +1815,27 @@ def _bu_candidate_evidence(ohlcv: dict, trading_range: dict,
         return None
     if any(volumes[index] > value * LPS_VOLUME_VS_AVERAGE for value in baselines):
         return None
+
+    def ratio(value):
+        return round(volumes[index] / value, 4) if value and value > 0 else None
+
     return {
         "breakout_atr": round(breakout_atr, 4),
+        "sos_atr": round(breakout_atr, 4),
+        "tr_resistance": round(resistance, 4),
+        "low": round(low, 4),
+        "high": round(highs[index], 4),
+        "close": round(close, 4),
+        "volume": round(volumes[index], 4),
+        "sos_volume": round(sos_volume, 4),
         "volume_avg5": round(avg5, 4),
         "volume_avg10": round(avg10, 4),
         "volume_tr_median": round(tr_median, 4),
         "pullback_spread": round(spread, 4),
+        "volume_vs_sos_ratio": ratio(sos_volume),
+        "volume_vs_avg5_ratio": ratio(avg5),
+        "volume_vs_avg10_ratio": ratio(avg10),
+        "volume_vs_tr_median_ratio": ratio(tr_median),
     }
 
 
