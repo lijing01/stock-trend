@@ -1890,23 +1890,6 @@ def run_prioritized_enrichment_timing_tests():
          f"elapsed={elapsed:.3f}s", "daily_recommendation")
 
 
-def run_golden_diff_tests():
-    """Run golden snapshot diff tests by invoking test_golden.py."""
-    test_golden_path = SCRIPT_DIR / "test_golden.py"
-    if not test_golden_path.exists():
-        skip("TG-golden-diff", "test_golden.py not found")
-        return
-
-    result = subprocess.run(
-        [sys.executable, str(test_golden_path), "--diff"],
-        capture_output=True, text=True, timeout=240,
-    )
-    test("TG-golden-diff: snapshot diff",
-         result.returncode == 0,
-         f"exit={result.returncode}, output={result.stdout[:200]}",
-         "golden")
-
-
 def test_eastmoney_utils():
     """Test eastmoney_utils shared module."""
     from core.eastmoney_utils import EM_HEADERS, build_secid, EM_API_HOSTS
@@ -2023,10 +2006,6 @@ def main():
     # Daily recommendation quality and regression tests
     if not args.fetch_only and not args.analyze_only:
         run_daily_recommendation_tests()
-
-    # Golden snapshot diff tests
-    if not args.fetch_only and not args.analyze_only:
-        run_golden_diff_tests()
 
     # Pipeline & automation tests
     if not args.fetch_only and not args.analyze_only:

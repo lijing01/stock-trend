@@ -318,13 +318,6 @@ def match_candidate_styles(code, records, basis_time):
     return result
 
 
-def _shadow_bucket(status, legacy_bucket):
-    """Return a display-only style bucket without changing formal policy."""
-    if status in {"strong", "mixed", "weak"}:
-        return legacy_bucket
-    return legacy_bucket
-
-
 def _candidate_style_state(statuses):
     statuses = list(statuses or [])
     if not statuses or any(status not in {"strong", "mixed", "weak"}
@@ -376,7 +369,7 @@ def annotate_candidates_for_shadow(candidates, buckets, shadow, memberships):
                         for index_code in membership.get("index_codes", [])
                         if isinstance(style_by_code.get(index_code), dict)],
             "legacy_bucket": legacy_bucket,
-            "shadow_bucket": _shadow_bucket(state, legacy_bucket),
+            "shadow_bucket": legacy_bucket,
             "action_changed": False,
             "reasons": list(dict.fromkeys(reasons)),
         }

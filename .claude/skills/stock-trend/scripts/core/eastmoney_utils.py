@@ -5,7 +5,6 @@ Consolidates headers, secid mapping, and node rotation logic
 that was duplicated across fetch_kline_eastmoney.py and fetch_capital_flow.py.
 """
 
-import math
 import re
 import socket
 import subprocess
@@ -361,12 +360,6 @@ def piecewise_linear(value, anchors):
     return anchors[-1][1]
 
 
-def piecewise_linear_clamped(value, anchors, low=0.0, high=100.0):
-    """Piecewise-linear interpolation clamped to [low, high]."""
-    result = piecewise_linear(value, anchors)
-    return max(low, min(high, result))
-
-
 def latest_kline_record(records):
     """Return most recent record from kline data array by trade_date.
 
@@ -420,21 +413,6 @@ def macd_direction(prices):
     for p in prices[26:]:
         ema26 = ema26 * (1 - alpha26) + p * alpha26
     return ema12 - ema26
-
-
-def bollinger_bands(prices, period=20, std_mult=2.0):
-    """Bollinger Bands from price list: middle, upper, lower, bandwidth_pct."""
-    if len(prices) < period:
-        last = prices[-1] if prices else 0
-        return {"middle": last, "upper": last, "lower": last, "bandwidth_pct": 0}
-    middle = sum(prices[-period:]) / period
-    variance = sum((p - middle) ** 2 for p in prices[-period:]) / period
-    std = math.sqrt(variance) if variance > 0 else 0
-    upper = middle + std_mult * std
-    lower = middle - std_mult * std
-    bandwidth_pct = (upper - lower) / middle * 100 if middle > 0 else 0
-    return {"middle": round(middle, 4), "upper": round(upper, 4),
-            "lower": round(lower, 4), "bandwidth_pct": round(bandwidth_pct, 2)}
 
 
 def volume_ma(kline, period=20):

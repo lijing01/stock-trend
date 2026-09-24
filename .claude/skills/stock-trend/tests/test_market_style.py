@@ -158,45 +158,59 @@ class TestMarketStyle(unittest.TestCase):
         self.assertNotIn("UNKNOWN", result["styles"])
 
     def test_candidate_annotation_is_diagnostic_and_keeps_legacy_bucket(self):
-        shadow = {
-            "schema_version": "market-style-shadow/v1",
-            "model_version": "style-ma20/v1",
-            "parameter_version": "style-observer/v1",
-            "basis_date": "2026-09-07",
-            "styles": {
-                "000300.SH": {"score": 100, "status": "strong"},
-                "000905.SH": {"score": 0, "status": "weak"},
-            },
-            "status": "complete",
-            "formal_policy_affected": False,
-        }
         candidates = [{"code": "600519.SH", "composite_score": 80}]
         buckets = {
             "actionable": [], "waiting_trigger": [],
             "next_day_confirmation": [],
             "observation": candidates, "data_rejected": [],
         }
-        memberships = {
-            "records": [
-                {"index_code": "000300.SH", "member_code": "600519.SH",
-                 "effective_from": "2026-01-01", "effective_to": None,
-                 "known_at": "2026-09-01", "source": "fixture"},
-                {"index_code": "000905.SH", "member_code": "600519.SH",
-                 "effective_from": "2026-01-01", "effective_to": None,
-                 "known_at": "2026-09-01", "source": "fixture"},
-            ],
+        base_shadow = {
+            "schema_version": "market-style-shadow/v1",
+            "model_version": "style-ma20/v1",
+            "parameter_version": "style-observer/v1",
+            "basis_date": "2026-09-07",
+            "status": "complete",
+            "formal_policy_affected": False,
         }
-        annotated, annotated_buckets = annotate_candidates_for_shadow(
-            candidates, buckets, shadow, memberships)
+        cases = {
+            "strong": [("000300.SH", "strong", 100)],
+            "mixed": [
+                ("000300.SH", "strong", 100),
+                ("000905.SH", "weak", 0),
+            ],
+            "weak": [("000905.SH", "weak", 0)],
+            "unknown": [("000300.SH", "unknown", None)],
+        }
 
-        row = annotated[0]
-        self.assertEqual(row["style_shadow"]["matched_style_state"], "mixed")
-        self.assertEqual(row["style_shadow"]["legacy_bucket"], "observation")
-        self.assertEqual(row["style_shadow"]["shadow_bucket"], "observation")
-        self.assertFalse(row["style_shadow"]["action_changed"])
-        self.assertNotIn("style_shadow", candidates[0])
-        self.assertEqual(annotated_buckets["observation"][0]["code"],
-                         "600519.SH")
+        for expected_state, styles in cases.items():
+            with self.subTest(expected_state=expected_state):
+                shadow = copy.deepcopy(base_shadow)
+                shadow["styles"] = {
+                    code: {"score": score, "status": status}
+                    for code, status, score in styles
+                }
+                memberships = {
+                    "records": [
+                        {"index_code": code, "member_code": "600519.SH",
+                         "effective_from": "2026-01-01", "effective_to": None,
+                         "known_at": "2026-09-01", "source": "fixture"}
+                        for code, _status, _score in styles
+                    ],
+                }
+                annotated, annotated_buckets = annotate_candidates_for_shadow(
+                    candidates, buckets, shadow, memberships)
+
+                row = annotated[0]
+                self.assertEqual(
+                    row["style_shadow"]["matched_style_state"], expected_state)
+                self.assertEqual(
+                    row["style_shadow"]["legacy_bucket"], "observation")
+                self.assertEqual(
+                    row["style_shadow"]["shadow_bucket"], "observation")
+                self.assertFalse(row["style_shadow"]["action_changed"])
+                self.assertNotIn("style_shadow", candidates[0])
+                self.assertEqual(
+                    annotated_buckets["observation"][0]["code"], "600519.SH")
 
     def test_fetcher_is_bounded_and_reports_provider_failure(self):
         active = 0
