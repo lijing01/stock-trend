@@ -15,3 +15,7 @@ observation_list:
   - date: '2026-09-21'
     code: '603336'
     entry_phase: 未记录
+
+- date: '2026-09-24'
+    code: '605008'
+    entry_phase: 'lps'
