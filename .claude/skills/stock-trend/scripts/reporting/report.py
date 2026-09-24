@@ -982,8 +982,7 @@ def build_context(args):
         "特殊标记内容": special_section.get("content", "") if special_section else "",
         # Data quality warning
         "数据质量警告": data_quality_warning,
-        # Chart and data source annotations
-        "has_chart": args.chart is not None and os.path.exists(args.chart),
+        # Data source annotations
         "tech_data_source": data_source if data_source else "Tushare/东方财富",
         "capital_data_source": capital_flow.get("meta", {}).get("data_source", "东方财富"),
         # Entry timing
@@ -1259,8 +1258,7 @@ def main():
     parser.add_argument("--entry-verdict", help="Entry timing: ready/watch/wait/avoid")
     parser.add_argument("--entry-signals", help="JSON array of entry confirmation signal strings")
     parser.add_argument("--analysis", help="JSON object with core_conflict, events, advice for 综合研判 section")
-    # Chart and new data files
-    parser.add_argument("--chart", help="Path to chart HTML fragment to embed")
+    # Supplemental data files
     parser.add_argument("--fundamental-data", help="Path to fundamental data JSON")
     parser.add_argument("--macro-data", help="Path to macro snapshot JSON")
     parser.add_argument("--futures-data", help="Path to futures data JSON (ETF only)")
@@ -1290,11 +1288,6 @@ def main():
             scores_path = data_dir / "scores.json"
             if scores_path.exists():
                 args.scores_file = str(scores_path)
-
-        if not args.chart:
-            chart_path = data_dir / "chart_fragment.html"
-            if chart_path.exists():
-                args.chart = str(chart_path)
 
         if not args.futures_data:
             futures_path = data_dir / "futures_data.json"
@@ -1403,14 +1396,6 @@ def main():
         if html_template_path.exists():
             template = html_template_path.read_text(encoding="utf-8")
             report = render_template(template, context)
-            # Embed chart fragment (post-render to avoid template syntax conflicts)
-            if context.get("has_chart") and args.chart:
-                try:
-                    with open(args.chart, "r", encoding="utf-8") as f:
-                        chart_html = f.read()
-                    report = report.replace("__CHART_HTML__", chart_html)
-                except Exception:
-                    report = report.replace("__CHART_HTML__", "<!-- Chart unavailable -->")
             os.makedirs(os.path.dirname(args.output_html) if os.path.dirname(args.output_html) else ".", exist_ok=True)
             with open(args.output_html, "w", encoding="utf-8") as f:
                 f.write(report)

@@ -159,14 +159,9 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 <p style="color:#86868b;font-size:12px">K线数据: {{kline_data_range}} ({{kline_data_count}}条)</p>
 {{/kline_data_source}}
 
-{{#has_chart}}
-<h2>六、K线走势图</h2>
-<div id="kline-chart">__CHART_HTML__</div>
-{{/has_chart}}
-
 {{#wyckoff}}
 <div class="section wyckoff-section">
-    <h2>七、维科夫操盘法分析</h2>
+    <h2>六、维科夫操盘法分析</h2>
 
     <p><strong>阶段判定:</strong> {{wyckoff_phase_name}}（置信度: {{wyckoff_confidence}}）<br>
     <strong>当前子阶段:</strong> {{wyckoff_sub_phase_name}}<br>
@@ -234,12 +229,12 @@ footer{margin-top:32px;padding-top:16px;border-top:1px solid #f0f0f0}
 {{/wyckoff}}
 
 {{#特殊标记}}
-<h2>八、{{特殊标记标题}}</h2>
+<h2>七、{{特殊标记标题}}</h2>
 <div class="spec">{{特殊标记内容}}</div>
 {{/特殊标记}}
 
 {{#综合研判}}
-<h2>九、综合研判</h2>
+<h2>八、综合研判</h2>
 
 <h3>核心矛盾</h3>
 <div class="analysis">{{核心矛盾}}</div>

@@ -103,10 +103,6 @@
 *K线数据: {{kline_data_range}} ({{kline_data_count}}条)*
 {{/kline_data_source}}
 
-{{#has_chart}}
-*K线走势图: 详见 HTML 版本报告*
-{{/has_chart}}
-
 {{#chip_distribution}}
 ## 六、筹码分布
 

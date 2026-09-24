@@ -30,11 +30,6 @@ python3 .claude/skills/stock-trend/scripts/pipeline/runner.py --code <code>
 
 **缓存TTL**：盘中5min/盘后16h(宏观:盘中4h/盘后12h,基本面:盘中30min/盘后16h)。`--no-cache`强制刷新。**超时**：每步30s，超时维度标记timeout。
 
-可选K线图：
-```bash
-python3 .claude/skills/stock-trend/scripts/reporting/chart.py .cache/stock-trend/{code}/kline.json --technical .cache/stock-trend/{code}/technical.json --chip-distribution .cache/stock-trend/{code}/chip_distribution.json -o .cache/stock-trend/{code}/chart_fragment.html
-```
-
 #### B. 四维并行搜索
 
 管线启动后**立即**四维并行搜索（一次调用多个搜索工具）：
