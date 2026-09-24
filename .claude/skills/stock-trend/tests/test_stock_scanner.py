@@ -2260,9 +2260,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
         regular_item = sc.run_phase2(
             [_make_candidate("600001")], enable_wyckoff=True)[0]
-        output = sc.build_output(
-            [regular_item], [_make_candidate("600001")], [], {}, 0.1)
-        self.assertNotIn("_phase_d_lps_context", json.dumps(output))
+        self.assertNotIn("_phase_d_lps_context", regular_item["wyckoff"])
 
     def test_funnel_passes_through_lps_current_health_audit(self):
         wk = _wk(phase="markup", sub="lps", conf=0.7, score=2.0)

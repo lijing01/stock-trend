@@ -102,7 +102,7 @@ def score_iopv_capital_flow(iopv_premium_pct):
 
 
 def score_shares_trend_from_etf_data(etf_data: dict) -> float | None:
-    """Compute shares trend score from etf_data (same logic as etf_scanner.py).
+    """Compute shares trend score from the single-ETF analysis data.
 
     Returns 0-100 score or None if insufficient data.
     """

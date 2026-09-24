@@ -28,9 +28,7 @@ Stock Trend Skill — Claude Code 的 A股/港股/ETF 日趋势判断技能插�
 
 - 趋势判断: `/stock-trend`
 - 指定标的: `/stock-trend 513180`
-- ETF扫描: `/etf-scan`
 - 观察列表: `.claude/skills/stock-trend/data/observation_list.yaml`
-- 回测验证: `/etf-backtest`
 - 安装 git hooks（新人必做）: `bash .githooks/install-hooks.sh`
 
 ## Architecture
@@ -42,8 +40,6 @@ Stock Trend Skill — Claude Code 的 A股/港股/ETF 日趋势判断技能插�
 │   ├── references/                        # 趋势维度、K线形态、故障排除
 │   ├── scripts/                           # 数据获取与分析脚本
 │   │   ├── run_pipeline.py                # 一键数据管线
-│   │   ├── etf_scanner.py                 # ETF 扫描
-│   │   ├── backtest_engine.py            # 回测引擎
 │   │   └── ...                            # fetch_*, compute_*, generate_* 等
 │   ├── data/                              # 观察列表 (observation_list.yaml)
 │   ├── assets/                            # 报告模板 (md + html)

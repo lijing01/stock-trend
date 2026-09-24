@@ -19,12 +19,12 @@
 `.claude/skills/stock-trend/scripts/scans/stock_scanner.py:1949` 实现，并在扫描结果中保存
 `raw_dimensions`、`raw_composite_score` 和 `quality_adjusted_score`。
 
-现有能力不能直接替代历史六维回测：
+现存能力不能直接替代历史六维回测：
 
-- `backtesting/wyckoff_backtest.py` 只回放维科夫事件；
 - `analysis/factor_ablation.py` 只对已经保存的正式研究快照做逐因子移除；
-- `backtesting/engine.py` 是 ETF 回测，使用另一套权重；
 - `analysis/recommendation_attribution.py` 能做交易归因，但输入是已有推荐快照。
+
+此前的维科夫事件回放和 ETF 排名回测入口已移除，不作为本方案的实现基础。
 
 因此需要补一条独立链路：
 

@@ -11,9 +11,7 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 ## 目录
 
 - [1. 趋势判断 `/stock-trend`](#1-趋势判断-stock-trend)
-- [2. ETF 扫描 `/etf-scan`](#2-etf-扫描-etf-scan)
-- [3.1 收盘板块快照（无 Tushare）](#31-收盘板块快照无-tushare)
-- [4. 回测 `/etf-backtest`](#4-回测-etf-backtest)
+- [2. 收盘板块快照（无 Tushare）](#2-收盘板块快照无-tushare)
 
 ---
 
@@ -55,39 +53,7 @@ python3 .claude/skills/stock-trend/scripts/reporting/report.py --code <code> [�
 
 ---
 
-## 2. ETF 扫描 `/etf-scan`
-
-扫描精选 ETF 池，输出趋势排名。
-
-```bash
-# 全量扫描
-/etf-scan
-
-# 聚焦板块
-/etf-scan --focus 科技|金融|消费医药|制造周期|商品跨境|宽基指数
-
-# Top N + 精简模式
-/etf-scan --top 10 --output compact
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/scans/etf_scanner.py [--top N] [--focus <板块>] [--output compact|full] --output-html
-```
-
-**信号映射**：
-| 条件 | 信号 |
-|------|------|
-| ≥+2.0 | ↑↑ 看多 |
-| +0.5 ~ +2.0 | ↑ 偏多 |
-| -0.5 ~ +0.5 | → 震荡 |
-| < -0.5 | ↓ 偏空 |
-
-**星级**：≥80 ★★★ / ≥65 ★★☆ / ≥50 ★☆☆
-
----
-
-## 3.1 收盘板块快照（无 Tushare）
+## 2. 收盘板块快照（无 Tushare）
 
 没有 Tushare 权限时，持续性历史只接受东方财富 `push2` 的行业和概念
 两类完整排行。AKShare 同花顺行业摘要、东方财富 BK 历史 K 线和旧 Top-30
@@ -117,33 +83,12 @@ dry-run 校验通过；`not_closed`、`market_closed`、`incomplete` 或 `error`
 
 ---
 
-## 4. 回测 `/etf-backtest`
-
-回测 ETF Phase 1 速评分模型预测力。
-
-```bash
-# 默认：120 天 / Top 10 / 窗口 5,10,20
-/etf-backtest
-
-# 聚焦板块 + 自定义窗口
-/etf-backtest --focus 科技 --eval-windows 5,10,20
-```
-
-**后台脚本**：
-```bash
-python3 .claude/skills/stock-trend/scripts/backtesting/engine.py [--lookback-days N] [--focus <板块>] [--top-n N] [--eval-windows 5,10,20]
-```
-
-**评判标准**：IC > 0.05 且 5% 显著 = 有预测力；命中率 > 55% = 优于随机
-
----
-
 ## 数据源一览
 
 | 系统 | 数据源 | 数据内容 |
 |------|--------|---------|
 | 趋势判断 | AKShare / Tushare / 东方财富 | K线、资金流向、基本面、宏观 |
-| ETF 扫描 | AKShare / 东方财富 | ETF 净值/IOPV/规模/期货基差 |
+| 单只 ETF 趋势分析 | AKShare / Tushare / 东方财富 | ETF 数据、IOPV、跟踪误差、期货基差/OI |
 | 市场主题 | 东方财富 push2 API | BK 板块排行 + 成分股 |
 | 涨停数据 | 东方财富涨停池 (AKShare) | 涨停股/封板/连板/炸板 |
 | 龙虎榜 | 东方财富龙虎榜 (AKShare) | 机构买卖明细 |

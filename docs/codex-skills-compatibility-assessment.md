@@ -101,8 +101,6 @@ allowed-tools:
 
 ```text
 /stock-trend
-/etf-scan
-/etf-backtest
 /longtou
 /market-theme
 ...
@@ -118,8 +116,6 @@ Codex CLI 支持 `/import` 导入 Claude Code 的 skills、slash commands、指�
 
 当前 description 只描述“A股/港股/ETF日趋势判断”，但同一个 skill 实际还承载：
 
-- ETF 扫描；
-- ETF 回测；
 - 龙头和中军扫描；
 - 市场主线分析；
 - 龙虎榜跟踪；
@@ -143,9 +139,7 @@ Codex 主要根据 `name` 和 `description` 决定是否隐式加载 skill。当
 它实际上是多个相对独立的工作流集合。官方建议一个 skill 聚焦一个明确的用户目标，并将重型参考资料放到 `references/`。建议至少拆分为：
 
 - `stock-trend`：单标的趋势分析；
-- `etf-scan`：ETF 扫描；
 - `market-theme`：市场主线、龙头和候选股；
-- `stock-backtest`：ETF/选股模型回测。
 
 拆分不是 Codex 能否加载的硬性前提，但能改善隐式触发准确率、上下文占用和维护边界。
 
