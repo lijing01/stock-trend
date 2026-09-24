@@ -366,10 +366,6 @@ _MARKET_GATE_BLOCK_REASONS = frozenset({
     "regime_missing", "regime_stale", "regime_data_missing",
     "regime_data_quality_unknown", "regime_data_partial", "regime_weak",
 })
-_OBSERVATION_MARKET_ONLY_REASONS = (
-    _MARKET_GATE_BLOCK_REASONS
-    | {"recommendation_limit", "intraday_provisional"}
-)
 
 
 def _market_gate_pass(policy):
@@ -382,29 +378,11 @@ def _market_gate_pass(policy):
     )
 
 
-def observation_display_groups(items):
-    """Group observations by blocker type and rank each group by priority."""
-    groups = [
-        {
-            "key": "market_or_limit",
-            "title": "仅受市场环境或推荐名额限制",
-            "items": [],
-        },
-        {"key": "other_reasons", "title": "其他观察原因", "items": []},
-    ]
-    for item in items or []:
-        reasons = set(item.get("observation_reasons") or [])
-        group = (
-            groups[0]
-            if reasons and reasons <= _OBSERVATION_MARKET_ONLY_REASONS
-            else groups[1]
-        )
-        group["items"].append(item)
-    for group in groups:
-        group["items"].sort(key=lambda item: (
-            -candidate_rank_score(item), str(item.get("code") or "")
-        ))
-    return groups
+def sorted_observation_items(items):
+    """Rank the single observation pool by priority without changing its input."""
+    return sorted(items or [], key=lambda item: (
+        -candidate_rank_score(item), str(item.get("code") or "")
+    ))
 
 
 def _data_quality_gate_pass(item, min_score):
@@ -3004,8 +2982,10 @@ def _news_risk_display(article):
     return risk if not details else f"{risk}（{'、'.join(details)}）"
 
 
-def _append_candidate_table(lines, title, items, empty_text, *, heading_level=2):
-    lines.extend(["", f"{'#' * heading_level} {title}", ""])
+def _append_candidate_table(lines, title, items, empty_text, *, intro=None):
+    lines.extend(["", f"## {title}", ""])
+    if intro:
+        lines.extend([f"> {intro}", ""])
     if not items:
         lines.append(f"> {empty_text}")
         return
@@ -3042,26 +3022,10 @@ def _append_candidate_table(lines, title, items, empty_text, *, heading_level=2)
 
 
 def _append_observation_pool_tables(lines, items):
-    lines.extend([
-        "",
-        f"## 观察池（共 {len(items)} 只）",
-        "",
-        "> 先按观察原因分组，组内按优先分由高到低；高分不代表已取得推荐资格。",
-    ])
-    if not items:
-        lines.extend(["", "> 观察池为空。"])
-        return
-    for group in observation_display_groups(items):
-        group_items = group["items"]
-        if not group_items:
-            continue
-        _append_candidate_table(
-            lines,
-            f"{group['title']}（{len(group_items)}）",
-            group_items,
-            "该组为空。",
-            heading_level=3,
-        )
+    _append_candidate_table(
+        lines, "观察池", sorted_observation_items(items), "观察池为空。",
+        intro="按优先分由高到低排列；高分不代表已取得推荐资格。",
+    )
 
 
 def load_regime_context():
@@ -4490,7 +4454,7 @@ def _observation_pool_intro_html():
         "<strong>观察池分级仅表示维科夫结构成熟度，不是买入建议。</strong>"
         "市场环境、数据质量、板块持续性和维科夫筛选仍是硬门槛；"
         "只有“今日可执行”区域具备推荐资格。"
-        "观察池先按原因分组，再按组内优先分由高到低排列；"
+        "观察池按优先分由高到低排列；"
         "高分不代表已取得推荐资格。"
         "</div>"
         "<div class='buy-level-legend observation-buy-level-legend' "
@@ -4504,20 +4468,9 @@ def _observation_pool_intro_html():
 def _html_observation_pool_content(items, empty_text):
     if not items:
         return f"<p class='empty-state'>{escape(empty_text)}</p>"
-    sections = []
-    for group in observation_display_groups(items):
-        group_items = group["items"]
-        if not group_items:
-            continue
-        rows = _html_candidate_rows(
-            group_items, buy_level_display="observation")
-        sections.append(
-            "<div class='observation-subgroup'><h3>"
-            f"{escape(group['title'])} "
-            f"<span class='section-count'>{len(group_items)}</span>"
-            f"</h3>{_html_candidate_table(rows)}</div>"
-        )
-    return _observation_pool_intro_html() + "".join(sections)
+    rows = _html_candidate_rows(
+        sorted_observation_items(items), buy_level_display="observation")
+    return _observation_pool_intro_html() + _html_candidate_table(rows)
 
 
 def _html_observation_pool_section(items):

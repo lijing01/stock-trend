@@ -1903,7 +1903,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(tracking["status"], "blocked_scope_incomplete")
         self.assertIsNone(tracking["path"])
 
-    def test_observation_reports_group_reasons_then_sort_by_priority(self):
+    def test_observation_reports_use_one_pool_sorted_by_priority(self):
         market_high = candidate("MKT-HI", adjusted_score=61.0)
         market_high["execution_priority_score"] = 61.0
         market_high["observation_reasons"] = ["regime_data_partial"]
@@ -1924,13 +1924,12 @@ class TestRecommendationPolicy(unittest.TestCase):
         ]
         original_codes = [item["code"] for item in items]
 
-        groups = dc.observation_display_groups(items)
         expected_codes = [
-            "MKT-HI", "MKT-A", "MKT-B", "BLK-HI", "BLK-LOW",
+            "BLK-HI", "MKT-HI", "MKT-A", "MKT-B", "BLK-LOW",
         ]
         self.assertEqual(
-            [[item["code"] for item in group["items"]] for group in groups],
-            [expected_codes[:3], expected_codes[3:]],
+            [item["code"] for item in dc.sorted_observation_items(items)],
+            expected_codes,
         )
         self.assertEqual([item["code"] for item in items], original_codes)
 
@@ -1951,13 +1950,16 @@ class TestRecommendationPolicy(unittest.TestCase):
         for rendered in (markdown, candidate_html, review_html):
             positions = [rendered.index(f"测试{code}") for code in expected_codes]
             self.assertEqual(positions, sorted(positions))
-            self.assertIn("仅受市场环境或推荐名额限制", rendered)
-            self.assertIn("其他观察原因", rendered)
+            self.assertNotIn("仅受市场环境或推荐名额限制", rendered)
+            self.assertNotIn("其他观察原因", rendered)
             self.assertIn("高分不代表已取得推荐资格", rendered)
 
+        self.assertEqual(markdown.count("## 观察池"), 1)
+        self.assertEqual(review_html.count("<table"), 1)
+        self.assertNotIn("observation-subgroup", candidate_html)
         only_market_html = dc.render_observation_pool_html(
             [market_high], source_date="2026-09-24")
-        self.assertNotIn("其他观察原因", only_market_html)
+        self.assertEqual(only_market_html.count("<table"), 1)
 
     def test_outputs_keep_quality_score_and_expose_execution_priority(self):
         item = _set_buy_level(
