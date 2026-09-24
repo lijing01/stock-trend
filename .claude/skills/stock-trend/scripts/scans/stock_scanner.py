@@ -470,7 +470,8 @@ def _cache_fetch(fetcher, *args, **kwargs):
 
 def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
                       max_workers: int = 4, sector_context=None,
-                      source_health=None, metrics=None, as_of_date="") -> dict:
+                      source_health=None, metrics=None, as_of_date="",
+                      include_codes=None) -> dict:
     """Phase 1: Gather constituent A-stocks from hot sectors, dedup, hard filter.
 
     Returns dict with:
@@ -484,6 +485,33 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         rank_hot_sectors,
     )
     from fetchers import sector_akshare
+
+    def _normalized_codes(values):
+        if isinstance(values, str):
+            values = [values]
+        return {
+            str(value).split(".", 1)[0].strip()
+            for value in (values or []) if str(value).strip()
+        }
+
+    if isinstance(include_codes, dict):
+        include_codes_by_sector = {
+            str(sector_code): _normalized_codes(codes)
+            for sector_code, codes in include_codes.items()
+        }
+        fallback_include_codes = set()
+    else:
+        include_codes_by_sector = {}
+        fallback_include_codes = _normalized_codes(include_codes)
+    include_code_set = set(fallback_include_codes)
+    for codes in include_codes_by_sector.values():
+        include_code_set.update(codes)
+
+    def _included_for_sector(code):
+        return include_codes_by_sector.get(str(code), fallback_include_codes)
+
+    def _membership_fetch_top_n(code):
+        return 500 if _included_for_sector(code) else top_n_per_sector
 
     # Get sector rankings to enrich with hot scores
     sector_scores = {}
@@ -610,7 +638,8 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             cache_only = _source_unavailable(source_health, "sector_membership")
             if cache_only:
                 stocks = _fetch_sector_cache(
-                    code, top_n=top_n_per_sector, as_of_date=as_of_date)
+                    code, top_n=_membership_fetch_top_n(code),
+                    as_of_date=as_of_date)
                 verified_snapshot = bool(
                     stocks and as_of_date
                     and all(stock.get("membership_data_date") == as_of_date
@@ -624,13 +653,13 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             else:
                 try:
                     fetched = _fetch_sector_live(
-                        code, top_n=top_n_per_sector,
+                        code, top_n=_membership_fetch_top_n(code),
                         as_of_date=as_of_date, with_evidence=True)
                 except TypeError as exc:
                     if "with_evidence" not in str(exc):
                         raise
                     fetched = _fetch_sector_live(
-                        code, top_n=top_n_per_sector,
+                        code, top_n=_membership_fetch_top_n(code),
                         as_of_date=as_of_date)
                 if isinstance(fetched, dict) and set(
                         ("payload", "live_attempt")) <= set(fetched):
@@ -691,7 +720,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     def _fetch_membership_live(code):
         try:
             wrapped = _fetch_sector_live(
-                code, top_n=top_n_per_sector,
+                code, top_n=_membership_fetch_top_n(code),
                 as_of_date=as_of_date,
                 timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_membership"],
                 retries=MAX_PROVIDER_ATTEMPTS["sector_membership"] - 1,
@@ -725,7 +754,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             "cache_only" if scheduler_reason in ("", "cache_only")
             else f"cache_only_{scheduler_reason}")
         stocks = _fetch_sector_cache(
-            code, top_n=top_n_per_sector,
+            code, top_n=_membership_fetch_top_n(code),
             fallback_reason=fallback_reason, as_of_date=as_of_date)
         verified_snapshot = bool(
             stocks and as_of_date
@@ -762,7 +791,24 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     for result in results:
         sector_code = result["code"]
         context = _sector_context(sector_code)
-        stocks = result["stocks"]
+        fetched_stocks = result["stocks"]
+        sector_include_codes = _included_for_sector(sector_code)
+        regular_codes = {
+            str(stock.get("code") or "").split(".", 1)[0]
+            for stock in fetched_stocks[:top_n_per_sector]
+        }
+        stocks = []
+        for position, stock in enumerate(fetched_stocks):
+            stock_code = str(stock.get("code") or "").split(".", 1)[0]
+            if (position >= top_n_per_sector
+                    and stock_code not in sector_include_codes):
+                continue
+            stocks.append({
+                **stock,
+                "historical_lps_included": (
+                    stock_code in sector_include_codes
+                    and stock_code not in regular_codes),
+            })
         if metrics is not None:
             metrics["sector_membership_attempted_count"] = (
                 metrics.get("sector_membership_attempted_count", 0)
@@ -839,6 +885,7 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
     # Dedup + filter
     stocks_by_code = {}
     memberships_by_code = {}
+    regular_candidate_codes = set()
     excluded = []
 
     for s, sector_code in all_stocks:
@@ -854,6 +901,8 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
         )
         memberships_by_code.setdefault(code, []).append(membership)
         stocks_by_code.setdefault(code, s)
+        if not s.get("historical_lps_included", False):
+            regular_candidate_codes.add(code)
 
     candidates = []
     for code in sorted(stocks_by_code):
@@ -921,6 +970,9 @@ def gather_candidates(sector_codes: list[str], top_n_per_sector: int = 30,
             "membership_mapping": primary.get("membership_mapping", ""),
             "membership_fetch_evidence": copy.deepcopy(
                 primary.get("membership_fetch_evidence", {})),
+            "historical_lps_included": bool(
+                code in include_code_set
+                and code not in regular_candidate_codes),
             "sector_memberships": memberships,
         })
 
@@ -2209,7 +2261,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                min_score=50, capital_expected_date="",
                defer_enrichment=False, disable_early_stop=False,
                require_wyckoff_gate=True, peer_cohorts=None,
-               include_phase_d_lps_context=False):
+               include_phase_d_lps_context=False,
+               include_formal_event_history=False):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2944,6 +2997,12 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                         wk.get("confirmed_event") or {}),
                     "event_health": event_health,
                 }
+                if include_formal_event_history:
+                    item["wyckoff"]["_formal_event_history"] = [
+                        copy.deepcopy(event)
+                        for event in (wk.get("event_history") or [])
+                        if isinstance(event, dict)
+                    ]
                 if include_phase_d_lps_context:
                     signal = wk.get("signal") or {}
                     short_event = short_term.get("event") or ""

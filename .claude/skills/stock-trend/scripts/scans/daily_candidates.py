@@ -81,6 +81,9 @@ from core.candidate_news import (
 from core.candidate_score_ledger import (
     append_entry_timing, append_wyckoff_bonus, ensure_score_ledger,
 )
+from core.lps_event_index import (
+    build_daily_index, load_prior_lps, save_daily_index,
+)
 from reporting.market_explanation import render_market_explanation
 from reporting import candidate_formatters
 SIGNAL_LABELS = candidate_formatters.SIGNAL_LABELS
@@ -2217,7 +2220,8 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  sector_expansion_step=DEFAULT_SECTOR_EXPANSION_STEP,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
                  policy=None, return_research_population=False,
-                 scan_mode="exploratory", defer_enrichment=False):
+                 scan_mode="exploratory", defer_enrichment=False,
+                 prior_lps_records=None):
     """Scan the bounded sector universe, optionally completing a fixed scope."""
     metrics = metrics if metrics is not None else {}
     formal_scope = scan_mode == "post_close_final"
@@ -2268,6 +2272,22 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
     all_scored = {}
     phase1_candidates = {}
     analyzed_codes = set()
+    prior_extra_filtered = set()
+    prior_by_code = {
+        str(row.get("code")): row for row in (prior_lps_records or [])
+        if isinstance(row, dict) and row.get("code")
+    }
+    prior_codes_by_sector = {}
+    for code, row in prior_by_code.items():
+        for membership in row.get("sector_memberships", []):
+            sector_code = membership.get("code") if isinstance(membership, dict) else None
+            if sector_code:
+                prior_codes_by_sector.setdefault(sector_code, set()).add(code)
+    metrics["prior_lps_seed_count"] = len(prior_by_code)
+    metrics.setdefault("prior_lps_membership_match_count", 0)
+    metrics.setdefault("prior_lps_revalidated_count", 0)
+    metrics.setdefault("prior_lps_rejected_count", 0)
+    metrics.setdefault("prior_lps_phase2_omitted_count", 0)
     metrics.setdefault("batch_count", 0)
     metrics.setdefault("raw_candidate_count", 0)
     metrics.setdefault("unique_candidate_count", 0)
@@ -2324,6 +2344,10 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
 
     for i, window_size in windows:
         batch = ordered_sector_codes[i:i + window_size]
+        include_codes = {
+            code: prior_codes_by_sector[code]
+            for code in batch if prior_codes_by_sector.get(code)
+        }
         metrics["sector_expanded_codes"].extend(batch)
         metrics["batch_count"] += 1
         metrics["scope_attempted_count"] += len(batch)
@@ -2334,13 +2358,14 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     batch, top_n_per_sector=per_sector,
                     sector_context=sector_context,
                     source_health=source_health, metrics=metrics,
-                    as_of_date=as_of_date)
+                    as_of_date=as_of_date,
+                    include_codes=include_codes)
             except TypeError as exc:
                 # Preserve compatibility with callers/tests that inject the
                 # historical two-argument gather function.
                 if not any(name in str(exc) for name in (
                         "sector_context", "source_health", "metrics",
-                        "as_of_date")):
+                        "as_of_date", "include_codes")):
                     raise
                 try:
                     # Older adapters may not know the evaluation date but can
@@ -2369,6 +2394,9 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         metrics["raw_candidate_count"] += len(raw_candidates)
         for candidate in raw_candidates:
             code = candidate.get("code", "")
+            if code in prior_by_code:
+                candidate["historical_lps_evidence"] = copy.deepcopy(
+                    prior_by_code[code].get("events", []))
             candidate["sector_memberships"] = _candidate_memberships(
                 candidate, sector_context)
             existing = phase1_candidates.get(code)
@@ -2379,6 +2407,11 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     existing.get("sector_memberships", []),
                     candidate.get("sector_memberships", []),
                 )
+                if (existing.get("historical_lps_included")
+                        and not candidate.get("historical_lps_included")):
+                    existing["historical_lps_included"] = False
+                    if code in prior_extra_filtered:
+                        analyzed_codes.discard(code)
         new_candidates = [
             phase1_candidates[candidate.get("code")]
             for candidate in raw_candidates
@@ -2397,12 +2430,14 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     top=capital_top, min_candidates=min_candidates,
                     min_score=min_score,
                     defer_enrichment=defer_enrichment,
-                    include_phase_d_lps_context=True)
+                    include_phase_d_lps_context=True,
+                    include_formal_event_history=True)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
                         "source_health", "metrics", "capital_expected_date",
                         "top", "min_candidates", "min_score",
-                        "defer_enrichment", "include_phase_d_lps_context")):
+                        "defer_enrichment", "include_phase_d_lps_context",
+                        "include_formal_event_history")):
                     raise
                 try:
                     scored = run_phase2(
@@ -2417,9 +2452,37 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     scored = run_phase2(
                         new_candidates, enable_wyckoff=True,
                         as_of_date=as_of_date)
+            scored_codes = {
+                item.get("code") for item in scored if isinstance(item, dict)
+            }
+            omitted = {
+                candidate.get("code") for candidate in new_candidates
+                if candidate.get("historical_lps_included")
+                and candidate.get("code") not in scored_codes
+            }
+            prior_extra_filtered.update(omitted)
+            metrics["prior_lps_phase2_omitted_count"] += len(omitted)
             for scored_item in scored:
                 code = scored_item.get("code", "")
                 raw = phase1_candidates.get(code, {})
+                if raw.get("historical_lps_included"):
+                    wyckoff = scored_item.get("wyckoff") or {}
+                    signal = wyckoff.get("signal") or {}
+                    health = wyckoff.get("event_health") or {}
+                    age = signal.get("age_bars")
+                    current_lps = (
+                        signal.get("event") == "lps"
+                        and signal.get("status") == "confirmed"
+                        and health.get("state") == "confirmed_holding"
+                        and isinstance(age, int) and age <= 3)
+                    if not current_lps:
+                        metrics["prior_lps_rejected_count"] += 1
+                        prior_extra_filtered.add(code)
+                        continue
+                    metrics["prior_lps_revalidated_count"] += 1
+                if raw.get("historical_lps_evidence"):
+                    scored_item["historical_lps_evidence"] = copy.deepcopy(
+                        raw["historical_lps_evidence"])
                 scored_item["sector_memberships"] = merge_sector_memberships(
                     scored_item.get("sector_memberships", [])
                     or _candidate_memberships(scored_item, sector_context),
@@ -2453,6 +2516,15 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
         metrics["scope_attempted_count"] == metrics["scope_expected_count"]
         and metrics["scope_completed_count"] == metrics["scope_expected_count"]
         and metrics["scope_failed_count"] == 0
+    )
+    expanded = set(metrics["sector_expanded_codes"])
+    metrics["prior_lps_membership_match_count"] = len(
+        set(phase1_candidates) & set(prior_by_code))
+    metrics["prior_lps_unscanned_count"] = sum(
+        not any(membership.get("code") in expanded
+                for membership in row.get("sector_memberships", [])
+                if isinstance(membership, dict))
+        for row in prior_by_code.values()
     )
     selected = [all_scored[code] for code in sorted(all_scored)]
     if not return_research_population:
@@ -2520,7 +2592,8 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
         source_health=source_health, metrics=metrics,
         top=top, min_candidates=min_candidates, min_score=min_score,
         disable_early_stop=True,
-        include_phase_d_lps_context=True)
+        include_phase_d_lps_context=True,
+        include_formal_event_history=True)
     original_by_code = {
         item.get("code"): item for item in scored if item.get("code")
     }
@@ -3795,6 +3868,7 @@ def _strip_phase_d_lps_context(*populations):
             wyckoff = item.get("wyckoff")
             if isinstance(wyckoff, dict):
                 wyckoff.pop("_phase_d_lps_context", None)
+                wyckoff.pop("_formal_event_history", None)
 
 
 def _phase_d_lps_event_visible_as_of(event, context):
@@ -5025,6 +5099,9 @@ def main():
         else None,
     )
     performance["capital_expected_date"] = capital_expected_date
+    prior_lps_records, prior_lps_load = load_prior_lps(
+        expected_date, _load_authoritative_trading_dates(current_time))
+    performance["prior_lps_index"] = prior_lps_load
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
     # P4: only an explicitly published, atomically pointed version can alter
@@ -5092,6 +5169,7 @@ def main():
         scan_mode=scan_mode,
         return_research_population=True,
         defer_enrichment=True,
+        prior_lps_records=prior_lps_records,
     )
     # Compatibility for injected legacy scanner stubs in downstream callers.
     if isinstance(scan_result, tuple):
@@ -5106,6 +5184,17 @@ def main():
         capital_expected_date=capital_expected_date, policy=policy,
         priority_bonuses=active_policy["priority_bonuses"],
         source_health=source_health, metrics=performance)
+    event_index = build_daily_index(
+        scored, expected_date,
+        scope_complete=(scan_mode == "post_close_final"
+                        and performance.get("scope_complete") is True))
+    try:
+        performance["lps_event_index"] = save_daily_index(event_index)
+    except (OSError, ValueError, TypeError) as exc:
+        performance["lps_event_index"] = {
+            "status": "write_failed", "reason": str(exc),
+            "record_count": event_index.get("record_count", 0),
+        }
     enriched_by_code = {
         item.get("code"): item for item in scored if item.get("code")
     }
