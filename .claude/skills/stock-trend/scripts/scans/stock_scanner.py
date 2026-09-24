@@ -3015,6 +3015,41 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     "confirmed_event": copy.deepcopy(
                         wk.get("confirmed_event") or {}),
                     "event_health": event_health,
+                    # Temporary context for the daily Phase D/LPS shadow view.
+                    # The daily scan consumes and removes this before any
+                    # candidate, research, or recommendation artifact is saved.
+                    "_phase_d_lps_context": {
+                        "short_term": {
+                            "event": short_term.get("event")
+                            or (wk.get("signal") or {}).get("event", ""),
+                            "signal_status": short_term.get("signal_status", ""),
+                            "sub_phase": short_term.get("sub_phase", ""),
+                            "current_state": short_term.get("current_state", ""),
+                            "event_date": short_term.get("event_date", ""),
+                            "confirmation_date": short_term.get("confirmation_date", ""),
+                            "signal_age_bars": short_term.get("signal_age_bars"),
+                            "range_id": (wk.get("signal") or {}).get("range_id", ""),
+                        },
+                        "event_history": [
+                            copy.deepcopy(event)
+                            for event in (wk.get("event_history") or [])
+                            if event.get("type") in {"sos", "bu", "lps", "spring"}
+                        ],
+                        "ranges": [
+                            {
+                                "id": trading_range.get("id", ""),
+                                "support": trading_range.get("support"),
+                                "resistance": trading_range.get("resistance"),
+                            }
+                            for trading_range in (wk.get("ranges") or [])
+                        ],
+                        "range": {
+                            "id": (wk.get("range") or {}).get("id", ""),
+                            "support": (wk.get("range") or {}).get("support"),
+                            "resistance": (wk.get("range") or {}).get("resistance"),
+                        },
+                        "event_health": copy.deepcopy(event_health),
+                    },
                 }
                 if isinstance(entry_timing, dict) and entry_timing:
                     item["wyckoff"]["entry_timing"] = copy.deepcopy(

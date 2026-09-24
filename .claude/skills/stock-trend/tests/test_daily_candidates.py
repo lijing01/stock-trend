@@ -27,6 +27,7 @@ from scans.daily_candidates import (
     _html_candidate_section,
     build_gate_audit,
     build_json_output,
+    build_phase_d_lps_shadow,
     build_recommendation_policy,
     candidate_rank_score,
     classify_candidates,
@@ -4431,6 +4432,146 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(output["sectors"], sectors)
         self.assertEqual(output["candidates"][0]["quality_adjusted_score"], 80.0)
         self.assertEqual(output["candidates"][0]["wyckoff"]["minor_phase"]["code"], "D")
+
+    def test_phase_d_lps_shadow_requires_same_range_and_parent_sos(self):
+        item = candidate("phase-d")
+        item["quality_adjusted_score"] = 76.0
+        item["wyckoff"].update({
+            "ranges": [{"id": "range-a", "support": 9.8, "resistance": 10.5}],
+            "short_term": {"event": "lps", "signal_status": "confirmed",
+                           "event_date": "2026-08-06", "signal_age_bars": 0,
+                           "range_id": "range-a"},
+            "event_history": [
+                {"type": "sos", "status": "confirmed", "range_id": "range-a",
+                 "event_index": 10, "detected_index": 12,
+                 "event_date": "2026-08-01", "detected_date": "2026-08-03"},
+                {"type": "lps", "status": "confirmed", "range_id": "range-a",
+                 "parent_event": "sos", "parent_event_index": 10,
+                 "event_index": 15, "detected_index": 16,
+                 "event_date": "2026-08-06", "detected_date": "2026-08-07",
+                 "volume_avg5": 100, "volume_avg10": 110,
+                 "volume_tr_median": 120, "pullback_spread": 0.3},
+                {"type": "lps", "status": "confirmed", "range_id": "range-b",
+                 "parent_event": "sos", "parent_event_index": 10,
+                 "event_index": 20, "detected_index": 21},
+                {"type": "sos", "status": "confirmed", "range_id": "range-b",
+                 "event_index": 25, "detected_index": 27,
+                 "event_date": "2026-08-20", "detected_date": "2026-08-24"},
+            ],
+            "event_health": {"event_type": "lps", "state": "confirmed_holding",
+                             "structural_floor": 9.5, "reason_code": ""},
+        })
+
+        shadow = build_phase_d_lps_shadow(
+            [item], {"mode": "observation", "reasons": ["regime_weak"]})
+
+        self.assertEqual(shadow["scanned_count"], 1)
+        self.assertEqual(shadow["phase_d_count"], 1)
+        self.assertEqual(shadow["sos_lps_count"], 1)
+        self.assertEqual(shadow["items"][0]["state"], "sos_lps")
+        self.assertEqual(shadow["items"][0]["lps"]["event_index"], 15)
+        self.assertEqual(shadow["items"][0]["range"]["resistance"], 10.5)
+        self.assertIn("市场环境评分偏弱", shadow["items"][0]["formal_blockers"])
+
+    def test_phase_d_lps_shadow_keeps_confirmed_sos_waiting_for_pullback(self):
+        item = candidate("sos-only")
+        item["wyckoff"].update({
+            "ranges": [{"id": "range-a", "support": 9.8, "resistance": 10.5}],
+            "short_term": {"event": "sos", "signal_status": "confirmed",
+                           "event_date": "2026-08-01", "signal_age_bars": 2,
+                           "range_id": "range-a"},
+            "event_history": [{
+                "type": "sos", "status": "confirmed", "range_id": "range-a",
+                "event_index": 10, "detected_index": 12,
+                "event_date": "2026-08-01", "detected_date": "2026-08-03",
+            }],
+        })
+
+        shadow = build_phase_d_lps_shadow([item], {"mode": "observation", "reasons": []})
+
+        self.assertEqual(shadow["items"][0]["state"], "sos_wait_pullback")
+        self.assertIsNone(shadow["items"][0]["lps"])
+
+    def test_phase_d_lps_shadow_marks_out_of_scope_and_incomplete_evidence(self):
+        sos_candidate = candidate("sos-candidate")
+        sos_candidate["wyckoff"]["_phase_d_lps_context"] = {
+            "short_term": {"event": "sos", "sub_phase": "pre_markup"},
+            "event_history": [{
+                "type": "sos", "status": "candidate", "range_id": "r1",
+                "event_index": 12, "detected_index": 12,
+                "event_date": "2026-08-05", "detected_date": "2026-08-05",
+            }],
+            "ranges": [{"id": "r1", "support": 9.0, "resistance": 11.0}],
+        }
+        unparented_lps = candidate("unparented-lps")
+        unparented_lps["wyckoff"]["_phase_d_lps_context"] = {
+            "short_term": {"event": "lps", "sub_phase": "lps"},
+            "event_history": [{
+                "type": "lps", "status": "confirmed", "range_id": "r2",
+                "event_index": 14, "detected_index": 16,
+                "event_date": "2026-08-06", "detected_date": "2026-08-08",
+            }],
+            "ranges": [{"id": "r2", "support": 8.0, "resistance": 10.0}],
+        }
+        unparented_lps["source_evidence"] = {
+            "capital": {"status": "cache_valid"},
+            "fundamental": {"status": "cache_miss"},
+        }
+        phase_c = candidate("spring")
+        phase_c["wyckoff"]["_phase_d_lps_context"] = {
+            "short_term": {"event": "spring", "sub_phase": "spring"},
+            "event_history": [{
+                "type": "sos", "status": "confirmed", "range_id": "old-range",
+                "event_index": 4, "detected_index": 6,
+                "event_date": "2026-06-01", "detected_date": "2026-06-03",
+            }],
+            "ranges": [],
+        }
+
+        shadow = build_phase_d_lps_shadow(
+            [sos_candidate, unparented_lps, phase_c],
+            {"mode": "observation", "reasons": []})
+        by_code = {row["code"]: row for row in shadow["items"]}
+
+        self.assertEqual(by_code["sos-candidate"]["state"], "insufficient_evidence")
+        self.assertEqual(by_code["unparented-lps"]["state"], "out_of_scope")
+        self.assertEqual(by_code["spring"]["state"], "out_of_scope")
+        self.assertEqual(by_code["unparented-lps"]["incomplete_sources"],
+                         ["fundamental"])
+        self.assertEqual(shadow["evidence_incomplete_count"], 3)
+
+    def test_phase_d_lps_shadow_renders_consistently_in_all_outputs(self):
+        item = candidate("render-shadow")
+        item["wyckoff"].update({
+            "ranges": [{"id": "range-a", "support": 9.8, "resistance": 10.5}],
+            "short_term": {"event": "sos", "signal_status": "confirmed",
+                           "event_date": "2026-08-01", "signal_age_bars": 2,
+                           "range_id": "range-a"},
+            "event_history": [{
+                "type": "sos", "status": "confirmed", "range_id": "range-a",
+                "event_index": 10, "detected_index": 12,
+                "event_date": "2026-08-01", "detected_date": "2026-08-03",
+            }],
+        })
+        policy = {"mode": "observation", "max_recommendations": 0,
+                  "reasons": ["regime_weak"]}
+        buckets = {"actionable": [], "waiting_trigger": [], "observation": [item]}
+        shadow = build_phase_d_lps_shadow([item], policy)
+
+        outputs = [
+            generate_report([item], [], 0.1, policy, buckets,
+                            phase_d_lps_shadow=shadow),
+            _generate_html([item], [], 0.1, "20260923-150000", policy, buckets,
+                           phase_d_lps_shadow=shadow),
+        ]
+        payload = build_json_output([item], [], 0.1, policy, buckets,
+                                    phase_d_lps_shadow=shadow)
+
+        for output in outputs:
+            self.assertIn("Phase D/LPS 观察", output)
+            self.assertIn("影子观察，不参与推荐", output)
+            self.assertIn("sos_wait_pullback", output)
+        self.assertEqual(payload["phase_d_lps_shadow"], shadow)
 
     def test_main_json_exposes_all_failed_scan_batches(self):
         def fake_scan(*_args, metrics=None, **_kwargs):

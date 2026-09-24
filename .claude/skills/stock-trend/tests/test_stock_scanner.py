@@ -2140,6 +2140,45 @@ class TestRunPhase2Funnel(unittest.TestCase):
         # 复合分重配后包含 wyckoff 权重
         self.assertGreater(item["composite_score"], 50.0)
 
+    def test_funnel_carries_compact_phase_d_lps_context(self):
+        wk = _wk(sub="lps", conf=0.7, score=2.0)
+        wk.update({
+            "short_term": {
+                "event": "sos", "signal_status": "confirmed",
+                "sub_phase": "jac", "current_state": "confirmed_holding",
+            },
+            "event_history": [{
+                "type": "sos", "status": "confirmed", "range_id": "r1",
+                "event_index": 10, "detected_index": 12,
+            }, {
+                "type": "lps", "status": "confirmed", "range_id": "r1",
+                "parent_event": "sos", "parent_event_index": 10,
+                "event_index": 15, "detected_index": 16,
+            }, {
+                "type": "spring", "status": "confirmed", "range_id": "r0",
+            }],
+            "ranges": [{"id": "r1", "support": 9.0, "resistance": 11.0,
+                        "swing_points": [1, 2, 3]}],
+            "event_health": {
+                "event_type": "lps", "event_range_id": "r1",
+                "state": "confirmed_holding", "structural_floor": 10.4,
+            },
+        })
+        sc.analyze_kline_dict = lambda kline: wk
+        sc._fetch_kline = lambda ts, as_of_date="", cache_only=False: _make_kline(
+            60, ts)
+
+        item = sc.run_phase2(
+            [_make_candidate("600001")], enable_wyckoff=True)[0]
+
+        context = item["wyckoff"]["_phase_d_lps_context"]
+        self.assertEqual([event["type"] for event in context["event_history"]],
+                         ["sos", "lps", "spring"])
+        self.assertEqual(context["ranges"], [{
+            "id": "r1", "support": 9.0, "resistance": 11.0,
+        }])
+        self.assertEqual(context["event_health"]["structural_floor"], 10.4)
+
     def test_funnel_passes_through_lps_current_health_audit(self):
         wk = _wk(phase="markup", sub="lps", conf=0.7, score=2.0)
         wk.update({

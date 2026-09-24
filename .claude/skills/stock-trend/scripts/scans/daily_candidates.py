@@ -3820,9 +3820,312 @@ def _save_recommendation_snapshot(candidates, sector_codes, policy, buckets,
         }
 
 
+def _phase_d_lps_formal_blockers(item, policy):
+    """Return the formal gates that still block an additive shadow row."""
+    blockers = [REASON_LABELS.get(reason, reason) for reason in policy.get("reasons", [])]
+    blockers.extend(
+        REASON_LABELS.get(reason, reason)
+        for reason in item.get("observation_reasons", [])
+    )
+    quality = item.get("data_quality") or {}
+    if quality.get("eligible") is False:
+        blockers.append("关键数据质量不合格")
+    if item.get("sector_actionable") is False:
+        blockers.append("板块持续性未验证")
+    return list(dict.fromkeys(blockers))
+
+
+def build_phase_d_lps_shadow(scored, policy, limit=20):
+    """Build an additive Phase D/LPS view from phase-2 scored candidates.
+
+    Formal buckets deliberately remain outside this function.  A row must
+    be anchored to the current short-term Wyckoff event.  Historical confirmed
+    SOS/LPS events alone must not make a stock look like a current setup.
+    """
+    rows = []
+    evidence_incomplete_count = 0
+    phase_d_count = 0
+    sos_lps_count = 0
+    for item in scored or []:
+        wyckoff = item.get("wyckoff") or {}
+        context = wyckoff.get("_phase_d_lps_context") or wyckoff
+        history = context.get("event_history") or []
+        short_term = context.get("short_term") or wyckoff.get("short_term") or {}
+        active_event = str(short_term.get("event") or "").lower()
+        active_date = short_term.get("event_date") or ""
+        active_range_id = short_term.get("range_id") or ""
+        sub_phase = str(short_term.get("sub_phase") or "").lower()
+
+        def latest(events):
+            return max(events, key=lambda event: (
+                event.get("event_index", -1), event.get("detected_index", -1)),
+                default=None)
+
+        def current_event(event_type):
+            matches = [event for event in history
+                       if event.get("type") == event_type]
+            if active_date:
+                dated = [event for event in matches
+                         if event.get("event_date") == active_date]
+                if active_range_id:
+                    dated_in_range = [event for event in dated
+                                      if event.get("range_id") == active_range_id]
+                    if dated_in_range:
+                        dated = dated_in_range
+                if dated:
+                    return latest(dated)
+            if active_range_id:
+                in_range = [event for event in matches
+                            if event.get("range_id") == active_range_id]
+                if in_range:
+                    matches = in_range
+            # Older direct callers and unit fixtures may omit event dates.  The
+            # production funnel always supplies them in the compact context.
+            return latest(matches) if not active_date else None
+
+        sos = None
+        lps = None
+        bu = None
+        range_id = active_range_id
+        state = ""
+        reason = ""
+        if active_event == "sos":
+            sos = current_event("sos")
+            if sos and sos.get("status") == "confirmed":
+                range_id = sos.get("range_id") or range_id
+                linked_lps = [event for event in history
+                              if event.get("type") == "lps"
+                              and event.get("status") == "confirmed"
+                              and event.get("range_id") == range_id
+                              and event.get("parent_event") == "sos"
+                              and event.get("parent_event_index") == sos.get("event_index")]
+                lps = latest(linked_lps)
+                state = "sos_lps" if lps else "sos_wait_pullback"
+                reason = ("已确认同箱体 SOS→LPS 事件链" if lps
+                          else "当前已确认 SOS，等待同箱体回踩")
+                phase_d_count += 1
+                if lps:
+                    sos_lps_count += 1
+            elif sos:
+                range_id = sos.get("range_id") or range_id
+                state = "insufficient_evidence"
+                reason = "当前 SOS 尚未完成确认"
+            else:
+                state = "insufficient_evidence"
+                reason = "当前 SOS 缺少可匹配的事件记录"
+        elif active_event == "lps":
+            lps = current_event("lps")
+            if lps:
+                range_id = lps.get("range_id") or range_id
+                parent_sos = next((event for event in history
+                                   if event.get("type") == "sos"
+                                   and event.get("status") == "confirmed"
+                                   and event.get("event_index") == lps.get("parent_event_index")
+                                   and event.get("range_id") == range_id), None)
+                if lps.get("status") == "confirmed" and parent_sos:
+                    sos = parent_sos
+                    state = "sos_lps"
+                    reason = "当前 LPS 已关联同箱体的已确认 SOS"
+                    phase_d_count += 1
+                    sos_lps_count += 1
+                elif parent_sos:
+                    sos = parent_sos
+                    state = "insufficient_evidence"
+                    reason = "LPS 尚未完成确认"
+                else:
+                    state = "out_of_scope"
+                    reason = "当前 LPS 缺少可验证的同箱体父 SOS"
+            else:
+                state = "out_of_scope"
+                reason = "当前 LPS 缺少可匹配的事件记录"
+        elif active_event == "bu":
+            bu = current_event("bu")
+            if bu:
+                range_id = bu.get("range_id") or range_id
+                parent_sos = next((event for event in history
+                                   if event.get("type") == "sos"
+                                   and event.get("status") == "confirmed"
+                                   and event.get("event_index") == bu.get("parent_event_index")
+                                   and event.get("range_id") == range_id), None)
+                if parent_sos:
+                    sos = parent_sos
+                    lps = bu
+                    state = "insufficient_evidence"
+                    reason = "当前 BU 回踩尚未确认成 LPS"
+                else:
+                    state = "out_of_scope"
+                    reason = "当前 BU 缺少可验证的同箱体父 SOS"
+            else:
+                continue
+        elif active_event == "spring" or sub_phase in {
+                "st", "test", "secondary_test", "spring"}:
+            state = "out_of_scope"
+            reason = f"当前子阶段 {short_term.get('sub_phase') or active_event} 不属于 Phase D/LPS"
+        else:
+            continue
+
+        ranges = context.get("ranges") or wyckoff.get("ranges") or []
+        event_range = next((row for row in ranges if row.get("id") == range_id), None)
+        current_range = context.get("range") or wyckoff.get("range") or {}
+        if event_range is None and current_range.get("id") == range_id:
+            event_range = current_range
+        health = context.get("event_health") or wyckoff.get("event_health") or {}
+        health_state = health.get("state", "state_unknown")
+        if (health.get("event_range_id") and health.get("event_range_id") != range_id):
+            health_state = "state_unknown" if lps else "not_evaluated"
+        if state in {"sos_lps", "sos_wait_pullback"} and health_state in {
+                "failed_breakout", "structure_invalidated", "follow_through_weakened"}:
+            state = "invalidated"
+            reason = "原箱体结构失效或 LPS 后续转弱"
+        supply_event = lps if lps and lps.get("type") == "lps" else None
+        if supply_event:
+            bu_event = next((event for event in history
+                             if event.get("type") == "bu"
+                             and event.get("event_index") == supply_event.get("candidate_event_index")
+                             and event.get("parent_event_index") == supply_event.get("parent_event_index")
+                             and event.get("range_id") == range_id), None)
+            if bu_event:
+                supply_event = bu_event
+        source_evidence = item.get("source_evidence") or {}
+        incomplete_sources = [
+            name for name in ("capital", "fundamental")
+            if (source_evidence.get(name) or {}).get("status")
+            not in {"live_success", "cache_valid"}
+        ]
+        evidence_incomplete = bool(incomplete_sources)
+        if evidence_incomplete:
+            evidence_incomplete_count += 1
+        rows.append({
+            "code": item.get("code", ""),
+            "name": item.get("name", ""),
+            "sector": _sector_text(item),
+            "state": state,
+            "reason": reason,
+            "signal_age_bars": short_term.get("signal_age_bars"),
+            "evidence_incomplete": evidence_incomplete,
+            "incomplete_sources": incomplete_sources,
+            "quality_score": round(candidate_quality_score(item), 2),
+            "sos": {
+                "event_date": (sos or {}).get("event_date", ""),
+                "confirmation_date": (sos or {}).get("detected_date", ""),
+                "event_index": (sos or {}).get("event_index"),
+                "range_id": range_id,
+            },
+            "lps": ({
+                "event_date": lps.get("event_date", ""),
+                "confirmation_date": lps.get("detected_date", ""),
+                "event_index": lps.get("event_index"),
+                "confirmation": lps.get("confirmation", ""),
+            } if lps else None),
+            "range": {
+                "support": (event_range or {}).get("support"),
+                "resistance": (event_range or {}).get("resistance"),
+            },
+            "supply_evidence": {
+                "lps_volume_avg5": supply_event.get("volume_avg5") if supply_event else None,
+                "lps_volume_avg10": supply_event.get("volume_avg10") if supply_event else None,
+                "lps_volume_tr_median": supply_event.get("volume_tr_median") if supply_event else None,
+                "lps_pullback_spread": supply_event.get("pullback_spread") if supply_event else None,
+            },
+            "event_health": {
+                "state": health_state,
+                "structural_floor": health.get("structural_floor"),
+                "reason_code": health.get("reason_code", ""),
+            },
+            "formal_blockers": _phase_d_lps_formal_blockers(item, policy),
+        })
+    def sort_key(row):
+        age = row.get("signal_age_bars")
+        age = age if isinstance(age, (int, float)) else float("inf")
+        return (age, row["evidence_incomplete"], -row["quality_score"], row["code"])
+
+    rows.sort(key=sort_key)
+    shown = rows[:limit]
+    return {
+        "schema_version": "phase-d-lps-shadow/v1",
+        "title": "Phase D/LPS 观察（影子观察，不参与推荐）",
+        "scanned_count": len(scored or []),
+        "phase_d_count": phase_d_count,
+        "sos_lps_count": sos_lps_count,
+        "shown_count": len(shown),
+        "evidence_incomplete_count": evidence_incomplete_count,
+        "items": shown,
+    }
+
+
+def _phase_d_lps_shadow_markdown(shadow):
+    if not shadow:
+        return []
+    lines = [
+        "", "## Phase D/LPS 观察（影子观察，不参与推荐）", "",
+        f"> 已扫描 {shadow['scanned_count']} 只；Phase D {shadow['phase_d_count']} 只；"
+        f"SOS→LPS {shadow['sos_lps_count']} 只；展示 {shadow['shown_count']} 只；"
+        f"证据未完整 {shadow['evidence_incomplete_count']} 只。",
+    ]
+    if not shadow["items"]:
+        return lines + ["> 本轮没有同一箱体内已确认 SOS 的观察对象。"]
+    lines.extend([
+        "",
+        "| 名称(代码) | 状态 | 状态说明 | SOS（事件/确认） | LPS（事件/确认） | 原箱体（支撑/上沿） | 供应证据 | 结构失效位 | 正式门控原因 |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ])
+    for row in shadow["items"]:
+        lps = row["lps"] or {}
+        supply = row["supply_evidence"]
+        supply_text = (f"均量5/10/TR {supply['lps_volume_avg5'] or '未知'}/"
+                       f"{supply['lps_volume_avg10'] or '未知'}/"
+                       f"{supply['lps_volume_tr_median'] or '未知'}；"
+                       f"振幅 {supply['lps_pullback_spread'] or '未知'}")
+        lines.append(
+            f"| {row['name']}({row['code']}) | {row['state']}"
+            f"{'；增强未完成: ' + ','.join(row['incomplete_sources']) if row['evidence_incomplete'] else ''} | "
+            f"{row['reason']} | "
+            f"{row['sos']['event_date'] or '未知'} / {row['sos']['confirmation_date'] or '未知'} | "
+            f"{lps.get('event_date') or '等待回踩'} / {lps.get('confirmation_date') or '未知'} | "
+            f"{row['range']['support'] or '未知'} / {row['range']['resistance'] or '未知'} | "
+            f"{supply_text} | {row['event_health']['structural_floor'] or '未知'} | "
+            f"{'; '.join(row['formal_blockers']) or '无（仍为影子观察）'} |"
+        )
+    return lines
+
+
+def _phase_d_lps_shadow_html(shadow):
+    if not shadow:
+        return ""
+    rows = []
+    for row in shadow["items"]:
+        lps = row["lps"] or {}
+        supply = row["supply_evidence"]
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(row['name']))}({escape(str(row['code']))})</td>"
+            f"<td>{escape(str(row['state']))}{'；增强未完成: ' + ','.join(row['incomplete_sources']) if row['evidence_incomplete'] else ''}</td>"
+            f"<td>{escape(str(row['reason']))}</td>"
+            f"<td>{escape(str(row['sos']['event_date'] or '未知'))} / {escape(str(row['sos']['confirmation_date'] or '未知'))}</td>"
+            f"<td>{escape(str(lps.get('event_date') or '等待回踩'))} / {escape(str(lps.get('confirmation_date') or '未知'))}</td>"
+            f"<td>{escape(str(row['range']['support'] or '未知'))} / {escape(str(row['range']['resistance'] or '未知'))}</td>"
+            f"<td>均量5/10/TR {escape(str(supply['lps_volume_avg5'] or '未知'))}/{escape(str(supply['lps_volume_avg10'] or '未知'))}/{escape(str(supply['lps_volume_tr_median'] or '未知'))}</td>"
+            f"<td>{escape(str(row['event_health']['structural_floor'] or '未知'))}</td>"
+            f"<td>{escape('；'.join(row['formal_blockers']) or '无（仍为影子观察）')}</td>"
+            "</tr>"
+        )
+    content = ("<p class='dt'>本区块独立于正式分桶：扫描 "
+               f"{shadow['scanned_count']}，Phase D {shadow['phase_d_count']}，"
+               f"SOS→LPS {shadow['sos_lps_count']}，展示 {shadow['shown_count']}，"
+               f"证据未完整 {shadow['evidence_incomplete_count']}。</p>")
+    if rows:
+        content += ("<table><thead><tr><th>标的</th><th>状态</th><th>状态说明</th><th>SOS</th><th>LPS</th>"
+                    "<th>原箱体</th><th>供应证据</th><th>结构失效位</th><th>正式门控原因</th>"
+                    "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+    else:
+        content += "<p class='dt'>本轮没有同一箱体内已确认 SOS 的观察对象。</p>"
+    return ("<details class='secondary-panel'><summary>Phase D/LPS 观察 · 影子观察，不参与推荐"
+            "</summary><div class='details-content'>" + content + "</div></details>")
+
+
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                     performance=None, tracking=None, market_regime=None,
-                    style_shadow=None, news_shadow=None):
+                    style_shadow=None, news_shadow=None, phase_d_lps_shadow=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -3913,6 +4216,7 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         lines, "扩展观察（未资金增强，非数据异常）",
         buckets.get("unenriched_observation", []),
         "无预算范围外的未增强候选。")
+    lines.extend(_phase_d_lps_shadow_markdown(phase_d_lps_shadow))
     concentration = (performance or {}).get("candidate_concentration", {})
     if concentration:
         distribution = "、".join(
@@ -4224,7 +4528,7 @@ def _html_decision_notice(buckets, candidates, policy, regime):
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                    performance=None, tracking=None, market_regime=None,
-                   style_shadow=None, news_shadow=None):
+                   style_shadow=None, news_shadow=None, phase_d_lps_shadow=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
     regime = market_regime
@@ -4276,6 +4580,7 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         explanation_html = render_market_explanation(
             regime["market_explanation"], "html")
     style_shadow_html = _style_shadow_html(style_shadow)
+    phase_d_lps_shadow_html = _phase_d_lps_shadow_html(phase_d_lps_shadow)
     news_shadow_html = ""
     if news_shadow:
         news_rows = []
@@ -4482,6 +4787,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {observation_section_html}
 {rejected_details_html}
 {unenriched_details_html}
+{phase_d_lps_shadow_html}
 {news_shadow_html}
 
 <footer><p class="disc">候选为维科夫买点与多维排序结果；只有“今日可执行”具备推荐资格。<br><strong>本报告仅供学习参考，不构成任何投资建议。股市有风险，投资需谨慎。</strong></p></footer>
@@ -4490,7 +4796,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
                       performance=None, tracking=None, market_regime=None,
-                      style_shadow=None, news_shadow=None):
+                      style_shadow=None, news_shadow=None, phase_d_lps_shadow=None):
     output = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -4517,6 +4823,8 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         output["style_shadow"] = copy.deepcopy(style_shadow)
     if news_shadow is not None:
         output["news_shadow"] = copy.deepcopy(news_shadow)
+    if phase_d_lps_shadow is not None:
+        output["phase_d_lps_shadow"] = copy.deepcopy(phase_d_lps_shadow)
     return output
 
 
@@ -4755,6 +5063,14 @@ def main():
         buckets = classify_candidates(candidates, policy)
     else:
         news_shadow = None
+    phase_d_lps_shadow = build_phase_d_lps_shadow(scored, policy)
+    # The scanner carries detailed event history only until the independent
+    # view is assembled. Keep that context out of formal candidate and
+    # research snapshots so this feature adds only its dedicated shadow field.
+    for scanned_item in list(scored or []) + list(research_population or []):
+        wyckoff = scanned_item.get("wyckoff")
+        if isinstance(wyckoff, dict):
+            wyckoff.pop("_phase_d_lps_context", None)
     news_by_code = {
         str(item.get("code")): copy.deepcopy(item.get("news_analysis"))
         for item in candidates if item.get("news_analysis")
@@ -4861,13 +5177,15 @@ def main():
             report_candidates, sector_codes, elapsed, policy, report_buckets,
             performance=performance,
             tracking=tracking, market_regime=regime,
-            style_shadow=style_shadow_report, news_shadow=news_shadow))]
+            style_shadow=style_shadow_report, news_shadow=news_shadow,
+            phase_d_lps_shadow=phase_d_lps_shadow))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
                 report_candidates, sector_codes, elapsed, ts, policy,
                 report_buckets, performance=performance,
                 tracking=tracking, market_regime=regime,
-                style_shadow=style_shadow_report, news_shadow=news_shadow)))
+                style_shadow=style_shadow_report, news_shadow=news_shadow,
+                phase_d_lps_shadow=phase_d_lps_shadow)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -4901,14 +5219,16 @@ def main():
         report_candidates, sector_codes, elapsed, policy, report_buckets,
         performance=performance,
         tracking=tracking, market_regime=regime,
-        style_shadow=style_shadow_report, news_shadow=news_shadow))]
+        style_shadow=style_shadow_report, news_shadow=news_shadow,
+        phase_d_lps_shadow=phase_d_lps_shadow))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
             report_candidates, sector_codes, elapsed, ts, policy,
             report_buckets, performance=performance,
             tracking=tracking, market_regime=regime,
-            style_shadow=style_shadow_report, news_shadow=news_shadow)))
+            style_shadow=style_shadow_report, news_shadow=news_shadow,
+            phase_d_lps_shadow=phase_d_lps_shadow)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(
