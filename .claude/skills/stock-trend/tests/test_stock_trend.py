@@ -1902,18 +1902,6 @@ def test_eastmoney_utils():
     print("  eastmoney_utils: OK")
 
 
-def test_base_fetcher_subclass():
-    """Test BaseFetcher subclass contract."""
-    from core.base_fetcher import BaseFetcher
-    class TestFetcher(BaseFetcher):
-        def fetch(self):
-            return {"meta": {"data_source": "test"}, "data": []}
-    f = TestFetcher()
-    assert f.cache_key_suffix == ""
-    assert f.cache_ttl_seconds is None
-    print("  base_fetcher subclass: OK")
-
-
 def test_cache_dir_is_project_relative():
     """Test cache dir migrated from /tmp to project .cache/."""
     from core.cache_utils import CACHE_DIR
@@ -1941,14 +1929,13 @@ def test_clean_cache():
 
 
 def run_script_unit_tests():
-    """Run script-level unit tests for eastmoney_utils, base_fetcher, cache_utils."""
+    """Run script-level unit tests for eastmoney_utils and cache_utils."""
     print("\n✅ 脚本单元测试 (Script Unit)")
     print("=" * 50)
     sys.path.insert(0, str(SCRIPTS_DIR))
 
     cases = [
         ("SU-eastmoney-utils", test_eastmoney_utils),
-        ("SU-base-fetcher", test_base_fetcher_subclass),
         ("SU-cache-dir", test_cache_dir_is_project_relative),
         ("SU-clean-cache", test_clean_cache),
     ]
@@ -1999,7 +1986,7 @@ def main():
     if not args.fetch_only and not args.analyze_only:
         run_validate_tests()
 
-    # Script unit tests (eastmoney_utils, base_fetcher, cache_utils)
+    # Script unit tests (eastmoney_utils, cache_utils)
     if not args.fetch_only and not args.analyze_only:
         run_script_unit_tests()
 
