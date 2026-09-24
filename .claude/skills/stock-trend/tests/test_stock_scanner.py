@@ -165,6 +165,34 @@ class TestMetadata(unittest.TestCase):
         self.assertFalse(verdict["valid"])
         self.assertIn("insufficient_data", verdict["reasons"])
 
+    def test_cache_evidence_status_wrappers_preserve_public_contract(self):
+        diagnosed = {
+            "meta": {"cache_validation": {"cache_present": True}}
+        }
+        self.assertEqual(
+            sc._cache_status(
+                diagnosed, {"valid": False}, cached=diagnosed),
+            "cache_stale",
+        )
+        self.assertEqual(
+            sc._cache_status(diagnosed, {"valid": False}), "cache_miss")
+        self.assertEqual(
+            sc._cache_status({}, {"valid": False}), "cache_miss")
+        self.assertEqual(
+            sc._cache_status({}, {"valid": True}), "cache_valid")
+
+        with patch.object(sc, "SOURCE_EVIDENCE_STATUSES", {"custom"}):
+            self.assertEqual(
+                sc._evidence_status(
+                    "capital", {}, {"status": "custom", "attempted": True}),
+                "custom",
+            )
+        self.assertEqual(
+            sc._evidence_status(
+                "capital", diagnosed, {}, cache_probe=True),
+            "cache_stale",
+        )
+
     def test_kline_validator_requires_sixty_bars_for_production_wyckoff(self):
         payload = self._valid_kline()
         payload["data"] = payload["data"][:59]
@@ -443,6 +471,23 @@ class TestMetadata(unittest.TestCase):
             }), encoding="utf-8")
             loaded = sc._read_json(path)
         self.assertTrue(loaded["meta"]["fetch_time"])
+
+    def test_read_json_returns_none_for_unreadable_payloads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            malformed = root / "malformed.json"
+            malformed.write_text("{broken", encoding="utf-8")
+            invalid_utf8 = root / "invalid-utf8.json"
+            invalid_utf8.write_bytes(b'\xff\xfe{"meta": {}}')
+            too_deep = root / "too-deep.json"
+            depth = sys.getrecursionlimit() + 100
+            too_deep.write_text("[" * depth + "0" + "]" * depth,
+                                encoding="utf-8")
+            missing = root / "missing.json"
+
+            for path in (malformed, invalid_utf8, too_deep, missing):
+                with self.subTest(path=path.name):
+                    self.assertIsNone(sc._read_json(path))
 
     def test_stale_kline_cache_is_refreshed_for_recommendation_date(self):
         stale = _make_dated_kline(trade_date="20260807")

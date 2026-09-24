@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,7 @@ from core.kline_utils import build_kline_fetch_command, is_usable_kline_payload
 from core.resolve_code import resolve_and_save
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
+LOGGER = logging.getLogger(__name__)
 
 
 def get_data_dir(code):
@@ -47,7 +49,8 @@ def read_json(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
+        LOGGER.debug("JSON input unavailable: %s", type(exc).__name__)
         return None
 
 

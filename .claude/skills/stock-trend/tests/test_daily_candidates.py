@@ -40,6 +40,7 @@ from scans.daily_candidates import (
 from scans import daily_candidates as dc
 from scans import stock_scanner as sc
 from core.recommendation_snapshot import content_sha256
+from reporting import candidate_formatters
 
 
 def candidate(code, eligible=True, adjusted_score=80.0,
@@ -187,6 +188,35 @@ def _full_candidate_history(code, scores, dates=None):
 
 
 class TestRecommendationPolicy(unittest.TestCase):
+    def test_report_formatter_symbols_remain_available_from_scan_module(self):
+        self.assertIsNot(dc._signal_text, candidate_formatters._signal_text)
+        self.assertEqual(
+            dc._signal_text({"volume_breakout": True, "custom": "确认"}),
+            "放量突破、确认",
+        )
+        with patch.object(dc, "SIGNAL_LABELS", {"custom": "已确认"}):
+            self.assertEqual(dc._signal_text({"custom": True}), "已确认")
+
+        row = {
+            "name": "测试", "code": "000001", "state": "watch",
+            "evidence_incomplete": False, "reason": "测试",
+            "sos": {"event_date": "", "confirmation_date": ""},
+            "lps": {}, "range": {"support": None, "resistance": None},
+            "event_health": {"state": "good", "reason_code": "",
+                             "structural_floor": None},
+            "formal_blockers": [],
+        }
+        shadow = {
+            "scan_pool": {}, "phase_d_count": 1, "sos_lps_count": 0,
+            "shown_count": 1, "evidence_incomplete_count": 0,
+            "items": [row],
+        }
+        with patch.object(dc, "_phase_d_lps_evidence_text",
+                          return_value=("ZONE", "SUPPLY")) as formatter:
+            self.assertIn("ZONE", "\n".join(dc._phase_d_lps_shadow_markdown(shadow)))
+            self.assertIn("SUPPLY", dc._phase_d_lps_shadow_html(shadow))
+            self.assertEqual(formatter.call_count, 2)
+
     def test_actionable_bucket_does_not_require_trade_plan(self):
         item = candidate("without-plan")
         item.pop("trade_plan")
@@ -1928,6 +1958,39 @@ class TestRecommendationPolicy(unittest.TestCase):
                    return_value=rankings):
             picked = dc.pick_hot_sectors(top_n=20, min_hot=45, min_stocks=1)
         self.assertEqual(picked, [])
+
+    def test_pick_hot_sectors_falls_back_for_provider_exceptions(self):
+        rankings, history = _complete_rankings_and_history()
+        cached = {
+            "cached_at": "2026-08-06T15:10:00",
+            "data_date": "2026-08-06",
+            "rankings": {
+                **rankings,
+                "meta": {**rankings["meta"], "provider": "eastmoney"},
+            },
+        }
+        for error in (TimeoutError("timed out"), RuntimeError("unexpected")):
+            with self.subTest(error=type(error).__name__):
+                metrics = {}
+                with patch("fetchers.sector_data.get_sector_rankings",
+                           side_effect=error), \
+                     patch("fetchers.sector_data.load_rankings_cache_full",
+                           return_value=cached), \
+                     patch("fetchers.sector_data.load_candidate_sector_history",
+                           return_value={}), \
+                     patch("fetchers.sector_data.load_snapshot_history",
+                           return_value=history):
+                    picked = dc.pick_hot_sectors(
+                        min_stocks=1,
+                        as_of_date="2026-08-06",
+                        metrics=metrics,
+                    )
+
+                self.assertEqual([item["code"] for item in picked], ["BK1"])
+                self.assertEqual(
+                    metrics["sector_ranking_selected_source"], "cache")
+                self.assertEqual(
+                    metrics["ranking_provenance"]["errors"], [str(error)])
 
     def test_pick_hot_sectors_returns_all_absolute_heat_qualified_sectors(self):
         rows = [
@@ -4967,12 +5030,30 @@ class TestRecommendationPolicy(unittest.TestCase):
                                              str(news_file)]), \
                  redirect_stdout(second_stdout):
                 dc.main()
+            malformed_stdout = io.StringIO()
+            news_file.write_text("{bad", encoding="utf-8")
+            with patch.object(sys, "argv", ["daily_candidates.py", "--json",
+                                             "--no-html", "--news-file",
+                                             str(news_file)]), \
+                 redirect_stdout(malformed_stdout):
+                dc.main()
+            deep_stdout = io.StringIO()
+            depth = sys.getrecursionlimit() + 100
+            news_file.write_text("[" * depth + "0" + "]" * depth,
+                                 encoding="utf-8")
+            with patch.object(sys, "argv", ["daily_candidates.py", "--json",
+                                             "--no-html", "--news-file",
+                                             str(news_file)]), \
+                 redirect_stdout(deep_stdout):
+                dc.main()
             tracking_path = json.loads(first_stdout.getvalue())[
                 "meta"]["tracking"]["path"]
             snapshot_text = Path(tracking_path).read_text(encoding="utf-8")
 
         first = json.loads(first_stdout.getvalue())
         second = json.loads(second_stdout.getvalue())
+        malformed = json.loads(malformed_stdout.getvalue())
+        deep = json.loads(deep_stdout.getvalue())
         self.assertEqual(first["meta"]["tracking"]["status"], "created")
         self.assertEqual(second["meta"]["tracking"]["status"], "unchanged")
         self.assertEqual(
@@ -4985,6 +5066,19 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertNotIn("_phase_d_lps_context", json.dumps(second))
         self.assertIsNone(first.get("news_shadow"))
         self.assertIsNotNone(second.get("news_shadow"))
+        self.assertEqual(malformed["news_shadow"]["status"], "unavailable")
+        self.assertEqual(malformed["news_shadow"]["fetch"], {
+            "status": "failed", "reason": "JSONDecodeError",
+        })
+        self.assertEqual(
+            [item["code"] for item in malformed["recommendations"]],
+            [item["code"] for item in first["recommendations"]],
+        )
+        self.assertEqual(malformed["meta"]["tracking"]["status"], "unchanged")
+        self.assertEqual(deep["news_shadow"]["fetch"], {
+            "status": "failed", "reason": "RecursionError",
+        })
+        self.assertEqual(deep["meta"]["tracking"]["status"], "unchanged")
         self.assertNotIn("_phase_d_lps_context", snapshot_text)
 
     def test_main_allows_intraday_candidate_without_official_snapshot(self):

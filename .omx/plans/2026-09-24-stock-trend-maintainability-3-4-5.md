@@ -1,6 +1,6 @@
 # Stock Trend 维护性改进计划：模块边界、异常降级、Skill 文档
 
-状态：仅计划，未实施。范围对应 2026-09-24 评审中的第 3、4、5 项。
+状态：已在当前分支按低风险批次实施；以下保留原计划，末尾记录交付与延期边界。范围对应 2026-09-24 评审中的第 3、4、5 项。
 
 ## 目标与不变量
 
@@ -72,3 +72,13 @@
 ## 完成判定
 
 三个阶段各自满足验收标准；全部 Python 批次通过两道强制测试及对应专项回归；golden 无未经解释的差异；文档链接与命令引用有效；工作树仅含计划内文件。该计划不要求消除所有宽泛异常或将两个主文件拆到特定行数。
+
+## 2026-09-24 当前分支执行记录
+
+- 基线：主套件 740/740 通过；候选股 194/194；扫描器 111/111；golden 21 通过、0 失败、2 个既有警告。
+- 问题 5：`SKILL.md` 保留路由、共性规则与免责声明；详细流程移动到五个一级 `references/` 文档。Skill 校验通过；原有 15 个脚本引用、25 个 CLI 参数及文档链接核对通过。
+- 问题 4：`pipeline/runner.py` 和 `stock_scanner.py` 的 JSON 文件读取收窄为文件、编码、格式等预期异常，并加入默认静默的 debug 诊断；候选股新闻 fixture 同样收窄。排行和实时新闻提供方边界保留宽捕获及原降级结果，增加 debug 诊断和排行故障回归。未改变可观察的 `live_attempt` 字段。
+- 问题 3：扫描器的 `_cache_status`、`_evidence_status`、`_cache_verdict`、`_payload_validation_reasons` 实现迁移到 `core/scanner_cache_validation.py`；候选报告的 `_signal_text`、Phase D/LPS 证据文字及 Markdown/HTML 影子区块格式化实现迁移到 `reporting/candidate_formatters.py`。原扫描模块保留同名转发入口，向新实现传递原模块可替换的标签和 helper，维持 monkeypatch 兼容；主流程、输出入口和抓取协调顺序未改。
+- 审查修正：深层 JSON 解码抛出的 `RecursionError` 继续走文件失效降级；格式化函数原模块的嵌套 helper patch 点由转发入口保持有效，并有针对性回归。
+- 最终验证：候选股专项 196/196，扫描器专项 113/113，JSON 读取专项 3/3；主套件 743 通过、0 失败、1 跳过（共 744）；golden 21 通过、0 失败、2 个既有警告；`compileall`、`git diff --check` 通过。未重生成 golden。独立复审确认两项审查问题已解决。
+- 延期边界：`_validate_kline_cache` 依赖可替换的校验函数和后置常量，迁移会扩大注入/兼容复杂度；`_append_candidate_table`、`_html_candidate_rows` 与更多扫描器抓取协调函数也保留原位，待单独证明依赖闭包和 patch 兼容后再议。提供方宽捕获保留在外部 I/O 边界。
