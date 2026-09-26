@@ -65,6 +65,18 @@ bash tools/python.sh .claude/skills/stock-trend/tests/test_golden.py --diff
 
 根目录 tests 为离线环境工具测试；主门禁含联网抓取，需要按下面的实时接口运行契约执行。Golden 比较不自动刷新快照。
 
+## 环境诊断
+
+```bash
+bash tools/python.sh .claude/skills/stock-trend/scripts/diagnose.py --quick
+```
+
+`--quick` 不访问行情 API，每次读取当前解释器、依赖版本和凭据配置；不会返回旧的完整诊断缓存。`checks.python` 显示版本要求与解释器路径；`checks.python_deps` 按 pyproject.toml 的 core 和各 extra 分组，区分缺失与版本不兼容。依赖检测读取安装元数据，不代表包导入或实时接口已经验证；导入由 hook 和质量门禁验证。
+
+诊断声明解析使用现有 test extra 中的 packaging，Python 3.10 还需 tomli；完整锁已包含它们。仅安装核心锁的环境如缺少诊断工具，输出 `environment_contract` 错误及安装提示；先安装 `'.[test]'` 再运行。无需增加生产依赖。核心缺失需修复；可选数据源缺失只影响对应能力，不等同于整个工程不能运行。Token 配置检查只输出状态和来源，不输出 Token 或前缀，也不使用凭据验证 API。
+
+省略 `--quick` 会按既有逻辑联网检查数据源，并保存完整诊断结果；需遵守下方实时接口契约。快速检查不证明实时来源可用。
+
 ## 提交钩子
 
 ```bash

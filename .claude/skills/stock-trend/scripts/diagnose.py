@@ -2,7 +2,8 @@
 """Stock Trend Skill diagnostic script.
 
 Checks data source availability, Python dependencies, and configuration.
-Results are cached in /tmp/stock-trend-diag.json with 1-hour TTL.
+Full results are cached in .cache/stock-trend/diag.json with 1-hour TTL.
+Quick checks always inspect the current environment and skip API calls.
 
 Usage:
     python3 diagnose.py              # Full diagnostic
@@ -37,17 +38,60 @@ def _diag_tmp(name):
     return os.path.join(_DIAG_TMP_DIR, f"{name}.json")
 
 
-def check_python_deps():
-    """Check Python package dependencies."""
-    deps = {}
-    for pkg in ["tushare", "baostock", "numpy", "pandas"]:
+def check_environment():
+    """Read the dependency contract from pyproject; never contact data sources."""
+    checks = {}
+    try:
         try:
-            mod = __import__(pkg)
-            version = getattr(mod, "__version__", "unknown")
-            deps[pkg] = {"status": "ok", "version": version}
+            import tomllib
         except ImportError:
-            deps[pkg] = {"status": "missing", "version": None}
-    return deps
+            import tomli as tomllib
+        from packaging.requirements import Requirement
+        from packaging.specifiers import SpecifierSet
+        from importlib.metadata import PackageNotFoundError, version
+        project = tomllib.loads(
+            (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]
+        required = project["requires-python"]
+        current = ".".join(map(str, sys.version_info[:3]))
+        checks["python"] = {
+            "status": "ok" if current in SpecifierSet(required) else "incompatible",
+            "version": current, "required": required, "executable": sys.executable,
+        }
+        deps = {}
+        groups = {"core": project.get("dependencies", [])}
+        groups.update(project.get("optional-dependencies", {}))
+        for group, declarations in groups.items():
+            for declaration in declarations:
+                req = Requirement(declaration)
+                # The aggregate extra refers to this project, not another package.
+                if req.name == project["name"]:
+                    continue
+                if req.marker and not req.marker.evaluate({"extra": group}):
+                    continue
+                try:
+                    installed = version(req.name)
+                    status = "ok" if installed in req.specifier else "incompatible"
+                except PackageNotFoundError:
+                    installed, status = None, "missing"
+                info = deps.setdefault(req.name, {
+                    "status": status, "version": installed,
+                    "required": str(req.specifier), "groups": [],
+                })
+                info["groups"].append(group)
+        checks["python_deps"] = deps
+    except (ImportError, OSError, ValueError, KeyError) as exc:
+        checks["environment_contract"] = {
+            "status": "error", "detail": str(exc),
+            "hint": "安装诊断工具: bash tools/python.sh -m pip install '.[test]'；检查 pyproject.toml",
+        }
+        checks["python_deps"] = {}
+    return checks
+
+
+def check_python_deps():
+    """Compatibility entry point for dependency checks."""
+    return check_environment()["python_deps"]
 
 
 def check_tushare_token():
@@ -55,7 +99,7 @@ def check_tushare_token():
     # CLI arg > env var > config file
     env_token = os.environ.get("TUSHARE_TOKEN")
     if env_token:
-        return {"status": "ok", "source": "env", "token_preview": env_token[:8] + "..."}
+        return {"status": "ok", "source": "env"}
 
     config_paths = [
         Path(".claude/tushare-config.json"),
@@ -67,11 +111,11 @@ def check_tushare_token():
                 with open(cp) as f:
                     cfg = json.load(f)
                 if cfg.get("token"):
-                    return {"status": "ok", "source": str(cp), "token_preview": cfg["token"][:8] + "..."}
+                    return {"status": "ok", "source": str(cp)}
             except (json.JSONDecodeError, OSError):
                 continue
 
-    return {"status": "missing", "source": None, "token_preview": None}
+    return {"status": "missing", "source": None}
 
 
 def check_tushare_api():
@@ -235,11 +279,21 @@ def run_diagnostic(quick=False):
     warnings = []
     recommendations = []
 
-    # Python dependencies (always check)
-    checks["python_deps"] = check_python_deps()
+    # Environment checks always reflect this interpreter, never cached results.
+    checks.update(check_environment())
+    if "environment_contract" in checks:
+        warnings.append("无法校验环境依赖声明")
+        recommendations.append(checks["environment_contract"]["hint"])
+    if checks.get("python", {}).get("status") == "incompatible":
+        warnings.append("Python 版本不满足 pyproject.toml 要求")
+        recommendations.append("使用 bash tools/python.sh 选择满足要求的解释器")
     for pkg, info in checks["python_deps"].items():
-        if info["status"] == "missing":
-            warnings.append(f"Python包 {pkg} 未安装")
+        if info["status"] != "ok":
+            core = "core" in info["groups"]
+            kind = "核心依赖" if core else "可选依赖"
+            warnings.append(f"{kind} {pkg}: {info['status']} (要求 {info['required']})")
+            profile = "." if core else ".[" + ",".join(info["groups"]) + "]"
+            recommendations.append(f"按运行说明安装 {profile}；可选依赖缺失只影响对应能力")
 
     # Tushare token
     checks["tushare_token"] = check_tushare_token()
@@ -309,20 +363,12 @@ def run_diagnostic(quick=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Stock Trend Skill diagnostic script")
-    parser.add_argument("--quick", action="store_true", help="Quick check (skip API calls, use cached results)")
+    parser.add_argument("--quick", action="store_true", help="Quick check (fresh environment checks, skip API calls)")
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     args = parser.parse_args()
 
-    # Try loading cache for quick mode
-    if args.quick:
-        cached = load_cache()
-        if cached:
-            result = cached
-            result["mode"] = "quick (cached)"
-        else:
-            result = run_diagnostic(quick=True)
-    else:
-        result = run_diagnostic(quick=False)
+    # Quick mode is offline and fresh. Full API results retain their own cache.
+    result = run_diagnostic(quick=args.quick)
 
     text = json.dumps(result, ensure_ascii=False, indent=2)
 
