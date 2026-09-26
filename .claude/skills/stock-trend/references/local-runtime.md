@@ -12,7 +12,7 @@ Python 运行要求为 >=3.10；工作流文档中的 `python3` 指满足要求�
 2. 仓库 `.venv/bin/python`。已有但损坏的 `.venv` 立即报错，不使用全局解释器掩盖问题。
 3. PATH 中的 `python3`。
 
-所选路径和版本写入 stderr，不污染 JSON stdout。包装器不会自动安装依赖或改动全局环境。其他工作流文档中的 `python3 <script>` 可等价替换为 `bash tools/python.sh <script>`。尚未修复的旧提交钩子仍直接调用 python3；本步不代表钩子已采用该选择器。
+所选路径和版本写入 stderr，不污染 JSON stdout。包装器不会自动安装依赖或改动全局环境。其他工作流文档中的 `python3 <script>` 可等价替换为 `bash tools/python.sh <script>`。提交钩子也使用该选择器。
 
 ## 创建与安装
 
@@ -64,6 +64,20 @@ bash tools/python.sh .claude/skills/stock-trend/tests/test_golden.py --diff
 ```
 
 根目录 tests 为离线环境工具测试；主门禁含联网抓取，需要按下面的实时接口运行契约执行。Golden 比较不自动刷新快照。
+
+## 提交钩子
+
+```bash
+bash .githooks/install-hooks.sh
+```
+
+安装器将当前仓库的 `core.hooksPath` 设置为相对路径 `.githooks`，从仓库子目录运行也可生效；已有其他 hooksPath 时拒绝覆盖。安装后可用 `git config --get core.hooksPath` 核对。本次代码修改不会自动安装钩子。
+
+hook 从 Git index 导出临时 skill 树，检查暂存 Python（含全部子目录）、Skill 元数据与本地引用。脚本、模板、skill 测试或关键环境配置变化时，还检查当前模块接口、scores 合法/非法输入、模板真实渲染及 Golden `--diff`。所需模块、模板或 Golden 入口缺失会拒绝提交。模板校验覆盖当前样例启用的分支；可选分支仍需要专项测试。
+
+业务检查不读取工作区未暂存内容，不修改真实 index、缓存或报告；不联网、不安装依赖，也不在每次提交时运行联网主门禁。hook 启动入口、解释器选择器与导出暂存树的外层检查器仍从工作区加载，这些工具自身的未暂存损坏可能导致启动失败。环境需事先按上述说明准备。只有无关路径变更时跳过 skill 检查。
+
+只有已记录的外部阻塞才使用 `STOCK_TREND_SKIP_GOLDEN=1 git commit ...`；输出会明确标注 Golden 未验证。它不跳过其他检查，也不允许缺失 Golden 入口。临时仓库回归测试可运行 `bash tools/python.sh -m unittest discover -s tests -p test_pre_commit.py -v`。
 
 ## 东方财富 / 同花顺实时接口运行契约
 

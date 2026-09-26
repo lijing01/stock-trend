@@ -1,6 +1,6 @@
 # Python 环境与提交钩子修复计划
 
-状态：A（统一 Python 环境）已实施并验证；B（提交钩子）与 C（诊断对齐）尚未实施。
+状态：A（统一 Python 环境）已实施并验证；B（提交钩子）已实施，见执行记录；C（诊断对齐）尚未实施。
 范围：上一轮审查第 1 项（提交钩子失效检查）和第 2 项（Python 环境可复现性）。
 
 ## 目标与边界
@@ -120,3 +120,15 @@
 - 验证：14 个环境工具离线测试通过；核心与完整锁各在干净 venv 中重建成功；pip check 和核心模块导入通过。
 - 既有门禁：test_stock_trend.py 为 677 passed、0 failed、1 skipped；Golden 为 21 passed、0 failed、2 warnings，未刷新快照。
 - 限制：已提交锁只覆盖 CPython 3.10 / macOS arm64 / 记录的系统 release；离线检查不重新解析传递依赖，源包构建不保证字节级相同。
+
+## B 的执行记录
+
+- 删除旧 hook 中的单层路径匹配、旧模块引用和 grep -P；shell 入口复用 tools/python.sh。
+- 新增 tools/check_staged.py：NUL 分隔读取暂存路径，导出独立 index 树；语法、引用、导入、输入校验、模板和 Golden 均在该树上验证。不导出 reports 或真实缓存。
+- 更新当前接口为 analysis.technical、analysis.scores、reporting.report；模块、接口、两份模板及 Golden 入口缺失时失败。
+- 检查 SKILL YAML 元数据、references 的具体本地链接和脚本引用；移除固定 Step 编号要求。
+- 安装器使用仓库相对 .githooks，验证配置，拒绝覆盖未知 hooksPath；本轮未改动真实仓库 Git 配置。
+- 新增 23 个临时仓库回归测试；修复前基线 17 项中 13 失败，修复后根目录全部 37 项测试通过。
+- 使用实际 skill 文件在临时 Git 仓库导出暂存树验证：模块/输入/模板检查通过，Golden 为 21 passed、0 failed、2 warnings，未更新快照。
+- shell 语法和 git diff --check 通过。本步未修改生产 scripts，因此未重复运行联网主门禁。
+- 限制：模板校验覆盖样例启用的分支，可选分支仍依赖专项测试；Golden 显式跳过会输出验证缺口。hook 启动工具仍从工作区加载，工具自身的未暂存损坏可能导致启动失败；业务检查使用暂存树。C 的 diagnose 对齐留待下一步。
