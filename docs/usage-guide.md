@@ -6,6 +6,8 @@ Agent 扮演专业股票分析师，从消息面、技术面、情绪面三维�
 
 **用户画像**：上班族，交易时段无法盯盘。
 
+运行 Python 前，按[环境安装与解释器选择说明](../.claude/skills/stock-trend/references/local-runtime.md)创建 `.venv` 并安装依赖。推荐通过 `bash tools/python.sh <script>` 运行；依赖声明在根目录 `pyproject.toml`，经验证的目标版本锁在 `requirements/`。
+
 ---
 
 ## 目录
