@@ -23,11 +23,16 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
 
 JSON 保留候选输出，并追加 `workflow` 阶段结果和 `notifications`。通知覆盖本次及跨调用检测到的策略版本/参数变化与 `invalid_pointer_fallback` 等安全回退；首次建立基线不报告变更。回复中醒目呈现通知，但不向外部渠道推送。publish 仍需显式人工审核，统一入口不得自动发布。不得自动打开 GUI 或浏览器。
 
-**最终交付链接（必须执行）**：在“今日推荐”最终回复中，候选报告链接后必须紧跟同一次统一入口中 `market_regime.py` 生成的今日复盘 HTML 链接，使用绝对本地路径和清晰标签：
+**最终交付链接（必须执行）**：在“今日推荐”最终回复中，候选报告链接后必须紧跟同一次统一入口中 `market_regime.py` 生成的今日复盘 HTML 链接，使用绝对本地路径和清晰标签。
+
+链接 href **必须带 `file://` scheme**。Claude Code 终端把 markdown 链接交给终端 OSC 8 超链接处理，无 scheme 的裸路径不是合法 URI，点击时被静默丢弃（表现为无反应，或浏览器打开空白页），不能交付。路径需按 URI 规则百分号编码（空格 `%20`、`#` `%23` 等）；本地路径无特殊字符时 `file:///` 后直接接绝对路径即可（`/Users/...` → `file:///Users/...`，注意三个斜杠）。另附一行反引号裸路径作为回退，供 href 不生效的终端版本使用：
 
 ```markdown
-报告：[HTML 候选报告](<absolute_candidates_html_path>)
-今日复盘：[HTML 复盘报告](<absolute_daily_review_html_path>)
+报告：[HTML 候选报告](file:///absolute_candidates_html_path)
+`/absolute_candidates_html_path`
+
+今日复盘：[HTML 复盘报告](file:///absolute_daily_review_html_path)
+`/absolute_daily_review_html_path`
 ```
 
 通过统一入口运行时，优先链接本次市场刷新实际生成且已验证存在的复盘 HTML。若当前请求未执行 `run_today.py`（例如仅解释或展示既有候选报告），则链接 `reports/lists/` 中最近生成、已验证存在的 `daily-review-*.html`，并标注“最近复盘”。候选报告仍需使用当前请求实际生成或明确指定的文件；找不到可验证的复盘 HTML 时，第二行改为“今日复盘：未生成（未找到可用复盘报告）”。
