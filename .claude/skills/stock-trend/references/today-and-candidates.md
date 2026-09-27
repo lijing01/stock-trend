@@ -25,17 +25,26 @@ JSON 保留候选输出，并追加 `workflow` 阶段结果和 `notifications`�
 
 **最终交付链接（必须执行）**：在“今日推荐”最终回复中，候选报告链接后必须紧跟同一次统一入口中 `market_regime.py` 生成的今日复盘 HTML 链接，使用绝对本地路径和清晰标签。
 
-链接 href **必须带 `file://` scheme**。Claude Code 终端把 markdown 链接交给终端 OSC 8 超链接处理，无 scheme 的裸路径不是合法 URI，点击时被静默丢弃（表现为无反应，或浏览器打开空白页），不能交付。路径需按 URI 规则百分号编码（空格 `%20`、`#` `%23` 等）；本地路径无特殊字符时 `file:///` 后直接接绝对路径即可（`/Users/...` → `file:///Users/...`，注意三个斜杠）。另附一行反引号裸路径作为回退，供 href 不生效的终端版本使用：
+每份报告固定两行：第一行 markdown 链接（href **必须带 `file://` scheme**），第二行反引号 `open` 命令（内含同一绝对路径，可复制粘贴）。两行缺一不可，分别覆盖两个工具：
 
 ```markdown
 报告：[HTML 候选报告](file:///absolute_candidates_html_path)
-`/absolute_candidates_html_path`
+打开：`open /absolute_candidates_html_path`
 
 今日复盘：[HTML 复盘报告](file:///absolute_daily_review_html_path)
-`/absolute_daily_review_html_path`
+打开：`open /absolute_daily_review_html_path`
 ```
 
-通过统一入口运行时，优先链接本次市场刷新实际生成且已验证存在的复盘 HTML。若当前请求未执行 `run_today.py`（例如仅解释或展示既有候选报告），则链接 `reports/lists/` 中最近生成、已验证存在的 `daily-review-*.html`，并标注“最近复盘”。候选报告仍需使用当前请求实际生成或明确指定的文件；找不到可验证的复盘 HTML 时，第二行改为“今日复盘：未生成（未找到可用复盘报告）”。
+- **第一行 → Claude Code**：终端把 markdown 链接交给 OSC 8 超链接处理。无 scheme 的裸路径不构成合法 URI，点击被静默丢弃（无反应，或浏览器打开空白页），所以必须写 `file:///` + 绝对路径（三个斜杠），cmd+click 即用默认浏览器打开报告。
+- **第二行 → Codex CLI**：Codex 的 markdown 渲染器把本地路径链接分流到独立的 local-link 分支，只有 `web_destination()` 通过 `http`/`https` 校验的目标才附加 OSC 8 超链接；`file://` 需经 `TrustedWorkspaceFile::validate` 标记为 trusted file 才输出（见 `codex-rs/tui/src/terminal_hyperlinks.rs`，openai/codex#22585 仍 Open）。因此模型发出的本地 markdown 链接在 Codex 下**只是带样式的文本，不可点击**，绝对路径还会被缩短。Codex 下靠第二行：用户复制路径，或直接执行 `open` 命令。第二行同时兜底 Claude Code 老版本 href 不生效的情况。
+
+不得依赖运行环境变量判断当前工具（Codex 可能从 Claude Code 内嵌启动，探测会误判），固定输出两行即可。
+
+`open` 是 macOS 默认程序打开；非 macOS 换成 `xdg-open`。**仍不得自动打开浏览器**：第二行是交付给用户的命令，只有用户明确要求时才由 agent 代为执行。
+
+路径按 URI 规则百分号编码（空格 `%20`、`#` `%23` 等）；无特殊字符时 `file:///` 后直接接绝对路径（`/Users/...` → `file:///Users/...`）。
+
+通过统一入口运行时，优先链接本次市场刷新实际生成且已验证存在的复盘 HTML。若当前请求未执行 `run_today.py`（例如仅解释或展示既有候选报告），则链接 `reports/lists/` 中最近生成、已验证存在的 `daily-review-*.html`，并标注“最近复盘”。候选报告仍需使用当前请求实际生成或明确指定的文件；找不到可验证的复盘 HTML 时，今日复盘的两行整体替换为“今日复盘：未生成（未找到可用复盘报告）”。
 
 只需候选扫描时继续使用独立的 `/candidates`。
 
