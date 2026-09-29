@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import math
 import os
 import sys
 from core.cache_utils import load_cache, output_json, save_cache, get_market_day_ttl
@@ -308,6 +309,18 @@ def fetch_tencent_a_stock(ts_code, freq, timeout=15):
     return records, name
 
 
+def _usable_ohlc_count(records):
+    if not isinstance(records, list):
+        return 0
+    return sum(
+        isinstance(row, dict) and all(
+            isinstance(row.get(field), (int, float))
+            and not isinstance(row.get(field), bool)
+            and math.isfinite(float(row[field]))
+            for field in ("open", "high", "low", "close"))
+        for row in records)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch K-line data from East Money (东方财富) API"
@@ -320,6 +333,8 @@ def main():
     parser.add_argument("-o", "--output", help="Output file path (default: stdout)")
     parser.add_argument("--no-cache", action="store_true", help="Force refresh, ignore cache")
     parser.add_argument("--expected-date", help="YYYY-MM-DD trading day the bars must cover; stale-by-date cache is ignored")
+    parser.add_argument("--min-records", type=int, default=0,
+                        help="Minimum usable OHLC bars; try other providers if fewer")
     parser.add_argument("--em-timeout", type=float, default=15,
                         help="Per-node EastMoney primary request timeout")
     parser.add_argument("--em-fallback-timeout", type=float,
@@ -330,6 +345,8 @@ def main():
                         help="Tencent K-line fallback timeout")
 
     args = parser.parse_args()
+    if args.min_records < 0:
+        parser.error("--min-records must be nonnegative")
 
     # Check cache (shared key with fetch_kline.py). A cache is a hit only when
     # it covers the expected trading day: a T-1 bar must not be served as fresh
@@ -339,7 +356,9 @@ def main():
     if not args.no_cache:
         cached = load_cache(cache_key, ttl_seconds=get_market_day_ttl())
         validation = cache_validation(cached, args.expected_date) if cached and args.expected_date else None
-        if cached and (validation is None or validation["valid"]):
+        if (isinstance(cached, dict) and cached
+                and (validation is None or validation["valid"])
+                and _usable_ohlc_count(cached.get("data")) >= args.min_records):
             if validation is not None:
                 cached = dict(cached)
                 cached["meta"] = dict(cached.get("meta", {}))
@@ -422,34 +441,85 @@ def main():
     name = ""
     error_msg = None
     used_host = None
+    provider_attempts = []
+    freshest_stale = None
+    best_incomplete = None
+
+    def accept_records(source, fetched, fetched_name, host):
+        nonlocal records, name, used_host, freshest_stale, best_incomplete
+        if not fetched:
+            provider_attempts.append({"source": source, "status": "empty"})
+            return False
+        validation = cache_validation({"data": fetched}, args.expected_date)
+        if args.expected_date and not validation["valid"]:
+            provider_attempts.append({
+                "source": source, "status": "stale",
+                "latest_date": validation["latest_date"],
+            })
+            if (freshest_stale is None or
+                    validation["latest_date"] > freshest_stale[0]):
+                freshest_stale = (
+                    validation["latest_date"], fetched, fetched_name, host)
+            return False
+        usable_count = _usable_ohlc_count(fetched)
+        if usable_count < args.min_records:
+            provider_attempts.append({
+                "source": source, "status": "insufficient_bars",
+                "latest_date": validation["latest_date"],
+                "usable_record_count": usable_count,
+            })
+            if best_incomplete is None or usable_count > best_incomplete[0]:
+                best_incomplete = (usable_count, fetched, fetched_name, host)
+            return False
+        provider_attempts.append({
+            "source": source, "status": "success",
+            "latest_date": validation["latest_date"],
+        })
+        records, name, used_host = fetched, fetched_name, host
+        return True
 
     from core.eastmoney_utils import rotate_em_host
     try:
-        (records, name), used_host = rotate_em_host(
+        (fetched, fetched_name), host = rotate_em_host(
             lambda h: fetch_eastmoney(
                 secid, args.freq, args.lmt, host=h,
                 timeout=args.em_timeout,
                 fallback_timeout=args.em_fallback_timeout),
             max_retries=max(1, args.em_host_retries))
+        accept_records("eastmoney", fetched, fetched_name, host)
     except RuntimeError as e:
         error_msg = str(e)
+        provider_attempts.append({
+            "source": "eastmoney", "status": "error", "error": error_msg[:300],
+        })
 
     # Fallback to Tencent Finance (A-shares) if EastMoney failed
     if records is None and not args.ts_code.endswith(".HK"):
         try:
-            records, name = fetch_tencent_a_stock(
+            fetched, fetched_name = fetch_tencent_a_stock(
                 args.ts_code, args.freq, timeout=args.fallback_timeout)
-            used_host = "tencent_a"
-        except Exception:
-            pass
+            accept_records("tencent_a", fetched, fetched_name, "tencent_a")
+        except Exception as e:
+            provider_attempts.append({
+                "source": "tencent_a", "status": "error", "error": str(e)[:300],
+            })
 
     # Fallback to BaoStock if EastMoney + Tencent both failed
     if records is None and not args.ts_code.endswith(".HK"):
         try:
-            records, name = fetch_baostock(args.ts_code, args.freq)
-            used_host = "baostock"
+            fetched, fetched_name = fetch_baostock(args.ts_code, args.freq)
+            accept_records("baostock", fetched, fetched_name, "baostock")
         except Exception as e:
-            error_msg = f"东方财富全节点失败 + Tencent/BaoStock降级失败: {error_msg}; {e}"
+            provider_attempts.append({
+                "source": "baostock", "status": "error", "error": str(e)[:300],
+            })
+            error_msg = f"东方财富/Tencent/BaoStock均未提供可用K线: {error_msg}; {e}"
+
+    incomplete_count = None
+    if records is None and best_incomplete is not None:
+        incomplete_count, records, name, used_host = best_incomplete
+    elif records is None and freshest_stale is not None:
+        _, records, name, used_host = freshest_stale
 
     if records is None:
         result = {
@@ -459,6 +529,7 @@ def main():
                 "freq": args.freq,
                 "data_source": "error",
                 "error": error_msg,
+                "provider_attempts": provider_attempts,
             },
             "data": [],
         }
@@ -489,12 +560,23 @@ def main():
             "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "em_host": used_host if used_host in EM_API_HOSTS else None,
             "warnings": warnings,
+            "provider_attempts": provider_attempts,
         },
         "data": records,
     }
 
     if args.expected_date:
         result = reject_stale_payload(result, args.expected_date)
+    if incomplete_count is not None and result["meta"]["data_source"] != "error":
+        result["meta"].update({
+            "data_source": "error",
+            "error_type": "insufficient_data",
+            "insufficient_data_source": data_source,
+            "usable_record_count": incomplete_count,
+            "record_count": 0,
+            "error": f"有效K线仅{incomplete_count}条，要求至少{args.min_records}条",
+        })
+        result["data"] = []
 
     # Cache successful result
     if result.get("meta", {}).get("data_source") not in ("error", None):

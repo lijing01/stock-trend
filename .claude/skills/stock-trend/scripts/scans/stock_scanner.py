@@ -10,7 +10,9 @@ import inspect
 import json
 import logging
 import math
+import os
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -1199,37 +1201,44 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     # budget: one fast EastMoney attempt (including its direct fallbacks), then
     # Tencent.  This prevents a slow EM host from consuming the subprocess
     # deadline before an independent provider can run.
-    cmd = build_kline_fetch_command(
-        "eastmoney", ts_code, cache_path,
-        asset="E", freq="D", expected_date=as_of_date,
-        provider_args=(
-            "--em-timeout", "4", "--em-fallback-timeout", "2",
-            "--em-host-retries", "1", "--fallback-timeout", "8",
-        ),
-    )
-
     def _run_kline_subprocess():
-        return run_script(
-            cmd, label=f"kline_{ts_code}",
-            timeout=_remaining_timeout("kline", live_deadline))
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{cache_path.name}.", suffix=".tmp",
+            dir=cache_path.parent)
+        os.close(fd)
+        output_path = Path(temporary)
+        try:
+            cmd = build_kline_fetch_command(
+                "eastmoney", ts_code, output_path,
+                asset="E", freq="D", expected_date=as_of_date,
+                provider_args=(
+                    "--em-timeout", "4", "--em-fallback-timeout", "2",
+                    "--em-host-retries", "1", "--fallback-timeout", "8",
+                    "--min-records", str(WYCKOFF_MIN_BARS),
+                ),
+            )
+            result = run_script(
+                cmd, label=f"kline_{ts_code}",
+                timeout=_remaining_timeout("kline", live_deadline))
+            payload = _read_json(str(output_path)) if result["success"] else None
+            verdict = (_validate_kline_cache(payload, as_of_date)
+                       if payload else {"valid": False})
+            if verdict["valid"]:
+                os.replace(output_path, cache_path)
+            return result, payload, verdict
+        finally:
+            output_path.unlink(missing_ok=True)
 
-    result = _run_kline_subprocess()
+    result, refreshed, refreshed_verdict = _run_kline_subprocess()
     attempt = live_attempt(
         attempted=True, provider_attempts=1, subprocess_started=True)
-    refreshed = None
-    refreshed_verdict = {"valid": False}
-    if result["success"]:
-        refreshed = _read_json(str(cache_path))
-        refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
     # Retry only when the subprocess itself failed (timeout/crash); a
     # successful-but-stale refresh re-running would just re-read the same
     # file the first attempt already wrote.
     if not result["success"]:
-        result = _run_kline_subprocess()
+        result, refreshed, refreshed_verdict = _run_kline_subprocess()
         attempt["provider_attempts"] = 2
-        if result["success"]:
-            refreshed = _read_json(str(cache_path))
-            refreshed_verdict = _validate_kline_cache(refreshed, as_of_date)
     if refreshed_verdict["valid"]:
         attempt["status"] = "live_success"
         wrapped = source_result(refreshed, attempt)
@@ -2262,7 +2271,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                defer_enrichment=False, disable_early_stop=False,
                require_wyckoff_gate=True, peer_cohorts=None,
                include_phase_d_lps_context=False,
-               include_formal_event_history=False):
+               include_formal_event_history=False, kline_diagnostics=None):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2412,6 +2421,42 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
 
     metrics_ref["kline_seconds"] = metrics_ref.get("kline_seconds", 0.0) + (
         time.monotonic() - kline_started)
+
+    if isinstance(kline_diagnostics, dict):
+        for candidate in candidates:
+            ts_code = candidate["ts_code"]
+            payload = kline_data.get(ts_code)
+            meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+            rows = payload.get("data", []) if isinstance(payload, dict) else []
+            rows = rows if isinstance(rows, list) else []
+            latest = (latest_data_date(payload) or
+                      (meta.get("cache_validation") or {}).get("latest_date", ""))
+            evidence = source_evidence["kline"].get(ts_code, {})
+            if latest and not _date_covers(latest, as_of_date):
+                reason_code = "wrong_trading_date"
+            elif meta.get("error_type") == "stale_data":
+                reason_code = "wrong_trading_date"
+            elif meta.get("error_type") == "insufficient_data":
+                reason_code = "insufficient_bars"
+            elif len(rows) < WYCKOFF_MIN_BARS and rows:
+                reason_code = "insufficient_bars"
+            elif not rows:
+                reason_code = "fetch_failed"
+            else:
+                reason_code = ""
+            kline_diagnostics[candidate["code"]] = {
+                "reason_code": reason_code,
+                "expected_date": as_of_date,
+                "latest_date": latest,
+                "record_count": meta.get("usable_record_count", len(rows)),
+                "provider": (meta.get("stale_data_source") or
+                             meta.get("insufficient_data_source") or
+                             meta.get("data_source") or ""),
+                "provider_attempts": meta.get("provider_attempts") or [],
+                "source_status": evidence.get("status") or "",
+                "source_reason": evidence.get("reason") or "",
+                "detail": meta.get("error") or meta.get("refresh_error") or "",
+            }
 
     # Wyckoff is intentionally in-memory and follows the K-line deadline.
     analysis_by_ts = {}

@@ -573,7 +573,37 @@ def _enrich_candidate_names(built, codes, data_date, resolver=None):
         result["name_fetched_at"] = candidate["name_fetched_at"]
 
 
-def _row(source, data_date, candidate_result=None, scored=None):
+def _kline_failure_text(diagnostic):
+    if not isinstance(diagnostic, dict):
+        return "六维分析未返回结果或 K 线不足"
+    reason = diagnostic.get("reason_code")
+    provider = {
+        "eastmoney": "东方财富", "tencent_a": "腾讯", "baostock": "BaoStock",
+    }.get(diagnostic.get("provider"), diagnostic.get("provider") or "")
+    source = f"（{provider}）" if provider and provider != "error" else ""
+    if reason == "wrong_trading_date":
+        latest = diagnostic.get("latest_date") or "未知"
+        expected = diagnostic.get("expected_date") or "未知"
+        return f"K 线仅到 {latest}，要求 {expected}{source}"
+    if reason == "insufficient_bars":
+        return (f"K 线仅有 {diagnostic.get('record_count', 0)} 条，"
+                f"至少需要 {stock_scanner.WYCKOFF_MIN_BARS} 条{source}")
+    if reason == "fetch_failed":
+        detail = str(diagnostic.get("detail") or diagnostic.get("source_reason") or "")
+        attempts = diagnostic.get("provider_attempts") or []
+        attempted = "、".join(
+            f"{attempt.get('source', '未知')}:{attempt.get('status', '未知')}"
+            for attempt in attempts if isinstance(attempt, dict))
+        expected = diagnostic.get("expected_date") or "未知"
+        message = f"K 线抓取失败，要求 {expected}，最新日期未知{source}"
+        if attempted:
+            message += f"；来源结果 {attempted}"
+        return message + (f"；{detail[:160]}" if detail else "")
+    return "六维分析未返回结果"
+
+
+def _row(source, data_date, candidate_result=None, scored=None,
+         kline_diagnostic=None):
     """Keep an observation row even when its market analysis fails."""
     candidate_result = candidate_result or {}
     scored = scored if isinstance(scored, dict) else {}
@@ -585,7 +615,7 @@ def _row(source, data_date, candidate_result=None, scored=None):
     if candidate_result.get("error"):
         reasons.append(candidate_result["error"])
     if not scored and not reasons:
-        reasons.append("六维分析未返回结果或 K 线不足")
+        reasons.append(_kline_failure_text(kline_diagnostic))
     if candidate_result.get("sector_status") in ("ranking_missing", "missing"):
         if candidate_result.get("sector_status") == "ranking_missing":
             reasons.append("缺少本依据日行业排行证据")
@@ -630,6 +660,7 @@ def _row(source, data_date, candidate_result=None, scored=None):
         "quality_adjusted_score": adjusted,
         "wyckoff": scored.get("wyckoff") or {},
         "data_quality": quality,
+        "kline_diagnostics": kline_diagnostic or {},
         "source_evidence": scored.get("source_evidence") or {},
         "sector_memberships": scored.get("sector_memberships") or
         (candidate_result.get("candidate") or {}).get("sector_memberships", []),
@@ -656,6 +687,11 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
         "schema": SCHEMA, "status": "ready" if config["status"] == "ready"
         else "unavailable", "reason": config.get("reason", ""),
         "data_date": data_date, "generated_at": datetime.now().isoformat(),
+        "provisional": (
+            data_date == datetime.now().strftime("%Y-%m-%d")
+            and datetime.now().weekday() < 5
+            and (9, 30) <= (datetime.now().hour, datetime.now().minute) < (15, 10)
+        ),
         "config_path": config["path"], "config_sha256": config["sha256"],
         "items": [],
     }
@@ -676,6 +712,7 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
         candidate = candidate_result.get("candidate") if isinstance(
             candidate_result, dict) else None
         scored = None
+        kline_diagnostics = {}
         if candidate:
             try:
                 rows = analyzer(
@@ -684,7 +721,8 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
                     as_of_date=data_date,
                     capital_expected_date=capital_expected_date or data_date,
                     top=1, min_candidates=1, disable_early_stop=True,
-                    peer_cohorts=candidate_result.get("peer_cohorts"))
+                    peer_cohorts=candidate_result.get("peer_cohorts"),
+                    kline_diagnostics=kline_diagnostics)
                 scored = next((row for row in rows
                                if row.get("code") == entry["code"]), None)
             except Exception as exc:
@@ -692,7 +730,9 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
                     **candidate_result,
                     "error": f"六维分析失败: {type(exc).__name__}",
                 }
-        result["items"].append(_row(entry, data_date, candidate_result, scored))
+        result["items"].append(_row(
+            entry, data_date, candidate_result, scored,
+            kline_diagnostics.get(entry["code"])))
     if any(item["status"] != "ready" for item in result["items"]):
         result["status"] = "degraded"
     if save:

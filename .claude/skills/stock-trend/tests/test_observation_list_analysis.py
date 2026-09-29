@@ -14,6 +14,53 @@ from scans import stock_scanner
 
 
 class ObservationAnalysisTests(unittest.TestCase):
+    def test_missing_kline_records_exact_date_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            yaml_path = Path(tmp) / "observation.yaml"
+            yaml_path.write_text(
+                "observation_list:\n"
+                "  - {code: '301489', date: '2026-09-21', entry_phase: 未记录}\n",
+                encoding="utf-8")
+
+            def builder(codes, _data_date):
+                return {codes[0]: {"candidate": {
+                    "code": codes[0], "ts_code": "301489.SZ",
+                    "name": "思泉新材", "sector_code": "BK1039",
+                }, "sector_status": "ready"}}
+
+            def analyzer(candidates, **kwargs):
+                kwargs["kline_diagnostics"][candidates[0]["code"]] = {
+                    "reason_code": "wrong_trading_date",
+                    "expected_date": "2026-09-29",
+                    "latest_date": "2026-09-28",
+                    "record_count": 0,
+                    "provider": "baostock",
+                }
+                return []
+
+            result = observation.analyze_observation_list(
+                "2026-09-29", yaml_path=yaml_path,
+                candidate_builder=builder, analyzer=analyzer, save=False)
+            row = result["items"][0]
+            self.assertEqual(row["status"], "degraded")
+            self.assertEqual(row["reasons"], [
+                "K 线仅到 2026-09-28，要求 2026-09-29（BaoStock）"])
+            self.assertEqual(row["kline_diagnostics"]["reason_code"],
+                             "wrong_trading_date")
+            result["provisional"] = True
+            rendered = observation.market_regime.render_observation_list_html(result)
+            self.assertIn("盘中临时分析", rendered)
+            self.assertIn("K 线仅到 2026-09-28", rendered)
+            self.assertIn("要求 2026-09-29，最新日期未知",
+                          observation._kline_failure_text({
+                              "reason_code": "fetch_failed",
+                              "expected_date": "2026-09-29",
+                              "provider_attempts": [
+                                  {"source": "eastmoney", "status": "error"},
+                                  {"source": "tencent_a", "status": "empty"},
+                              ],
+                          }))
+
     def test_yaml_order_bad_rows_and_scanner_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             yaml_path = Path(tmp) / "observation.yaml"

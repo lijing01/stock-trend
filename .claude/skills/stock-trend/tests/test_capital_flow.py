@@ -580,6 +580,10 @@ class TestKlineExpectedDateValidation(unittest.TestCase):
                 patch.object(kline_eastmoney, "build_secid", return_value="1.600519"), \
                 patch("core.eastmoney_utils.rotate_em_host",
                       return_value=((stale_records, "贵州茅台"), "push2his.eastmoney.com")), \
+                patch.object(kline_eastmoney, "fetch_tencent_a_stock",
+                             return_value=(stale_records, "贵州茅台")), \
+                patch.object(kline_eastmoney, "fetch_baostock",
+                             return_value=(stale_records, "贵州茅台")), \
                 patch.object(kline_eastmoney, "output_json",
                              side_effect=lambda value, **_: outputs.append(value)), \
                 patch.object(kline_eastmoney, "save_cache") as save:
@@ -594,6 +598,9 @@ class TestKlineExpectedDateValidation(unittest.TestCase):
             "valid": False,
         })
         self.assertEqual(result["data"], [])
+        self.assertEqual(
+            [attempt["status"] for attempt in result["meta"]["provider_attempts"]],
+            ["stale", "stale", "stale"])
         save.assert_not_called()
 
 

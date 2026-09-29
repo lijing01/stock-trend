@@ -1265,7 +1265,11 @@ def render_observation_list_html(state: dict | None = None, *, pending: bool = F
                    "维科夫", "综合 / 质量调整", "维科夫结构", "数据质量", "观察原因")
         status_note = ('<p class="dt" data-observation-status="degraded">部分观察标的数据或资格证据不足，详见各行原因。</p>'
                        if state.get("status") == "degraded" else "")
-        body = (status_note + f'<p class="dt">分析依据日：{_observation_cell(state.get("data_date"))}</p>' +
+        provisional_note = (
+            '<p class="dt" data-observation-provisional="true">盘中临时分析，K 线尚未收盘确认。</p>'
+            if state.get("provisional") else "")
+        body = (status_note + provisional_note +
+                f'<p class="dt">分析依据日：{_observation_cell(state.get("data_date"))}</p>' +
                 '<div class="observation-table-wrap"><table><thead><tr>' +
                 "".join(f"<th>{head}</th>" for head in headers) + "</tr></thead><tbody>" +
                 ("".join(rows) or '<tr><td colspan="13">YAML 观察列表为空</td></tr>') +

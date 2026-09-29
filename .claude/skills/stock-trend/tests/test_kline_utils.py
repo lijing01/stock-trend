@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Regression tests for shared K-line payload and command contracts."""
 
+import json
 import sys
+import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -18,6 +22,8 @@ from core.kline_utils import (  # noqa: E402
     reject_stale_kline_payload,
     validate_kline_coverage,
 )
+from fetchers import kline_eastmoney  # noqa: E402
+from scans import stock_scanner  # noqa: E402
 
 
 class TestKlinePayloadContract(unittest.TestCase):
@@ -103,6 +109,135 @@ class TestKlinePayloadContract(unittest.TestCase):
         payload["data"][-1]["close"] = 9.8
         payload["meta"]["data_source"] = "error"
         self.assertFalse(is_usable_kline_payload(payload))
+
+
+class TestKlineProviderFallback(unittest.TestCase):
+    @staticmethod
+    def _rows(last_date):
+        return [{"trade_date": last_date, "open": 10, "high": 11,
+                 "low": 9, "close": 10.5, "vol": 100}]
+
+    def test_stale_eastmoney_continues_to_current_tencent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kline.json"
+            argv = ["kline_eastmoney.py", "301489.SZ", "--no-cache",
+                    "--expected-date", "2026-09-29", "-o", str(output)]
+            with patch.object(sys, "argv", argv), \
+                    patch("core.eastmoney_utils.rotate_em_host", return_value=(
+                        (self._rows("20260928"), "思泉新材"),
+                        "push2his.eastmoney.com")), \
+                    patch.object(kline_eastmoney, "fetch_tencent_a_stock",
+                         return_value=(self._rows("20260929"), "思泉新材")), \
+                    patch.object(kline_eastmoney, "fetch_baostock",
+                         side_effect=AssertionError("BaoStock should not run")), \
+                    patch.object(kline_eastmoney, "save_cache"):
+                kline_eastmoney.main()
+            payload = json.loads(output.read_text())
+            self.assertEqual(payload["meta"]["data_source"], "tencent_a")
+            self.assertEqual(payload["meta"]["cache_validation"]["latest_date"],
+                             "2026-09-29")
+            self.assertEqual([a["status"] for a in payload["meta"]["provider_attempts"]],
+                             ["stale", "success"])
+
+    def test_all_stale_sources_return_dated_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kline.json"
+            argv = ["kline_eastmoney.py", "301489.SZ", "--no-cache",
+                    "--expected-date", "2026-09-29", "-o", str(output)]
+            with patch.object(sys, "argv", argv), \
+                    patch("core.eastmoney_utils.rotate_em_host", return_value=(
+                        (self._rows("20260928"), "思泉新材"),
+                        "push2his.eastmoney.com")), \
+                    patch.object(kline_eastmoney, "fetch_tencent_a_stock",
+                         return_value=(self._rows("20260927"), "思泉新材")), \
+                    patch.object(kline_eastmoney, "fetch_baostock",
+                         return_value=(self._rows("20260928"), "思泉新材")), \
+                    patch.object(kline_eastmoney, "save_cache"):
+                kline_eastmoney.main()
+            payload = json.loads(output.read_text())
+            self.assertEqual(payload["meta"]["error_type"], "stale_data")
+            self.assertEqual(payload["data"], [])
+            self.assertEqual([a["status"] for a in payload["meta"]["provider_attempts"]],
+                             ["stale", "stale", "stale"])
+            self.assertEqual(payload["meta"]["cache_validation"]["latest_date"],
+                             "2026-09-28")
+
+    def test_current_but_short_eastmoney_continues_to_complete_tencent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kline.json"
+            argv = ["kline_eastmoney.py", "301489.SZ", "--no-cache",
+                    "--expected-date", "2026-09-29", "--min-records", "60",
+                    "-o", str(output)]
+            first = date(2026, 8, 1)
+            complete = [self._rows((first + timedelta(days=i)).strftime("%Y%m%d"))[0]
+                        for i in range(60)]
+            with patch.object(sys, "argv", argv), \
+                    patch("core.eastmoney_utils.rotate_em_host", return_value=(
+                        (self._rows("20260929"), "思泉新材"),
+                        "push2his.eastmoney.com")), \
+                    patch.object(kline_eastmoney, "fetch_tencent_a_stock",
+                         return_value=(complete, "思泉新材")), \
+                    patch.object(kline_eastmoney, "fetch_baostock",
+                         side_effect=AssertionError("BaoStock should not run")), \
+                    patch.object(kline_eastmoney, "save_cache"):
+                kline_eastmoney.main()
+            payload = json.loads(output.read_text())
+            self.assertEqual(payload["meta"]["data_source"], "tencent_a")
+            self.assertEqual(len(payload["data"]), 60)
+            self.assertEqual([a["status"] for a in payload["meta"]["provider_attempts"]],
+                             ["insufficient_bars", "success"])
+
+    def test_all_current_but_short_sources_are_not_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kline.json"
+            argv = ["kline_eastmoney.py", "301489.SZ", "--no-cache",
+                    "--expected-date", "2026-09-29", "--min-records", "60",
+                    "-o", str(output)]
+            short = self._rows("20260929")
+            with patch.object(sys, "argv", argv), \
+                    patch("core.eastmoney_utils.rotate_em_host", return_value=(
+                        (short, "思泉新材"), "push2his.eastmoney.com")), \
+                    patch.object(kline_eastmoney, "fetch_tencent_a_stock",
+                         return_value=(short, "思泉新材")), \
+                    patch.object(kline_eastmoney, "fetch_baostock",
+                         return_value=(short, "思泉新材")), \
+                    patch.object(kline_eastmoney, "save_cache") as save:
+                kline_eastmoney.main()
+            payload = json.loads(output.read_text())
+            self.assertEqual(payload["meta"]["error_type"], "insufficient_data")
+            self.assertEqual(payload["meta"]["usable_record_count"], 1)
+            self.assertEqual(payload["data"], [])
+            save.assert_not_called()
+
+
+class TestScannerKlineRefresh(unittest.TestCase):
+    def test_failed_refresh_preserves_last_good_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "301489" / "kline.json"
+            cache.parent.mkdir()
+            first = date(2026, 7, 31)
+            rows = [{"trade_date": (first + timedelta(days=i)).strftime("%Y%m%d"),
+                     "open": 10, "high": 11, "low": 9, "close": 10.5}
+                    for i in range(60)]
+            old = {"meta": {"data_source": "eastmoney"}, "data": rows}
+            cache.write_text(json.dumps(old))
+
+            def failed_fetch(cmd, **_kwargs):
+                output = Path(cmd[cmd.index("-o") + 1])
+                output.write_text(json.dumps({
+                    "meta": {"data_source": "error", "error_type": "stale_data",
+                             "stale_data_source": "baostock",
+                             "cache_validation": {"latest_date": "2026-09-28"}},
+                    "data": [],
+                }))
+                return {"success": True, "error": "", "stderr": ""}
+
+            with patch.object(stock_scanner, "CACHE_DIR", tmp), \
+                    patch.object(stock_scanner, "run_script", side_effect=failed_fetch):
+                result = stock_scanner._fetch_kline(
+                    "301489.SZ", as_of_date="2026-09-29")
+            self.assertEqual(json.loads(cache.read_text()), old)
+            self.assertEqual(result["meta"]["error_type"], "stale_data")
 
 
 class TestKlineCommandContract(unittest.TestCase):
