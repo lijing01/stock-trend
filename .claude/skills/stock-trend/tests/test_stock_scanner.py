@@ -1372,6 +1372,91 @@ class TestScoreWyckoff(unittest.TestCase):
 
 
 class TestRunPhase2Funnel(unittest.TestCase):
+    def test_two_pass_reuses_valid_kline_and_wyckoff_without_reusing_score(self):
+        item = _make_candidate("610990")
+        kline = _make_dated_kline(60, item["ts_code"], "20260916")
+        kline["meta"]["data_source"] = "fixture"
+        capital = {
+            "meta": {"data_source": "fixture", "fetch_time": "20260916-160000"},
+            "data": [{"date": "20260916", "main_net_inflow": 1000000}],
+        }
+        artifacts = {}
+        metrics = {}
+        health = sc.RunSourceHealth()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(sc, "_fetch_kline", return_value=kline) as fetch, \
+                patch.object(sc, "analyze_kline_dict",
+                             return_value=_wk()) as analyze, \
+                patch.object(sc, "_fetch_capital_flow",
+                             return_value=capital) as fetch_capital, \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            first = sc.run_phase2(
+                [item], enable_wyckoff=True, as_of_date="2026-09-16",
+                defer_enrichment=True, kline_artifacts=artifacts,
+                metrics=metrics, source_health=health)
+            second = sc.run_phase2(
+                [item], enable_wyckoff=True, as_of_date="2026-09-16",
+                disable_early_stop=True, kline_artifacts=artifacts,
+                metrics=metrics, source_health=health)
+            baseline = sc.run_phase2(
+                [item], enable_wyckoff=True, as_of_date="2026-09-16",
+                disable_early_stop=True,
+                source_health=sc.RunSourceHealth())
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(fetch.call_count, 2)  # first pass + baseline
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(health.snapshot()["kline"]["logical_live_requests"], 1)
+        self.assertEqual(metrics["kline_reused_count"], 1)
+        self.assertEqual(metrics["wyckoff_reused_count"], 1)
+        self.assertGreaterEqual(fetch_capital.call_count, 1)
+        self.assertNotEqual(first[0]["composite_score"],
+                            second[0]["composite_score"])
+        for field in ("composite_score", "quality_adjusted_score",
+                      "wyckoff", "data_quality", "source_evidence"):
+            self.assertEqual(second[0][field], baseline[0][field], field)
+
+    def test_two_pass_retries_stale_kline_instead_of_reusing_it(self):
+        item = _make_candidate("610989")
+        stale = _make_dated_kline(60, item["ts_code"], "20260915")
+        fresh = _make_dated_kline(60, item["ts_code"], "20260916")
+        artifacts = {}
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patch.object(sc, "CACHE_DIR", tmpdir), \
+                patch.object(sc, "_fetch_kline",
+                             side_effect=[stale, fresh]) as fetch, \
+                patch.object(sc, "analyze_kline_dict",
+                             return_value=_wk()) as analyze, \
+                patch.object(sc, "_fetch_capital_flow", return_value=None), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            sc.run_phase2([item], enable_wyckoff=True,
+                          as_of_date="2026-09-16", defer_enrichment=True,
+                          kline_artifacts=artifacts)
+            second = sc.run_phase2([item], enable_wyckoff=True,
+                                   as_of_date="2026-09-16",
+                                   kline_artifacts=artifacts)
+
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(len(second), 1)
+
+    def test_failed_buy_point_does_not_retain_kline_artifact(self):
+        item = _make_candidate("610988")
+        kline = _make_dated_kline(60, item["ts_code"], "20260916")
+        kline["meta"]["data_source"] = "fixture"
+        artifacts = {}
+        with patch.object(sc, "_fetch_kline", return_value=kline), \
+                patch.object(sc, "analyze_kline_dict", return_value=_wk(
+                    phase="distribution", sub="lpsy")):
+            result = sc.run_phase2(
+                [item], enable_wyckoff=True, as_of_date="2026-09-16",
+                defer_enrichment=True, kline_artifacts=artifacts)
+
+        self.assertEqual(result, [])
+        self.assertEqual(artifacts, {})
+
     def test_stale_kline_skips_capital_provider_without_health_failure(self):
         candidate = _make_candidate("610991")
         health = sc.RunSourceHealth()

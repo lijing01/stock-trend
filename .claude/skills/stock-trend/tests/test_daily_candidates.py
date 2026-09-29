@@ -431,6 +431,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             "report_seconds": 0.0, "total_seconds": 1.1,
             "batch_count": 1, "raw_candidate_count": 2,
             "unique_candidate_count": 1, "wyckoff_pass_count": 1,
+            "kline_reused_count": 3, "wyckoff_reused_count": 3,
             "final_candidate_count": 1, "final_valid_count": 1,
             "actionable_count": 1,
             "capital_priority_count": 36,
@@ -478,10 +479,12 @@ class TestRecommendationPolicy(unittest.TestCase):
             _emit_performance_summary(performance)
 
         self.assertIn("## 性能与数据源审计", report)
+        self.assertIn("本轮复用**: K线 3 | 维科夫 3", report)
         self.assertEqual(report.count("## 性能与数据源审计"), 1)
         self.assertIn("板块成分", report)
         self.assertIn("sector_membership", report)
         self.assertIn("性能与数据源审计", html)
+        self.assertIn("kline_reused=3 | wyckoff_reused=3", html)
         self.assertEqual(html.count("性能与数据源审计"), 1)
         self.assertIn("sector_membership", html)
         self.assertIn("板块覆盖率", report)
@@ -493,6 +496,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("二轮补齐 6（启动 4，有效 3，截止未启动 2）", report)
         self.assertIn("capital_topup_selected=6", html)
         self.assertIn("[performance]", stderr.getvalue())
+        self.assertIn("kline_reused=3 wyckoff_reused=3", stderr.getvalue())
         self.assertIn("capital_topup_selected=6", stderr.getvalue())
         self.assertIn("K线前置跳过 3", report)
         self.assertIn("capital_tushare_permission_denied=1", html)
@@ -2407,6 +2411,7 @@ class TestRecommendationPolicy(unittest.TestCase):
 
     def test_scan_can_defer_enrichment_to_the_global_report_scope(self):
         phase2_kwargs = []
+        artifacts = {}
 
         def fake_gather(batch, **_kwargs):
             return {"candidates": [{
@@ -2426,14 +2431,16 @@ class TestRecommendationPolicy(unittest.TestCase):
             result = dc.scan_sectors(
                 ["BK1"], min_candidates=1,
                 sector_context={"BK1": {"sector_actionable": True}},
-                defer_enrichment=True)
+                defer_enrichment=True, kline_artifacts=artifacts)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(len(phase2_kwargs), 1)
         self.assertTrue(phase2_kwargs[0]["defer_enrichment"])
+        self.assertIs(phase2_kwargs[0]["kline_artifacts"], artifacts)
 
     def test_global_enrichment_covers_report_scope_and_buffer(self):
         scored = []
+        artifacts = {}
         for index in range(50):
             item = candidate(f"{600000 + index:06d}")
             item["ts_code"] = f"{item['code']}.SH"
@@ -2454,7 +2461,8 @@ class TestRecommendationPolicy(unittest.TestCase):
             enriched, scope_codes = dc.enrich_global_report_scope(
                 scored, top=30, min_candidates=20, min_score=50,
                 as_of_date="2026-08-06",
-                capital_expected_date="2026-08-06", metrics=metrics)
+                capital_expected_date="2026-08-06", metrics=metrics,
+                kline_artifacts=artifacts)
 
         self.assertEqual(len(calls), 1)
         candidates, kwargs = calls[0]
@@ -2462,6 +2470,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(kwargs["top"], 30)
         self.assertEqual(kwargs["min_candidates"], 20)
         self.assertTrue(kwargs["disable_early_stop"])
+        self.assertIs(kwargs["kline_artifacts"], artifacts)
         self.assertEqual(metrics["global_enrichment_scope_count"], 42)
         selected_codes = {item["code"] for item in candidates}
         self.assertEqual(scope_codes, selected_codes)

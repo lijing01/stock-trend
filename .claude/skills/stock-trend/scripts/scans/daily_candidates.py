@@ -494,7 +494,8 @@ _PERFORMANCE_PHASE_FIELDS = (
 _PERFORMANCE_FUNNEL_FIELDS = (
     "sector_universe_count", "sector_qualified_count",
     "sector_expanded_count", "batch_count", "raw_candidate_count",
-    "unique_candidate_count", "wyckoff_pass_count", "final_candidate_count",
+    "unique_candidate_count", "wyckoff_pass_count", "kline_reused_count",
+    "wyckoff_reused_count", "final_candidate_count",
     "output_candidate_count", "final_valid_count", "data_eligible_count",
     "data_rejected_count", "unenriched_observation_count",
     "actionable_count",
@@ -946,6 +947,10 @@ def _performance_markdown(performance):
         for label, field in phase_labels)
     lines.extend([
         "",
+        "**本轮复用**: "
+        f"K线 {performance.get('kline_reused_count', 0)} | "
+        f"维科夫 {performance.get('wyckoff_reused_count', 0)}",
+        "",
         "**板块漏斗**: "
         f"评估 {performance.get('sector_universe_count', 0)} → "
         f"热度合格 {performance.get('sector_qualified_count', 0)} → "
@@ -1172,7 +1177,9 @@ def _performance_html(performance):
         f"output={performance.get('output_candidate_count', performance.get('final_candidate_count', 0))}→"
         f"eligible={performance.get('data_eligible_count', 0)}→"
         f"rejected={performance.get('data_rejected_count', 0)}→"
-        f"actionable={performance.get('actionable_count', 0)}"
+        f"actionable={performance.get('actionable_count', 0)} | "
+        f"kline_reused={performance.get('kline_reused_count', 0)} | "
+        f"wyckoff_reused={performance.get('wyckoff_reused_count', 0)}"
     )
     gate_audit = performance.get("gate_audit") or {}
     gate_labels = {
@@ -1361,6 +1368,8 @@ def _emit_performance_summary(performance):
         f"raw={performance.get('raw_candidate_count', 0)} "
         f"unique={performance.get('unique_candidate_count', 0)} "
         f"wyckoff={performance.get('wyckoff_pass_count', 0)} "
+        f"kline_reused={performance.get('kline_reused_count', 0)} "
+        f"wyckoff_reused={performance.get('wyckoff_reused_count', 0)} "
         f"output={performance.get('output_candidate_count', performance.get('final_candidate_count', 0))} "
         f"data_eligible={performance.get('data_eligible_count', 0)} "
         f"data_rejected={performance.get('data_rejected_count', 0)} "
@@ -2221,7 +2230,7 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
                  policy=None, return_research_population=False,
                  scan_mode="exploratory", defer_enrichment=False,
-                 prior_lps_records=None):
+                 prior_lps_records=None, kline_artifacts=None):
     """Scan the bounded sector universe, optionally completing a fixed scope."""
     metrics = metrics if metrics is not None else {}
     formal_scope = scan_mode == "post_close_final"
@@ -2431,13 +2440,14 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     min_score=min_score,
                     defer_enrichment=defer_enrichment,
                     include_phase_d_lps_context=True,
-                    include_formal_event_history=True)
+                    include_formal_event_history=True,
+                    kline_artifacts=kline_artifacts)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
                         "source_health", "metrics", "capital_expected_date",
                         "top", "min_candidates", "min_score",
                         "defer_enrichment", "include_phase_d_lps_context",
-                        "include_formal_event_history")):
+                        "include_formal_event_history", "kline_artifacts")):
                     raise
                 try:
                     scored = run_phase2(
@@ -2455,6 +2465,15 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
             scored_codes = {
                 item.get("code") for item in scored if isinstance(item, dict)
             }
+            if isinstance(kline_artifacts, dict):
+                retained_ts_codes = {
+                    item.get("ts_code") for item in scored
+                    if isinstance(item, dict)
+                }
+                for candidate in new_candidates:
+                    if candidate.get("ts_code") not in retained_ts_codes:
+                        kline_artifacts.pop(
+                            (candidate.get("ts_code"), as_of_date), None)
             omitted = {
                 candidate.get("code") for candidate in new_candidates
                 if candidate.get("historical_lps_included")
@@ -2569,7 +2588,7 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
                                min_score=50, as_of_date="",
                                capital_expected_date="", policy=None,
                                priority_bonuses=None, source_health=None,
-                               metrics=None):
+                               metrics=None, kline_artifacts=None):
     """Run one enrichment queue over the global report scope plus buffer."""
     scored = list(scored or [])
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -2593,7 +2612,8 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
         top=top, min_candidates=min_candidates, min_score=min_score,
         disable_early_stop=True,
         include_phase_d_lps_context=True,
-        include_formal_event_history=True)
+        include_formal_event_history=True,
+        kline_artifacts=kline_artifacts)
     original_by_code = {
         item.get("code"): item for item in scored if item.get("code")
     }
@@ -5071,6 +5091,7 @@ def main():
         args, "max_sector_expansion", DEFAULT_MAX_SECTOR_EXPANSION)
     post_close_final = bool(getattr(args, "post_close_final", False))
     scan_mode = "post_close_final" if post_close_final else "exploratory"
+    kline_artifacts = {} if post_close_final else None
     scan_expansion_limit = (
         DEFAULT_MAX_SECTOR_EXPANSION if post_close_final
         else max_sector_expansion)
@@ -5170,6 +5191,7 @@ def main():
         return_research_population=True,
         defer_enrichment=True,
         prior_lps_records=prior_lps_records,
+        kline_artifacts=kline_artifacts,
     )
     # Compatibility for injected legacy scanner stubs in downstream callers.
     if isinstance(scan_result, tuple):
@@ -5183,7 +5205,10 @@ def main():
         min_score=args.min_score, as_of_date=expected_date,
         capital_expected_date=capital_expected_date, policy=policy,
         priority_bonuses=active_policy["priority_bonuses"],
-        source_health=source_health, metrics=performance)
+        source_health=source_health, metrics=performance,
+        kline_artifacts=kline_artifacts)
+    if kline_artifacts is not None:
+        kline_artifacts.clear()
     event_index = build_daily_index(
         scored, expected_date,
         scope_complete=(scan_mode == "post_close_final"

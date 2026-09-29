@@ -2271,7 +2271,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                defer_enrichment=False, disable_early_stop=False,
                require_wyckoff_gate=True, peer_cohorts=None,
                include_phase_d_lps_context=False,
-               include_formal_event_history=False, kline_diagnostics=None):
+               include_formal_event_history=False, kline_diagnostics=None,
+               kline_artifacts=None):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2349,6 +2350,27 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
 
     print("  Fetching K-line data...", file=sys.stderr)
     kline_started = time.monotonic()
+    reusable_analysis = {}
+    fetch_candidates = []
+    for candidate in candidates:
+        ts_code = candidate["ts_code"]
+        key = (ts_code, as_of_date)
+        artifact = (kline_artifacts.get(key)
+                    if isinstance(kline_artifacts, dict) and as_of_date
+                    else None)
+        payload = artifact.get("kline") if isinstance(artifact, dict) else None
+        analysis = artifact.get("analysis") if isinstance(artifact, dict) else None
+        if (not _kline_usable(payload)
+                or (enable_wyckoff and not isinstance(analysis, dict))):
+            fetch_candidates.append(candidate)
+            continue
+        kline_data[ts_code] = copy.deepcopy(payload)
+        _record_source_evidence(
+            "kline", ts_code, artifact.get("source_evidence"))
+        if enable_wyckoff:
+            reusable_analysis[ts_code] = copy.deepcopy(analysis)
+        metrics_ref["kline_reused_count"] = (
+            metrics_ref.get("kline_reused_count", 0) + 1)
 
     def _fetch_one_kline(candidate):
         ts_code = candidate["ts_code"]
@@ -2391,7 +2413,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 usable=_kline_usable)
 
         fetched = bounded_source_map(
-            "kline", candidates, source_health, _live_kline,
+            "kline", fetch_candidates, source_health, _live_kline,
             lambda candidate: _cache_fetch(
                 _fetch_kline, candidate["ts_code"], as_of_date=as_of_date),
             source_health.kline_deadline,
@@ -2414,7 +2436,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         with ThreadPoolExecutor(
                 max_workers=min(worker_count, MAX_IN_FLIGHT["kline"])) as pool:
             futures = [pool.submit(_fetch_one_kline, candidate)
-                       for candidate in candidates]
+                       for candidate in fetch_candidates]
             for future in as_completed(futures):
                 ts_code, payload, _ = future.result()
                 kline_data[ts_code] = _truncate_kline_as_of(payload, as_of_date)
@@ -2471,9 +2493,24 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         if enable_wyckoff:
             if len(records) < WYCKOFF_MIN_BARS:
                 continue
-            analysis = analyze_kline_dict(kline)
+            analysis = reusable_analysis.get(ts_code)
+            if analysis is None:
+                analysis = analyze_kline_dict(kline)
+            else:
+                metrics_ref["wyckoff_reused_count"] = (
+                    metrics_ref.get("wyckoff_reused_count", 0) + 1)
             if require_wyckoff_gate and not wyckoff_gate_pass(analysis):
                 continue
+            if (ts_code not in reusable_analysis
+                    and isinstance(kline_artifacts, dict) and as_of_date
+                    and _kline_usable(kline)
+                    and isinstance(analysis, dict)):
+                kline_artifacts[(ts_code, as_of_date)] = {
+                    "kline": copy.deepcopy(kline),
+                    "source_evidence": copy.deepcopy(
+                        source_evidence["kline"].get(ts_code, {})),
+                    "analysis": copy.deepcopy(analysis),
+                }
             analysis_by_ts[ts_code] = analysis
         eligible_candidates.append(candidate)
     metrics_ref["wyckoff_seconds"] = metrics_ref.get("wyckoff_seconds", 0.0) + (
