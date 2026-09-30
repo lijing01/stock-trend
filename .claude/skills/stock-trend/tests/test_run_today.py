@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from bridge import run_today as job
 
 RUN_SCRIPT = job._run_script
+REAL_MONITOR = job.evolution.monitoring_snapshot
 
 
 BASELINE = {"status": "baseline", "experiment_id": "baseline",
@@ -462,6 +463,292 @@ class TodayTests(unittest.TestCase):
                                            status="running", started_at="2026-09-09T16:01:00+08:00")
             status = today_background.read_status(task["task_id"], root=root / "background")
             self.assertEqual(status["status"], "running")
+
+    def test_close_timeout_is_persisted_and_monitor_keeps_own_budget(self):
+        from bridge import today_background as bg
+        task = bg.ensure_task({"as_of": "2026-09-09", "job_root": str(self.root / "jobs"),
+                               "budget_seconds": 7}, root=self.root / "background")
+        from contextlib import contextmanager
+        budgets = []
+        @contextmanager
+        def timer(seconds):
+            budgets.append(seconds)
+            yield
+        with patch.object(bg, "_stage_timeout", timer), \
+             patch.object(bg.evolution, "run_close", side_effect=TimeoutError), \
+             patch.object(bg.evolution, "run_weekly") as weekly, \
+             patch.object(bg.evolution, "monitoring_snapshot", return_value=
+                          bg.evolution._package("monitor", {"status": "healthy"})) as monitor:
+            result = bg.run_task(task["task_id"], root=self.root / "background")
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["stages"]["close"]["status"], "timed_out")
+        self.assertEqual(budgets[0], 7)
+        self.assertEqual(budgets[-1], 7)
+        weekly.assert_not_called()
+        monitor.assert_called_once()
+        latest = bg.evolution._close_run_days(self.root / "jobs")["2026-09-09"]
+        self.assertEqual(latest["status"], "failed")
+        self.assertEqual(latest["failure_class"], "runtime")
+
+    def test_background_invalid_configuration_is_explicit(self):
+        from bridge import today_background as bg
+        for manifest, reason in [({"schema_version": "unknown"}, "unsupported_schema"),
+                                  ({"schema_version": "today-recommendation-background/v2"},
+                                   "invalid_budget_config"),
+                                  ({"budget_seconds": True}, "invalid_budget_config")]:
+            with self.subTest(manifest=manifest):
+                task = bg.ensure_task(manifest, root=self.root / "background")
+                self.assertEqual(task["status"], "launch_failed")
+                self.assertEqual(task["reason"], reason)
+        self.assertFalse((self.root / "background").exists())
+
+    def test_background_close_persistence_failure_blocks_monitor(self):
+        from bridge import today_background as bg
+        task = bg.ensure_task({"as_of": "2026-09-09", "job_root": str(self.root / "jobs")},
+                              root=self.root / "background")
+        with patch.object(bg.evolution, "run_close", return_value=
+                          bg.evolution._package("close", {"status": "completed"})), \
+             patch.object(bg.evolution, "_save", side_effect=OSError), \
+             patch.object(bg.evolution, "monitoring_snapshot") as monitor:
+            result = bg.run_task(task["task_id"], root=self.root / "background")
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "current_close_persistence_failed")
+        self.assertEqual(result["stages"]["monitor"]["reason"], "current_close_unavailable")
+        monitor.assert_not_called()
+
+    def test_background_timer_escapes_exception_handlers(self):
+        import time
+        from bridge import today_background as bg
+        caught = False
+        with self.assertRaises(bg._StageDeadline):
+            with bg._stage_timeout(.005):
+                try:
+                    time.sleep(.03)
+                except Exception:
+                    caught = True
+        self.assertFalse(caught)
+
+    def _background_fixture(self, *, v2=False, **changes):
+        from bridge import today_background as bg
+        manifest = {"as_of": "2026-09-09", "trading_sessions": ["2026-09-09"],
+                    "job_root": str(self.root / "jobs"), "budget_seconds": 30}
+        if v2:
+            manifest.update({"schema_version": "today-recommendation-background/v2",
+                             "lock_wait_budget_seconds": 30, "close_budget_seconds": 300,
+                             "weekly_budget_seconds": 300, "monitor_budget_seconds": 300})
+        manifest.update(changes)
+        task = bg.ensure_task(manifest, root=self.root / "background")
+        return bg, task, self.root / "background", manifest
+
+    def test_weekly_or_monitor_timeout_retries_only_unfinished_stage(self):
+        for failed_stage in ("weekly", "monitor"):
+            with self.subTest(stage=failed_stage), tempfile.TemporaryDirectory() as root:
+                from bridge import today_background as bg
+                root = Path(root)
+                background = root / "background"
+                task = bg.ensure_task({"as_of": "2026-09-09", "job_root": str(root / "jobs")},
+                                      root=background)
+                calls = {"close": 0, "weekly": 0, "monitor": 0}
+                def run(name):
+                    calls[name] += 1
+                    if name == failed_stage and calls[name] == 1:
+                        raise TimeoutError
+                    return bg.evolution._package(name, {"status": "healthy" if name == "monitor" else "completed"})
+                with patch.object(bg.evolution, "run_close", side_effect=lambda *_: run("close")), \
+                     patch.object(bg.evolution, "run_weekly", side_effect=lambda *_: run("weekly")), \
+                     patch.object(bg.evolution, "monitoring_snapshot", side_effect=lambda **_: run("monitor")):
+                    first = bg.run_task(task["task_id"], root=background)
+                    second = bg.run_task(task["task_id"], root=background)
+                self.assertEqual(first["status"], "partial")
+                self.assertEqual(second["status"], "completed")
+                self.assertEqual(calls, {"close": 1, "weekly": 2 if failed_stage == "weekly" else 1,
+                                         "monitor": 2 if failed_stage == "monitor" else 1})
+
+    def test_close_retry_changes_monitor_dependency_and_latest_attempt(self):
+        bg, task, root, _ = self._background_fixture()
+        calls = []
+        def close(*_):
+            calls.append("close")
+            if calls.count("close") == 1:
+                raise TimeoutError
+            return bg.evolution._package("close", {"status": "completed"})
+        with patch.object(bg.evolution, "run_close", side_effect=close), \
+             patch.object(bg.evolution, "run_weekly", return_value=bg.evolution._package("weekly", {"status": "completed"})), \
+             patch.object(bg.evolution, "monitoring_snapshot", side_effect=lambda **_:
+                          calls.append("monitor") or bg.evolution._package("monitor", {"status": "healthy"})):
+            first = bg.run_task(task["task_id"], root=root)
+            second = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(calls, ["close", "monitor", "close", "monitor"])
+        self.assertNotEqual(first["stages"]["close"]["persistence"]["job_id"],
+                            second["stages"]["close"]["persistence"]["job_id"])
+        self.assertEqual(bg.evolution._close_run_days(self.root / "jobs")["2026-09-09"]["status"], "completed")
+        checkpoint = bg._read(root / task["task_id"] / "checkpoints.json")
+        self.assertEqual(checkpoint["stages"]["monitor"]["input"]["close_execution_job_id"],
+                         second["stages"]["close"]["persistence"]["job_id"])
+
+    def test_core_attempt_identity_prevents_same_success_reusing_old_job(self):
+        bg, task, root, _ = self._background_fixture()
+        directory = root / task["task_id"]
+        statuses = iter(["completed", "failed", "completed"])
+        success = bg.evolution._package("close", {"status": "completed"})
+        def close(*_):
+            status = next(statuses)
+            return success if status == "completed" else bg.evolution._package("close", {"status": "failed"})
+        with patch.object(bg.evolution, "run_close", side_effect=close), \
+             patch.object(bg.evolution, "run_weekly", return_value=bg.evolution._package("weekly", {"status": "completed"})), \
+             patch.object(bg.evolution, "monitoring_snapshot", return_value=bg.evolution._package("monitor", {"status": "healthy"})):
+            first = bg.run_task(task["task_id"], root=root)
+            checkpoints = bg._read(directory / "checkpoints.json")
+            del checkpoints["stages"]["close"]
+            bg._write(directory / "checkpoints.json", checkpoints)
+            second = bg.run_task(task["task_id"], root=root)
+            third = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(second["status"], "partial")
+        self.assertNotEqual(first["stages"]["close"]["persistence"]["job_id"],
+                            third["stages"]["close"]["persistence"]["job_id"])
+        self.assertEqual(bg.evolution._close_run_days(self.root / "jobs")["2026-09-09"]["status"], "completed")
+
+    def test_lock_wait_does_not_consume_stage_budgets_and_timeout_is_visible(self):
+        bg, task, root, _ = self._background_fixture(v2=True)
+        from contextlib import contextmanager
+        budgets = []
+        @contextmanager
+        def timer(seconds):
+            budgets.append(seconds)
+            yield
+        original_lock = bg._lock
+        clock = [0.0]
+        def waited_lock(root, deadline):
+            self.assertEqual(deadline, 30)
+            clock[0] = 29.9
+            return original_lock(root, deadline)
+        with patch.object(bg.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(bg, "_lock", side_effect=waited_lock), \
+             patch.object(bg, "_stage_timeout", timer), \
+             patch.object(bg.evolution, "run_close", return_value=bg.evolution._package("close", {"status": "completed"})), \
+             patch.object(bg.evolution, "run_weekly", return_value=bg.evolution._package("weekly", {"status": "completed"})), \
+             patch.object(bg.evolution, "monitoring_snapshot", return_value=bg.evolution._package("monitor", {"status": "healthy"})):
+            result = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(budgets, [300, 300, 300])
+        self.assertEqual(result["status"], "completed")
+        with patch.object(bg, "_lock", side_effect=TimeoutError("postprocess_lock_timeout")), \
+             patch.object(bg.evolution, "monitoring_snapshot") as monitor:
+            result = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(result["status"], "timed_out")
+        self.assertEqual(result["stages"]["monitor"]["reason"], "postprocess_lock_unavailable")
+        monitor.assert_not_called()
+
+    def test_existing_bad_manifest_read_and_run_fail_explicitly(self):
+        bg, task, root, manifest = self._background_fixture()
+        manifest["schema_version"] = "unknown"
+        bg._write(root / task["task_id"] / "manifest.json", manifest)
+        self.assertEqual(bg.read_status(task["task_id"], root=root)["reason"], "unsupported_schema")
+        result = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "unsupported_schema")
+
+    def test_v2_pid_grace_uses_full_budget_and_legacy_manifest_is_immutable(self):
+        bg, task, root, manifest = self._background_fixture(v2=True)
+        bg.update_status(task["task_id"], root=root, status="running", pid=123,
+                         started_at="2026-09-09T16:00:00+08:00")
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 9, 9, 16, 6, tzinfo=tz)
+        with patch.object(bg, "datetime", Clock), patch.object(bg, "_pid_alive", return_value=False):
+            self.assertEqual(bg.read_status(task["task_id"], root=root)["status"], "running")
+        bg.update_status(task["task_id"], root=root, started_at="2026-09-09T15:00:00+08:00")
+        with patch.object(bg, "datetime", Clock), patch.object(bg, "_pid_alive", return_value=False):
+            self.assertEqual(bg.read_status(task["task_id"], root=root)["status"], "interrupted")
+        legacy = {"budget_seconds": 17}
+        frozen = copy.deepcopy(legacy)
+        self.assertEqual(bg._budgets(legacy)["monitor"], 17)
+        self.assertEqual(legacy, frozen)
+
+    def test_background_weekly_success_reused_across_tasks(self):
+        bg, task, root, manifest = self._background_fixture()
+        weekly = bg.evolution._package("weekly", {"status": "completed", "as_of": "2026-09-08",
+                                                  "input": {"research_snapshots": 1}})
+        bg.evolution._save(weekly, self.root / "jobs")
+        with patch.object(bg.evolution, "run_close", return_value=bg.evolution._package("close", {"status": "completed"})), \
+             patch.object(bg.evolution, "run_weekly") as run_weekly, \
+             patch.object(bg.evolution, "monitoring_snapshot", return_value=bg.evolution._package("monitor", {"status": "healthy"})) as monitor:
+            first = bg.run_task(task["task_id"], root=root)
+            other = bg.ensure_task({**manifest, "report_sha256": "another"}, root=root)
+            second = bg.run_task(other["task_id"], root=root)
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(first["stages"]["weekly"]["reason"], "already_completed_this_week")
+        run_weekly.assert_not_called()
+        self.assertEqual(monitor.call_count, 2)
+
+    def test_real_monitor_observes_current_close_timeout_without_policy_recovery(self):
+        bg, task, root, _ = self._background_fixture()
+        bg.evolution._save(bg.evolution._package("close", {"as_of": "2026-09-09", "status": "completed"}),
+                           self.root / "jobs")
+        with patch.object(bg.evolution, "run_close", side_effect=TimeoutError), \
+             patch.object(bg.evolution, "monitoring_snapshot", REAL_MONITOR), \
+             patch.object(bg.evolution, "load_candidate_signal_items", return_value=[]), \
+             patch.object(bg.evolution, "load_active_policy", return_value=BASELINE), \
+             patch.object(bg.evolution, "recover_policy_incident") as recover:
+            result = bg.run_task(task["task_id"], root=root)
+        monitor = result["stages"]["monitor"]
+        self.assertEqual(monitor["data_failure_rate"], 1.0)
+        self.assertEqual(result["status"], "partial")
+        recover.assert_not_called()
+
+    def test_bad_budget_types_and_missing_v2_fields_do_not_queue(self):
+        from bridge import today_background as bg
+        valid = {"schema_version": "today-recommendation-background/v2",
+                 "lock_wait_budget_seconds": 30, "close_budget_seconds": 300,
+                 "weekly_budget_seconds": 300, "monitor_budget_seconds": 300}
+        for field in valid.keys() - {"schema_version"}:
+            bad = dict(valid)
+            del bad[field]
+            self.assertEqual(bg.ensure_task(bad, root=self.root / "background")["reason"], "invalid_budget_config")
+        for value in (0, -1, True, 1.5, "300", None, float("inf")):
+            self.assertEqual(bg.ensure_task({**valid, "monitor_budget_seconds": value}, root=self.root / "background")["status"], "launch_failed")
+        self.assertFalse((self.root / "background").exists())
+
+    def test_failed_close_package_write_also_blocks_monitor(self):
+        bg, task, root, _ = self._background_fixture()
+        with patch.object(bg.evolution, "run_close", side_effect=TimeoutError), \
+             patch.object(bg.evolution, "_save", side_effect=OSError), \
+             patch.object(bg.evolution, "monitoring_snapshot") as monitor:
+            result = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "current_close_persistence_failed")
+        monitor.assert_not_called()
+
+    def test_legacy_monitor_checkpoint_and_corrupt_close_reference_are_not_reused(self):
+        bg, task, root, manifest = self._background_fixture()
+        with patch.object(bg.evolution, "run_close", return_value=bg.evolution._package("close", {"status": "completed"})), \
+             patch.object(bg.evolution, "run_weekly", return_value=bg.evolution._package("weekly", {"status": "completed"})), \
+             patch.object(bg.evolution, "monitoring_snapshot", return_value=bg.evolution._package("monitor", {"status": "healthy"})) as monitor:
+            first = bg.run_task(task["task_id"], root=root)
+            directory = root / task["task_id"]
+            checkpoints = bg._read(directory / "checkpoints.json")
+            old_inputs = {"manifest": {key: value for key, value in bg._read(directory / "manifest.json").items()
+                                      if key != "requested_at"}, "stage": "monitor", "close": None}
+            checkpoints["stages"]["monitor"]["input_sha256"] = job.content_sha256(old_inputs)
+            bg._write(directory / "checkpoints.json", checkpoints)
+            bg.run_task(task["task_id"], root=root)
+            self.assertEqual(monitor.call_count, 2)
+            Path(first["stages"]["close"]["persistence"]["path"]).write_text("{}")
+            with patch.object(bg.evolution, "run_close", return_value=bg.evolution._package("close", {"status": "completed"})) as close:
+                bg.run_task(task["task_id"], root=root)
+            close.assert_called_once()
+            self.assertEqual(monitor.call_count, 3)
+
+    def test_background_without_deadline_support_fails_explicitly(self):
+        from types import SimpleNamespace
+        bg, task, root, _ = self._background_fixture()
+        with patch.object(bg, "signal", SimpleNamespace()), \
+             patch.object(bg.evolution, "run_close") as close:
+            result = bg.run_task(task["task_id"], root=root)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["reason"], "background_deadline_unsupported")
+        close.assert_not_called()
 
     def test_shared_series_loader_deduplicates_benchmark_and_sector(self):
         from analysis import recommendation_attribution as attribution

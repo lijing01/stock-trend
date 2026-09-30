@@ -312,6 +312,76 @@ class TestRecommendationPolicy(unittest.TestCase):
         )
         self.assertEqual(performance["final_valid_count"], 1)
 
+    def test_final_valid_count_respects_frozen_capital_proof_policy(self):
+        item = candidate("capital-policy", adjusted_score=70)
+        item["sector_capital_evidence"] = "unverified"
+        buckets = {
+            "actionable": [], "waiting_trigger": [], "observation": [item],
+        }
+        permissive = {
+            "mode": "actionable", "max_recommendations": 5,
+            "reasons": [], "requires_sector_capital_proof": False,
+        }
+        proof_required = dict(
+            permissive, requires_sector_capital_proof=True)
+
+        permissive_performance = _complete_performance(
+            {}, None, [item], buckets, min_score=50, total_seconds=1.0,
+            policy=permissive)
+        required_performance = _complete_performance(
+            {}, None, [item], buckets, min_score=50, total_seconds=1.0,
+            policy=proof_required)
+
+        self.assertEqual(permissive_performance["final_valid_count"], 1)
+        self.assertEqual(required_performance["final_valid_count"], 0)
+
+        item["sector_capital_evidence"] = "positive_verified"
+        verified_performance = _complete_performance(
+            {}, None, [item], buckets, min_score=50, total_seconds=1.0,
+            policy=proof_required)
+        self.assertEqual(verified_performance["final_valid_count"], 1)
+
+    def test_final_valid_count_respects_waiting_trigger_policy(self):
+        item = candidate("wait-policy", adjusted_score=70)
+        item["wyckoff"]["entry_timing"] = {
+            "status": "entry_wait_pullback",
+            "reason_code": "entry_wait_pullback",
+            "executable": False,
+            "entry_timing_score": 60,
+        }
+        actionable = {
+            "mode": "actionable", "max_recommendations": 5, "reasons": [],
+        }
+        waiting = {
+            "mode": "waiting_trigger", "max_recommendations": 2,
+            "reasons": [],
+        }
+
+        actionable_performance = _complete_performance(
+            {}, None, [item], classify_candidates([item], actionable),
+            min_score=50, total_seconds=1.0, policy=actionable)
+        waiting_performance = _complete_performance(
+            {}, None, [item], classify_candidates([item], waiting),
+            min_score=50, total_seconds=1.0, policy=waiting)
+
+        self.assertEqual(actionable_performance["final_valid_count"], 0)
+        self.assertEqual(waiting_performance["final_valid_count"], 1)
+
+    def test_final_valid_count_is_before_recommendation_limit(self):
+        items = [candidate(str(index), adjusted_score=70)
+                 for index in range(6)]
+        policy = {
+            "mode": "actionable", "max_recommendations": 5, "reasons": [],
+        }
+        buckets = classify_candidates(items, policy)
+
+        performance = _complete_performance(
+            {}, None, items, buckets, min_score=50, total_seconds=1.0,
+            policy=policy)
+
+        self.assertEqual(performance["final_valid_count"], 6)
+        self.assertEqual(len(buckets["actionable"]), 5)
+
     def test_complete_performance_preserves_degraded_scan_evidence(self):
         performance = {
             "degradation_reasons": ["resonance_error:RuntimeError"],
@@ -5076,6 +5146,10 @@ class TestRecommendationPolicy(unittest.TestCase):
              }]), \
              patch.object(dc, "scan_sectors", side_effect=fake_scan), \
              patch.object(
+                 dc, "_complete_performance",
+                 wraps=dc._complete_performance,
+             ) as complete_performance, \
+             patch.object(
                  dc, "save_snapshot_if_official",
                  side_effect=lambda source: (
                      __import__("core.recommendation_snapshot",
@@ -5147,6 +5221,9 @@ class TestRecommendationPolicy(unittest.TestCase):
         })
         self.assertEqual(deep["meta"]["tracking"]["status"], "unchanged")
         self.assertNotIn("_phase_d_lps_context", snapshot_text)
+        completion_policy = complete_performance.call_args.kwargs["policy"]
+        self.assertEqual(completion_policy["mode"], "actionable")
+        self.assertEqual(completion_policy["max_recommendations"], 5)
 
     def test_main_allows_intraday_candidate_without_official_snapshot(self):
         item = candidate("000001")

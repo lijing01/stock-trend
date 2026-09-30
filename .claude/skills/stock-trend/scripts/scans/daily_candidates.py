@@ -569,7 +569,7 @@ def _record_failed_batch(metrics, batch, exc):
 
 
 def _complete_performance(performance, source_health, candidates, buckets,
-                          min_score, total_seconds):
+                          min_score, total_seconds, *, policy=None):
     """Finalize the additive public performance contract from run evidence."""
     completed = performance
     skipped_codes = completed.pop(
@@ -609,7 +609,8 @@ def _complete_performance(performance, source_health, candidates, buckets,
     # stage used in the repair plan and downstream dashboards.
     completed["output_candidate_count"] = len(candidates)
     completed["final_valid_count"] = sum(
-        _is_final_valid_candidate(item, min_score) for item in candidates)
+        _is_final_valid_candidate(item, min_score, policy)
+        for item in candidates)
     completed["data_eligible_count"] = sum(
         bool(item.get("data_quality", {}).get("eligible", False))
         for item in candidates)
@@ -5335,7 +5336,7 @@ def main():
     elapsed = time.time() - start
     performance = _complete_performance(
         performance, source_health, candidates, buckets, args.min_score,
-        time.monotonic() - monotonic_start)
+        time.monotonic() - monotonic_start, policy=policy)
     tracking = _save_recommendation_snapshot(
         candidates, sector_codes, policy, buckets, expected_date, performance,
         market_regime=regime)

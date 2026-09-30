@@ -87,6 +87,32 @@ def _package(kind, content):
     return {"job_id": content_sha256(body)[:16], "content_sha256": content_sha256(body), "content": body}
 
 
+def weekly_completed_run(job_root, as_of):
+    """Return a verified non-empty completed weekly run from the same ISO week."""
+    as_of = _day(as_of)
+    week = date.fromisoformat(as_of).isocalendar()[:2]
+    for path in sorted((Path(job_root) / "weekly").glob("*.json")):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+            content = run["content"]
+            if not isinstance(content, dict) or not isinstance(content.get("input"), dict):
+                continue
+            prior = date.fromisoformat(content["as_of"])
+            digest = content_sha256(content)
+            if (content.get("kind") == "weekly" and content.get("status") == "completed"
+                    and prior.isoformat() <= as_of and prior.isocalendar()[:2] == week
+                    and content["input"].get("research_snapshots", 0) > 0
+                    and run.get("content_sha256") == digest
+                    and run.get("job_id") == digest[:16]):
+                return {"job_id": run["job_id"], "content_sha256": digest,
+                        "as_of": prior.isoformat(),
+                        "persistence": {"status": "reused", "path": str(path),
+                                        "job_id": run["job_id"]}}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
 def _load_publish_evidence(value):
     """Load structured v2 release evidence from a JSON file or JSON argument."""
     try:

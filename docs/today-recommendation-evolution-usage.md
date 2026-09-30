@@ -44,7 +44,9 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_today.py \
   --resume <task_id> --json
 ```
 
-后台目录 `.cache/stock-trend/evolution/background/<task_id>/` 保存 `manifest.json`、`status.json`、`checkpoints.json`、`worker.log` 和 `result.json`。后台使用冻结的评价日期/交易日列表；每日消融、核心后处理、成熟评价分别使用 10 秒、300 秒、20 秒预算。超出预算会写入 `timed_out` 或 `partial`，可通过 `--resume` 继续未完成阶段；已完成且输入摘要未变的阶段会复用检查点。close 同一次运行共享沪深300、板块和个股序列，避免对每条历史记录重复发起相同资源请求。
+后台目录 `.cache/stock-trend/evolution/background/<task_id>/` 保存 `manifest.json`、`status.json`、`checkpoints.json`、`worker.log` 和 `result.json`。后台使用冻结的评价日期/交易日列表；默认锁等待预算为 30 秒，每日消融为 10 秒，`close`、`weekly`、`monitor` 各自拥有 300 秒，成熟评价为 20 秒，配置预算合计 960 秒。该合计不包含没有平台级定时器保护的少量磁盘收尾时间，因此不是严格的全生命周期硬时限；候选报告仍会先返回，后台最长等待时间可能比旧任务更长。`STOCK_TREND_BACKGROUND_BUDGET` 设置的是三个核心阶段各自的预算，例如设置为 `120` 表示 `close`、`weekly`、`monitor` 各 120 秒，不是三者共享 120 秒。
+
+核心阶段超时或失败会写入对应任务记录和检查点；`close` 或 `weekly` 失败后，只要本次 `close` 终态已可靠持久化，`monitor` 仍使用自己的完整预算运行，任务整体标为 `partial`。如果本次 `close` 记录无法持久化，`monitor` 会以 `current_close_unavailable` 跳过，避免读取更早的成功记录。锁等待超时会写为 `postprocess_lock_timeout`，不会伪造监控成功。可通过 `--resume` 继续未完成、超时或依赖已变化的阶段；已完成且输入摘要未变的阶段会复用检查点，`weekly` 和 `monitor` 同时绑定已持久化的本次 `close` job id。旧版 manifest 仍可续跑，其原 `budget_seconds` 会在内存中解释为三个核心阶段各自的预算，不改写历史 manifest 或 task id。close 同一次运行共享沪深300、板块和个股序列，避免对每条历史记录重复发起相同资源请求。
 
 ## 投资胜率证据链修复：日常如何生效
 
@@ -77,7 +79,7 @@ P0–P5 是一次性的工程修复阶段，不会在每次报告后从头执行
   audit --start-date 2026-09-08 --as-of 2026-09-23 --json
 ```
 
-查看研究结果时，区分正式推荐、冻结研究候选和观察池的分母。20 日主窗口达到至少 20 个成熟日期、100 个去重有效事件，且每项消融比较覆盖率达到 90% 之前，`continue_accumulating` 表示继续积累证据，不表示胜率已提高。消融报告同时给出绝对收益、沪深300超额、胜率、MAE、日期分布和市场分层；正式门控仍按市场、数据质量、板块持续性、资金和买点健康逐项执行。发布实验策略需满足完整样本外证据并显式人工审核，不会随日常运行自动发布。
+查看研究结果时，区分正式推荐、冻结研究候选和观察池的分母。`final_valid_count` 表示本次输出候选集合中，按同一次冻结 policy 通过最终资格谓词的数量，统计发生在推荐名额截取之前；它不等于 `actionable` 与 `waiting_trigger` 的条数之和。弱市下正式推荐可以为零，而 `final_valid_count` 仍可非零。20 日主窗口达到至少 20 个成熟日期、100 个去重有效事件，且每项消融比较覆盖率达到 90% 之前，`continue_accumulating` 表示继续积累证据，不表示胜率已提高。消融报告同时给出绝对收益、沪深300超额、胜率、MAE、日期分布和市场分层；正式门控仍按市场、数据质量、板块持续性、资金和买点健康逐项执行。发布实验策略需满足完整样本外证据并显式人工审核，不会随日常运行自动发布。
 
 修复范围与验收门槛见 [投资胜率证据链修复计划](../.omx/plans/2026-09-23-win-rate-evidence-repair.md)。
 

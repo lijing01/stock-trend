@@ -1,4 +1,5 @@
 """P4 orchestration, publication, and recovery contracts."""
+import json
 import sys
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from analysis.evolution_job import (_monitoring_coverage, monitoring_snapshot,
-                                    run_close, run_weekly)
+                                    run_close, run_weekly, weekly_completed_run)
 from backtesting.recommendation_experiments import _bootstrap, default_experiment
 from core.candidate_research_snapshot import build_research_snapshot, save_research_snapshot
 from core.evolution_registry import (load_active_policy, publish_experiment, register_experiment,
@@ -638,6 +639,72 @@ class T(unittest.TestCase):
                              attribution_root=Path(root) / "evaluations", dry_run=True)
         self.assertEqual(run["content"]["input"]["research_snapshots"], 1)
         self.assertEqual(run["content"]["as_of"], "2026-09-07")
+
+    def test_weekly_completed_run_returns_verified_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            weekly_root = Path(root) / "weekly"
+            weekly_root.mkdir(parents=True)
+            content = {
+                "schema_version": "recommendation-evolution-job/v1",
+                "kind": "weekly",
+                "as_of": "2026-09-08",
+                "status": "completed",
+                "input": {"research_snapshots": 2},
+            }
+            digest = content_sha256(content)
+            source = {
+                "job_id": digest[:16],
+                "content_sha256": digest,
+                "content": content,
+            }
+            (weekly_root / f"{source['job_id']}.json").write_text(
+                json.dumps(source), encoding="utf-8")
+
+            found = weekly_completed_run(Path(root), "2026-09-10")
+
+            self.assertEqual(found["persistence"], {
+                "status": "reused",
+                "path": str(weekly_root / f"{source['job_id']}.json"),
+                "job_id": digest[:16],
+            })
+
+        self.assertEqual(found["job_id"], digest[:16])
+        self.assertEqual(found["content_sha256"], digest)
+        self.assertEqual(found["as_of"], "2026-09-08")
+
+    def test_weekly_completed_run_ignores_unusable_records(self):
+        with tempfile.TemporaryDirectory() as root:
+            weekly_root = Path(root) / "weekly"
+            weekly_root.mkdir(parents=True)
+            cases = [
+                ("failed", "2026-09-08", 2, False, False),
+                ("empty", "2026-09-08", 0, False, False),
+                ("future", "2026-09-11", 2, False, False),
+                ("prior-week", "2026-09-04", 2, False, False),
+                ("bad-digest", "2026-09-08", 2, True, False),
+                ("bad-job-id", "2026-09-08", 2, False, True),
+            ]
+            for name, run_as_of, snapshots, corrupt_digest, corrupt_job_id in cases:
+                content = {
+                    "schema_version": "recommendation-evolution-job/v1",
+                    "kind": "weekly",
+                    "as_of": run_as_of,
+                    "status": "failed" if name == "failed" else "completed",
+                    "input": {"research_snapshots": snapshots},
+                }
+                digest = content_sha256(content)
+                payload = {
+                    "job_id": "corrupt" if corrupt_job_id else digest[:16],
+                    "content_sha256": "corrupt" if corrupt_digest else digest,
+                    "content": content,
+                }
+                (weekly_root / f"{name}.json").write_text(
+                    json.dumps(payload), encoding="utf-8")
+            (weekly_root / "invalid.json").write_text("{", encoding="utf-8")
+
+            found = weekly_completed_run(Path(root), "2026-09-10")
+
+        self.assertIsNone(found)
 
     def test_cold_start_offline_loop_stops_before_release_and_monitor_is_explicitly_insufficient(self):
         with tempfile.TemporaryDirectory() as root:

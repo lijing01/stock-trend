@@ -91,22 +91,7 @@ def _should_use_post_close_final(now):
 
 
 def _weekly_completed(job_root, as_of):
-    week = date.fromisoformat(as_of).isocalendar()[:2]
-    for path in (job_root / "weekly").glob("*.json"):
-        try:
-            run = json.loads(path.read_text(encoding="utf-8"))
-            content = run["content"]
-            if not isinstance(content, dict) or not isinstance(content.get("input"), dict):
-                continue
-            prior = date.fromisoformat(content["as_of"])
-            if (content.get("kind") == "weekly" and content.get("status") == "completed"
-                    and prior.isoformat() <= as_of and prior.isocalendar()[:2] == week
-                    and (content.get("input") or {}).get("research_snapshots", 0) > 0
-                    and run.get("content_sha256") == content_sha256(content)):
-                return True
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-    return False
+    return bool(evolution.weekly_completed_run(job_root, as_of))
 
 
 def _job_stage(kind, callback, job_root):
@@ -130,21 +115,31 @@ def _launch_background(output, *, now, as_of, sessions, state_root, postprocess_
     """Create/reuse a detached post-process task after the report is ready."""
     from bridge import today_background
 
+    try:
+        budget = int(os.environ.get("STOCK_TREND_BACKGROUND_BUDGET", "300"))
+        if budget <= 0:
+            raise ValueError("invalid_budget_config")
+    except ValueError:
+        return {"status": "launch_failed", "reason": "invalid_budget_config"}
     manifest = {
-        "schema_version": "today-recommendation-background/v1",
+        "schema_version": "today-recommendation-background/v2",
         "requested_at": now.isoformat(),
         "as_of": as_of,
         "trading_sessions": list(sessions),
         "report_sha256": _report_digest(output),
         "state_root": str(Path(state_root).resolve()),
         "job_root": str((Path(state_root) / "jobs").resolve()),
-        "budget_seconds": int(os.environ.get("STOCK_TREND_BACKGROUND_BUDGET", "300")),
+        "budget_seconds": budget,
+        "lock_wait_budget_seconds": 30,
+        "close_budget_seconds": budget,
+        "weekly_budget_seconds": budget,
+        "monitor_budget_seconds": budget,
         "factor_daily_budget_seconds": 10,
         "factor_evaluation_budget_seconds": 20,
         "research_eligible": _should_use_post_close_final(now),
     }
     task = today_background.ensure_task(manifest, root=postprocess_root)
-    if task["status"] in {"completed", "partial", "failed", "timed_out", "interrupted"}:
+    if task["status"] in {"completed", "partial", "failed", "timed_out", "interrupted", "launch_failed"}:
         return task
     if task.get("status") == "running":
         return task
