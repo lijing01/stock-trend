@@ -17,6 +17,56 @@ python3 .claude/skills/stock-trend/scripts/bridge/run_today.py --json
 5. 使用真实交易日执行 monitor。接口或契约异常触发现有安全恢复时必须说明并通知；普通统计退化仅标记人工复核。
 6. `factor_ablation_daily` 只读取同一次正式扫描的冻结研究快照，验证真实选择范围、六维分数逐项舍入、质量因子和买点奖励后，在同一资格层内分别移除一个维度重排。它只生成观察用影子 Top 1/3/5，不改变正式权重、门槛、报告或发布指针。结果写入 `.cache/stock-trend/evolution/factor_ablation/daily/<依据日>/`。
 7. `factor_ablation_evaluation` 严格按 `(record_id, research_snapshot_sha256, evaluation_contract_id)` 关联前向结果；5 日仅作质量排查，20 日为主窗口，60 日作方向确认。样本未达到 20 个成熟日期和 100 个去重事件时返回 `continue_accumulating`，不触发调权或发布。旧快照缺真实选择范围时返回 `scope_unverified`。
+
+### 独立 LPS 交易评估
+
+离线读取截至日之前最新一份正式冻结研究快照，先验证快照关联、选择范围及基线复放，再生成独立报告：
+
+```bash
+bash tools/python.sh .claude/skills/stock-trend/scripts/analysis/trade_assessment.py --as-of YYYY-MM-DD --json --save
+```
+
+可加 `--context-file <JSON>` 提供可审计的当时决策证据与后续原始行情。
+完整字段及来源约束见 [独立交易评估输入契约](trade-assessment-input.md)。
+输入 schema 为 `trade-assessment-context/v1`，`opportunities` 以
+`record_id@research_snapshot_sha256` 为键；每项分为 `decision_context` 与 `market_data`。
+不能按代码关联历史，不能使用当前行情或当前证券资料回填当时决策。
+`decision_context` 包含真实市场日历、当时证券元数据、冻结目标、费用、事件核验及价格尺度；
+`market_data` 包含真实日历身份/覆盖、原始 OHLC/成交量/涨跌停证据、当时规则、调整映射及基准。
+缺失证据保留“数据不足”，不会强行生成交易计划。
+
+计划状态为“可制定交易计划 / 等待触发 / 不可计划 / 数据不足”，同时保留原正式分桶。
+主板普通 A 股才支持 `open_only_v1`；仅下一有效交易日开盘一次机会，保护性止损按触价触发。
+20/60 日持有策略及参考/压力成本分别保存；佣金最低金额、卖出税和滑点均可按现金流复算。
+成本是研究假设，不是账户实际费率；单笔机会可重叠，不相加为组合收益，不输出组合年化/最大回撤。
+未来行情缺失、未成交、无法退出分别保留，不以零收益填缺口。
+
+`--save` 创建独立 `reports/trade-assessment-<截至日>-<输入哈希>.md/.html/.json`
+及 `.cache/stock-trend/evolution/shadow/trade_assessment/` 的不可覆盖结果。
+依据日可能早于截至日，报告必须明确标示。此入口不接入今日推荐后台预算，
+不修改候选报告排序、正式快照或发布指针；前向收集、周度共同机会配对及升级判断属于后续接入阶段。
+
+### LPS 距离独立研究
+
+显式离线运行，不接入上述后台预算，不抓取当前行情回填历史：
+
+```bash
+bash tools/python.sh .claude/skills/stock-trend/scripts/analysis/lps_distance_research.py --as-of YYYY-MM-DD --json --save
+```
+
+`--contract-id` 可指定冻结候选信号评价合同，默认沿用现有 5/10/20/60 日零成本信号合同。
+`--save` 只在 `.cache/stock-trend/evolution/shadow/lps_distance/` 写入带内容身份的独立结果，
+不更新正式快照、推荐政策或发布指针；同一输入重复执行应幂等。
+
+研究验证真实选样范围、清单、内容哈希及正式快照关联。LPS 必须已确认、年龄不超过 3、
+事件保持有效，具有有效 ATR、触发价、结构失效价及最终收盘来源证据。扫描在收盘后生成，
+但使用盘中缓存 K 线时仍为证据不足；不能将兼容默认零距离解释为贴近触发位。
+描述分组为负距离、0–0.5 ATR、0.5–1 ATR、大于 1 ATR、证据不足，边界不是买入阈值。
+只在相同正式分桶及质量分档内置换合格非负 LPS 的原有槽位，其余槽位固定；不扩池补位。
+Top 3 / 20 日为主评价，其他 Top K 与窗口只描述。结果精确关联记录、快照和评价合同，
+按各窗口最早事件去重，分别报告未到期、缺失和冲突；缺失收益不填零。
+达到样本与覆盖门槛也只支持进一步信号研究。此入口不模拟成交或成本，不能据此声称净收益
+提高，也不会自动升级正式排序。历史回放与冻结之后的前向评价必须区分。
 8. 周度诊断按新闻分数档与风险级别统计成熟样本的 5/10/20 日结果、沪深300超额收益、胜率与 MAE。新闻层是否提升准确性必须由前向样本回答；证据不足时明确“继续积累”，不得凭单日案例转正。`--no-news` 仅用于诊断降级，`--news-file <JSON>` 可注入带发布时间和来源的可复现证据。
 
 需要诊断或兼容旧的同步行为时，显式传 `--postprocess sync`。后台任务状态保存在 `.cache/stock-trend/evolution/background/<task_id>/`，包括冻结输入、状态、日志和最终结果；报告成功不代表后台研究已完成。核心阶段的超时和失败会写入任务记录与检查点；close或weekly失败不占用monitor的独立预算，任务可进入`partial`并用`--resume`继续。若本次close记录无法持久化，monitor以`current_close_unavailable`跳过，不能读取更早成功记录；锁等待超时以`postprocess_lock_timeout`结束并允许续跑。旧任务继续按原manifest恢复，不迁移或改写历史任务身份。

@@ -1795,6 +1795,10 @@ def run_daily_recommendation_tests():
         from test_research_events import run_research_event_tests
         from test_recommendation_diagnostics import run_recommendation_diagnostics_tests
         from test_recommendation_experiments import run_recommendation_experiment_tests
+        from test_lps_distance_research import run_lps_distance_research_tests
+        from test_lps_trade_assessment import run_lps_trade_assessment_tests
+        from test_open_only_trade_simulation import run_open_only_trade_simulation_tests
+        from test_trade_assessment import run_trade_assessment_tests
         from test_evolution_job import run_evolution_job_tests
         from test_run_today import run_today_tests
         from test_evolution_storage import run_evolution_storage_tests
@@ -1816,6 +1820,10 @@ def run_daily_recommendation_tests():
             run_research_event_tests,
             run_recommendation_diagnostics_tests,
             run_recommendation_experiment_tests,
+            run_lps_distance_research_tests,
+            run_lps_trade_assessment_tests,
+            run_open_only_trade_simulation_tests,
+            run_trade_assessment_tests,
             run_evolution_job_tests,
             run_today_tests,
             run_evolution_storage_tests,
