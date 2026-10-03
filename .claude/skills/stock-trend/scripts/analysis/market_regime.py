@@ -1307,6 +1307,15 @@ def _atomic_write_text(path: Path, content: str) -> None:
 def update_observation_list_html(html_path, *, pending: bool = False, data_date=None,
                                  artifact_path=None, yaml_path=None) -> dict:
     """Update only the marked observation block in an existing daily-review HTML."""
+    from core.report_file import report_lock
+    with report_lock(html_path):
+        return _update_observation_list_html_locked(
+            html_path, pending=pending, data_date=data_date,
+            artifact_path=artifact_path, yaml_path=yaml_path)
+
+
+def _update_observation_list_html_locked(html_path, *, pending=False, data_date=None,
+                                       artifact_path=None, yaml_path=None):
     path = Path(html_path)
     original = path.read_text(encoding="utf-8")
     start = original.find(OBSERVATION_BLOCK_START)
@@ -1399,6 +1408,10 @@ def generate_report(ctx: dict) -> str:
         lines.append("- —")
     lines.append("")
 
+    if ctx.get("us_market_summary") is not None:
+        from reporting.us_market_summary import render_markdown
+        lines.append(render_markdown(ctx["us_market_summary"]))
+        lines.append("")
     lines.append("---")
     lines.append(f"> *数据来源: 东方财富/腾讯 + AKShare | {DISCLAIMER}*")
     return "\n".join(lines)
@@ -1773,6 +1786,11 @@ def main():
         save_context(ctx)
 
     now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Independent report context: never saved as an A-share component/history entry.
+    from bridge.us_review import collect_summary
+    ctx = dict(ctx)
+    ctx["us_market_summary"] = collect_summary(
+        ctx.get("data_date") or "", no_refresh=args.no_refresh)
 
     if args.json:
         # 精简 JSON 供 Agent 消费
@@ -1834,6 +1852,10 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
         observation_state = load_observation_analysis(ctx.get("data_date") or "")
     observation_html = render_observation_list_html(
         observation_state, pending=observation_pending)
+    us_html = ""
+    if ctx.get("us_market_summary") is not None:
+        from reporting.us_market_summary import render_html
+        us_html = render_html(ctx["us_market_summary"])
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1869,6 +1891,7 @@ ul{{padding-left:20px;line-height:1.8}}
 <p><strong>最强前{TOP_SECTOR_COUNT}:</strong></p><ul>{top or '<li>—</li>'}</ul>
 <p><strong>最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
 
+{us_html}
 {observation_html}
 
 <footer><p class="disc">数据来源: 东方财富 + AKShare | {DISCLAIMER}</p></footer>

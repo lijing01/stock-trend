@@ -1,0 +1,37 @@
+schema_version: us-market-watchlist/v1
+version: '2026-10-03'
+indices:
+  - {symbol: SPY, name: 标普500 ETF, sector: 大盘}
+  - {symbol: QQQ, name: 纳斯达克100 ETF, sector: 大盘}
+  - {symbol: DIA, name: 道琼斯工业平均 ETF, sector: 大盘}
+  - {symbol: IWM, name: 罗素2000 ETF, sector: 大盘}
+sectors:
+  - {symbol: XLK, name: 科技, sector: 科技}
+  - {symbol: XLC, name: 通信服务, sector: 通信服务}
+  - {symbol: XLY, name: 可选消费, sector: 可选消费}
+  - {symbol: XLP, name: 必需消费, sector: 必需消费}
+  - {symbol: XLE, name: 能源, sector: 能源}
+  - {symbol: XLF, name: 金融, sector: 金融}
+  - {symbol: XLV, name: 医疗, sector: 医疗}
+  - {symbol: XLI, name: 工业, sector: 工业}
+  - {symbol: XLB, name: 材料, sector: 材料}
+  - {symbol: XLRE, name: 房地产, sector: 房地产}
+  - {symbol: XLU, name: 公用事业, sector: 公用事业}
+stocks:
+  - {symbol: AAPL, name: 苹果, sector: 科技}
+  - {symbol: MSFT, name: 微软, sector: 科技}
+  - {symbol: NVDA, name: 英伟达, sector: 半导体}
+  - {symbol: AVGO, name: 博通, sector: 半导体}
+  - {symbol: AMD, name: 超威半导体, sector: 半导体}
+  - {symbol: GOOGL, name: Alphabet, sector: 通信服务}
+  - {symbol: META, name: Meta, sector: 通信服务}
+  - {symbol: AMZN, name: 亚马逊, sector: 可选消费}
+  - {symbol: TSLA, name: 特斯拉, sector: 可选消费}
+  - {symbol: JPM, name: 摩根大通, sector: 金融}
+  - {symbol: XOM, name: 埃克森美孚, sector: 能源}
+  - {symbol: LLY, name: 礼来, sector: 医疗}
+  - {symbol: CAT, name: 卡特彼勒, sector: 工业}
+  - {symbol: FCX, name: 自由港麦克莫兰, sector: 材料}
+  - {symbol: WMT, name: 沃尔玛, sector: 必需消费}
+  - {symbol: NEE, name: 新纪元能源, sector: 公用事业}
+  - {symbol: PLD, name: 普洛斯, sector: 房地产}
