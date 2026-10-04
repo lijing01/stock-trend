@@ -1,6 +1,7 @@
 """Independent US report context must preserve A-share scoring and updates."""
 
 import copy
+import io
 import json
 import sys
 import tempfile
@@ -10,15 +11,83 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
+from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from bridge.us_review import collect_summary
+from bridge.us_review import collect_summary, resolve_anchor
 from analysis import market_regime
 from reporting import us_market_summary as reporting
 
 
 class USReviewIntegrationTests(unittest.TestCase):
+    def test_calendar_write_failure_only_degrades_us_collection(self):
+        with tempfile.TemporaryDirectory() as root, patch(
+                "bridge.us_review.atomic_write_text", side_effect=OSError("calendar disk failure")), patch(
+                "fetchers.sector_data._load_authoritative_trading_dates",
+                return_value={"2026-09-30", "2026-10-09"}):
+            result = collect_summary("2026-09-30", anchor_mode="completed", cache_dir=root)
+        self.assertEqual(result["data_quality"], "unavailable")
+        self.assertIn("calendar disk failure", result["errors"]["collection"])
+
+    def test_calendar_preparation_error_is_visible_and_score_preserved(self):
+        ctx = {"data_date": "2026-09-30", "generated_at": "2026-10-04 16:00:00",
+               "regime": {"score": 50, "label": "弱势"}, "components": {},
+               "amount_yi": 10000, "zt": {}, "top_sectors": [], "bottom_sectors": []}
+        summary = {"schema_version": "us-market-summary/v2", "basis_date": "2026-09-30",
+                   "status": "unavailable", "data_quality": "unavailable", "errors": {}}
+        original = copy.deepcopy(ctx)
+        with patch.object(sys, "argv", ["market_regime.py", "--json", "--no-html"]), patch(
+                "bridge.us_review.resolve_anchor", side_effect=OSError("calendar disk failure")), patch(
+                "bridge.us_review.collect_summary", return_value=summary), patch.object(
+                market_regime, "collect_context", return_value=ctx), patch.object(
+                market_regime, "should_save_history", return_value=False), patch.object(
+                market_regime, "save_context"), redirect_stdout(io.StringIO()):
+            market_regime.main()
+        self.assertEqual(ctx, original)
+        self.assertEqual(summary["errors"]["calendar_preparation"], "OSError: calendar disk failure")
+
+    def test_completed_anchor_morning_and_cache_contract(self):
+        config = {"config_sha256": "fixture", "indices": [
+            {"symbol": "SPY", "name": "SPY", "sector": "index"}], "sectors": [], "stocks": []}
+        payload = {"provider": "fixture", "rows": {"SPY": [
+            {"date": "2026-09-28", "adj_close": 100},
+            {"date": "2026-09-29", "adj_close": 102}]}, "errors": {}}
+        capture = datetime.fromisoformat("2026-09-29T16:00:00+08:00")
+        cutoff = datetime.fromisoformat("2026-09-30T09:00:00+08:00")
+        with tempfile.TemporaryDirectory() as root:
+            with patch("bridge.us_review._observed_now", return_value=capture), patch(
+                    "fetchers.sector_data._load_authoritative_trading_dates",
+                    return_value={"2026-09-28", "2026-09-29", "2026-09-30", "2026-10-09"}):
+                resolve_anchor(capture, root)
+            with patch("analysis.us_market_summary.load_watchlist", return_value=config), patch(
+                    "bridge.us_review._observed_now", return_value=cutoff), patch(
+                    "fetchers.us_market.fetch_us_market", return_value=payload), patch(
+                    "fetchers.sector_data._load_authoritative_trading_dates", side_effect=AssertionError("network")):
+                result = collect_summary("2026-09-30", as_of=cutoff, cache_dir=root,
+                                         anchor_mode="completed", calendar_prepared=True)
+            self.assertEqual(result["basis_date"], "2026-09-30")
+            self.assertEqual(result["a_share_anchor_date"], "2026-09-29")
+            self.assertEqual(result["latest_completed_session"], "2026-09-29")
+            self.assertEqual(result["groups"]["indices"][0]["daily_pct"], 2)
+            with patch("analysis.us_market_summary.load_watchlist", return_value=config), patch(
+                    "fetchers.us_market.fetch_us_market", side_effect=AssertionError("network")), patch(
+                    "fetchers.sector_data._load_authoritative_trading_dates", side_effect=AssertionError("network")):
+                cached = collect_summary("2026-09-30", as_of=cutoff.replace(hour=10),
+                                         cache_dir=root, no_refresh=True, anchor_mode="completed")
+                self.assertEqual(cached["source_status"], "cached")
+                after_close = collect_summary("2026-09-30", as_of=cutoff.replace(hour=16),
+                                         cache_dir=root, no_refresh=True, anchor_mode="completed")
+                self.assertEqual(after_close["data_quality"], "unavailable")
+                pointer = next((Path(root) / "us_market").glob("*.json"))
+                stored = json.loads(pointer.read_text())
+                for field, value in (("schema_version", "us-market-summary/v1"),
+                                     ("frozen_at", "2026-10-01T00:00:00+08:00")):
+                    pointer.write_text(json.dumps(dict(stored, **{field: value})))
+                    rejected = collect_summary("2026-09-30", as_of=cutoff.replace(hour=10),
+                                         cache_dir=root, no_refresh=True, anchor_mode="completed")
+                    self.assertEqual(rejected["data_quality"], "unavailable")
+
     def test_observation_and_us_updates_do_not_lose_each_other(self):
         entered = threading.Event()
         release = threading.Event()
@@ -68,7 +137,7 @@ class USReviewIntegrationTests(unittest.TestCase):
                    "rows": {}, "errors": {}}
         cutoff = datetime(2026, 10, 3, 17, tzinfo=ZoneInfo("Asia/Shanghai"))
         with tempfile.TemporaryDirectory() as directory:
-            with patch("fetchers.us_market.fetch_us_market", return_value=payload) as fetch:
+            with patch("bridge.us_review._observed_now", return_value=cutoff), patch("fetchers.us_market.fetch_us_market", return_value=payload) as fetch:
                 result = collect_summary("2026-09-30", as_of=cutoff, cache_dir=directory)
                 self.assertNotEqual(result.get("errors", {}).get("collection"), "no_qualified_us_cache")
                 fetch.assert_called_once()

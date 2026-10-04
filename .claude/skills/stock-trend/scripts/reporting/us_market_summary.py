@@ -33,6 +33,16 @@ _STATUS_LABELS = {
     "missing": "数据缺失",
     "error": "异常",
 }
+_ANCHOR_STATUS_LABELS = {
+    "qualified": "已核验",
+    "verified": "已核验",
+    "degraded": "降级核验",
+    "legacy": "历史口径",
+    "legacy_basis": "历史口径",
+    "explicit": "显式锚点",
+    "unavailable": "不可用",
+    "unknown": "未核验",
+}
 _NYSE_CALENDAR_URL = "https://www.nyse.com/trade/hours-calendars"
 _SECTOR_SOURCE_URL = (
     "https://www.ssga.com/us/en/intermediary/capabilities/equities/"
@@ -108,8 +118,52 @@ def _md(value, default: str = "—") -> str:
 
 
 def _status(summary: Mapping) -> tuple[str, str]:
-    raw = _plain(summary.get("data_quality") or summary.get("status"), "unavailable")
+    status = _plain(summary.get("status"), "").lower()
+    raw = "empty" if status == "empty" else _plain(
+        summary.get("data_quality") or summary.get("status"), "unavailable"
+    )
     return raw, _STATUS_LABELS.get(raw.lower(), raw)
+
+
+def _anchor_status(summary: Mapping) -> tuple[str, str]:
+    evidence = _mapping(summary.get("anchor_evidence"))
+    raw = _plain(
+        summary.get("anchor_qualification") or evidence.get("status"),
+        "unknown",
+    ).lower()
+    return raw, _ANCHOR_STATUS_LABELS.get(raw, raw)
+
+
+def _legacy_artifact(summary: Mapping) -> bool:
+    return _plain(summary.get("schema_version"), "") in {
+        "", "us-market-summary/v1",
+    }
+
+
+def _anchor_date(summary: Mapping) -> object:
+    value = summary.get("a_share_anchor_date")
+    if value not in (None, ""):
+        return value
+    return summary.get("basis_date") if _legacy_artifact(summary) else None
+
+
+def _latest_sessions(summary: Mapping) -> tuple[object, object]:
+    latest = summary.get("latest_completed_session")
+    if latest in (None, "") and _legacy_artifact(summary):
+        latest = summary.get("actual_end_session")
+    previous = (
+        summary.get("latest_previous_session") or summary.get("previous_session")
+    )
+    return latest, previous
+
+
+def _anchor_reason(summary: Mapping) -> object:
+    evidence = _mapping(summary.get("anchor_evidence"))
+    return summary.get("anchor_reason") or evidence.get("reason") or evidence.get("source")
+
+
+def _anchor_digest(summary: Mapping) -> object:
+    return _mapping(summary.get("anchor_evidence")).get("evidence_sha256")
 
 
 def _sorted_performance(rows: Sequence[Mapping]) -> list[Mapping]:
@@ -148,7 +202,7 @@ def _symbol_url(symbol) -> str:
 
 def _narrative(summary: Mapping) -> list[str]:
     if _plain(summary.get("status"), "").lower() == "empty":
-        return ["从A股依据日锚点到本次截止时刻，没有新增的已完成美股常规交易时段。"]
+        return ["区间无新增交易日；仍展示最近已完成美股交易日的单日涨跌。"]
     indices = {str(row.get("symbol", "")).upper(): row for row in _rows(summary, "indices")}
     market_bits = []
     for symbol in ("SPY", "QQQ"):
@@ -178,9 +232,20 @@ def _narrative(summary: Mapping) -> list[str]:
 
 def _html_daily_details(summary: Mapping, groups: Sequence[tuple[str, Sequence[Mapping]]]) -> str:
     detail_rows = []
+    empty_interval = _plain(summary.get("status"), "").lower() == "empty"
     for group_name, rows in groups:
         for row in rows:
             symbol = _h(row.get("symbol"))
+            if empty_interval:
+                detail_rows.append(
+                    f"<tr><td>{_h(group_name)}</td><td>{symbol}</td><td>{_h(row.get('latest_previous_session') or row.get('previous_session'))}（前一交易日）</td>"
+                    f"<td>{_h(_price(row.get('previous_price')))}</td><td>—</td></tr>"
+                )
+                detail_rows.append(
+                    f"<tr><td>{_h(group_name)}</td><td>{symbol}</td><td>{_h(row.get('latest_completed_session') or row.get('actual_end_session'))}（最近完成）</td>"
+                    f"<td>{_h(_price(row.get('latest_price')))}</td><td>{_h(_pct(row.get('daily_pct')))}</td></tr>"
+                )
+                continue
             detail_rows.append(
                 f"<tr><td>{_h(group_name)}</td><td>{symbol}</td><td>{_h(summary.get('baseline_session'))}（基准）</td>"
                 f"<td>{_h(_price(row.get('baseline_price')))}</td><td>—</td></tr>"
@@ -211,20 +276,37 @@ def render_html(summary) -> str:
     """Render a self-contained, scoped HTML block without network access."""
     summary = _mapping(summary)
     status_raw, status_label = _status(summary)
+    _, anchor_status_label = _anchor_status(summary)
+    latest_completed, latest_previous = _latest_sessions(summary)
     source_status = _plain(summary.get("source_status"), "unknown")
+    anchor_digest = _anchor_digest(summary)
+    empty_interval = _plain(summary.get("status"), "").lower() == "empty"
+    quality_raw = _plain(summary.get("data_quality"), "unavailable").lower()
+    quality_label = _STATUS_LABELS.get(quality_raw, quality_raw)
+    badge_label = f"{status_label} · {quality_label}" if empty_interval else status_label
     index_rows = _index_rows(summary)
     sector_rows = _sorted_performance(_rows(summary, "sectors"))
     stock_rows = _sorted_performance(_rows(summary, "stocks"))
 
     cards = []
     for row in index_rows:
+        if empty_interval:
+            endpoint_text = (
+                f"最近一日价格 {_h(_price(row.get('previous_price')))} → "
+                f"{_h(_price(row.get('latest_price')))}"
+            )
+        else:
+            endpoint_text = (
+                f"区间端点 {_h(_price(row.get('baseline_price')))} → "
+                f"{_h(_price(row.get('end_price')))}"
+            )
         cards.append(
             '<article class="us-card">'
             f'<div><strong>{_h(row.get("name") or _INDEX_DEFAULT_NAMES.get(_plain(row.get("symbol")), "ETF代理"))}</strong> '
             f'<a href="{escape(_symbol_url(row.get("symbol")), quote=True)}" rel="noopener noreferrer">{_h(row.get("symbol"))}</a></div>'
             f'<div class="us-return">{_h(_pct(row.get("interval_pct")))}</div>'
             f'<div class="us-muted">最近一日 {_h(_pct(row.get("daily_pct")))} · 截止 {_h(row.get("actual_end_session"))}</div>'
-            f'<div class="us-muted">端点 {_h(_price(row.get("baseline_price")))} → {_h(_price(row.get("end_price")))} · {_h(row.get("status"), "数据缺失")} · {_h(_row_reason(row))}</div>'
+            f'<div class="us-muted">{endpoint_text} · {_h(row.get("status"), "数据缺失")} · {_h(_row_reason(row))}</div>'
             "</article>"
         )
 
@@ -265,7 +347,7 @@ def render_html(summary) -> str:
         ("大盘ETF", index_rows), ("行业ETF", sector_rows), ("代表个股", stock_rows),
     ))
     return f"""{HTML_BLOCK_START}
-<section id="us-market-summary" data-status="{escape(status_raw, quote=True)}">
+<section id="us-market-summary" data-status="{escape(status_raw, quote=True)}" data-anchor-evidence="{_h(anchor_digest, '')}">
 <style>
 #us-market-summary{{margin:22px 0 10px;color:#1d1d1f}}
 #us-market-summary *{{box-sizing:border-box}}
@@ -291,9 +373,11 @@ def render_html(summary) -> str:
 @media(max-width:600px){{#us-market-summary .us-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}#us-market-summary .us-card{{padding:9px}}}}
 @media(max-width:390px){{#us-market-summary .us-grid{{grid-template-columns:1fr}}#us-market-summary .us-toolbar{{justify-content:flex-start;flex-wrap:wrap}}}}
 </style>
-<div class="us-head"><h2>③ 美股区间概要</h2><span class="us-badge">{_h(status_label)} · {_h(source_status)}</span></div>
-<p class="us-meta">A股依据日：{_h(summary.get('basis_date'))} · 锚点：{_h(summary.get('anchor_at'))} · 请求截止：{_h(summary.get('requested_as_of') or summary.get('as_of'))} · 数据截止：{_h(summary.get('as_of'))}</p>
-<p class="us-meta">美国基准交易日：{_h(summary.get('baseline_session'))} · 预期终点：{_h(summary.get('expected_end_session'))} · 纳入已完成交易日：{session_count} 个 · 行情抓取于：{_h(summary.get('fetched_at'))}</p>
+<div class="us-head"><h2>③ 美股区间概要</h2><span class="us-badge">{_h(badge_label)} · {_h(source_status)}</span></div>
+<p class="us-meta">A股报告依据日：{_h(summary.get('basis_date'))} · 美股锚点交易日：{_h(_anchor_date(summary))} · 锚点时刻：{_h(summary.get('anchor_at'))}</p>
+<p class="us-meta">A股锚点资格：{_h(anchor_status_label)} · 原因：{_h(_anchor_reason(summary))} · 请求截止：{_h(summary.get('requested_as_of') or summary.get('as_of'))} · 数据截止：{_h(summary.get('as_of'))}</p>
+<p class="us-meta">锚点证据摘要：{_h(anchor_digest)}</p>
+<p class="us-meta">最近已完成美股交易日：{_h(latest_completed)} · 前一交易日：{_h(latest_previous)} · 美国区间基准日：{_h(summary.get('baseline_session'))} · 预期终点：{_h(summary.get('expected_end_session'))} · 区间新增交易日：{session_count} 个 · 行情抓取于：{_h(summary.get('fetched_at'))}</p>
 <div class="us-note">{narratives}</div>
 <h3>大盘ETF代理</h3><div class="us-grid">{''.join(cards)}</div>
 <h3>标普500主要行业ETF代理</h3><div class="us-table-wrap"><table><thead><tr><th>行业</th><th>ETF</th><th>区间复权涨跌</th><th>最近一日</th><th>相对SPY</th><th>截止日</th><th>状态</th><th>说明</th></tr></thead><tbody>{''.join(sectors_html) or '<tr><td colspan="8">数据缺失</td></tr>'}</tbody></table></div>
@@ -312,6 +396,8 @@ def render_markdown(summary) -> str:
     """Render the same summary as a marked Markdown section."""
     summary = _mapping(summary)
     _, status_label = _status(summary)
+    _, anchor_status_label = _anchor_status(summary)
+    latest_completed, latest_previous = _latest_sessions(summary)
     index_rows = _index_rows(summary)
     sector_rows = _sorted_performance(_rows(summary, "sectors"))
     stock_rows = _sorted_performance(_rows(summary, "stocks"))
@@ -322,9 +408,12 @@ def render_markdown(summary) -> str:
         "### ③ 美股区间概要",
         "",
         f"- 数据状态：{_md(status_label)}；来源状态：{_md(summary.get('source_status'))}",
-        f"- A股依据日：{_md(summary.get('basis_date'))}；锚点：{_md(summary.get('anchor_at'))}",
+        f"- A股报告依据日：{_md(summary.get('basis_date'))}；美股锚点交易日：{_md(_anchor_date(summary))}；锚点时刻：{_md(summary.get('anchor_at'))}",
+        f"- A股锚点资格：{_md(anchor_status_label)}；原因：{_md(_anchor_reason(summary))}",
+        f"- 锚点证据摘要：{_md(_anchor_digest(summary))}",
         f"- 请求截止：{_md(summary.get('requested_as_of') or summary.get('as_of'))}；数据截止：{_md(summary.get('as_of'))}",
-        f"- 美国基准交易日：{_md(summary.get('baseline_session'))}；预期终点：{_md(summary.get('expected_end_session'))}；纳入已完成交易日：{session_count} 个",
+        f"- 最近已完成美股交易日：{_md(latest_completed)}；前一交易日：{_md(latest_previous)}",
+        f"- 美国区间基准日：{_md(summary.get('baseline_session'))}；预期终点：{_md(summary.get('expected_end_session'))}；区间新增交易日：{session_count} 个",
         f"- 行情提供方：{_md(summary.get('provider'))}；抓取时间：{_md(summary.get('fetched_at'))}",
         "",
     ]

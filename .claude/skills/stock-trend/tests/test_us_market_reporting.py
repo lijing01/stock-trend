@@ -21,8 +21,12 @@ from reporting.us_market_summary import (  # noqa: E402
 
 def sample_summary():
     return {
+        "schema_version": "us-market-summary/v2",
         "basis_date": "2026-09-30",
+        "a_share_anchor_date": "2026-09-30",
         "anchor_at": "2026-09-30T15:00:00+08:00",
+        "anchor_qualification": "qualified",
+        "anchor_reason": "calendar_verified",
         "as_of": "2026-10-03T16:44:58+08:00",
         "baseline_session": "2026-09-29",
         "expected_end_session": "2026-10-02",
@@ -69,6 +73,39 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(4, html.count('class="us-card"'))
         self.assertIn("数据缺失", markdown)
 
+    def test_legacy_v1_artifact_still_renders(self):
+        summary = sample_summary()
+        summary["schema_version"] = "us-market-summary/v1"
+        for key in ("a_share_anchor_date", "anchor_qualification", "anchor_reason"):
+            summary.pop(key, None)
+        html = render_html(summary)
+        markdown = render_markdown(summary)
+        self.assertIn("美股区间概要", html)
+        self.assertIn("美股区间概要", markdown)
+        self.assertIn("A股锚点资格：未核验", html)
+        self.assertIn("美股锚点交易日：2026-09-30", html)
+
+    def test_v2_missing_anchor_does_not_fall_back_to_basis_date(self):
+        summary = sample_summary()
+        summary.pop("a_share_anchor_date")
+        summary.pop("anchor_qualification")
+        summary.pop("anchor_reason")
+        html = render_html(summary)
+        markdown = render_markdown(summary)
+        self.assertIn("美股锚点交易日：—", html)
+        self.assertIn("A股锚点资格：未核验", html)
+        self.assertIn("美股锚点交易日：—", markdown)
+
+    def test_v2_missing_latest_session_does_not_use_actual_end_session(self):
+        summary = sample_summary()
+        summary.pop("latest_completed_session", None)
+        summary["actual_end_session"] = "2026-10-01"
+        html = render_html(summary)
+        markdown = render_markdown(summary)
+        self.assertIn("最近已完成美股交易日：—", html)
+        self.assertIn("最近已完成美股交易日：—", markdown)
+        self.assertNotIn("最近已完成美股交易日：2026-10-01", html)
+
     def test_external_values_are_escaped_and_missing_rows_sort_last(self):
         summary = sample_summary()
         summary["provider"] = '<img src=x onerror="bad">'
@@ -85,6 +122,48 @@ class RenderTests(unittest.TestCase):
         self.assertIn("NYSE交易日历", markdown)
         self.assertIn("固定代表观察池，不代表全市场排行", markdown)
         self.assertIn("+2.00 个百分点", markdown)
+
+    def test_v2_renders_latest_completed_session_and_anchor_qualification(self):
+        summary = sample_summary()
+        summary["latest_completed_session"] = "2026-10-02"
+        summary["previous_session"] = "2026-10-01"
+        html = render_html(summary)
+        markdown = render_markdown(summary)
+        self.assertIn("最近已完成美股交易日：2026-10-02", html)
+        self.assertIn("A股锚点资格：已核验", html)
+        self.assertIn("最近已完成美股交易日：2026-10-02", markdown)
+        self.assertIn("A股锚点资格：已核验", markdown)
+
+    def test_empty_v2_labels_no_new_session_but_keeps_latest_daily_return(self):
+        summary = sample_summary()
+        summary.update({
+            "status": "empty",
+            "data_quality": "complete",
+            "sessions": [],
+            "expected_end_session": None,
+            "latest_completed_session": "2026-09-29",
+            "previous_session": "2026-09-28",
+        })
+        summary["anchor_evidence"] = {
+            "status": "qualified",
+            "reason": "calendar_verified",
+            "evidence_sha256": "anchor-fixture-sha",
+        }
+        for group in summary["groups"].values():
+            for row in group:
+                row["interval_pct"] = None
+                row["actual_end_session"] = "2026-09-29"
+                row["previous_price"] = 100
+                row["latest_price"] = 101
+        html = render_html(summary)
+        markdown = render_markdown(summary)
+        self.assertIn("区间无新增交易日", html)
+        self.assertIn("区间无新增交易日", markdown)
+        self.assertIn("最近已完成美股交易日：2026-09-29", html)
+        self.assertIn("暂无新增收盘 · 完整", html)
+        self.assertIn("最近一日价格 100 → 101", html)
+        self.assertIn('data-anchor-evidence="anchor-fixture-sha"', html)
+        self.assertIn("锚点证据摘要：anchor-fixture-sha", markdown)
 
 
 class UpdateTests(unittest.TestCase):

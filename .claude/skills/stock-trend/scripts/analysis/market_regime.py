@@ -1830,6 +1830,7 @@ def build_agent_output(ctx: dict) -> dict:
         "zt": ctx["zt"],
         "top_sectors": ctx["top_sectors"],
         "bottom_sectors": ctx["bottom_sectors"],
+        "us_market_summary": ctx.get("us_market_summary"),
     }
 
 
@@ -1846,6 +1847,16 @@ def main():
                         help="HTML 观察列表状态；统一入口先写 pending，再由后台更新")
     args = parser.parse_args()
 
+    from bridge.us_review import resolve_anchor
+    calendar_prepare_error = None
+    if not args.no_refresh:
+        # Calendar acquisition precedes the frozen cutoff, including first run.
+        # A calendar failure affects only the later US section.
+        try:
+            resolve_anchor(datetime.now(ZoneInfo("Asia/Shanghai")), CACHE_DIR)
+        except Exception as exc:
+            calendar_prepare_error = f"{type(exc).__name__}: {exc}"
+    run_as_of = datetime.now(ZoneInfo("Asia/Shanghai"))
     start = time.time()
 
     if args.no_refresh:
@@ -1863,7 +1874,7 @@ def main():
         print("[3/5] 拉取涨停情绪...")
         print("[4/5] 拉取资金(全市场主力净流入)...")
         print("[5/5] 计算市场评分...")
-        ctx = collect_context()
+        ctx = collect_context(now=run_as_of.replace(tzinfo=None))
         # 持久化: 盘中快照不写 history(避免 partial 污染基线),但 context 仍写
         # (candidates 盘中需要当日 regime 分档)
         if should_save_history(ctx):
@@ -1893,12 +1904,29 @@ def main():
                 ctx["history_persistence"]["status"] = "write_error"
         save_context(ctx)
 
-    now_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    now_ts = run_as_of.strftime("%Y%m%d-%H%M%S")
     # Independent report context: never saved as an A-share component/history entry.
     from bridge.us_review import collect_summary
     ctx = dict(ctx)
+    frozen_closes = []
+    for code, row in (ctx.get("indices") or {}).items():
+        if row.get("ok") and row.get("date_origin") == "provider" and _safe_float(row.get("close")) > 0:
+            try:
+                frozen_at = datetime.fromisoformat(row.get("fetched_at") or "")
+                confirmed_at = datetime.combine(date.fromisoformat(row["data_date"]),
+                    datetime.min.time(), ZoneInfo("Asia/Shanghai")).replace(hour=15, minute=10)
+                if frozen_at.tzinfo is not None and confirmed_at <= frozen_at <= run_as_of:
+                    frozen_closes.append({"data_date": row["data_date"],
+                        "frozen_at": frozen_at.isoformat(), "date_origin": "provider",
+                        "completed_close": True, "source": row.get("provider"),
+                        "code": code, "close": row["close"]})
+            except (ValueError, TypeError, KeyError):
+                pass
     ctx["us_market_summary"] = collect_summary(
-        ctx.get("data_date") or "", no_refresh=args.no_refresh)
+        ctx.get("data_date") or "", as_of=run_as_of, no_refresh=args.no_refresh,
+        anchor_mode="completed", calendar_prepared=True, frozen_closes=frozen_closes)
+    if calendar_prepare_error:
+        ctx["us_market_summary"].setdefault("errors", {})["calendar_preparation"] = calendar_prepare_error
 
     if args.json:
         # 精简 JSON 供 Agent 消费

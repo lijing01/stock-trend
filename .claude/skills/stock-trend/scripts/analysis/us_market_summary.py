@@ -96,21 +96,31 @@ def _session_close(day: date, calendar: dict) -> datetime:
     return datetime.combine(day, _clock(close_value), ZoneInfo(calendar["timezone"]))
 
 
-def _unavailable_window(anchor_at: datetime, as_of: datetime, calendar: dict | None,
-                        reason: str, status: str = "calendar_unavailable") -> dict:
+def _unavailable_window(basis: date, anchor_date: date, anchor_at: datetime,
+                        as_of: datetime, calendar: dict | None, reason: str,
+                        status: str = "calendar_unavailable",
+                        anchor_evidence: dict | None = None) -> dict:
     return {
+        "basis_date": basis.isoformat(),
+        "a_share_anchor_date": anchor_date.isoformat(),
         "anchor_at": anchor_at.isoformat(),
         "as_of": as_of.isoformat(),
         "baseline_session": None,
         "expected_end_session": None,
+        "latest_completed_session": None,
+        "latest_previous_session": None,
+        "previous_session": None,
         "sessions": [],
         "calendar_version": calendar.get("version") if calendar else None,
         "status": status,
         "reason": reason,
+        "anchor_evidence": dict(anchor_evidence or {}),
     }
 
 
-def resolve_window(basis_date: Any, as_of: Any, calendar_path: Any = None) -> dict:
+def resolve_window(basis_date: Any, as_of: Any, calendar_path: Any = None,
+                   a_share_anchor_date: Any = None,
+                   anchor_evidence: dict | None = None) -> dict:
     """Resolve completed NYSE sessions after the A-share close anchor.
 
     The annual calendar is deliberately bounded. A required baseline or scan day
@@ -118,31 +128,47 @@ def resolve_window(basis_date: Any, as_of: Any, calendar_path: Any = None) -> di
     a session from weekdays alone.
     """
     basis = _parse_date(basis_date, "basis_date")
+    anchor_date = _parse_date(
+        a_share_anchor_date if a_share_anchor_date is not None else basis,
+        "a_share_anchor_date",
+    )
     cutoff = _parse_aware_datetime(as_of)
-    anchor_at = datetime.combine(basis, time(15, 0), SHANGHAI)
+    anchor_at = datetime.combine(anchor_date, time(15, 0), SHANGHAI)
+    evidence = dict(anchor_evidence or {})
+    if not evidence:
+        evidence = {"status": "legacy", "reason": "basis_date_anchor"}
     try:
         calendar = _load_calendar(Path(calendar_path or DEFAULT_CALENDAR))
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        return _unavailable_window(anchor_at, cutoff, None, str(exc))
+        return _unavailable_window(
+            basis, anchor_date, anchor_at, cutoff, None, str(exc),
+            anchor_evidence=evidence,
+        )
 
     if cutoff < anchor_at:
         return _unavailable_window(
-            anchor_at, cutoff, calendar, "as_of_before_anchor", status="invalid_window")
+            basis, anchor_date, anchor_at, cutoff, calendar, "as_of_before_anchor",
+            status="invalid_window", anchor_evidence=evidence,
+        )
 
     start, end = calendar["_coverage"]
-    anchor_ny = anchor_at.astimezone(ZoneInfo(calendar["timezone"]))
     cutoff_ny = cutoff.astimezone(ZoneInfo(calendar["timezone"]))
-    scan_start = max(start, anchor_ny.date() - timedelta(days=10))
     scan_end = cutoff_ny.date()
     if scan_end > end or scan_end < start:
-        return _unavailable_window(anchor_at, cutoff, calendar, "calendar_coverage_insufficient")
+        return _unavailable_window(
+            basis, anchor_date, anchor_at, cutoff, calendar,
+            "calendar_coverage_insufficient", anchor_evidence=evidence,
+        )
 
     completed_before_anchor = []
     completed_after_anchor = []
-    day = scan_start
+    completed_before_cutoff = []
+    day = start
     while day <= scan_end:
         if _is_session(day, calendar):
             close_at = _session_close(day, calendar)
+            if close_at <= cutoff:
+                completed_before_cutoff.append(day)
             if close_at <= anchor_at:
                 completed_before_anchor.append(day)
             elif anchor_at < close_at <= cutoff:
@@ -150,17 +176,31 @@ def resolve_window(basis_date: Any, as_of: Any, calendar_path: Any = None) -> di
         day += timedelta(days=1)
 
     if not completed_before_anchor:
-        return _unavailable_window(anchor_at, cutoff, calendar, "baseline_session_unavailable")
+        return _unavailable_window(
+            basis, anchor_date, anchor_at, cutoff, calendar,
+            "baseline_session_unavailable", anchor_evidence=evidence,
+        )
+    if len(completed_before_cutoff) < 2:
+        return _unavailable_window(
+            basis, anchor_date, anchor_at, cutoff, calendar,
+            "latest_completed_session_unavailable", anchor_evidence=evidence,
+        )
     baseline = completed_before_anchor[-1]
     sessions = [item.isoformat() for item in completed_after_anchor]
     return {
+        "basis_date": basis.isoformat(),
+        "a_share_anchor_date": anchor_date.isoformat(),
         "anchor_at": anchor_at.isoformat(),
         "as_of": cutoff.isoformat(),
         "baseline_session": baseline.isoformat(),
         "expected_end_session": sessions[-1] if sessions else None,
+        "latest_completed_session": completed_before_cutoff[-1].isoformat(),
+        "latest_previous_session": completed_before_cutoff[-2].isoformat(),
+        "previous_session": completed_before_cutoff[-2].isoformat(),
         "sessions": sessions,
         "calendar_version": calendar["version"],
         "status": "complete" if sessions else "empty",
+        "anchor_evidence": evidence,
     }
 
 
@@ -240,8 +280,12 @@ def _build_row(entry: dict, window: dict, payload: dict, spy_interval: float | N
     symbol = entry["symbol"]
     baseline = window["baseline_session"]
     expected_end = window["expected_end_session"]
+    latest_completed = window.get("latest_completed_session")
+    previous_session = window.get("latest_previous_session") or window.get("previous_session")
     sessions = list(window["sessions"])
-    required_dates = {baseline, *sessions}
+    required_dates = {
+        day for day in (baseline, latest_completed, previous_session, *sessions) if day
+    }
     prices, validation_errors = _normalize_prices(
         (payload.get("rows") or {}).get(symbol), required_dates)
     source_error = (payload.get("errors") or {}).get(symbol)
@@ -269,12 +313,25 @@ def _build_row(entry: dict, window: dict, payload: dict, spy_interval: float | N
 
     actual_dates = [day for day in sessions if day in prices]
     actual_end = actual_dates[-1] if actual_dates else None
-    daily_pct = daily[-1]["change_pct"] if daily else None
+    latest_price = prices.get(latest_completed) if latest_completed else None
+    previous_price = prices.get(previous_session) if previous_session else None
+    daily_pct = (
+        _pct(latest_price, previous_price)
+        if latest_price is not None and previous_price is not None else None
+    )
+    if latest_completed and latest_price is None:
+        reasons.append(f"missing_adj_close:{latest_completed}")
+    if previous_session and previous_price is None:
+        reasons.append(f"missing_previous_adj_close:{previous_session}")
     hard_invalid = any(reason.startswith(("duplicate_date:", "invalid_")) for reason in reasons)
+    if not sessions and latest_price is not None:
+        actual_end = latest_completed
     if hard_invalid:
         status = "invalid"
         interval_pct = daily_pct = None
         endpoint_ok = False
+    elif not sessions and daily_pct is not None:
+        status = "partial" if reasons else "complete"
     elif not endpoint_ok:
         status = "unavailable"
     elif reasons or any(item["change_pct"] is None for item in daily):
@@ -293,6 +350,11 @@ def _build_row(entry: dict, window: dict, payload: dict, spy_interval: float | N
         "baseline_price": baseline_price if not hard_invalid else None,
         "end_price": end_price if not hard_invalid else None,
         "actual_end_session": actual_end,
+        "latest_completed_session": latest_completed,
+        "latest_previous_session": previous_session,
+        "previous_session": previous_session,
+        "latest_price": latest_price if not hard_invalid else None,
+        "previous_price": previous_price if not hard_invalid else None,
         "status": status,
         "daily": daily,
         "reasons": sorted(set(reasons)),
@@ -302,12 +364,22 @@ def _build_row(entry: dict, window: dict, payload: dict, spy_interval: float | N
 def build_summary(window: dict, config: dict, payload: dict) -> dict:
     """Build a deterministic artifact from an already-fetched adjusted-close payload."""
     artifact = {
-        "schema_version": "us-market-summary/v1",
-        "basis_date": window.get("anchor_at", "")[:10] or None,
+        "schema_version": "us-market-summary/v2",
+        "basis_date": window.get("basis_date") or window.get("anchor_at", "")[:10] or None,
+        "a_share_anchor_date": (
+            window.get("a_share_anchor_date") or window.get("anchor_at", "")[:10] or None
+        ),
         "anchor_at": window.get("anchor_at"),
         "as_of": window.get("as_of"),
         "baseline_session": window.get("baseline_session"),
         "expected_end_session": window.get("expected_end_session"),
+        "latest_completed_session": window.get("latest_completed_session"),
+        "latest_previous_session": (
+            window.get("latest_previous_session") or window.get("previous_session")
+        ),
+        "previous_session": (
+            window.get("latest_previous_session") or window.get("previous_session")
+        ),
         "actual_end_session": None,
         "sessions": list(window.get("sessions") or []),
         "calendar_version": window.get("calendar_version"),
@@ -320,8 +392,14 @@ def build_summary(window: dict, config: dict, payload: dict) -> dict:
         "groups": {"indices": [], "sectors": [], "stocks": []},
         "errors": dict(payload.get("errors") or {}),
     }
-    if window.get("status") != "complete":
-        artifact["data_quality"] = "empty" if window.get("status") == "empty" else "unavailable"
+    anchor_evidence = window.get("anchor_evidence")
+    if not isinstance(anchor_evidence, dict):
+        anchor_evidence = {}
+    artifact["anchor_evidence"] = dict(anchor_evidence)
+    artifact["anchor_qualification"] = anchor_evidence.get("status") or "unknown"
+    artifact["anchor_reason"] = anchor_evidence.get("reason") or window.get("reason")
+    if window.get("status") not in {"complete", "empty"}:
+        artifact["data_quality"] = "unavailable"
         if window.get("reason"):
             artifact["errors"]["calendar"] = window["reason"]
         return artifact
@@ -341,9 +419,12 @@ def build_summary(window: dict, config: dict, payload: dict) -> dict:
     statuses = {row["status"] for row in all_rows}
     if statuses == {"complete"}:
         artifact["data_quality"] = "complete"
-    elif any(row["interval_pct"] is not None for row in all_rows):
+    elif any(
+        row["interval_pct"] is not None or row["daily_pct"] is not None
+        for row in all_rows
+    ):
         artifact["data_quality"] = "partial"
     else:
         artifact["data_quality"] = "unavailable"
-    artifact["status"] = artifact["data_quality"]
+    artifact["status"] = "empty" if window.get("status") == "empty" else artifact["data_quality"]
     return artifact

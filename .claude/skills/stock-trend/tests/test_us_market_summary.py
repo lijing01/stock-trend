@@ -41,6 +41,18 @@ def payload(values):
 
 
 class TestResolveWindow(unittest.TestCase):
+    def test_explicit_anchor_is_independent_from_report_basis_date(self):
+        result = resolve_window(
+            "2026-10-04",
+            "2026-10-04T09:00:00+08:00",
+            a_share_anchor_date="2026-09-30",
+            anchor_evidence={"status": "qualified", "reason": "calendar_verified"},
+        )
+        self.assertEqual(result["basis_date"], "2026-10-04")
+        self.assertEqual(result["a_share_anchor_date"], "2026-09-30")
+        self.assertEqual(result["anchor_at"], "2026-09-30T15:00:00+08:00")
+        self.assertEqual(result["anchor_evidence"]["status"], "qualified")
+
     def test_china_holiday_window_has_three_completed_us_sessions(self):
         result = resolve_window("2026-09-30", "2026-10-03T16:44:58+08:00")
         self.assertEqual(result["baseline_session"], "2026-09-29")
@@ -55,6 +67,13 @@ class TestResolveWindow(unittest.TestCase):
         self.assertEqual(before["status"], "empty")
         self.assertEqual(after["sessions"], ["2026-09-30"])
 
+    def test_empty_window_still_resolves_latest_completed_and_previous_sessions(self):
+        result = resolve_window(
+            "2026-09-30", "2026-09-30T15:59:59-04:00")
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["latest_completed_session"], "2026-09-29")
+        self.assertEqual(result["previous_session"], "2026-09-28")
+
     def test_dst_and_early_close_use_exchange_local_time(self):
         summer = resolve_window("2026-07-01", "2026-07-01T20:00:00Z")
         winter = resolve_window("2026-11-04", "2026-11-04T21:00:00Z")
@@ -65,11 +84,19 @@ class TestResolveWindow(unittest.TestCase):
         self.assertEqual(early_before["sessions"], [])
         self.assertEqual(early_after["sessions"], ["2026-11-27"])
 
+    def test_us_holiday_is_not_counted_as_a_completed_session(self):
+        result = resolve_window("2026-07-03", "2026-07-03T23:59:59-04:00")
+        self.assertEqual(result["sessions"], [])
+        self.assertEqual(result["latest_completed_session"], "2026-07-02")
+        self.assertEqual(result["latest_previous_session"], "2026-07-01")
+
     def test_requires_aware_cutoff_and_fails_outside_calendar_coverage(self):
         with self.assertRaisesRegex(ValueError, "timezone_aware"):
             resolve_window("2026-09-30", datetime(2026, 10, 3, 12))
         result = resolve_window("2027-01-04", "2027-01-05T12:00:00-05:00")
         self.assertEqual(result["status"], "calendar_unavailable")
+        self.assertEqual(result["reason"], "calendar_coverage_insufficient")
+        self.assertIsNone(result["latest_completed_session"])
 
     def test_cutoff_before_anchor_is_invalid_and_calendar_errors_are_contained(self):
         result = resolve_window("2026-10-03", "2026-10-02T12:00:00+08:00")
@@ -159,9 +186,59 @@ class TestBuildSummary(unittest.TestCase):
 
     def test_empty_window_does_not_attempt_calculation(self):
         window = resolve_window("2026-09-30", "2026-09-30T15:00:00+08:00")
+        data = payload({
+            "SPY": [("2026-09-28", 100), ("2026-09-29", 102)],
+            "XLK": [("2026-09-28", 50), ("2026-09-29", 49)],
+            "AAPL": [("2026-09-28", 200), ("2026-09-29", 204)],
+        })
+        result = build_summary(window, tiny_config(), data)
+        self.assertEqual(result["schema_version"], "us-market-summary/v2")
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["data_quality"], "complete")
+        self.assertIsNone(result["groups"]["indices"][0]["interval_pct"])
+        self.assertEqual(result["groups"]["indices"][0]["daily_pct"], 2.0)
+        self.assertEqual(result["groups"]["indices"][0]["latest_completed_session"], "2026-09-29")
+        self.assertEqual(result["groups"]["indices"][0]["previous_session"], "2026-09-28")
+
+    def test_v2_summary_preserves_basis_anchor_and_anchor_qualification(self):
+        window = resolve_window(
+            "2026-10-04",
+            "2026-10-04T09:00:00+08:00",
+            a_share_anchor_date="2026-09-30",
+            anchor_evidence={"status": "degraded", "reason": "verified_close_not_latest"},
+        )
         result = build_summary(window, tiny_config(), payload({}))
-        self.assertEqual(result["data_quality"], "empty")
-        self.assertEqual(result["groups"]["indices"], [])
+        self.assertEqual(result["basis_date"], "2026-10-04")
+        self.assertEqual(result["a_share_anchor_date"], "2026-09-30")
+        self.assertEqual(result["anchor_qualification"], "degraded")
+        self.assertEqual(result["anchor_reason"], "verified_close_not_latest")
+
+    def test_empty_window_partial_latest_quote_remains_visible(self):
+        window = resolve_window("2026-09-30", "2026-09-30T15:00:00+08:00")
+        data = payload({
+            "SPY": [("2026-09-28", 100), ("2026-09-29", 101)],
+        })
+        data["errors"]["SPY"] = "delayed_response"
+        result = build_summary(window, tiny_config(), data)
+        spy = result["groups"]["indices"][0]
+        self.assertEqual(spy["daily_pct"], 1.0)
+        self.assertEqual(spy["status"], "partial")
+        self.assertEqual(result["data_quality"], "partial")
+
+    def test_missing_latest_close_does_not_substitute_previous_session(self):
+        window = resolve_window("2026-09-30", "2026-09-30T16:00:00-04:00")
+        data = payload({
+            "SPY": [("2026-09-29", 100), ("2026-09-30", 101)],
+            "XLK": [("2026-09-29", 50), ("2026-09-30", 51)],
+            "AAPL": [("2026-09-29", 200), ("2026-09-30", 202)],
+        })
+        for rows in data["rows"].values():
+            rows.pop()
+        result = build_summary(window, tiny_config(), data)
+        spy = result["groups"]["indices"][0]
+        self.assertIsNone(spy["daily_pct"])
+        self.assertIsNone(spy["actual_end_session"])
+        self.assertIn("missing_adj_close:2026-09-30", spy["reasons"])
 
 
 if __name__ == "__main__":
