@@ -5,11 +5,19 @@ from html import escape
 
 _QUALITY_NOTE_LABELS = {
     "source_timestamp_unknown": (
-        "来源采集时间未记录（完整度与评分资格按冻结组件状态判定）"
+        "来源事件时刻未记录；交易日资格与事件时效分别核验"
     ),
     "legacy_context_evidence_unknown": "旧缓存缺少来源证据",
     "legacy_evidence_unknown": "旧缓存来源证据未知",
     "intraday_anchor_missing": "盘中锚点缺失，无法复算混合分",
+}
+
+_QUALIFICATION_LABELS = {
+    "qualified": "交易日已核验",
+    "mismatched": "来源日期不一致",
+    "unknown": "来源日期未知",
+    "partial": "组件证据不完整",
+    "missing": "组件证据缺失",
 }
 
 
@@ -25,7 +33,7 @@ def _evidence_summary(component):
     evidence = component.get("evidence") or {}
     return "; ".join(
         f"{key}={_cell(evidence.get(key))}"
-        for key in ("completeness", "freshness", "source_kind", "usage")
+        for key in ("completeness", "freshness", "source_kind", "usage", "date_origin", "alignment")
     )
 
 
@@ -40,20 +48,44 @@ def _index_summary(explanation):
     return "指数名单：" + "、".join(str(code) for code in codes)
 
 
+def _qualification_summary(explanation):
+    qualification = explanation.get("conclusion_qualification") or {}
+    status = qualification.get("status") or "unknown"
+    label = _QUALIFICATION_LABELS.get(status, str(status))
+    if qualification.get("eligible") and qualification.get("event_time_status") == "unknown":
+        label = "交易日已核验，事件时刻未知"
+    elif qualification.get("date_alignment") == "unknown" and status != "unknown":
+        label += "；来源日期未知"
+    elif qualification.get("date_alignment") == "mismatched" and status != "mismatched":
+        label += "；来源日期不一致"
+    return qualification, label
+
+
 def _render_markdown(explanation):
+    qualification, qualification_label = _qualification_summary(explanation)
+    qualified = qualification.get("eligible") is True
+    score_label = "模型计算分" if qualified else "参考评分（模型计算分）"
     lines = [
         "### 市场环境解释",
         "",
-        f"- 正式评分：**{_cell(explanation.get('score'))}** / 100",
+        f"- {score_label}：**{_cell(explanation.get('score'))}** / 100",
+        f"- 结论资格：{_cell(qualification_label)}；"
+        f"日期对齐 {_cell(qualification.get('date_alignment'))}；"
+        f"事件时效 {_cell(qualification.get('freshness'))}",
         f"- 口径：{_cell(explanation.get('mode'))}；基准日 {_cell(explanation.get('basis_date'))}；"
         f"归一化分母 {_cell(explanation.get('normalization_denominator'))}",
+        "- 结论资格原因：" + ("、".join(_cell(item) for item in qualification.get("reasons") or []) or "无"),
         f"- 计算校验：{_cell(explanation.get('reconciliation'))}；"
         f"原始加权合计 {_cell(explanation.get('raw_weighted_total'))}",
         f"- {_index_summary(explanation)}",
+    ]
+    if not qualified:
+        lines.extend(["- 证据不足，以下为模型提示。"])
+    lines.extend([
         "",
         "| 组件 | 得分 | 权重 | 贡献 | 证据资格 | 说明 |",
         "|---|---:|---:|---:|---|---|",
-    ]
+    ])
     for component in explanation.get("components", []):
         lines.append(
             f"| {_cell(component.get('name') or component.get('id'))} "
@@ -86,6 +118,10 @@ def _render_html(explanation):
     def h(value):
         return escape(str(value if value not in (None, "") else "—"))
 
+    qualification, qualification_label = _qualification_summary(explanation)
+    qualified = qualification.get("eligible") is True
+    score_label = "模型计算分" if qualified else "参考评分（模型计算分）"
+    model_note = "" if qualified else "<p><strong>证据不足，以下为模型提示。</strong></p>"
     rows = []
     for component in explanation.get("components", []):
         evidence = component.get("evidence") or {}
@@ -118,10 +154,15 @@ def _render_html(explanation):
     return (
         "<section class='market-explanation'>"
         "<h2>市场环境解释</h2>"
-        f"<p>正式评分：<strong>{h(explanation.get('score'))}</strong> / 100；"
+        f"<p>{h(score_label)}：<strong>{h(explanation.get('score'))}</strong> / 100；"
         f"口径：{h(explanation.get('mode'))}；基准日 {h(explanation.get('basis_date'))}；"
         f"归一化分母 {h(explanation.get('normalization_denominator'))}；"
         f"计算校验 {h(explanation.get('reconciliation'))}</p>"
+        f"<p>结论资格：{h(qualification_label)}；"
+        f"日期对齐 {h(qualification.get('date_alignment'))}；"
+        f"事件时效 {h(qualification.get('freshness'))}</p>"
+        "<p>结论资格原因：" + ("、".join(h(item) for item in qualification.get("reasons") or []) or "无") + "</p>"
+        f"{model_note}"
         f"<p>{index_summary}</p>"
         "<table><thead><tr><th>组件</th><th>得分</th><th>权重</th><th>贡献</th>"
         "<th>证据资格</th><th>说明</th></tr></thead><tbody>"

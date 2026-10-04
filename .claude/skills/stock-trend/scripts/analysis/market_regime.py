@@ -33,6 +33,7 @@ import sys
 import time
 import shutil
 import tempfile
+from zoneinfo import ZoneInfo
 from datetime import datetime, date
 from pathlib import Path
 
@@ -191,7 +192,7 @@ def fetch_index_kline(code: str, lmt: int = 80, retries: int = 2,
     def record_success(source: str, records: list[dict]) -> list[dict]:
         normalized_dates = [
             _iso_date_from_value(row.get("trade_date"))
-            for row in records
+            for row in records if _safe_float(row.get("close")) > 0
         ]
         normalized_dates = [value for value in normalized_dates if value]
         status.update({
@@ -254,7 +255,8 @@ def _index_metrics(records: list[dict]) -> dict:
     """Close / ma5 / ma20 / ma20_rising for a sorted index kline list."""
     if not records:
         return {"ok": False}
-    closes = [_safe_float(r.get("close")) for r in records]
+    valid_records = [r for r in records if _safe_float(r.get("close")) > 0]
+    closes = [_safe_float(r.get("close")) for r in valid_records]
     closes = [c for c in closes if c > 0]
     if len(closes) < 20:
         return {"ok": False}
@@ -270,7 +272,9 @@ def _index_metrics(records: list[dict]) -> dict:
         "ma20": ma20_now,
         "ma20_rising": ma20_now > ma20_5ago,
         "above_ma20": close_now > ma20_now,
-        "pct_chg": _safe_float(records[-1].get("pct_chg")),
+        "pct_chg": _safe_float(valid_records[-1].get("pct_chg")),
+        "data_date": _iso_date_from_value(valid_records[-1].get("trade_date")),
+        "date_origin": "provider" if _iso_date_from_value(valid_records[-1].get("trade_date")) else "unknown",
     }
 
 
@@ -280,7 +284,18 @@ def fetch_sector_rankings() -> list[dict]:
         from fetchers.sector_data import get_sector_rankings
         result = get_sector_rankings()
         sectors = [s for s in result.get("sectors", []) if s.get("type") == "industry"]
-        return sectors
+        meta = result.get("meta") or {}
+        # A request/collection date does not identify the snapshot session.
+        evidence = {
+            "provider": meta.get("provider", "unknown"),
+            "data_date": _iso_date_from_value(meta.get("data_date")) if meta.get("date_origin") == "provider" else None,
+            "date_origin": "provider" if meta.get("date_origin") == "provider" else "unknown",
+            "requested_date": datetime.now().date().isoformat(),
+            "fetched_at": _observed_at(),
+            "source_timestamp": meta.get("source_timestamp"),
+            "completeness": "complete" if sectors else "missing",
+        }
+        return [dict(sector, evidence=copy.deepcopy(evidence)) for sector in sectors]
     except Exception:
         return []
 
@@ -301,7 +316,9 @@ def fetch_zt_stats() -> dict:
             "evidence": {
                 "schema_version": "market-component-evidence/v1",
                 "provider": "akshare",
-                "data_date": data_date,
+                "data_date": None,
+                "requested_date": data_date,
+                "date_origin": "request",
                 "fetched_at": fetched_at,
                 "source_timestamp": None,
                 "completeness": completeness,
@@ -344,7 +361,7 @@ def fetch_market_activity() -> dict | None:
         from fetchers.sector_data import _fetch_json
         url = ("https://push2.eastmoney.com/api/qt/clist/get"
                "?pn=1&pz=60&po=0&np=1&fltt=2&fid=f3&fs=m:90+t:1"
-               "&fields=f12,f14,f104,f105,f62")
+               "&fields=f12,f14,f104,f105,f62,f124")
         data = _fetch_json(url)
         items = (data.get("data") or {}).get("diff", [])
         if not items:
@@ -354,19 +371,30 @@ def fetch_market_activity() -> dict | None:
         main_force_yi = sum(float(x.get("f62") or 0) for x in items) / 1e8
         if up + down <= 0:
             return None
+        timestamps = []
+        for item in items:
+            try:
+                stamp = datetime.fromtimestamp(float(item.get("f124")), tz=ZoneInfo("Asia/Shanghai"))
+                timestamps.append(stamp)
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+        verified = len(timestamps) == len(items) and len({t.date() for t in timestamps}) == 1
         return {
             "up": up,
             "down": down,
             "main_force_yi": round(main_force_yi, 1),
+            "main_force_raw_yi": main_force_yi,
             "evidence": {
                 "schema_version": "market-component-evidence/v1",
                 "provider": "eastmoney",
-                "data_date": datetime.now().date().isoformat(),
+                "data_date": timestamps[0].date().isoformat() if verified else None,
+                "requested_date": datetime.now().date().isoformat(),
+                "date_origin": "provider" if verified else "unknown",
                 "fetched_at": _observed_at(),
-                "source_timestamp": None,
+                "source_timestamp": min(timestamps).isoformat() if verified else None,
                 "completeness": "complete",
                 "usage": "scorable",
-                "reasons": ["provider_event_timestamp_missing"],
+                "reasons": [] if verified else ["provider_event_timestamp_missing"],
             },
         }
     except Exception:
@@ -677,6 +705,11 @@ def complete_market_amounts(index_rows: dict) -> dict[str, float]:
     }
 
 
+def _date_in_common(data_date, dates):
+    normalized = _iso_date_from_value(data_date)
+    return bool(normalized and normalized in dates)
+
+
 def build_amount_evidence(index_rows: dict, index_diagnostics: dict | None = None,
                           data_date: str = "") -> dict:
     """Build auditable two-market turnover provenance.
@@ -757,7 +790,9 @@ def build_amount_evidence(index_rows: dict, index_diagnostics: dict | None = Non
         "schema_version": "market-amount-evidence/v1",
         "provider": "+".join(dict.fromkeys(provider_names)) or "unknown",
         "source_kind": source_kind,
-        "data_date": _iso_date_from_value(data_date),
+        "data_date": _iso_date_from_value(data_date) if _date_in_common(data_date, common_dates) else None,
+        "date_origin": "provider" if _date_in_common(data_date, common_dates) else "unknown",
+        "requested_date": _iso_date_from_value(data_date),
         "fetched_at": max(fetched_values) if fetched_values else None,
         "source_timestamp": None,
         "per_index": per_index,
@@ -1098,22 +1133,20 @@ def load_recommendation_context(path=None, *, today=None) -> dict | None:
         context = _normalize_legacy_intraday_quality(
             context, today or datetime.now().date().isoformat())
         regime = context.get("regime", {})
-        # A legacy explanation may describe the retired partial status.
-        explanation = None if context is not raw_context else context.get("market_explanation")
-        if not isinstance(explanation, dict):
-            try:
-                from analysis.market_explanation import build_market_explanation
-                explanation = build_market_explanation(
-                    context, context.get("data_date") or datetime.now().date().isoformat())
-            except (TypeError, ValueError):
-                explanation = None
+        from analysis.market_explanation import build_market_explanation
+        explanation = build_market_explanation(context, context.get("data_date") or "")
+        qualification = explanation["conclusion_qualification"]
+        quality = (raw_context.get("regime") or {}).get("data_quality", regime.get("data_quality", "unknown"))
+        effective_quality = "partial" if quality == "good" and not qualification.get("eligible") else quality
         return {
             "score": regime.get("score"),
             "label": regime.get("label", ""),
             "data_date": context.get("data_date", ""),
             "context_sha256": content_sha256(context),
             "advice": regime.get("advice", ""),
-            "data_quality": regime.get("data_quality", "unknown"),
+            "data_quality": effective_quality,
+            "model_data_quality": quality,
+            "conclusion_qualification": copy.deepcopy(qualification),
             "missing_components": regime.get("missing_components", []),
             "partial_components": regime.get("partial_components", []),
             "score_lower": regime.get("score_lower"),
@@ -1341,7 +1374,7 @@ DISCLAIMER = "本报告仅供学习参考,不构成任何投资建议。股市�
 
 def _market_explanation_for_report(ctx: dict) -> dict | None:
     explanation = ctx.get("market_explanation")
-    if isinstance(explanation, dict):
+    if isinstance(explanation, dict) and "conclusion_qualification" in explanation:
         return explanation
     try:
         from analysis.market_explanation import build_market_explanation
@@ -1360,8 +1393,10 @@ def generate_report(ctx: dict) -> str:
     lines.append(f"▸ 生成时间: {ctx.get('generated_at', '')}")
     regime = ctx.get("regime", {})
     label_icon = {"强势": "🟢", "中性": "🟡", "弱势": "🔴"}.get(regime.get("label", ""), "⚪")
-    lines.append(f"▸ 市场环境评分: **{regime.get('score', 0)} / 100** {label_icon} {regime.get('label', '')}")
-    lines.append(f"▸ 操作建议: {regime.get('advice', '')}")
+    qualified = bool((_market_explanation_for_report(ctx) or {}).get("conclusion_qualification", {}).get("eligible"))
+    score_title = "市场环境评分" if qualified else "参考评分（模型计算分）"
+    lines.append(f"▸ {score_title}: **{regime.get('score', 0)} / 100** {label_icon} {regime.get('label', '')}")
+    lines.append(f"▸ 操作建议: {'' if qualified else '证据不足，以下为模型提示：'}{regime.get('advice', '')}")
     if ctx.get("stale_note"):
         lines.append(f"▸ ⚠️ {ctx['stale_note']}")
     if ctx.get("intraday_note"):
@@ -1476,7 +1511,8 @@ def collect_context(now=None) -> dict:
         zt_evidence = {
             "schema_version": "market-component-evidence/v1",
             "provider": "unknown",
-            "data_date": data_date or None,
+            "data_date": None,
+            "date_origin": "unknown",
             "fetched_at": None,
             "source_timestamp": None,
             "completeness": "missing",
@@ -1488,7 +1524,8 @@ def collect_context(now=None) -> dict:
         activity_evidence = {
             "schema_version": "market-component-evidence/v1",
             "provider": "unknown",
-            "data_date": data_date or None,
+            "data_date": None,
+            "date_origin": "unknown",
             "fetched_at": None,
             "source_timestamp": None,
             "completeness": "missing",
@@ -1553,7 +1590,7 @@ def collect_context(now=None) -> dict:
             "metric": metric,
             "provider": activity_evidence.get("provider", "unknown"),
             "source_kind": "primary" if activity_evidence.get("provider") == "eastmoney" else "unknown",
-            "data_date": activity_evidence.get("data_date") or data_date or None,
+            "data_date": activity_evidence.get("data_date"),
             "fetched_at": activity_evidence.get("fetched_at"),
             "source_timestamp": activity_evidence.get("source_timestamp"),
         })
@@ -1561,7 +1598,7 @@ def collect_context(now=None) -> dict:
         "metric": "limit_up_emotion",
         "provider": zt_evidence.get("provider", "unknown"),
         "source_kind": "primary" if zt_evidence.get("provider") == "akshare" else "unknown",
-        "data_date": zt_evidence.get("data_date") or data_date or None,
+        "data_date": zt_evidence.get("data_date"),
         "fetched_at": zt_evidence.get("fetched_at"),
         "source_timestamp": zt_evidence.get("source_timestamp"),
     })
@@ -1601,7 +1638,7 @@ def collect_context(now=None) -> dict:
                 ext_components[key].update({
                     "provider": source.get("provider", "unknown"),
                     "source_kind": source.get("source_kind", "unknown"),
-                    "data_date": source.get("data_date") or data_date or None,
+                    "data_date": source.get("data_date"),
                     "fetched_at": source.get("fetched_at"),
                     "source_timestamp": source.get("source_timestamp"),
                 })
@@ -1609,7 +1646,7 @@ def collect_context(now=None) -> dict:
                 ext_components[key].update({
                     "provider": activity_evidence.get("provider", "unknown"),
                     "source_kind": "primary" if activity_evidence.get("provider") == "eastmoney" else "unknown",
-                    "data_date": activity_evidence.get("data_date") or data_date or None,
+                    "data_date": activity_evidence.get("data_date"),
                     "fetched_at": activity_evidence.get("fetched_at"),
                     "source_timestamp": activity_evidence.get("source_timestamp"),
                 })
@@ -1675,12 +1712,14 @@ def collect_context(now=None) -> dict:
         "activity_evidence": activity_evidence,
         "intraday_evidence": intraday_evidence,
         "capital_context": {
+            "date_origin": activity_evidence.get("date_origin", "unknown"),
+            "requested_date": activity_evidence.get("requested_date"),
             "metric": "market_main_force_net_inflow" if (
                 activity and activity.get("main_force_yi") is not None
             ) else "capital_flow",
             "source_kind": "primary" if activity_evidence.get("provider") == "eastmoney" else "unknown",
             "provider": activity_evidence.get("provider", "unknown"),
-            "data_date": activity_evidence.get("data_date") or data_date or None,
+            "data_date": activity_evidence.get("data_date"),
             "fetched_at": activity_evidence.get("fetched_at"),
             "source_timestamp": activity_evidence.get("source_timestamp"),
         },
@@ -1695,7 +1734,9 @@ def collect_context(now=None) -> dict:
                 "pct_chg": m.get("pct_chg"),
                 "above_ma20": m.get("above_ma20"),
                 "ma20_rising": m.get("ma20_rising"),
-                "data_date": _iso_date_from_value(index_diagnostics.get(code, {}).get("data_date")),
+                "data_date": m.get("data_date"),
+                "date_origin": m.get("date_origin", "unknown"),
+                "ma20": m.get("ma20"),
                 "source": index_diagnostics.get(code, {}).get("source"),
                 "provider": index_diagnostics.get(code, {}).get("provider")
                             or index_diagnostics.get(code, {}).get("source"),
@@ -1711,8 +1752,57 @@ def collect_context(now=None) -> dict:
         "bottom_sectors": bottom_sectors,
     }
     from analysis.market_explanation import build_market_explanation
+    volume_samples = [a for a in amount_history_yi if a > 0][-20:]
+    zt_samples = [c for c in history_zt_counts if c > 0][-20:]
+    sector_dates = {_iso_date_from_value((row.get("evidence") or {}).get("data_date")) for row in sectors}
+    sector_verified = bool(sectors) and None not in sector_dates and len(sector_dates) == 1
+    ctx["sector_evidence"] = {
+        "data_date": next(iter(sector_dates)) if sector_verified else None,
+        "date_origin": "provider" if sector_verified and all((row.get("evidence") or {}).get("date_origin") == "provider" for row in sectors) else "unknown",
+        "provider": "+".join(sorted({str((row.get("evidence") or {}).get("provider") or "unknown") for row in sectors})),
+        "completeness": "complete" if sectors else "missing",
+        "dates": sorted(value for value in sector_dates if value),
+        "source_timestamp": None,
+        "fetched_at": _observed_at(),
+    }
+    ctx["detail_inputs"] = {
+        "index_trend": {
+            "indices": [dict(item, code=code) for code, item in ctx["indices"].items()],
+        },
+        "volume": {
+            "amount_yi": today_amount_yi,
+            "history_average_yi": sum(volume_samples) / len(volume_samples) if volume_samples else None,
+            "history_sample_count": len(volume_samples),
+            "history_amounts_yi": volume_samples,
+            "coverage": "Shanghai+Shenzhen",
+        },
+        "breadth": {
+            "up": (activity or {}).get("up"),
+            "down": (activity or {}).get("down"),
+            "industry_up_count": sum(_safe_float(row.get("change_pct")) > 0 for row in sectors),
+            "industry_count": len(sectors),
+            "coverage": "eastmoney_region_boards",
+        },
+        "zt_emotion": {
+            "count": zt.get("count"),
+            "streak_count": zt.get("streak_count"),
+            "max_streak": zt.get("max_streak"),
+            "history_average_count": sum(zt_samples) / len(zt_samples) if len(zt_samples) >= 5 else None,
+            "history_sample_count": len(zt_samples),
+            "absolute_baseline_count": 50 if len(zt_samples) < 5 else None,
+        },
+        "capital": {
+            "main_force_yi": (activity or {}).get("main_force_raw_yi", (activity or {}).get("main_force_yi")),
+            "model_main_force_yi": (activity or {}).get("main_force_yi"),
+            "coverage": "eastmoney_region_boards",
+        },
+    }
+    for key, evidence in (("volume", amount_evidence), ("zt_emotion", zt_evidence), ("breadth", activity_evidence), ("capital", activity_evidence)):
+        ctx["components"][key]["date_origin"] = evidence.get("date_origin", "unknown")
+        ctx["components"][key]["requested_date"] = evidence.get("requested_date")
     ctx["market_explanation"] = build_market_explanation(
         ctx, data_date or date.today().isoformat())
+    ctx["conclusion_qualification"] = copy.deepcopy(ctx["market_explanation"]["conclusion_qualification"])
     return ctx
 
 
@@ -1724,6 +1814,9 @@ def build_agent_output(ctx: dict) -> dict:
         "regime": ctx["regime"],
         "components": ctx["components"],
         "market_explanation": ctx.get("market_explanation"),
+        "conclusion_qualification": ctx.get("conclusion_qualification"),
+        "detail_inputs": ctx.get("detail_inputs", {}),
+        "sector_evidence": ctx.get("sector_evidence", {}),
         "indices": ctx.get("indices", {}),
         "amount_evidence": ctx.get("amount_evidence", {}),
         "zt_evidence": ctx.get("zt_evidence", {}),
@@ -1760,6 +1853,9 @@ def main():
         if not ctx:
             print("⚠️ 无今日缓存(market_regime.json),先不带 --no-refresh 跑一次")
             return
+        from analysis.market_explanation import build_market_explanation
+        ctx["market_explanation"] = build_market_explanation(ctx, ctx.get("data_date") or "")
+        ctx["conclusion_qualification"] = copy.deepcopy(ctx["market_explanation"]["conclusion_qualification"])
         save_context(ctx)
     else:
         print("[1/5] 拉取指数K线 + 成交额...")
@@ -1785,6 +1881,8 @@ def main():
                 "zt": ctx["zt"],
                 "intraday": False,
                 "component_evidence": component_evidence,
+                "conclusion_qualification": copy.deepcopy(ctx.get("conclusion_qualification")),
+                "detail_inputs": copy.deepcopy(ctx.get("detail_inputs") or {}),
                 "amount_evidence": copy.deepcopy(ctx.get("amount_evidence") or {}),
                 "zt_evidence": copy.deepcopy(ctx.get("zt_evidence") or {}),
                 "activity_evidence": copy.deepcopy(ctx.get("activity_evidence") or {}),
@@ -1842,6 +1940,9 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
     label_color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime.get("label", ""), "#86868b")
     comps = ctx.get("components", {})
     explanation = _market_explanation_for_report(ctx)
+    qualified = bool((explanation or {}).get("conclusion_qualification", {}).get("eligible"))
+    score_title = "市场环境评分" if qualified else "参考评分（模型计算分）"
+    advice_prefix = "" if qualified else "证据不足，以下为模型提示："
     explanation_html = ""
     if explanation:
         from reporting.market_explanation import render_market_explanation
@@ -1894,8 +1995,9 @@ ul{{padding-left:20px;line-height:1.8}}
 </style></head><body><div class="w">
 <h1>📅 今日复盘 {ctx.get('data_date','')}</h1>
 <p class="dt">{ctx.get('generated_at','')}</p>
+<p class="dt">{score_title}</p>
 <div class="score">{regime.get('score',0)} / 100 <span style="font-size:18px">{regime.get('label','')}</span></div>
-<p class="dt">{regime.get('advice','')}</p>
+<p class="dt">{advice_prefix}{regime.get('advice','')}</p>
 {'<p class="dt">⚠️ ' + ctx.get('stale_note','') + '</p>' if ctx.get('stale_note') else ''}
 {'<p class="dt" style="color:#d97706">⚠️ ' + ctx.get('intraday_note','') + '</p>' if ctx.get('intraday_note') else ''}
 

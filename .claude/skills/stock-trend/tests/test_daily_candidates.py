@@ -3163,7 +3163,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(policy["mode"], "observation")
         self.assertIn("regime_stale", policy["reasons"])
 
-    def test_legacy_northbound_partial_cache_is_promoted_in_memory(self):
+    def test_legacy_northbound_partial_cache_retains_recommendation_block(self):
         context = {
             "data_date": "2026-08-06",
             "regime": {
@@ -3190,8 +3190,9 @@ class TestRecommendationPolicy(unittest.TestCase):
                 loaded = dc.load_regime_context()
             self.assertEqual(path.read_text(encoding="utf-8"), original)
 
-        self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(loaded["data_quality"], "partial")
         self.assertEqual(loaded["partial_components"], [])
+        self.assertEqual(build_recommendation_policy(loaded, "2026-08-06")["max_recommendations"], 0)
         normalized = copy.deepcopy(context)
         normalized["components"]["capital"]["data_status"] = "good"
         normalized["components"]["capital"]["detail"] = "全市场主力净流入 +10.0亿"
@@ -3250,7 +3251,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             with patch.object(dc, "CACHE_DIR", cache_dir):
                 loaded = dc.load_regime_context()
             self.assertEqual(path.read_text(encoding="utf-8"), original)
-        self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(loaded["data_quality"], "partial")
         self.assertEqual(loaded["score"], 50.0)
         self.assertEqual(loaded["missing_components"], [])
         self.assertEqual(loaded["partial_components"], [])

@@ -55,6 +55,9 @@ def _source_metadata(ctx, component_id):
     data_date = component.get("data_date")
     fetched_at = component.get("fetched_at")
     source_timestamp = component.get("source_timestamp")
+    requested_date = component.get("requested_date")
+    date_origin = component.get("date_origin") or "unknown"
+    alignment = component.get("alignment") or "unknown"
     reasons = []
 
     if component_id == "capital":
@@ -67,6 +70,9 @@ def _source_metadata(ctx, component_id):
             data_date = capital_context.get("data_date") or data_date
             fetched_at = capital_context.get("fetched_at") or fetched_at
             source_timestamp = capital_context.get("source_timestamp") or source_timestamp
+            requested_date = capital_context.get("requested_date") or requested_date
+            date_origin = capital_context.get("date_origin") or date_origin
+            alignment = capital_context.get("alignment") or alignment
         elif "主力" in detail:
             metric = "market_main_force_net_inflow"
             source_kind = explicit or "primary"
@@ -88,6 +94,9 @@ def _source_metadata(ctx, component_id):
         data_date = data_date or amount_evidence.get("data_date")
         fetched_at = fetched_at or amount_evidence.get("fetched_at")
         source_timestamp = source_timestamp or amount_evidence.get("source_timestamp")
+        requested_date = requested_date or amount_evidence.get("requested_date")
+        date_origin = amount_evidence.get("date_origin") or date_origin
+        alignment = amount_evidence.get("alignment") or alignment
         source_kind = explicit or amount_evidence.get("source_kind") or source_kind
         reasons.extend(str(reason) for reason in amount_evidence.get("reasons") or [])
 
@@ -97,6 +106,9 @@ def _source_metadata(ctx, component_id):
         data_date = data_date or zt_evidence.get("data_date")
         fetched_at = fetched_at or zt_evidence.get("fetched_at")
         source_timestamp = source_timestamp or zt_evidence.get("source_timestamp")
+        requested_date = requested_date or zt_evidence.get("requested_date")
+        date_origin = zt_evidence.get("date_origin") or date_origin
+        alignment = zt_evidence.get("alignment") or alignment
         reasons.extend(str(reason) for reason in zt_evidence.get("reasons") or [])
 
     if component_id in {"breadth", "capital"}:
@@ -105,6 +117,9 @@ def _source_metadata(ctx, component_id):
         data_date = data_date or activity_evidence.get("data_date")
         fetched_at = fetched_at or activity_evidence.get("fetched_at")
         source_timestamp = source_timestamp or activity_evidence.get("source_timestamp")
+        requested_date = requested_date or activity_evidence.get("requested_date")
+        date_origin = activity_evidence.get("date_origin") or date_origin
+        alignment = activity_evidence.get("alignment") or alignment
         reasons.extend(str(reason) for reason in activity_evidence.get("reasons") or [])
 
     if component_id == "index_trend":
@@ -136,8 +151,6 @@ def _source_metadata(ctx, component_id):
         elif not data_date:
             reasons.append("legacy_context_evidence_unknown")
 
-    if not data_date:
-        data_date = ctx.get("data_date") or None
     if not source_timestamp:
         reasons.append("source_timestamp_missing")
 
@@ -145,6 +158,9 @@ def _source_metadata(ctx, component_id):
         "metric": metric,
         "provider": provider or "unknown",
         "data_date": data_date,
+        "requested_date": requested_date,
+        "date_origin": date_origin,
+        "alignment": alignment,
         "fetched_at": fetched_at,
         "source_timestamp": source_timestamp,
         "source_kind": source_kind,
@@ -160,6 +176,176 @@ def _freshness(meta, expected_date):
     if meta.get("data_date") == expected_date:
         return "fresh"
     return "stale"
+
+
+def _date_assessment(payload, expected_date, reason_prefix):
+    """Assess one provider date without treating request dates as source dates."""
+    payload = payload if isinstance(payload, dict) else {}
+    data_date = _valid_iso_date(payload.get("data_date"), "data_date")
+    date_origin = payload.get("date_origin") or "unknown"
+    source_timestamp = payload.get("source_timestamp")
+    reasons = []
+    if not expected_date:
+        alignment = "unknown"
+        reasons.append(f"{reason_prefix}:expected_date_invalid")
+    elif date_origin != "provider":
+        alignment = "unknown"
+        reasons.append(f"{reason_prefix}:source_date_unknown")
+        if data_date is None:
+            reasons.append(f"{reason_prefix}:data_date_missing")
+    elif data_date is None:
+        alignment = "unknown"
+        reasons.append(f"{reason_prefix}:data_date_missing")
+    elif data_date != expected_date:
+        alignment = "mismatched"
+        reasons.append(f"{reason_prefix}:data_date_mismatch")
+    else:
+        alignment = "matched"
+    return {
+        "label": reason_prefix,
+        "data_date": data_date if date_origin == "provider" else None,
+        "reported_data_date": payload.get("data_date"),
+        "requested_date": payload.get("requested_date"),
+        "date_origin": date_origin,
+        "alignment": alignment,
+        "source_timestamp": source_timestamp,
+        "reasons": reasons,
+    }
+
+
+def _qualification_sources(ctx, component_id, expected_date):
+    detail_inputs = ctx.get("detail_inputs") or {}
+    component = (ctx.get("components") or {}).get(component_id) or {}
+    if component_id == "index_trend":
+        frozen = (detail_inputs.get("index_trend") or {}).get("indices")
+        by_code = {
+            item.get("code"): item for item in frozen or []
+            if isinstance(item, dict) and item.get("code")
+        }
+        sources = []
+        for code in TREND_INDEX_CODES:
+            item = dict(by_code.get(code) or (ctx.get("indices") or {}).get(code) or {})
+            diagnostics = (ctx.get("index_data_quality") or {}).get(code) or {}
+            for key in (
+                "data_date", "requested_date", "date_origin", "alignment",
+                "source_timestamp",
+            ):
+                if not item.get(key) and diagnostics.get(key):
+                    item[key] = diagnostics[key]
+            sources.append(_date_assessment(
+                item, expected_date, f"index_trend:{code}"))
+        return sources
+    if component_id == "volume":
+        payload = ctx.get("amount_evidence") or component
+        return [_date_assessment(payload, expected_date, "volume")]
+    if component_id == "breadth":
+        return [
+            _date_assessment(
+                ctx.get("activity_evidence"), expected_date, "breadth:activity"),
+            _date_assessment(
+                ctx.get("sector_evidence"), expected_date, "breadth:sector"),
+        ]
+    if component_id == "zt_emotion":
+        payload = ctx.get("zt_evidence") or component
+        return [_date_assessment(payload, expected_date, "zt_emotion")]
+    payload = ctx.get("capital_context") or ctx.get("activity_evidence") or component
+    return [_date_assessment(payload, expected_date, "capital")]
+
+
+def build_conclusion_qualification(ctx, expected_date, components=None):
+    """Build date/event qualification separately from score and model quality."""
+    if not isinstance(ctx, dict):
+        raise TypeError("ctx must be a dict")
+    expected_date_valid = _valid_iso_date(expected_date, "expected_date") is not None
+    if not expected_date_valid:
+        expected_date = ""
+    explained = {
+        item.get("id"): item for item in components or []
+        if isinstance(item, dict) and item.get("id")
+    }
+    component_results = []
+    all_sources = []
+    has_missing = False
+    has_partial = False
+    for component_id in REGIME_COMPONENT_ORDER:
+        frozen = (ctx.get("components") or {}).get(component_id) or {}
+        evidence = (explained.get(component_id) or {}).get("evidence") or {}
+        completeness = evidence.get("completeness") or {
+            "good": "complete", "partial": "partial", "missing": "missing",
+        }.get(frozen.get("data_status"), "missing")
+        reasons = []
+        if completeness == "missing":
+            reasons.append(f"{component_id}:component_missing")
+            has_missing = True
+        elif completeness != "complete":
+            reasons.append(f"{component_id}:component_incomplete")
+            has_partial = True
+        sources = _qualification_sources(ctx, component_id, expected_date)
+        all_sources.extend(sources)
+        reasons.extend(reason for source in sources for reason in source["reasons"])
+        alignments = {source["alignment"] for source in sources}
+        alignment = (
+            "mismatched" if "mismatched" in alignments
+            else "unknown" if "unknown" in alignments
+            else "matched"
+        )
+        component_results.append({
+            "id": component_id,
+            "completeness": completeness,
+            "date_alignment": alignment,
+            "event_time_status": (
+                "known" if sources and all(
+                    source.get("source_timestamp") for source in sources)
+                else "unknown"
+            ),
+            "reasons": _dedupe(reasons),
+            "sources": sources,
+        })
+
+    alignments = {item["date_alignment"] for item in component_results}
+    date_alignment = (
+        "mismatched" if "mismatched" in alignments
+        else "unknown" if "unknown" in alignments or not expected_date_valid
+        else "matched"
+    )
+    event_time_status = (
+        "known" if all_sources and all(
+            source.get("source_timestamp") for source in all_sources)
+        else "unknown"
+    )
+    if has_missing:
+        status = "missing"
+    elif has_partial:
+        status = "partial"
+    elif date_alignment == "mismatched":
+        status = "mismatched"
+    elif date_alignment == "unknown":
+        status = "unknown"
+    else:
+        status = "qualified"
+    eligible = status == "qualified"
+    freshness = (
+        "fresh" if eligible and event_time_status == "known"
+        else "stale" if date_alignment == "mismatched" and event_time_status == "known"
+        else "unknown"
+    )
+    reasons = _dedupe(
+        reason for item in component_results for reason in item["reasons"])
+    if not expected_date_valid:
+        reasons.insert(0, "expected_date_invalid")
+    if event_time_status == "unknown":
+        reasons.append("source_timestamp_missing")
+    return {
+        "schema_version": "conclusion-qualification/v1",
+        "status": status,
+        "eligible": eligible,
+        "expected_date": expected_date or None,
+        "date_alignment": date_alignment,
+        "event_time_status": event_time_status,
+        "freshness": freshness,
+        "reasons": _dedupe(reasons),
+        "components": component_results,
+    }
 
 
 def _index_counts(ctx):
@@ -225,6 +411,9 @@ def _component_explanation(ctx, component_id, expected_date, used_weight):
         "metric": meta["metric"],
         "provider": meta["provider"],
         "data_date": meta.get("data_date"),
+        "requested_date": meta.get("requested_date"),
+        "date_origin": meta.get("date_origin"),
+        "alignment": meta.get("alignment"),
         "fetched_at": meta.get("fetched_at"),
         "source_timestamp": meta.get("source_timestamp"),
         "usage": usage,
@@ -248,6 +437,20 @@ def _component_explanation(ctx, component_id, expected_date, used_weight):
                     (item.get("data_date") if isinstance(item, dict) else None)
                     or ((ctx.get("index_data_quality") or {}).get(code) or {}).get("data_date")
                     or None
+                ),
+                "requested_date": (
+                    (item.get("requested_date") if isinstance(item, dict) else None)
+                    or ((ctx.get("index_data_quality") or {}).get(code) or {}).get("requested_date")
+                ),
+                "date_origin": (
+                    (item.get("date_origin") if isinstance(item, dict) else None)
+                    or ((ctx.get("index_data_quality") or {}).get(code) or {}).get("date_origin")
+                    or "unknown"
+                ),
+                "alignment": (
+                    (item.get("alignment") if isinstance(item, dict) else None)
+                    or ((ctx.get("index_data_quality") or {}).get(code) or {}).get("alignment")
+                    or "unknown"
                 ),
                 "fetched_at": (
                     ((ctx.get("index_data_quality") or {}).get(code) or {}).get("fetched_at")
@@ -431,6 +634,50 @@ def build_market_explanation(ctx, expected_date):
         "quality_notes": _dedupe(quality_notes),
         "reconciliation": reconciliation,
     }
+    qualification = build_conclusion_qualification(ctx, expected_date, components)
+    result["conclusion_qualification"] = qualification
+    qualified_components = {
+        item["id"]: item for item in qualification["components"]
+    }
+    for component in components:
+        qualified = qualified_components[component["id"]]
+        evidence = component["evidence"]
+        sources = qualified["sources"]
+        origins = {source["date_origin"] for source in sources}
+        dates = {source["data_date"] for source in sources if source["data_date"]}
+        requested_dates = {
+            source["requested_date"] for source in sources
+            if source["requested_date"]
+        }
+        evidence["alignment"] = qualified["date_alignment"]
+        evidence["date_origin"] = (
+            next(iter(origins)) if len(origins) == 1 else "unknown"
+        )
+        evidence["data_date"] = (
+            next(iter(dates)) if len(dates) == 1
+            and all(source["data_date"] for source in sources) else None
+        )
+        evidence["requested_date"] = (
+            next(iter(requested_dates)) if len(requested_dates) == 1 else None
+        )
+        evidence["freshness"] = (
+            "fresh" if qualified["date_alignment"] == "matched"
+            and qualified["event_time_status"] == "known"
+            and origins == {"provider"}
+            else "stale" if qualified["date_alignment"] == "mismatched"
+            and qualified["event_time_status"] == "known"
+            else "unknown"
+        )
+        if component["id"] == "index_trend":
+            source_by_code = {
+                source["label"].rsplit(":", 1)[-1]: source
+                for source in sources
+            }
+            for item in evidence.get("indices") or []:
+                source = source_by_code.get(item.get("code"))
+                if source:
+                    item["alignment"] = source["alignment"]
+                    item["date_origin"] = source["date_origin"]
     if intraday is not None:
         result["intraday"] = intraday
         result["intraday_mix"] = {

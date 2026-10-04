@@ -49,6 +49,44 @@ def explanation_context():
 
 
 class TestMarketExplanationReporting(unittest.TestCase):
+    def test_unqualified_score_is_rendered_as_reference_model_prompt(self):
+        explanation = build_market_explanation(
+            explanation_context(), "2026-09-07")
+
+        for rendered in (
+            render_market_explanation(explanation, "markdown"),
+            render_market_explanation(explanation, "html"),
+        ):
+            self.assertIn("参考评分", rendered)
+            self.assertIn("模型计算分", rendered)
+            self.assertIn("证据不足，以下为模型提示", rendered)
+            self.assertIn("来源日期未知", rendered)
+
+    def test_matched_dates_without_event_time_are_not_rendered_fresh(self):
+        ctx = explanation_context()
+        ctx["regime"].update({"data_quality": "good", "partial_components": []})
+        ctx["components"]["capital"]["data_status"] = "good"
+        for item in ctx["indices"].values():
+            item.update({"data_date": "2026-09-07", "date_origin": "provider"})
+        ctx.update({
+            "amount_evidence": {"data_date": "2026-09-07", "date_origin": "provider"},
+            "activity_evidence": {"data_date": "2026-09-07", "date_origin": "provider"},
+            "sector_evidence": {"data_date": "2026-09-07", "date_origin": "provider"},
+            "zt_evidence": {"data_date": "2026-09-07", "date_origin": "provider"},
+            "capital_context": {
+                "metric": "market_main_force_net_inflow",
+                "data_date": "2026-09-07", "date_origin": "provider",
+            },
+        })
+        explanation = build_market_explanation(ctx, "2026-09-07")
+
+        for rendered in (
+            render_market_explanation(explanation, "markdown"),
+            render_market_explanation(explanation, "html"),
+        ):
+            self.assertIn("交易日已核验，事件时刻未知", rendered)
+            self.assertNotIn("fresh（已核验）", rendered)
+
     def test_markdown_and_html_render_all_explanation_evidence(self):
         explanation = build_market_explanation(
             explanation_context(), "2026-09-07")
@@ -70,8 +108,8 @@ class TestMarketExplanationReporting(unittest.TestCase):
         markdown = render_market_explanation(explanation, "markdown")
         html = render_market_explanation(explanation, "html")
         for rendered in (markdown, html):
-            self.assertIn("来源采集时间未记录", rendered)
-            self.assertIn("完整度与评分资格按冻结组件状态判定", rendered)
+            self.assertIn("来源事件时刻未记录", rendered)
+            self.assertIn("交易日资格与事件时效分别核验", rendered)
 
     def test_html_escapes_untrusted_detail(self):
         ctx = explanation_context()
@@ -163,7 +201,7 @@ class TestMarketExplanationReporting(unittest.TestCase):
             stale = mr.load_recommendation_context(path, today="2026-09-08")
 
         self.assertEqual(loaded["score"], 77.5)
-        self.assertEqual(loaded["data_quality"], "good")
+        self.assertEqual(loaded["data_quality"], "partial")
         self.assertEqual(stale["data_quality"], "unknown")
 
     def test_official_snapshot_uses_legacy_market_regime_projection(self):

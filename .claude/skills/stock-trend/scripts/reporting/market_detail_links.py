@@ -180,16 +180,22 @@ def _number(value):
 
 
 def _raw_detail(ctx, key):
-    component = (ctx.get("components") or {}).get(key) or {}
+    frozen = (ctx.get("detail_inputs") or {}).get(key) or {}
     if key == "index_trend":
         records = []
+        by_code = {
+            item.get("code"): item
+            for item in frozen.get("indices") or []
+            if isinstance(item, dict) and item.get("code")
+        }
         for code in ("000001.SH", "000300.SH", "399001.SZ"):
-            item = (ctx.get("indices") or {}).get(code) or {}
+            item = by_code.get(code) or {}
             fields = []
             close = _number(item.get("close"))
             ma20 = _number(item.get("ma20"))
             if close is not None:
-                fields.append(f"收盘价 {close}")
+                price_label = "盘中价" if ctx.get("intraday") else "收盘价"
+                fields.append(f"{price_label} {close}")
             else:
                 fields.append("收盘价未保存")
             if ma20 is not None:
@@ -200,29 +206,52 @@ def _raw_detail(ctx, key):
                 fields.append("收盘在MA20上方" if item["above_ma20"] else "收盘在MA20下方")
             if isinstance(item.get("ma20_rising"), bool):
                 fields.append("MA20向上" if item["ma20_rising"] else "MA20向下")
+            if _present(item.get("data_date")):
+                fields.append(f"数据日 {item['data_date']}")
+            if _present(item.get("provider")):
+                fields.append(f"来源 {item['provider']}")
             records.append(f"{code}：{'，'.join(fields)}")
         return "；".join(records) + "。"
     if key == "volume":
-        amount = _number(ctx.get("amount_yi"))
+        amount = _number(frozen.get("amount_yi"))
+        average = _number(frozen.get("history_average_yi"))
+        sample_count = _number(frozen.get("history_sample_count"))
+        amounts = [
+            value for value in (
+                _number(item) for item in frozen.get("history_amounts_yi") or [])
+            if value is not None
+        ]
         return (
-            f"两市成交额：{amount}亿；" if amount is not None else "两市成交额：未保存；"
-        ) + "20日均额：未保存（不根据比例倒算）。"
+            f"两市成交额：{amount or '未保存'}亿；"
+            f"历史实际均额：{average or '未保存'}亿；"
+            f"历史样本数：{sample_count or '未保存'}；"
+            f"历史成交额样本：{('、'.join(amounts) + '亿') if amounts else '未保存'}；"
+            f"覆盖范围：{frozen.get('coverage') or '未保存'}。"
+        )
     if key == "breadth":
-        up = _number(component.get("up"))
-        down = _number(component.get("down"))
+        up = _number(frozen.get("up"))
+        down = _number(frozen.get("down"))
+        industry_up = _number(frozen.get("industry_up_count"))
+        industry_count = _number(frozen.get("industry_count"))
         return (
             f"上涨家数：{up or '未保存'}；下跌家数：{down or '未保存'}；"
-            "行业上涨占比的结构化原始值：未保存。"
+            f"上涨行业数：{industry_up or '未保存'}；"
+            f"行业总数：{industry_count or '未保存'}；"
+            f"覆盖范围：{frozen.get('coverage') or '未保存'}。"
         )
     if key == "zt_emotion":
-        zt = ctx.get("zt") or {}
         return (
-            f"涨停家数：{_number(zt.get('count')) or '未保存'}；"
-            f"连板家数：{_number(zt.get('streak_count')) or '未保存'}；"
-            f"最高板：{_number(zt.get('max_streak')) or '未保存'}；"
-            "历史基线：未保存。"
+            f"涨停家数：{_number(frozen.get('count')) or '未保存'}；"
+            f"连板家数：{_number(frozen.get('streak_count')) or '未保存'}；"
+            f"最高板：{_number(frozen.get('max_streak')) or '未保存'}；"
+            f"历史实际均值：{_number(frozen.get('history_average_count')) or '未保存'}；"
+            f"历史样本数：{_number(frozen.get('history_sample_count')) or '未保存'}；"
+            f"绝对家数基线：{_number(frozen.get('absolute_baseline_count')) or '未保存'}。"
         )
-    return "主力净流入的结构化原始字段：未保存；冻结汇总值以本报告说明为准。"
+    return (
+        f"全市场主力净流入：{_number(frozen.get('main_force_yi')) or '未保存'}亿；"
+        f"覆盖范围：{frozen.get('coverage') or '未保存'}。"
+    )
 
 
 def summary_link(key, format="html"):

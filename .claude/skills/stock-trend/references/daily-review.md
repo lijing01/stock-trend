@@ -10,6 +10,12 @@
 
 证据资格与分数状态分开记录：完整/部分/缺失、fresh/stale/unknown、primary/alternative/estimate/unknown、scorable/reference_only/unavailable。市场资金正式使用全市场主力净流入(`market_main_force_net_inflow`)；该数据有效时标记 `primary`/`scorable`，不因北向数据不可用产生 `partial` 或 `regime_data_partial`。其他组件仍按各自完整性标记，缺少来源时间戳不得标记为 fresh。盘中解释额外保存锚分、外推分和混合权重；无法取得锚证据时只显示已存正式分，不声称组件合计解释了盘中混合分。
 
+**日期证据与结论资格**：`data_date` 仅保存可核验的来源交易日，缺失保留 null；`requested_date` 是请求日，`fetched_at` 是本机采集时刻。`date_origin=provider/request/unknown` 与 `alignment=matched/mismatched/unknown` 分开记录。逐只核验三个趋势指数的末条有效收盘日期；赚钱效应同时核验涨跌家数和行业排行日期。假期采集或无来源日期的快照不自动对齐报告日。
+
+上下文与解释保存独立 `conclusion_qualification`。组件完整且来源交易日全部匹配才可支撑结论；没有来源事件时刻时显示“交易日已核验，事件时刻未知”，时效仍为 unknown。证据不足时 HTML/Markdown 显示“参考评分（模型计算分）”及“证据不足，以下为模型提示”，保留原分数、公式与模型质量。推荐入口统一投影有效质量：原 good 且资格不足降为 partial，原 partial/missing 保留；旧缓存重新核验证据，不自动放行。未核验记录可冻结供参考，不可充当合格收盘对比基线。
+
+新增 `detail_inputs` 冻结收盘价、MA20、真实成交均额与样本数、涨跌家数和行业计数、涨停/连板/最高板及基线、主力净流入与覆盖范围。详情只读冻结字段，未保存值不倒算、不联网补齐历史。
+
 **盘中混合口径**: 交易时间内跑，评分为「上一收盘锚 + 盘中按已过 240 交易分钟占比外推」的混合 —— 半日成交额/涨停/涨跌家数按已过时间占比放大估全天值再打分，早盘(开盘约 40 分钟内)不外推、直接用上一收盘。越早越依赖昨收，因此**不会因半日数据误报弱势**。报告标 `盘中临时`，输出含 `intraday: true` + `intraday_note`；盘中快照**不写** `market_regime_history.json`(避免 partial 数据污染后续基线)。
 
 **步骤**：

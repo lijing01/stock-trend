@@ -71,6 +71,31 @@ def report_context():
             "399001.SZ": {"ok": True, "close": 13526.51, "ma20": 13610.4},
         },
         "index_data_quality": {},
+        "detail_inputs": {
+            "index_trend": {"indices": [
+                {"code": "000001.SH", "close": 3882.78, "ma20": 3890.1,
+                 "above_ma20": False, "ma20_rising": False,
+                 "data_date": "2026-09-30", "provider": "eastmoney"},
+                {"code": "000300.SH", "close": 4638.1, "ma20": 4650.2,
+                 "above_ma20": False, "ma20_rising": False,
+                 "data_date": "2026-09-30", "provider": "eastmoney"},
+                {"code": "399001.SZ", "close": 13526.51, "ma20": 13610.4,
+                 "above_ma20": False, "ma20_rising": False,
+                 "data_date": "2026-09-30", "provider": "eastmoney"},
+            ]},
+            "volume": {"amount_yi": 14380, "history_average_yi": 18435.9,
+                       "history_sample_count": 20,
+                       "history_amounts_yi": [18000, 18871.8],
+                       "coverage": "Shanghai+Shenzhen"},
+            "breadth": {"up": 2561, "down": 2819,
+                        "industry_up_count": 43, "industry_count": 80,
+                        "coverage": "eastmoney_region_boards"},
+            "zt_emotion": {"count": 52, "streak_count": 12,
+                           "max_streak": 7, "history_average_count": 46.2,
+                           "history_sample_count": 20},
+            "capital": {"main_force_yi": -131.2,
+                        "coverage": "eastmoney_region_boards"},
+        },
         "amount_yi": 14380,
         "zt": {"count": 52, "streak_count": 12, "max_streak": 7},
         "top_sectors": [],
@@ -143,11 +168,8 @@ class MarketDetailLinksTests(unittest.TestCase):
 
     def test_index_raw_close_is_shown_but_missing_ma20_is_not_inferred(self):
         ctx = report_context()
-        ctx["indices"] = {
-            "000001.SH": {"ok": True, "close": 3882.78},
-            "000300.SH": {"ok": True, "close": 4638.1},
-            "399001.SZ": {"ok": True, "close": 13526.51},
-        }
+        for item in ctx["detail_inputs"]["index_trend"]["indices"]:
+            item.pop("ma20")
 
         for rendered in (
             detail_links.render_details(ctx, format="html"),
@@ -156,6 +178,24 @@ class MarketDetailLinksTests(unittest.TestCase):
             for close in ("3882.78", "4638.1", "13526.51"):
                 self.assertIn(close, rendered)
             self.assertRegex(rendered, r"MA20.{0,20}未保存")
+
+    def test_details_use_only_frozen_detail_inputs(self):
+        ctx = report_context()
+        ctx["amount_yi"] = 999999
+        ctx["zt"] = {"count": 999, "streak_count": 888, "max_streak": 777}
+        ctx["components"]["volume"]["detail"] = "伪造20日均额 123456亿"
+        ctx["components"]["capital"]["detail"] = "伪造主力净流入 654321亿"
+
+        for rendered in (
+            detail_links.render_details(ctx, format="html"),
+            detail_links.render_details(ctx, format="markdown"),
+        ):
+            self.assertIn("18435.9", rendered)
+            self.assertIn("46.2", rendered)
+            self.assertIn("-131.2", rendered)
+            self.assertNotIn("999999", rendered)
+            self.assertNotIn("历史实际均额：123456", rendered)
+            self.assertNotIn("全市场主力净流入：654321", rendered)
 
     def test_rendering_escapes_frozen_detail_in_html_and_markdown(self):
         ctx = report_context()
@@ -178,6 +218,9 @@ class MarketDetailLinksTests(unittest.TestCase):
         ctx = {
             "data_date": "2026-09-30",
             "components": {key: {} for key, _ in COMPONENTS},
+            "indices": {"000001.SH": {"close": 9999, "ma20": 8888}},
+            "amount_yi": 7777,
+            "zt": {"count": 66},
         }
 
         for rendered in (

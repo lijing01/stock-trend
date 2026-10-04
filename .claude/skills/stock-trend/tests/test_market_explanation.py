@@ -12,7 +12,10 @@ TEST_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = TEST_DIR.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from analysis.market_explanation import build_market_explanation
+from analysis.market_explanation import (
+    build_conclusion_qualification,
+    build_market_explanation,
+)
 
 
 COMPONENT_SCORES = {
@@ -95,6 +98,118 @@ def assert_all_finite(testcase, value):
 
 
 class MarketExplanationTests(unittest.TestCase):
+    def test_conclusion_qualification_matches_all_frozen_source_dates(self):
+        ctx = fixture_close_context()
+        ctx["amount_evidence"] = {
+            "data_date": "2026-09-07", "date_origin": "provider",
+            "source_timestamp": None,
+        }
+        ctx["activity_evidence"] = {
+            "data_date": "2026-09-07", "date_origin": "provider",
+            "source_timestamp": None,
+        }
+        ctx["sector_evidence"] = {
+            "data_date": "2026-09-07", "date_origin": "provider",
+            "source_timestamp": None,
+        }
+        ctx["zt_evidence"] = {
+            "data_date": "2026-09-07", "date_origin": "provider",
+            "source_timestamp": None,
+        }
+        ctx["capital_context"] = {
+            "metric": "market_main_force_net_inflow",
+            "data_date": "2026-09-07", "date_origin": "provider",
+            "source_timestamp": None,
+        }
+        for item in ctx["indices"].values():
+            item["date_origin"] = "provider"
+
+        qualification = build_conclusion_qualification(ctx, "2026-09-07")
+
+        self.assertEqual(qualification["status"], "qualified")
+        self.assertTrue(qualification["eligible"])
+        self.assertEqual(qualification["date_alignment"], "matched")
+        self.assertEqual(qualification["event_time_status"], "unknown")
+        self.assertEqual(qualification["freshness"], "unknown")
+        self.assertIn("source_timestamp_missing", qualification["reasons"])
+
+        explanation = build_market_explanation(ctx, "2026-09-07")
+        for component in explanation["components"]:
+            self.assertEqual(component["evidence"]["alignment"], "matched")
+            self.assertEqual(component["evidence"]["freshness"], "unknown")
+
+    def test_conclusion_qualification_locates_mismatched_index(self):
+        ctx = fixture_close_context()
+        for item in ctx["indices"].values():
+            item["date_origin"] = "provider"
+        ctx["indices"]["000300.SH"]["data_date"] = "2026-09-06"
+
+        qualification = build_conclusion_qualification(ctx, "2026-09-07")
+        index = next(
+            item for item in qualification["components"]
+            if item["id"] == "index_trend"
+        )
+
+        self.assertFalse(qualification["eligible"])
+        self.assertEqual(qualification["date_alignment"], "mismatched")
+        self.assertIn(
+            "index_trend:000300.SH:data_date_mismatch", index["reasons"])
+
+    def test_breadth_requires_activity_and_sector_source_dates(self):
+        ctx = fixture_close_context()
+        ctx["activity_evidence"] = {
+            "data_date": "2026-09-07", "date_origin": "provider",
+        }
+        ctx["sector_evidence"] = {
+            "data_date": None, "date_origin": "unknown",
+        }
+
+        qualification = build_conclusion_qualification(ctx, "2026-09-07")
+        breadth = next(
+            item for item in qualification["components"]
+            if item["id"] == "breadth"
+        )
+
+        self.assertEqual(breadth["date_alignment"], "unknown")
+        self.assertIn("breadth:sector:source_date_unknown", breadth["reasons"])
+
+    def test_request_date_and_local_timestamp_cannot_claim_fresh(self):
+        ctx = fixture_close_context()
+        ctx["amount_evidence"] = {
+            "data_date": None,
+            "requested_date": "2026-09-07",
+            "date_origin": "request",
+            "source_timestamp": "2026-09-07T15:00:00+08:00",
+        }
+
+        result = build_market_explanation(ctx, "2026-09-07")
+        volume = next(item for item in result["components"] if item["id"] == "volume")
+
+        self.assertEqual(volume["evidence"]["alignment"], "unknown")
+        self.assertEqual(volume["evidence"]["freshness"], "unknown")
+        self.assertIn(
+            "volume:source_date_unknown",
+            result["conclusion_qualification"]["reasons"],
+        )
+        self.assertIn(
+            "volume:data_date_missing",
+            result["conclusion_qualification"]["reasons"],
+        )
+
+    def test_legacy_component_does_not_inherit_report_date(self):
+        ctx = fixture_close_context()
+        ctx["components"]["volume"].pop("data_date", None)
+
+        result = build_market_explanation(ctx, "2026-09-07")
+        volume = next(item for item in result["components"] if item["id"] == "volume")
+
+        self.assertIsNone(volume["evidence"]["data_date"])
+        self.assertEqual(volume["evidence"]["alignment"], "unknown")
+        self.assertIn(
+            "volume:source_date_unknown",
+            result["conclusion_qualification"]["reasons"],
+        )
+
     def test_close_score_reconciles(self):
         ctx = fixture_close_context()
         result = build_market_explanation(ctx, "2026-09-07")
