@@ -1352,6 +1352,8 @@ def _market_explanation_for_report(ctx: dict) -> dict | None:
 
 
 def generate_report(ctx: dict) -> str:
+    from reporting.market_detail_links import COMPONENTS, render_details, summary_link
+
     lines = []
     lines.append(f"## 📅 今日复盘 ({ctx.get('data_date', '')})")
     lines.append("")
@@ -1369,13 +1371,19 @@ def generate_report(ctx: dict) -> str:
     # ① 市场环境
     lines.append("### ① 市场环境")
     lines.append("")
-    lines.append("| 组件 | 得分 | 说明 |")
-    lines.append("|------|------|------|")
-    for key, name in [("index_trend", "大盘趋势"), ("volume", "成交额"),
-                      ("breadth", "赚钱效应"), ("zt_emotion", "涨停情绪"),
-                      ("capital", "资金")]:
+    lines.append('<a id="market-component-summary"></a>')
+    lines.append("")
+    lines.append("| 组件 | 得分 | 说明 | 详情 |")
+    lines.append("|------|------|------|------|")
+    for key, name in COMPONENTS:
         comp = (ctx.get("components") or {}).get(key) or {}
-        lines.append(f"| {name} | **{comp.get('score', '—')}** | {comp.get('detail', '—')} |")
+        detail = html_lib.escape(str(comp.get("detail", "—"))).replace("\n", " ")
+        for char in ("\\", "`", "*", "_", "[", "]", "(", ")", "|"):
+            detail = detail.replace(char, "\\" + char)
+        lines.append(
+            f"| {name} | **{comp.get('score', '—')}** | {detail} | "
+            f"{summary_link(key, 'markdown')} |"
+        )
     lines.append("")
     breadth = (ctx.get("components") or {}).get("breadth") or {}
     lines.append(f"▸ 涨跌家数: 涨 {breadth.get('up') if breadth.get('up') is not None else '—'} / 跌 {breadth.get('down') if breadth.get('down') is not None else '—'} | "
@@ -1387,6 +1395,8 @@ def generate_report(ctx: dict) -> str:
         from reporting.market_explanation import render_market_explanation
         lines.append(render_market_explanation(explanation, "markdown"))
         lines.append("")
+    lines.append(render_details(ctx, "markdown"))
+    lines.append("")
 
     # ② 板块
     lines.append("### ② 板块")
@@ -1837,9 +1847,17 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
         from reporting.market_explanation import render_market_explanation
         explanation_html = render_market_explanation(explanation, "html")
 
+    from reporting.market_detail_links import render_details, summary_link
+    details_html = render_details(ctx, "html")
+
     def comp_row(key, name):
         c = comps.get(key) or {}
-        return f"<tr><td>{name}</td><td><strong>{c.get('score', '—')}</strong></td><td>{c.get('detail', '—')}</td></tr>"
+        return (
+            f"<tr><td>{html_lib.escape(name)}</td>"
+            f"<td><strong>{html_lib.escape(str(c.get('score', '—')))}</strong></td>"
+            f"<td>{html_lib.escape(str(c.get('detail', '—')))}</td>"
+            f"<td>{summary_link(key, 'html')}</td></tr>"
+        )
 
     top = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
@@ -1882,10 +1900,11 @@ ul{{padding-left:20px;line-height:1.8}}
 {'<p class="dt" style="color:#d97706">⚠️ ' + ctx.get('intraday_note','') + '</p>' if ctx.get('intraday_note') else ''}
 
 <h2>① 市场环境</h2>
-<table><thead><tr><th>组件</th><th>得分</th><th>说明</th></tr></thead><tbody>
+<table id="market-component-summary"><thead><tr><th>组件</th><th>得分</th><th>说明</th><th>详情</th></tr></thead><tbody>
 {comp_row('index_trend','大盘趋势')}{comp_row('volume','成交额')}{comp_row('breadth','赚钱效应')}{comp_row('zt_emotion','涨停情绪')}{comp_row('capital','资金')}
 </tbody></table>
 {explanation_html}
+{details_html}
 
 <h2>② 板块</h2>
 <p><strong>最强前{TOP_SECTOR_COUNT}:</strong></p><ul>{top or '<li>—</li>'}</ul>
