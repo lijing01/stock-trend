@@ -1287,12 +1287,14 @@ def update_observation_list_reports(html_path, md_path=None, *, pending=False,
                                     data_date=None, artifact_path=None, yaml_path=None):
     """Load once and synchronize the two marked blocks under shared locks."""
     from reporting.observation_report_update import update_observation_reports
+    from reporting.cross_market_review import update_block
     state = None if pending else load_observation_analysis(data_date, artifact_path, yaml_path)
     return update_observation_reports(
         html_path, md_path or Path(html_path).with_suffix(".md"), state=state, pending=pending,
         render_html=render_observation_list_html,
         render_markdown=render_observation_list_markdown,
-        block_start=OBSERVATION_BLOCK_START, block_end=OBSERVATION_BLOCK_END)
+        block_start=OBSERVATION_BLOCK_START, block_end=OBSERVATION_BLOCK_END,
+        supplementary_renderer=update_block)
 
 
 def _observation_score(value) -> str:
@@ -1576,6 +1578,9 @@ def generate_report(ctx: dict, *, observation_status: str = "ready",
         lines.extend(['<a id="us-market-summary"></a>', '### 美股', '', '美股摘要未提供。', ''])
     if observation_status != "pending" and observation_state is None:
         observation_state = load_observation_analysis(ctx.get("data_date") or "")
+    from reporting.cross_market_review import render as render_cross_market
+    lines.append(render_cross_market(ctx, "markdown", observation_state))
+    lines.append("")
     lines.append(render_observation_list_markdown(
         observation_state, pending=observation_status == "pending"))
     lines.append("")
@@ -1963,6 +1968,7 @@ def build_agent_output(ctx: dict) -> dict:
         "top_sectors": ctx["top_sectors"],
         "bottom_sectors": ctx["bottom_sectors"],
         "us_market_summary": ctx.get("us_market_summary"),
+        "cross_market_observation": ctx.get("cross_market_observation"),
         "review_comparison": ctx.get("review_comparison"),
         "sector_persistence": ctx.get("sector_persistence"),
         "model_version": ctx.get("model_version"),
@@ -2167,6 +2173,11 @@ def main():
     if not args.no_refresh and ctx["sector_persistence"].get("run_binding"):
         core_ctx["sector_persistence_binding"] = ctx["sector_persistence"]["run_binding"]
         save_context(core_ctx)
+    if observation_state is None and args.observation_status == "ready":
+        observation_state = load_observation_analysis(ctx.get("data_date") or "", as_of=run_as_of)
+    from reporting.cross_market_review import prepare as prepare_cross_market
+    ctx["cross_market_inputs"], ctx["cross_market_observation"] = prepare_cross_market(
+        ctx, observation_state)
     if args.json:
         # 精简 JSON 供 Agent 消费
         print(json.dumps(build_agent_output(ctx), ensure_ascii=False, indent=2))
@@ -2244,6 +2255,8 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
         observation_state = load_observation_analysis(ctx.get("data_date") or "")
     observation_html = render_observation_list_html(
         observation_state, pending=observation_pending)
+    from reporting.cross_market_review import render as render_cross_market
+    cross_market_html = render_cross_market(ctx, "html", observation_state)
     us_html = ""
     if ctx.get("us_market_summary") is not None:
         from reporting.us_market_summary import render_html
@@ -2293,6 +2306,7 @@ ul{{padding-left:20px;line-height:1.8}}
 {sector_persistence_html}
 
 {us_html}
+{cross_market_html}
 {observation_html}
 {details_html}
 {explanation_html}

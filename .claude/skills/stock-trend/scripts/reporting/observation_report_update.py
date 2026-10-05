@@ -14,9 +14,11 @@ def _replace_block(original, replacement, block_start, block_end):
     return original[:start] + replacement + original[end:]
 
 
-def _update_file(path, replacement, block_start, block_end):
+def _update_file(path, replacement, block_start, block_end, transform=None):
     original = path.read_text(encoding="utf-8")
     updated = _replace_block(original, replacement, block_start, block_end)
+    if transform is not None:
+        updated = transform(updated)
     if updated != original:
         atomic_write_text(path, updated)
     return {"status": "updated", "path": str(path.resolve()),
@@ -30,7 +32,7 @@ def _failure(path, exc):
 
 def update_observation_reports(
         html_path, markdown_path, *, state=None, pending=False,
-        render_html, render_markdown, block_start, block_end):
+        render_html, render_markdown, block_start, block_end, supplementary_renderer=None):
     """Atomically update each report under a shared, consistently ordered lock.
 
     The two visible files cannot be replaced as one filesystem transaction.  A
@@ -53,14 +55,18 @@ def update_observation_reports(
     with report_lock(html_path):
         try:
             files["html"] = _update_file(
-                html_path, html_block, block_start, block_end)
+                html_path, html_block, block_start, block_end,
+                (lambda content: supplementary_renderer(content, frozen_state, pending, "html"))
+                if supplementary_renderer else None)
         except (OSError, UnicodeError, ValueError) as exc:
             files["html"] = _failure(html_path, exc)
 
         with report_lock(markdown_path):
             try:
                 files["markdown"] = _update_file(
-                    markdown_path, markdown_block, block_start, block_end)
+                    markdown_path, markdown_block, block_start, block_end,
+                    (lambda content: supplementary_renderer(content, frozen_state, pending, "markdown"))
+                    if supplementary_renderer else None)
             except (OSError, UnicodeError, ValueError) as exc:
                 files["markdown"] = _failure(markdown_path, exc)
 

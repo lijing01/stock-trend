@@ -1,0 +1,97 @@
+{
+  "schema_version": "us-a-share-observation-mapping/v1",
+  "version": "2026-10-05.1",
+  "verified_at": "2026-10-05",
+  "scope": "固定美股配置的有限业务映射；代码只用于交集匹配既有观察池，不自动加入股票。",
+  "mappings": [
+    {
+      "symbol": "XLE",
+      "direction": "油气开采与能源设备服务",
+      "relation_type": "direct_industry",
+      "sector_names": [
+        "石油行业",
+        "采掘行业",
+        "油气开采及服务"
+      ],
+      "sources": [
+        {
+          "title": "State Street XLE官方基金资料",
+          "url": "https://www.ssga.com/us/en/individual/etfs/state-street-energy-select-sector-spdr-etf-xle"
+        }
+      ],
+      "rationale": "XLE覆盖油气及能源设备服务，与A股相关行业属于同类业务观察方向。"
+    },
+    {
+      "symbol": "XLV",
+      "direction": "制药、生物技术与医疗服务",
+      "relation_type": "direct_industry",
+      "sector_names": [
+        "化学制药",
+        "生物制品",
+        "医疗服务"
+      ],
+      "sources": [
+        {
+          "title": "State Street XLV官方基金资料",
+          "url": "https://www.ssga.com/us/en/individual/etfs/state-street-health-care-select-sector-spdr-etf-xlv"
+        }
+      ],
+      "rationale": "XLV覆盖制药、生物技术、医疗设备及服务，与A股相关行业属于同类业务观察方向。"
+    },
+    {
+      "symbol": "NVDA",
+      "direction": "半导体与加速计算",
+      "relation_type": "direct_industry",
+      "sector_names": [
+        "半导体"
+      ],
+      "sources": [
+        {
+          "title": "NVIDIA FY2026业绩公告",
+          "url": "https://investor.nvidia.com/news/press-release-details/2026/NVIDIA-Announces-Financial-Results-for-Fourth-Quarter-and-Fiscal-2026/"
+        }
+      ],
+      "rationale": "NVIDIA加速计算与数据中心业务作为半导体行业背景；不代表A股具体产品或收益相同。"
+    },
+    {
+      "symbol": "NVDA",
+      "direction": "数据中心热管理",
+      "relation_type": "demand",
+      "sector_names": [],
+      "observation_codes": [
+        "301489"
+      ],
+      "sources": [
+        {
+          "title": "NVIDIA FY2026业绩公告",
+          "url": "https://investor.nvidia.com/news/press-release-details/2026/NVIDIA-Announces-Financial-Results-for-Fourth-Quarter-and-Fiscal-2026/"
+        },
+        {
+          "title": "思泉新材2025年4月投资者活动记录",
+          "url": "https://static.cninfo.com.cn/finalpage/2025-04-23/1223238077.PDF"
+        }
+      ],
+      "rationale": "加速计算数据中心与服务器散热存在共同终端需求；思泉热管理产品覆盖服务器场景。未证明双方直接客户或供应商关系。"
+    },
+    {
+      "symbol": "TSLA",
+      "direction": "新能源汽车、储能与锂电设备",
+      "relation_type": "demand",
+      "sector_names": [],
+      "observation_codes": [
+        "300457"
+      ],
+      "sources": [
+        {
+          "title": "Tesla 2025 Form 10-K",
+          "url": "https://ir.tesla.com/_flysystem/s3/sec/000162828026003952/tsla-20251231-gen.pdf"
+        },
+        {
+          "title": "赢合科技2025半年报",
+          "url": "https://static.cninfo.com.cn/finalpage/2025-08-23/1224557698.PDF"
+        }
+      ],
+      "rationale": "Tesla电动车、储能、电池业务与赢合锂电生产自动化设备存在共同终端需求。未证明双方直接客户或供应商关系。"
+    }
+  ]
+}
