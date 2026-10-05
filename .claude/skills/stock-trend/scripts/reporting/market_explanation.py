@@ -152,7 +152,8 @@ def _render_html(explanation):
         )
     index_summary = h(_index_summary(explanation))
     return (
-        "<section class='market-explanation'>"
+        '<details class="market-explanation">'
+        "<summary>评分解释</summary>"
         "<h2>市场环境解释</h2>"
         f"<p>{h(score_label)}：<strong>{h(explanation.get('score'))}</strong> / 100；"
         f"口径：{h(explanation.get('mode'))}；基准日 {h(explanation.get('basis_date'))}；"
@@ -164,14 +165,16 @@ def _render_html(explanation):
         "<p>结论资格原因：" + ("、".join(h(item) for item in qualification.get("reasons") or []) or "无") + "</p>"
         f"{model_note}"
         f"<p>{index_summary}</p>"
-        "<table><thead><tr><th>组件</th><th>得分</th><th>权重</th><th>贡献</th>"
+        '<div class="market-explanation-table-wrap" style="overflow-x:auto;max-width:100%">'
+        '<style>.market-explanation-table-wrap>table{min-width:760px}</style>'
+        '<table><thead><tr><th>组件</th><th>得分</th><th>权重</th><th>贡献</th>'
         "<th>证据资格</th><th>说明</th></tr></thead><tbody>"
         + "".join(rows)
-        + "</tbody></table>"
+        + "</tbody></table></div>"
         f"<p>限制原因：{reasons}</p>"
         f"<p>数据质量说明：{notes}</p>"
         + intraday_html
-        + "</section>"
+        + "</details>"
     )
 
 

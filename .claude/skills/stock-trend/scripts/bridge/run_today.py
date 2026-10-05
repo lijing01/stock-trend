@@ -152,7 +152,7 @@ def _launch_background(output, *, now, as_of, sessions, state_root, postprocess_
         return {**task, "status": "launch_failed", "reason": type(exc).__name__}
 
 
-def _launch_review_html_update(html_path, *, data_date=None, artifact_path=None,
+def _launch_review_html_update(html_path, markdown_path=None, *, data_date=None, artifact_path=None,
                                background_root=None):
     """Queue the optional observation-list replacement without blocking candidates."""
     from bridge import today_background
@@ -165,7 +165,7 @@ def _launch_review_html_update(html_path, *, data_date=None, artifact_path=None,
     except OSError:
         config_sha256 = None
     task = today_background.ensure_review_html_task(
-        html_path, data_date=data_date, artifact_path=artifact_path,
+        html_path, markdown_path, data_date=data_date, artifact_path=artifact_path,
         yaml_path=yaml_path, config_sha256=config_sha256, root=root)
     if task.get("status") in {"completed", "failed", "timed_out", "interrupted", "launch_failed"}:
         return task
@@ -236,15 +236,25 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
         output["notifications"].append(notice)
 
     daily_review_path = None
+    daily_review_markdown_path = None
     daily_review_date = None
     try:
         market = _run_script("analysis/market_regime.py", ["--observation-status", "pending"])
         market_paths = market.get("report_paths") or {}
         daily_review_path = market_paths.get("html")
+        daily_review_markdown_path = market_paths.get("markdown")
+        if daily_review_path and not daily_review_markdown_path:
+            matching_markdown = Path(daily_review_path).with_suffix(".md")
+            if matching_markdown.is_file():
+                daily_review_markdown_path = str(matching_markdown.resolve())
         daily_review_date = (market.get("meta") or {}).get("data_date")
         workflow["market"] = {"status": "completed", "report_paths": market_paths}
         if daily_review_path:
-            output["report_paths"] = {"daily_review_html": daily_review_path}
+            output["report_paths"] = {
+                "daily_review_html": daily_review_path,
+                **({"daily_review_markdown": daily_review_markdown_path}
+                   if daily_review_markdown_path else {}),
+            }
             print(f"今日复盘 HTML: {daily_review_path}", file=sys.stderr, flush=True)
     except Exception as exc:
         workflow["market"] = {"status": "failed", "reason": type(exc).__name__}
@@ -256,6 +266,8 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
             output["report_paths"] = {
                 **candidate_paths,
                 **({"daily_review_html": daily_review_path} if daily_review_path else {}),
+                **({"daily_review_markdown": daily_review_markdown_path}
+                   if daily_review_markdown_path else {}),
             }
             workflow["candidates"] = {"status": "completed"}
         except Exception as exc:
@@ -271,7 +283,8 @@ def run_today(candidate_args=None, *, now=None, state_root=DEFAULT_STATE_ROOT,
     if daily_review_path:
         try:
             workflow["review_html"] = _launch_review_html_update(
-                daily_review_path, data_date=daily_review_date,
+                daily_review_path, markdown_path=daily_review_markdown_path,
+                data_date=daily_review_date,
                 background_root=Path(background_root) if background_root else state_root / "background")
         except Exception as exc:
             workflow["review_html"] = {"status": "failed", "reason": type(exc).__name__}

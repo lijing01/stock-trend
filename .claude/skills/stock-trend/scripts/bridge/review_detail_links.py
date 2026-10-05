@@ -133,6 +133,7 @@ class _DocumentParser(HTMLParser):
 def _norm(value) -> str:
     value = html.unescape(str(value or ""))
     value = value.replace("**", "").replace(r"\|", "|")
+    value = re.sub(r"\\([\\`*_\[\]()<>#])", r"\1", value)
     return re.sub(r"\s+", "", value).strip()
 
 
@@ -192,7 +193,7 @@ def _parse_html_report(content: str, basis_date: str) -> dict:
     tables = [
         table for table in parser.find("table")
         if market_heading.end <= table.start < board_heading.start
-        and not any(parent.tag == "section" and "market-explanation" in
+        and not any("market-explanation" in
                     (parent.attrs.get("class") or "").split()
                     for parent in _parents(table))
     ]
@@ -231,9 +232,10 @@ def _parse_html_report(content: str, basis_date: str) -> dict:
         raise ValueError("market_component_order_invalid")
 
     explanation_sections = [
-        section for section in parser.find("section")
-        if "market-explanation" in (section.attrs.get("class") or "").split()
-        and market_heading.end < section.start < board_heading.start
+        element for element in parser.elements
+        if element.tag in {"section", "details"}
+        and "market-explanation" in (element.attrs.get("class") or "").split()
+        and summary_table.end <= element.start
     ]
     explanation = _require_single(explanation_sections, "market_explanation_section_invalid")
     basis_matches = re.findall(r"基准日\s*(\d{4}-\d{2}-\d{2})", explanation.text)
@@ -320,7 +322,8 @@ def _parse_markdown_report(content: str, basis_date: str, html_components: dict)
         raise ValueError("daily_review_markdown_headings_invalid")
     section_match = section_matches[0]
     board_match = board_matches[0]
-    if section_match.end() >= explanation_matches[0].start() or explanation_matches[0].end() >= board_match.start():
+    explanation_match = explanation_matches[0]
+    if section_match.end() >= board_match.start() or explanation_match.start() <= section_match.end():
         raise ValueError("daily_review_markdown_sections_invalid")
     region = content[section_match.end():board_match.start()]
     lines = region.splitlines(keepends=True)
@@ -366,6 +369,9 @@ def _parse_markdown_report(content: str, basis_date: str, html_components: dict)
         "table_end": table_end,
         "lines": lines[header_index:header_index + 7],
         "board_start": board_match.start(),
+        "board_end": board_match.end(),
+        "explanation_start": explanation_match.start(),
+        "explanation_end": explanation_match.end(),
     }
 
 
@@ -374,7 +380,7 @@ def _replace_marker_block(
     block: str,
     *,
     insert_at: int,
-    allowed_after: int,
+    allowed_ranges: tuple[tuple[int, int], ...],
 ) -> tuple[int, int, str]:
     start_count = content.count(HTML_BLOCK_START)
     end_count = content.count(HTML_BLOCK_END)
@@ -383,7 +389,7 @@ def _replace_marker_block(
             raise ValueError("market_detail_links_marker_invalid")
         start = content.index(HTML_BLOCK_START)
         end = content.index(HTML_BLOCK_END, start) + len(HTML_BLOCK_END)
-        if not (allowed_after <= start < end <= insert_at):
+        if not any(lower <= start < end <= upper for lower, upper in allowed_ranges):
             raise ValueError("market_detail_links_marker_location_invalid")
         existing = content[start:end]
         for key, _ in _EXPECTED_COMPONENTS:
@@ -391,8 +397,10 @@ def _replace_marker_block(
                 rf"\bid\s*=\s*['\"]market-detail-{re.escape(key)}['\"]", existing
             )) != 1:
                 raise ValueError("market_detail_links_existing_block_invalid")
-        # Existing generated reports may contain richer frozen raw evidence. Preserve it.
-        return start, end, existing
+        # Existing generated reports may contain richer frozen raw evidence. Preserve it;
+        # only upgrade the generated presentation wrapper.
+        from reporting.market_detail_links import upgrade_html_block
+        return start, end, upgrade_html_block(existing)
     return insert_at, insert_at, block.strip() + "\n\n"
 
 
@@ -405,6 +413,37 @@ def _apply_edits(content: str, edits: list[tuple[int, int, str]]) -> str:
         result = result[:start] + replacement + result[end:]
         last_start = start
     return result
+
+
+def _fold_explanation(content: str, explanation: _Element) -> tuple[int, int, str]:
+    if explanation.end_start is None or explanation.end is None:
+        raise ValueError("market_explanation_section_invalid")
+    opening = content[explanation.start:explanation.start_end]
+    if explanation.tag == "section":
+        opening = re.sub(r"^<section\b", "<details", opening, count=1, flags=re.IGNORECASE)
+    inner = content[explanation.start_end:explanation.end_start]
+    if "market-explanation-table-wrap" not in inner:
+        tables = _descendants(explanation, "table")
+        table = _require_single(tables, "market_explanation_table_invalid")
+        if table.end is None:
+            raise ValueError("market_explanation_table_invalid")
+        relative_start = table.start - explanation.start_end
+        relative_end = table.end - explanation.start_end
+        wrapper_start = (
+            '<div class="market-explanation-table-wrap" '
+            'style="overflow-x:auto;max-width:100%">'
+            '<style>.market-explanation-table-wrap>table{min-width:760px}</style>'
+        )
+        inner = (
+            inner[:relative_start]
+            + wrapper_start
+            + inner[relative_start:relative_end]
+            + "</div>"
+            + inner[relative_end:]
+        )
+    summary = "<summary>评分解释</summary>" if explanation.tag == "section" else ""
+    replacement = opening + summary + inner + "</details>"
+    return explanation.start, explanation.end, replacement
 
 
 def _updated_html(content: str, parsed: dict) -> str:
@@ -448,14 +487,36 @@ def _updated_html(content: str, parsed: dict) -> str:
 
     table_source = content[table.start:table.end]
     updated_table = _apply_edits(table_source, relative_edits)
+    has_scroll_wrapper = any(
+        "summary-table-wrap" in (parent.attrs.get("class") or "").split()
+        for parent in _parents(table)
+    )
+    if not has_scroll_wrapper:
+        updated_table = (
+            '<div class="summary-table-wrap" style="overflow-x:auto;max-width:100%">'
+            '<style>.summary-table-wrap>#market-component-summary{min-width:540px}</style>'
+            + updated_table
+            + "</div>"
+        )
     block = render_details(parsed["ctx"], format="html")
+    board = parsed["board_heading"]
+    explanation = parsed["explanation"]
+    insert_at = board.start if explanation.start < board.start else explanation.start
+    allowed_ranges = (
+        (table.end, board.start),
+        (board.end, explanation.start),
+    )
     detail_edit = _replace_marker_block(
         content,
         block,
-        insert_at=parsed["board_heading"].start,
-        allowed_after=parsed["explanation"].end,
+        insert_at=insert_at,
+        allowed_ranges=allowed_ranges,
     )
-    return _apply_edits(content, [(table.start, table.end, updated_table), detail_edit])
+    explanation_edit = _fold_explanation(content, parsed["explanation"])
+    return _apply_edits(
+        content,
+        [(table.start, table.end, updated_table), explanation_edit, detail_edit],
+    )
 
 
 def _updated_markdown(content: str, parsed: dict, ctx: dict) -> str:
@@ -485,13 +546,21 @@ def _updated_markdown(content: str, parsed: dict, ctx: dict) -> str:
         table = anchor + "\n" + table
     block = render_details(ctx, format="markdown")
     explanation_heading = re.search(r"(?m)^###\s+市场环境解释\s*$", content)
-    if not explanation_heading or explanation_heading.start() >= parsed["board_start"]:
+    if not explanation_heading or explanation_heading.start() != parsed["explanation_start"]:
         raise ValueError("market_explanation_markdown_heading_invalid")
+    insert_at = (
+        parsed["board_start"]
+        if explanation_heading.start() < parsed["board_start"]
+        else explanation_heading.start()
+    )
     detail_edit = _replace_marker_block(
         content,
         block,
-        insert_at=parsed["board_start"],
-        allowed_after=explanation_heading.end(),
+        insert_at=insert_at,
+        allowed_ranges=(
+            (parsed["table_end"], parsed["board_start"]),
+            (parsed["board_end"], explanation_heading.start()),
+        ),
     )
     return _apply_edits(
         content,

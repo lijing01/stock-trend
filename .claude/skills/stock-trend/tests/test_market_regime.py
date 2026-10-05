@@ -447,7 +447,7 @@ def test_report():
     test("不含明日计划", "明日计划" not in md)
     test("含免责声明", "不构成任何投资建议" in md)
     test("含腾讯指数数据源", "腾讯" in md)
-    test("Markdown 显示最强前10", "**最强前10**:" in md)
+    test("Markdown 显示最强前10", "**当日排名最强前10**:" in md)
     test("Markdown 包含前10名", all(f"强势板块{i}" in md for i in range(1, 11)))
     test("Markdown 不包含第11名", "强势板块11" not in md)
     test("Markdown 最强板块保持输入顺序",

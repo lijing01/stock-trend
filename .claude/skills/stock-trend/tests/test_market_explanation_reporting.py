@@ -101,6 +101,12 @@ class TestMarketExplanationReporting(unittest.TestCase):
             self.assertIn("regime_weak", text)
             self.assertIn("贡献", text)
         self.assertIn("000300.SH", markdown)
+        self.assertIn('<details class="market-explanation">', html)
+        self.assertIn("<summary>评分解释</summary>", html)
+        self.assertNotIn('<details class="market-explanation" open', html)
+        self.assertIn('class="market-explanation-table-wrap"', html)
+        self.assertIn("table{min-width:760px}", html)
+        self.assertIn("### 市场环境解释", markdown)
 
     def test_unknown_source_timestamp_is_clear_audit_note(self):
         explanation = build_market_explanation(

@@ -43,7 +43,7 @@ class _StageDeadline(BaseException):
 
 def _budgets(manifest):
     schema = manifest.get("schema_version")
-    if schema == "daily-review-html-background/v1":
+    if schema in {"daily-review-html-background/v1", "daily-review-reports-background/v2"}:
         return {"html": 300}
     if schema not in {None, "today-recommendation-background/v1",
                       "today-recommendation-background/v2"}:
@@ -200,14 +200,16 @@ def _review_html_root(root=DEFAULT_ROOT):
     return Path(root) / REVIEW_HTML_ROOT_NAME
 
 
-def ensure_review_html_task(html_path, *, data_date=None, artifact_path=None,
+def ensure_review_html_task(html_path, markdown_path=None, *, data_date=None, artifact_path=None,
                             yaml_path=None, config_sha256=None, root=DEFAULT_ROOT):
-    """Create an independent task for replacing one daily-review HTML block."""
+    """Create an independent task for replacing both daily-review blocks."""
     path = str(Path(html_path).resolve())
+    markdown_path = Path(markdown_path) if markdown_path else Path(html_path).with_suffix(".md")
     manifest = {
-        "schema_version": "daily-review-html-background/v1",
-        "kind": "daily-review-html",
+        "schema_version": "daily-review-reports-background/v2",
+        "kind": "daily-review-reports",
         "html_path": path,
+        "markdown_path": str(markdown_path.resolve()),
         "data_date": data_date,
         "artifact_path": str(artifact_path) if artifact_path else None,
         "yaml_path": str(yaml_path) if yaml_path else None,
@@ -221,7 +223,7 @@ def read_review_html_status(task_id, root=DEFAULT_ROOT):
 
 
 def launch_review_html_task(task_id, root=DEFAULT_ROOT):
-    """Launch the tiny detached HTML updater and return its task status."""
+    """Launch the tiny detached report updater and return its task status."""
     review_root = _review_html_root(root)
     directory = _task_dir(task_id, review_root)
     directory.mkdir(parents=True, exist_ok=True)
@@ -255,7 +257,7 @@ def launch_review_html_task(task_id, root=DEFAULT_ROOT):
 
 
 def run_review_html_task(task_id, root=DEFAULT_ROOT):
-    """Replace only the marked observation block and persist task state."""
+    """Replace the marked observation block in both reports and persist state."""
     review_root = _review_html_root(root)
     directory = _task_dir(task_id, review_root)
     manifest = _read(directory / "manifest.json")
@@ -264,22 +266,52 @@ def run_review_html_task(task_id, root=DEFAULT_ROOT):
     try:
         from analysis import market_regime
         from analysis.observation_list_analysis import analyze_observation_list
+        from reporting.observation_report_update import update_observation_reports
         yaml_path = Path(manifest.get("yaml_path") or market_regime.OBSERVATION_LIST_FILE)
-        expected_hash = manifest.get("config_sha256")
-        if expected_hash is not None and hashlib.sha256(yaml_path.read_bytes()).hexdigest() != expected_hash:
-            raise ValueError("observation_yaml_changed")
-        analyze_observation_list(
-            manifest["data_date"], yaml_path=yaml_path,
-            artifact_path=manifest.get("artifact_path"))
+        analysis_failure = None
+        try:
+            expected_hash = manifest.get("config_sha256")
+            if (expected_hash is not None
+                    and hashlib.sha256(yaml_path.read_bytes()).hexdigest() != expected_hash):
+                raise ValueError("observation_yaml_changed")
+            analyze_observation_list(
+                manifest["data_date"], yaml_path=yaml_path,
+                artifact_path=manifest.get("artifact_path"))
+        except Exception as exc:
+            failure_reason = (str(exc) if isinstance(exc, ValueError) and str(exc)
+                              else type(exc).__name__)
+            analysis_failure = {
+                "status": "unavailable", "items": [],
+                "reason": f"YAML 观察分析失败: {failure_reason}",
+            }
         update_status(task_id, root=review_root, status="running", stage="updating",
                       pid=os.getpid())
-        result = market_regime.update_observation_list_html(
-            manifest["html_path"], data_date=manifest.get("data_date"),
-            artifact_path=manifest.get("artifact_path"), yaml_path=yaml_path)
+        if analysis_failure:
+            result = update_observation_reports(
+                manifest["html_path"], manifest.get("markdown_path"),
+                state=analysis_failure, pending=False,
+                render_html=market_regime.render_observation_list_html,
+                render_markdown=market_regime.render_observation_list_markdown,
+                block_start=market_regime.OBSERVATION_BLOCK_START,
+                block_end=market_regime.OBSERVATION_BLOCK_END)
+            result["analysis"] = {
+                "status": "failed", "reason": analysis_failure["reason"]}
+        else:
+            result = market_regime.update_observation_list_reports(
+                manifest["html_path"], manifest.get("markdown_path"),
+                data_date=manifest.get("data_date"),
+                artifact_path=manifest.get("artifact_path"), yaml_path=yaml_path)
         result.update({"task_id": task_id, "finished_at": _now()})
+        task_status = "partial" if (
+            analysis_failure or result.get("status") == "degraded") else "completed"
+        result["status"] = task_status
         _write(directory / "result.json", result)
-        update_status(task_id, root=review_root, status="completed", stage="done",
+        update_status(task_id, root=review_root, status=task_status, stage="done",
                       result_path=str(directory / "result.json"),
+                      files=result.get("files"),
+                      partial_failures=result.get("partial_failures"),
+                      observation_status=result.get("observation_status"),
+                      analysis=result.get("analysis"),
                       finished_at=result["finished_at"])
         return result
     except Exception as exc:

@@ -134,6 +134,55 @@ class RenderTests(unittest.TestCase):
         self.assertIn("最近已完成美股交易日：2026-10-02", markdown)
         self.assertIn("A股锚点资格：已核验", markdown)
 
+    def test_html_keeps_core_summary_visible_and_folds_raw_anchor_evidence(self):
+        summary = sample_summary()
+        summary["latest_completed_session"] = "2026-10-02"
+        summary["anchor_evidence"] = {
+            "status": "qualified",
+            "reason": "calendar_verified",
+            "evidence_sha256": "anchor-fixture-sha-" + "a" * 80,
+        }
+        html = render_html(summary)
+
+        overview, technical = html.split('<details class="us-details us-technical-details">', 1)
+        self.assertIn("③ 美股区间概要", overview)
+        self.assertIn("大盘ETF代理", overview)
+        self.assertIn("最近已完成美股交易日：2026-10-02", overview)
+        self.assertIn("A股锚点资格：已核验", overview)
+        self.assertNotIn("calendar_verified", overview)
+        self.assertNotIn('<p class="us-meta">锚点证据摘要：', overview)
+        self.assertIn("<summary>查看锚点资格与原始证据</summary>", technical)
+        self.assertIn("<dt>原始资格代码</dt>", technical)
+        self.assertIn('class="us-technical-value">qualified</dd>', technical)
+        self.assertIn("<dt>原始原因</dt>", technical)
+        self.assertIn('class="us-technical-value">calendar_verified</dd>', technical)
+        self.assertIn("anchor-fixture-sha-", technical)
+        self.assertIn('id="us-market-summary"', html)
+        self.assertIn(HTML_BLOCK_START, html)
+        self.assertIn(HTML_BLOCK_END, html)
+
+    def test_mobile_css_contains_local_table_scroll_and_long_value_wrapping(self):
+        html = render_html(sample_summary())
+        self.assertIn("#us-market-summary{max-width:100%;min-width:0;", html)
+        self.assertIn("overflow-wrap:anywhere", html)
+        self.assertIn(".us-table-wrap{overflow-x:auto;", html)
+        self.assertIn("-webkit-overflow-scrolling:touch", html)
+        self.assertIn(".us-technical-value{overflow-wrap:anywhere;word-break:break-word}", html)
+
+    def test_markdown_keeps_full_anchor_evidence_and_stable_toc_target(self):
+        summary = sample_summary()
+        summary["anchor_evidence"] = {
+            "status": "qualified",
+            "reason": "calendar_verified",
+            "evidence_sha256": "anchor-fixture-sha",
+        }
+        markdown = render_markdown(summary)
+        self.assertEqual(1, markdown.count('<a id="us-market-summary"></a>'))
+        self.assertLess(markdown.index('<a id="us-market-summary"></a>'), markdown.index("### ③ 美股区间概要"))
+        self.assertIn("A股锚点资格：已核验（原始代码：qualified）", markdown)
+        self.assertIn("原因：calendar_verified", markdown)
+        self.assertIn("锚点证据摘要：anchor-fixture-sha", markdown)
+
     def test_empty_v2_labels_no_new_session_but_keeps_latest_daily_return(self):
         summary = sample_summary()
         summary.update({
@@ -202,6 +251,8 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(html_original, Path(str(html) + ".pre-us-summary").read_text(encoding="utf-8"))
             self.assertEqual(md_original, Path(str(md) + ".pre-us-summary").read_text(encoding="utf-8"))
             self.assertEqual(1, md.read_text(encoding="utf-8").count(HTML_BLOCK_START))
+            self.assertEqual(1, second.count('id="us-market-summary"'))
+            self.assertEqual(1, md.read_text(encoding="utf-8").count('<a id="us-market-summary"></a>'))
 
     def test_basis_mismatch_refuses_without_writing_or_backup(self):
         with tempfile.TemporaryDirectory() as directory:

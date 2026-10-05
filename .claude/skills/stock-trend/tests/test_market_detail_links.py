@@ -115,6 +115,12 @@ class MarketDetailLinksTests(unittest.TestCase):
         self.assertIn("<style>", html)
         self.assertIn(".market-detail-links", html)
         self.assertIn(".market-detail", html)
+        self.assertEqual(5, len(re.findall(r'<details class="market-detail"', html)))
+        self.assertEqual(5, len(re.findall(r"<summary>[^<]+</summary>", html)))
+        self.assertNotIn('<details class="market-detail" open', html)
+        self.assertIn("hashchange", html)
+        self.assertIn("popstate", html)
+        self.assertIn("market-detail-link", html)
 
         for key, name in COMPONENTS:
             target = f"market-detail-{key}"
@@ -268,7 +274,10 @@ class MarketDetailLinksTests(unittest.TestCase):
             html = mr._generate_html(ctx, "20261003-164458")
             self.assertEqual(list(Path(directory).iterdir()), [])
 
-        observation_load.assert_called_once_with("2026-09-30")
+        self.assertEqual(2, observation_load.call_count)
+        self.assertTrue(all(
+            args == ("2026-09-30",) for args, _ in observation_load.call_args_list
+        ))
         self.assertEqual(ctx, before)
         self.assertEqual(markdown.count("查看详情"), 5)
         self.assertEqual(html.count("查看详情"), 5)
@@ -279,6 +288,10 @@ class MarketDetailLinksTests(unittest.TestCase):
             self.assertEqual(html.count(f'href="#{target}"'), 1)
             self.assertEqual(len(re.findall(rf'id=["\']{re.escape(target)}["\']', html)), 1)
             self.assertEqual(len(re.findall(rf'id=["\']{re.escape(target)}["\']', markdown)), 1)
+
+        self.assertEqual(5, len(re.findall(r'<details class="market-detail"', html)))
+        self.assertIn("hashchange", html)
+        self.assertIn("popstate", html)
 
         self.assertEqual(len(re.findall(r'id=["\']market-component-summary["\']', html)), 1)
         self.assertEqual(len(re.findall(r'id=["\']market-component-summary["\']', markdown)), 1)

@@ -1954,6 +1954,23 @@ def run_script_unit_tests():
         except Exception as e:
             test(name, False, str(e), "script_unit")
 
+    # Review comparisons must remain covered by the required quality gate.
+    import unittest
+    sys.path.insert(0, str(SCRIPT_DIR))
+    suite = unittest.TestSuite()
+    for name in ("test_review_comparison", "test_review_comparison_reporting",
+                 "test_review_comparison_integration", "test_review_reading",
+                 "test_sector_persistence", "test_observation_comparison",
+                 "test_observation_comparison_reporting", "test_observation_list_analysis",
+                 "test_observation_report_update", "test_review_stage5_integration"):
+        suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
+    global PASSED, FAILED, SKIPPED
+    failures = len(result.failures) + len(result.errors)
+    PASSED += result.testsRun - failures - len(result.skipped)
+    FAILED += failures
+    SKIPPED += len(result.skipped)
+
 
 # ========================
 # Main

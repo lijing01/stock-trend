@@ -7,13 +7,15 @@ recommendations or consume the candidate scanner's observation bucket.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
 import tempfile
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent.parent.parent
@@ -25,7 +27,11 @@ from core.resolve_code import resolve_suffix
 from core.eastmoney_utils import EM_HEADERS, build_secid, rotate_push2_host
 from fetchers import sector_data
 
-SCHEMA = "yaml-observation-analysis/v1"
+SCHEMA = "yaml-observation-analysis/v2"
+LEGACY_SCHEMA = "yaml-observation-analysis/v1"
+SCORING_MODEL_VERSION = "observation-six-dimension/v1"
+QUALITY_METHOD_VERSION = "scanner-data-quality-comparison/v2"
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 DIMENSIONS = (
     "momentum", "volume_price", "capital", "fundamental",
     "sector_strength", "wyckoff",
@@ -204,6 +210,56 @@ def _config_digest(path):
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
     except OSError:
         return ""
+
+
+def _canonical_digest(value):
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _quality_comparison_signature(data_quality):
+    quality = data_quality if isinstance(data_quality, dict) else {}
+    dimensions = quality.get("dimensions")
+    dimensions = dimensions if isinstance(dimensions, dict) else {}
+    dimension_fields = (
+        "returned", "available", "fresh", "source", "quality",
+        "stale_reason", "source_status",
+    )
+    return {
+        "eligible": quality.get("eligible"),
+        "coverage": quality.get("coverage"),
+        "coverage_factor": quality.get("coverage_factor"),
+        "freshness_factor": quality.get("freshness_factor"),
+        "confidence": quality.get("confidence"),
+        "reasons": sorted(str(reason) for reason in (
+            quality.get("reasons") or [])),
+        "dimensions": {
+            name: {field: value.get(field) for field in dimension_fields}
+            for name, value in sorted(dimensions.items())
+            if isinstance(value, dict)
+        },
+    }
+
+
+def quality_comparison_digest(data_quality):
+    """Digest quality/method eligibility while excluding daily timestamps."""
+    return _canonical_digest(_quality_comparison_signature(data_quality))
+
+
+def _market_for_code(code):
+    suffix = resolve_suffix(str(code or ""))
+    return {".SH": "SH", ".SZ": "SZ", ".BJ": "BJ"}.get(suffix, "")
+
+
+def _normalized_row_config(source):
+    return {
+        "code": str(source.get("code") or ""),
+        "market": _market_for_code(source.get("code")),
+        "joined_date": str(source.get("date") or ""),
+        "entry_phase": str(source.get("entry_phase") or ""),
+    }
 
 
 def load_observation_config(yaml_path=None):
@@ -404,6 +460,7 @@ def build_candidates(codes, data_date):
                     "ranking_data_date": data_date if ranking else "",
                     "ranking_source": "eastmoney" if ranking else "",
                     "ranking_quality": "same_date" if ranking else "unknown",
+                    "sector_type": ranking.get("type", "") if ranking else "",
                     "sector_actionable": False,
                 },
                 stock={
@@ -417,6 +474,7 @@ def build_candidates(codes, data_date):
                     },
                 },
             )
+            membership["sector_type"] = ranking.get("type", "") if ranking else ""
             found[code].append((stock, membership))
 
     for path in sorted(snapshots.glob("*.json")):
@@ -632,9 +690,14 @@ def _row(source, data_date, candidate_result=None, scored=None,
     complete = all(dimensions[key] is not None for key in DIMENSIONS)
     raw_composite = scored.get("raw_composite_score") if complete else None
     adjusted = scored.get("quality_adjusted_score") if complete else None
+    normalized_config = _normalized_row_config(source)
     return {
         "code": source.get("code", ""), "date": source.get("date", ""),
         "entry_phase": source.get("entry_phase", ""),
+        "market": normalized_config["market"],
+        "joined_date": normalized_config["joined_date"],
+        "normalized_config": normalized_config,
+        "row_config_sha256": _canonical_digest(normalized_config),
         "data_date": data_date, "name": _display_name(
             scored.get("name"), source.get("code", "")) or _display_name(
                 (candidate_result.get("candidate") or {}).get("name", ""),
@@ -660,6 +723,8 @@ def _row(source, data_date, candidate_result=None, scored=None,
         "quality_adjusted_score": adjusted,
         "wyckoff": scored.get("wyckoff") or {},
         "data_quality": quality,
+        "quality_method": QUALITY_METHOD_VERSION,
+        "quality_digest": quality_comparison_digest(quality),
         "kline_diagnostics": kline_diagnostic or {},
         "source_evidence": scored.get("source_evidence") or {},
         "sector_memberships": scored.get("sector_memberships") or
@@ -686,16 +751,17 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
     result = {
         "schema": SCHEMA, "status": "ready" if config["status"] == "ready"
         else "unavailable", "reason": config.get("reason", ""),
-        "data_date": data_date, "generated_at": datetime.now().isoformat(),
-        "provisional": (
-            data_date == datetime.now().strftime("%Y-%m-%d")
-            and datetime.now().weekday() < 5
-            and (9, 30) <= (datetime.now().hour, datetime.now().minute) < (15, 10)
-        ),
+        "data_date": data_date, "generated_at": "", "provisional": False,
         "config_path": config["path"], "config_sha256": config["sha256"],
+        "scoring_model_version": SCORING_MODEL_VERSION,
+        "evidence_cutoff_date": data_date,
+        "normalized_config_sha256": _canonical_digest([
+            _normalized_row_config(entry) for entry in entries
+        ]),
         "items": [],
     }
     if config["status"] != "ready":
+        _freeze_completion_time(result)
         return result
     valid_codes = [item["code"] for item in entries if not item.get("error")]
     try:
@@ -735,9 +801,20 @@ def analyze_observation_list(data_date, yaml_path=None, artifact_path=None,
             kline_diagnostics.get(entry["code"])))
     if any(item["status"] != "ready" for item in result["items"]):
         result["status"] = "degraded"
+    _freeze_completion_time(result)
     if save:
         save_artifact(result, artifact_path)
     return result
+
+
+def _freeze_completion_time(payload):
+    completed_at = datetime.now(SHANGHAI)
+    payload["generated_at"] = completed_at.isoformat()
+    payload["provisional"] = (
+        payload.get("data_date") == completed_at.date().isoformat()
+        and completed_at.weekday() < 5
+        and time(9, 30) <= completed_at.time().replace(tzinfo=None) < time(15, 10)
+    )
 
 
 def save_artifact(payload, artifact_path=None):
@@ -770,7 +847,8 @@ def load_artifact(data_date, artifact_path=None, yaml_path=None):
     except (OSError, ValueError):
         return {"status": "unavailable", "reason": "本依据日 YAML 观察分析未生成", "items": []}
     config = load_observation_config(yaml_path)
-    if payload.get("schema") != SCHEMA or payload.get("data_date") != data_date:
+    if payload.get("schema") not in (SCHEMA, LEGACY_SCHEMA) \
+            or payload.get("data_date") != data_date:
         return {"status": "unavailable", "reason": "观察分析 schema/依据日不匹配", "items": []}
     if not config["sha256"] or payload.get("config_sha256") != config["sha256"]:
         return {"status": "unavailable", "reason": "观察列表配置已变更", "items": []}
@@ -778,6 +856,206 @@ def load_artifact(data_date, artifact_path=None, yaml_path=None):
             item.get("code") for item in config["items"]]:
         return {"status": "unavailable", "reason": "观察分析行与 YAML 不一致", "items": []}
     return payload
+
+
+def _unavailable_history(reason_code, reason):
+    return {
+        "status": "unavailable", "reason_code": reason_code,
+        "reason": reason, "items": [],
+    }
+
+
+def _parse_datetime(value):
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _localized_datetime(value, *, allow_naive=False):
+    parsed = value if isinstance(value, datetime) else _parse_datetime(value)
+    if not parsed:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=SHANGHAI) if allow_naive else None
+    return parsed.astimezone(SHANGHAI)
+
+
+def _parse_evidence_date(value):
+    text = str(value or "").strip()
+    try:
+        if re.fullmatch(r"\d{8}", text):
+            return datetime.strptime(text, "%Y%m%d").date()
+        return date.fromisoformat(text[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+_EVIDENCE_DATE_KEYS = {
+    "as_of_date", "capital_expected_date", "data_date", "expected_date",
+    "latest_date", "returned_data_date", "membership_data_date",
+    "ranking_data_date", "event_date", "confirmation_date", "detected_date",
+    "evaluated_through", "breach_date", "first_breach_date",
+}
+
+
+def _has_future_evidence(value, cutoff):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in _EVIDENCE_DATE_KEYS:
+                parsed = _parse_evidence_date(child)
+                if parsed and parsed > cutoff:
+                    return True
+            if isinstance(child, (dict, list)) and _has_future_evidence(
+                    child, cutoff):
+                return True
+    elif isinstance(value, list):
+        return any(_has_future_evidence(child, cutoff) for child in value)
+    return False
+
+
+def _finite_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and math.isfinite(value)
+
+
+def load_historical_artifact(data_date, artifact_path=None, as_of=None,
+                             *, require_completed=True):
+    """Read and self-validate a historical artifact without today's YAML.
+
+    V1 artifacts expose only an unambiguous record identity set.  V2 artifacts
+    must prove their own frozen normalized configuration before scores or
+    structure can be compared.
+    """
+    try:
+        artifact_path_for(data_date)
+    except ValueError:
+        return _unavailable_history("invalid_data_date", "观察依据日无效")
+    path = Path(artifact_path) if artifact_path else artifact_path_for(data_date)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _unavailable_history(
+            "artifact_missing", "相邻交易日观察 artifact 不存在")
+    if payload.get("data_date") != data_date:
+        return _unavailable_history(
+            "artifact_date_mismatch", "观察 artifact 依据日不匹配")
+    rows = payload.get("items")
+    if not isinstance(rows, list):
+        return _unavailable_history("invalid_items", "观察 artifact 行结构无效")
+
+    identities = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return _unavailable_history("invalid_identity", "观察记录身份无效")
+        code = str(row.get("code") or "")
+        market = str(row.get("market") or _market_for_code(code))
+        if not re.fullmatch(r"\d{6}", code) or not market:
+            return _unavailable_history("invalid_identity", "观察记录身份无效")
+        identities.append((market, code))
+    if len(identities) != len(set(identities)):
+        return _unavailable_history("duplicate_identity", "观察记录身份重复")
+
+    if payload.get("schema") == LEGACY_SCHEMA:
+        frozen = _localized_datetime(payload.get("generated_at"), allow_naive=True) \
+            if payload.get("generated_at") else None
+        if payload.get("generated_at") and not frozen:
+            return _unavailable_history(
+                "invalid_generated_at", "观察 artifact 冻结时间无效")
+        limit = _localized_datetime(as_of, allow_naive=True) if as_of else None
+        if frozen and limit and frozen > limit:
+            return _unavailable_history(
+                "future_artifact", "观察 artifact 冻结时间晚于报告截止时间")
+        if require_completed and frozen:
+            confirmed_at = datetime.combine(
+                date.fromisoformat(data_date), time(15, 10), SHANGHAI)
+            if payload.get("provisional") is True or frozen < confirmed_at:
+                return _unavailable_history(
+                    "trading_day_incomplete", "观察 artifact 尚未完成收盘确认")
+        compatible = dict(payload)
+        compatible["items"] = [
+            {**row, "market": market}
+            for row, (market, _) in zip(rows, identities)
+        ]
+        compatible["history_compatibility"] = "collection_only"
+        return compatible
+    if payload.get("schema") != SCHEMA:
+        return _unavailable_history("unsupported_schema", "观察 artifact schema 不支持")
+    frozen = _localized_datetime(payload.get("generated_at"))
+    if not frozen:
+        return _unavailable_history(
+            "invalid_generated_at", "观察 artifact 冻结时间缺失或无时区")
+    limit = _localized_datetime(as_of, allow_naive=True) if as_of else None
+    if as_of and not limit:
+        return _unavailable_history("invalid_as_of", "观察 artifact 截止时间无效")
+    if limit and frozen > limit:
+        return _unavailable_history(
+            "future_artifact", "观察 artifact 冻结时间晚于报告截止时间")
+    basis_day = date.fromisoformat(data_date)
+    confirmed_at = datetime.combine(basis_day, time(15, 10), SHANGHAI)
+    if require_completed and (payload.get("provisional") is True
+                              or frozen < confirmed_at):
+        return _unavailable_history(
+            "trading_day_incomplete", "观察 artifact 尚未完成收盘确认")
+    if not payload.get("scoring_model_version"):
+        return _unavailable_history("model_version_missing", "观察评分模型版本缺失")
+    if payload.get("evidence_cutoff_date") != data_date:
+        return _unavailable_history("evidence_cutoff_mismatch", "观察证据截止日不匹配")
+
+    configs = []
+    for row in rows:
+        config = row.get("normalized_config")
+        if not isinstance(config, dict):
+            return _unavailable_history("row_config_missing", "观察冻结行配置缺失")
+        expected = _normalized_row_config({
+            "code": config.get("code"), "date": config.get("joined_date"),
+            "entry_phase": config.get("entry_phase"),
+        })
+        if config != expected or row.get("code") != expected["code"] \
+                or row.get("market") != expected["market"] \
+                or row.get("joined_date") != expected["joined_date"]:
+            return _unavailable_history("row_config_invalid", "观察冻结行配置无效")
+        joined = _parse_evidence_date(expected["joined_date"])
+        if not joined or joined > basis_day:
+            return _unavailable_history("joined_date_invalid", "观察加入日期无效")
+        if row.get("row_config_sha256") != _canonical_digest(config):
+            return _unavailable_history(
+                "row_config_digest_mismatch", "观察冻结行配置摘要不匹配")
+        if row.get("data_date") != data_date:
+            return _unavailable_history("row_data_date_mismatch", "观察行依据日不匹配")
+        quality = row.get("data_quality")
+        if not isinstance(quality, dict) \
+                or row.get("quality_method") != QUALITY_METHOD_VERSION:
+            return _unavailable_history(
+                "quality_method_mismatch", "观察数据质量方法不匹配")
+        if row.get("quality_digest") != quality_comparison_digest(quality):
+            return _unavailable_history(
+                "quality_digest_mismatch", "观察数据质量摘要不匹配")
+        if row.get("status") == "ready":
+            dimensions = row.get("raw_dimensions")
+            if not isinstance(dimensions, dict) or any(
+                    not _finite_number(dimensions.get(name)) for name in DIMENSIONS) \
+                    or not _finite_number(row.get("raw_composite_score")) \
+                    or not _finite_number(row.get("quality_adjusted_score")):
+                return _unavailable_history(
+                    "ready_score_invalid", "观察完整行的评分字段无效")
+        evidence = {
+            "data_quality": quality,
+            "source_evidence": row.get("source_evidence") or {},
+            "kline_diagnostics": row.get("kline_diagnostics") or {},
+            "sector_memberships": row.get("sector_memberships") or [],
+            "wyckoff": row.get("wyckoff") or {},
+        }
+        if _has_future_evidence(evidence, basis_day):
+            return _unavailable_history(
+                "future_row_evidence", "观察行包含晚于证据截止日的数据")
+        configs.append(config)
+    if payload.get("normalized_config_sha256") != _canonical_digest(configs):
+        return _unavailable_history(
+            "config_digest_mismatch", "观察冻结配置摘要不匹配")
+    compatible = dict(payload)
+    compatible["history_compatibility"] = "full"
+    return compatible
 
 
 def main(argv=None):

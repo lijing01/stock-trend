@@ -1224,7 +1224,7 @@ def load_observation_list(path=None) -> dict:
     return {"status": "ready", "items": items, "path": str(observation_path)}
 
 
-def load_observation_analysis(data_date, artifact_path=None, yaml_path=None) -> dict:
+def load_observation_analysis(data_date, artifact_path=None, yaml_path=None, *, as_of=None) -> dict:
     """Load a same-date analysis of the current hand-maintained YAML list."""
     from analysis.observation_list_analysis import load_artifact
     path = artifact_path or OBSERVATION_ANALYSIS_DIR / f"{data_date}.json"
@@ -1235,7 +1235,64 @@ def load_observation_analysis(data_date, artifact_path=None, yaml_path=None) -> 
         return {"status": "unavailable", "reason": "YAML 观察分析文件损坏或不可读", "items": []}
     if not isinstance(state.get("items"), list):
         return {"status": "unavailable", "reason": "YAML 观察分析条目无效", "items": []}
+    if state.get("status") in {"ready", "degraded"}:
+        try:
+            from analysis.observation_list_analysis import load_historical_artifact
+            from analysis.observation_comparison import compare_observation_artifacts
+            cutoff = as_of or datetime.now(ZoneInfo("Asia/Shanghai"))
+            previous_date = _previous_observation_session(data_date, as_of=cutoff)
+            current = load_historical_artifact(
+                data_date, artifact_path=path, as_of=cutoff, require_completed=False)
+            previous = None
+            if previous_date:
+                previous = load_historical_artifact(
+                    previous_date, artifact_path=Path(path).parent / f"{previous_date}.json",
+                    as_of=cutoff)
+            state["comparison"] = compare_observation_artifacts(
+                current, previous, expected_previous_date=previous_date,
+                as_of_date=cutoff.date().isoformat())
+        except Exception as exc:
+            state["comparison"] = {"status": "unavailable", "reason":
+                f"观察变化不可用：{type(exc).__name__}: {exc}"}
     return state
+
+
+def _review_calendar(as_of=None):
+    """Read only a previously verified calendar; never infer holiday sessions."""
+    from bridge.us_review import resolve_anchor
+    cutoff = as_of or datetime.now(ZoneInfo("Asia/Shanghai"))
+    anchor = resolve_anchor(cutoff, CACHE_DIR, no_refresh=True)
+    if not anchor.get("evidence_path"):
+        return None
+    evidence = json.loads(Path(anchor["evidence_path"]).read_text(encoding="utf-8"))
+    evidence["evidence_sha256"] = anchor.get("evidence_sha256") or Path(anchor["evidence_path"]).stem
+    return evidence
+
+
+def _previous_observation_session(data_date, *, as_of=None):
+    try:
+        cutoff = as_of or datetime.now(ZoneInfo("Asia/Shanghai"))
+        confirmed = datetime.fromisoformat(f"{data_date}T15:10:00+08:00")
+        if confirmed > cutoff:
+            return None
+        calendar = _review_calendar(cutoff)
+        dates = (calendar or {}).get("trading_dates") or []
+        position = dates.index(data_date)
+        return dates[position - 1] if position > 0 else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def update_observation_list_reports(html_path, md_path=None, *, pending=False,
+                                    data_date=None, artifact_path=None, yaml_path=None):
+    """Load once and synchronize the two marked blocks under shared locks."""
+    from reporting.observation_report_update import update_observation_reports
+    state = None if pending else load_observation_analysis(data_date, artifact_path, yaml_path)
+    return update_observation_reports(
+        html_path, md_path or Path(html_path).with_suffix(".md"), state=state, pending=pending,
+        render_html=render_observation_list_html,
+        render_markdown=render_observation_list_markdown,
+        block_start=OBSERVATION_BLOCK_START, block_end=OBSERVATION_BLOCK_END)
 
 
 def _observation_score(value) -> str:
@@ -1307,6 +1364,9 @@ def render_observation_list_html(state: dict | None = None, *, pending: bool = F
                 "".join(f"<th>{head}</th>" for head in headers) + "</tr></thead><tbody>" +
                 ("".join(rows) or '<tr><td colspan="13">YAML 观察列表为空</td></tr>') +
                 "</tbody></table></div>")
+    if not pending and state.get("comparison"):
+        from reporting.observation_comparison import render_html
+        body = render_html(state["comparison"]) + body
     return (
         f"{OBSERVATION_BLOCK_START}\n"
         '<section id="observation-list">\n'
@@ -1316,6 +1376,53 @@ def render_observation_list_html(state: dict | None = None, *, pending: bool = F
         "</section>\n"
         f"{OBSERVATION_BLOCK_END}"
     )
+
+
+def render_observation_list_markdown(state: dict | None = None, *, pending: bool = False) -> str:
+    """Mirror the frozen observation state without requiring HTML interaction."""
+    state = state or {"status": "ready", "items": []}
+
+    def cell(value):
+        return html_lib.escape(str(value if value not in (None, "") else "—"), quote=False).replace(
+            "\n", " ").replace("|", "\\|")
+
+    lines = [OBSERVATION_BLOCK_START, '<a id="observation-list"></a>',
+             '### 观察列表', '', '手工观察对象的六维分析，仅供学习参考，非正式推荐。', '']
+    if pending:
+        lines.append('YAML 观察列表六维分析进行中，完成后将同步更新HTML与Markdown观察区块。')
+    elif state.get("status") not in {"ready", "degraded"}:
+        lines.append(f"观察列表不可用：{cell(state.get('reason') or '未知原因')}")
+    else:
+        lines.extend([f"分析依据日：{cell(state.get('data_date'))}", ''])
+        if state.get("provisional"):
+            lines.extend(['盘中临时分析，K线尚未收盘确认。', ''])
+        if state.get("status") == "degraded":
+            lines.extend(['部分观察标的数据或资格证据不足，详见各行原因。', ''])
+        lines.extend(['| 股票名称 / 代码 | 加入日期 | 加入时阶段 | 动量 | 量价 | 资金 | 基本面 | 板块强度 | 维科夫 | 综合 / 质量调整 | 维科夫结构 | 数据质量 | 观察原因 |',
+                      '|---|---|---|---|---|---|---|---|---|---|---|---|---|'])
+        for item in state.get("items", []):
+            name, code = _observation_identity(item)
+            dimensions = item.get("raw_dimensions") or item.get("dimensions") or {}
+            wyckoff = item.get("wyckoff") or {}
+            quality = item.get("data_quality") or {}
+            reasons = item.get("reasons") or item.get("reason") or item.get("error") or []
+            if isinstance(reasons, list):
+                reasons = "；".join(str(reason) for reason in reasons)
+            structure = (format_minor_phase_text(wyckoff) if wyckoff.get("minor_phase") else
+                         wyckoff.get("sub_phase") or wyckoff.get("phase") or "未提供")
+            values = [f"{name} / {code}", item.get("date"), item.get("entry_phase")]
+            values.extend(_observation_score(dimensions.get(key)) for key in (
+                "momentum", "volume_price", "capital", "fundamental", "sector_strength", "wyckoff"))
+            values.extend([f"{_observation_score(item.get('composite_score'))} / {_observation_score(item.get('quality_adjusted_score'))}",
+                           structure, quality.get("status") or quality.get("quality") or item.get("status"), reasons])
+            lines.append('| ' + ' | '.join(cell(value) for value in values) + ' |')
+        if not state.get("items"):
+            lines.extend(['', 'YAML 观察列表为空。'])
+    if not pending and state.get("comparison"):
+        from reporting.observation_comparison import render_markdown
+        lines.insert(5, render_markdown(state["comparison"]))
+    lines.extend(['', OBSERVATION_BLOCK_END])
+    return '\n'.join(lines)
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -1384,13 +1491,15 @@ def _market_explanation_for_report(ctx: dict) -> dict | None:
         return None
 
 
-def generate_report(ctx: dict) -> str:
+def generate_report(ctx: dict, *, observation_status: str = "ready",
+                    observation_state: dict | None = None) -> str:
     from reporting.market_detail_links import COMPONENTS, render_details, summary_link
 
     lines = []
     lines.append(f"## 📅 今日复盘 ({ctx.get('data_date', '')})")
     lines.append("")
     lines.append(f"▸ 生成时间: {ctx.get('generated_at', '')}")
+    lines.append(f"▸ 报告状态: {'盘中临时，尚未确认收盘' if ctx.get('intraday') else '收盘口径'}")
     regime = ctx.get("regime", {})
     label_icon = {"强势": "🟢", "中性": "🟡", "弱势": "🔴"}.get(regime.get("label", ""), "⚪")
     qualified = bool((_market_explanation_for_report(ctx) or {}).get("conclusion_qualification", {}).get("eligible"))
@@ -1402,6 +1511,16 @@ def generate_report(ctx: dict) -> str:
     if ctx.get("intraday_note"):
         lines.append(f"▸ ⚠️ {ctx['intraday_note']}")
     lines.append("")
+
+    lines.append("目录：[五项简表](#market-component-summary) · [板块](#market-sectors) · "
+                 "[美股](#us-market-summary) · [观察列表](#observation-list) · "
+                 "[五项详情](#market-component-details)")
+    lines.append("")
+
+    if ctx.get("review_comparison") is not None:
+        from reporting.review_comparison import render_review_comparison
+        lines.append(render_review_comparison(ctx["review_comparison"], "markdown"))
+        lines.append("")
 
     # ① 市场环境
     lines.append("### ① 市场环境")
@@ -1425,27 +1544,20 @@ def generate_report(ctx: dict) -> str:
                  f"两市成交 {ctx.get('amount_yi', 0):.0f}亿 | "
                  f"涨停 {ctx.get('zt', {}).get('count', 0)}家(连板{ctx.get('zt', {}).get('streak_count', 0)})")
     lines.append("")
-    explanation = _market_explanation_for_report(ctx)
-    if explanation:
-        from reporting.market_explanation import render_market_explanation
-        lines.append(render_market_explanation(explanation, "markdown"))
-        lines.append("")
-    lines.append(render_details(ctx, "markdown"))
-    lines.append("")
-
     # ② 板块
+    lines.append('<a id="market-sectors"></a>')
     lines.append("### ② 板块")
     lines.append("")
     top = ctx.get("top_sectors", [])[:TOP_SECTOR_COUNT]
     bottom = ctx.get("bottom_sectors", [])[:3]
-    lines.append(f"**最强前{TOP_SECTOR_COUNT}**:")
+    lines.append(f"**当日排名最强前{TOP_SECTOR_COUNT}**:")
     if top:
         for s in top:
             lines.append(f"- {s.get('name', '')} {_safe_float(s.get('change_pct')):+.2f}%")
     else:
         lines.append("- —")
     lines.append("")
-    lines.append("**最弱前3**:")
+    lines.append("**当日排名最弱前3**:")
     if bottom:
         for s in bottom:
             lines.append(f"- {s.get('name', '')} {_safe_float(s.get('change_pct')):+.2f}%")
@@ -1453,9 +1565,27 @@ def generate_report(ctx: dict) -> str:
         lines.append("- —")
     lines.append("")
 
+    from reporting.sector_persistence import render_markdown as render_sector_markdown
+    lines.append(render_sector_markdown(ctx.get("sector_persistence") or {}))
+    lines.append("")
     if ctx.get("us_market_summary") is not None:
         from reporting.us_market_summary import render_markdown
         lines.append(render_markdown(ctx["us_market_summary"]))
+        lines.append("")
+    else:
+        lines.extend(['<a id="us-market-summary"></a>', '### 美股', '', '美股摘要未提供。', ''])
+    if observation_status != "pending" and observation_state is None:
+        observation_state = load_observation_analysis(ctx.get("data_date") or "")
+    lines.append(render_observation_list_markdown(
+        observation_state, pending=observation_status == "pending"))
+    lines.append("")
+    lines.append('<a id="market-component-details"></a>')
+    lines.append(render_details(ctx, "markdown"))
+    lines.append("")
+    explanation = _market_explanation_for_report(ctx)
+    if explanation:
+        from reporting.market_explanation import render_market_explanation
+        lines.append(render_market_explanation(explanation, "markdown"))
         lines.append("")
     lines.append("---")
     lines.append(f"> *数据来源: 东方财富/腾讯 + AKShare | {DISCLAIMER}*")
@@ -1695,10 +1825,12 @@ def collect_context(now=None) -> dict:
 
     # 板块最强/最弱(industry, 按 change_pct)
     ranked = sorted(sectors, key=lambda s: _safe_float(s.get("change_pct")), reverse=True)
-    top_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[:TOP_SECTOR_COUNT]]
-    bottom_sectors = [{"name": s.get("name"), "change_pct": _safe_float(s.get("change_pct"))} for s in ranked[-5:]]
+    top_sectors = [dict(s, change_pct=_safe_float(s.get("change_pct"))) for s in ranked[:TOP_SECTOR_COUNT]]
+    bottom_sectors = [dict(s, change_pct=_safe_float(s.get("change_pct"))) for s in ranked[-5:]]
 
     ctx = {
+        "model_version": "market-regime-score/v1",
+        "methodology_version": "daily-review-close/v1",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_date": data_date,
         "stale_note": (
@@ -1831,7 +1963,94 @@ def build_agent_output(ctx: dict) -> dict:
         "top_sectors": ctx["top_sectors"],
         "bottom_sectors": ctx["bottom_sectors"],
         "us_market_summary": ctx.get("us_market_summary"),
+        "review_comparison": ctx.get("review_comparison"),
+        "sector_persistence": ctx.get("sector_persistence"),
+        "model_version": ctx.get("model_version"),
+        "methodology_version": ctx.get("methodology_version"),
     }
+
+
+def collect_sector_persistence(ctx, *, observation_state=None, no_refresh=False, as_of=None):
+    """Bound supplementary evidence to the core run and verified calendar."""
+    try:
+        from analysis.sector_persistence import select_displayed_sectors
+        from analysis.sector_snapshot_job import freeze_sector_persistence
+        basis = ctx.get("data_date") or ""
+        cutoff = as_of or datetime.now(ZoneInfo("Asia/Shanghai"))
+        if no_refresh:
+            binding = ctx.get("sector_persistence_binding") or {}
+            if binding.get("basis_date") != basis or not binding.get("artifact_path"):
+                return {"status": "missing", "items": [], "basis_date": basis,
+                        "reasons": ["frozen_run_binding_missing"]}
+            path = Path(binding["artifact_path"])
+            if path.resolve().parent != (CACHE_DIR / "sector_persistence" / basis).resolve():
+                raise ValueError("sector_artifact_path_outside_basis_directory")
+            state = freeze_sector_persistence(
+                binding["sectors"], basis, binding["trading_dates"], path,
+                refresh=False, as_of=cutoff, run_as_of=binding.get("run_as_of"),
+                calendar_evidence=binding.get("calendar_evidence"))
+            state["run_binding"] = binding
+            return state
+        calendar = _review_calendar(cutoff)
+        dates = (calendar or {}).get("trading_dates") or []
+        if (ctx.get("intraday") or basis not in dates
+                or datetime.fromisoformat(f"{basis}T15:10:00+08:00") > cutoff):
+            return {"status": "unavailable", "items": [], "basis_date": basis,
+                    "reasons": ["completed_basis_or_calendar_unverified"]}
+        observations = observation_state or load_observation_analysis(basis)
+        memberships = []
+        skipped = 0
+        for row in observations.get("items", []):
+            for membership in row.get("sector_memberships", []):
+                if not isinstance(membership, dict):
+                    continue
+                kind = membership.get("sector_type") or membership.get("type")
+                source = membership.get("membership_provider") or membership.get("ranking_source")
+                if (kind not in {"industry", "concept"} or source != "eastmoney"
+                        or membership.get("membership_data_date") != basis
+                        or membership.get("membership_quality") not in {
+                            "same_day_verified", "historical_verified"}):
+                    skipped += 1
+                    continue
+                memberships.append({"code": membership.get("code"), "name": membership.get("name"),
+                    "type": kind, "provider": source,
+                    "sector_id": f"{source}:{kind}:{membership.get('code')}"})
+        sectors = select_displayed_sectors(ctx.get("top_sectors"), ctx.get("bottom_sectors"), memberships)
+        calendar_evidence = {key: (calendar or {}).get(key) for key in (
+            "source", "fetched_at", "evidence_sha256", "coverage", "timezone")}
+        binding = {"generated_at": ctx.get("generated_at"), "basis_date": basis,
+                   "sectors": sectors, "trading_dates": dates,
+                   "calendar_evidence": calendar_evidence, "run_as_of": cutoff.isoformat()}
+        path = CACHE_DIR / "sector_persistence" / basis / f"{content_sha256(binding)}.json"
+        state = freeze_sector_persistence(sectors, basis, dates, path,
+            refresh=True, calendar_evidence=calendar_evidence, run_as_of=cutoff)
+        binding["artifact_path"] = str(path)
+        state["run_binding"] = binding
+        if observations.get("status") not in {"ready", "degraded"}:
+            state.setdefault("reasons", []).append("observation_memberships_unavailable")
+        if skipped:
+            state.setdefault("reasons", []).append(f"observation_sector_identity_unverified:{skipped}")
+        return state
+    except Exception as exc:
+        return {"status": "unavailable", "items": [], "reason":
+                f"板块持续性不可用：{type(exc).__name__}: {exc}"}
+
+
+def collect_review_comparison(ctx: dict, *, as_of, persist=False) -> dict:
+    """Use frozen calendar evidence; comparison failure never blocks review."""
+    try:
+        from bridge.us_review import resolve_anchor
+        from analysis.review_comparison import prepare_comparison
+        anchor = resolve_anchor(as_of, CACHE_DIR, no_refresh=True)
+        calendar = None
+        if anchor.get("evidence_path"):
+            calendar = json.loads(Path(anchor["evidence_path"]).read_text(encoding="utf-8"))
+        return prepare_comparison(ctx, calendar, as_of=as_of, cache_dir=CACHE_DIR,
+                                  persist=persist, source_history=load_history(),
+                                  frozen_at=datetime.now(ZoneInfo("Asia/Shanghai")))
+    except Exception as exc:
+        return {"schema_version": "review-comparison/v1", "status": "unavailable",
+                "reason": f"交易日对比不可用：{type(exc).__name__}: {exc}", "fields": {}}
 
 
 def main():
@@ -1907,7 +2126,10 @@ def main():
     now_ts = run_as_of.strftime("%Y%m%d-%H%M%S")
     # Independent report context: never saved as an A-share component/history entry.
     from bridge.us_review import collect_summary
+    core_ctx = copy.deepcopy(ctx)
     ctx = dict(ctx)
+    ctx["review_comparison"] = collect_review_comparison(
+        ctx, as_of=run_as_of, persist=not args.no_refresh)
     frozen_closes = []
     for code, row in (ctx.get("indices") or {}).items():
         if row.get("ok") and row.get("date_origin") == "provider" and _safe_float(row.get("close")) > 0:
@@ -1928,28 +2150,45 @@ def main():
     if calendar_prepare_error:
         ctx["us_market_summary"].setdefault("errors", {})["calendar_preparation"] = calendar_prepare_error
 
+    observation_state = None
+    if (not args.json or args.html) and args.observation_status == "ready":
+        if not args.no_refresh:
+            try:
+                from analysis.observation_list_analysis import analyze_observation_list
+                analyze_observation_list(ctx.get("data_date") or "")
+            except Exception as exc:
+                observation_state = {"status": "unavailable", "items": [],
+                                     "reason": f"YAML 观察分析失败: {type(exc).__name__}"}
+        if observation_state is None:
+            observation_state = load_observation_analysis(ctx.get("data_date") or "")
+
+    ctx["sector_persistence"] = collect_sector_persistence(
+        ctx, observation_state=observation_state, no_refresh=args.no_refresh, as_of=run_as_of)
+    if not args.no_refresh and ctx["sector_persistence"].get("run_binding"):
+        core_ctx["sector_persistence_binding"] = ctx["sector_persistence"]["run_binding"]
+        save_context(core_ctx)
     if args.json:
         # 精简 JSON 供 Agent 消费
         print(json.dumps(build_agent_output(ctx), ensure_ascii=False, indent=2))
     else:
-        report = generate_report(ctx)
+        report = generate_report(ctx, observation_status=args.observation_status,
+                                 observation_state=observation_state)
         print(report)
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         md_path = REPORTS_DIR / f"daily-review-{now_ts}.md"
         md_path.write_text(report, encoding="utf-8")
         print(f"\nMD: {md_path}")
 
+    if args.json and args.html:
+        # The unified background workflow needs both pending files even when
+        # the machine-readable result is printed to stdout.
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        md_path = REPORTS_DIR / f"daily-review-{now_ts}.md"
+        _atomic_write_text(md_path, generate_report(
+            ctx, observation_status=args.observation_status, observation_state=observation_state))
+        print(f"MD: {md_path}")
     if args.html:
         try:
-            observation_state = None
-            if args.observation_status == "ready":
-                try:
-                    from analysis.observation_list_analysis import analyze_observation_list
-                    analyze_observation_list(ctx.get("data_date") or "")
-                    observation_state = load_observation_analysis(ctx.get("data_date") or "")
-                except Exception as exc:
-                    observation_state = {"status": "unavailable", "items": [],
-                                         "reason": f"YAML 观察分析失败: {type(exc).__name__}"}
             html = _generate_html(ctx, now_ts, observation_status=args.observation_status,
                                   observation_state=observation_state)
             html_path = REPORTS_DIR / f"daily-review-{now_ts}.html"
@@ -1978,6 +2217,10 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
 
     from reporting.market_detail_links import render_details, summary_link
     details_html = render_details(ctx, "html")
+    comparison_html = ""
+    if ctx.get("review_comparison") is not None:
+        from reporting.review_comparison import render_review_comparison
+        comparison_html = render_review_comparison(ctx["review_comparison"], "html")
 
     def comp_row(key, name):
         c = comps.get(key) or {}
@@ -1994,6 +2237,8 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
     bottom = "".join(
         f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
         for s in ctx.get("bottom_sectors", [])[:3])
+    from reporting.sector_persistence import render_html as render_sector_html
+    sector_persistence_html = render_sector_html(ctx.get("sector_persistence") or {})
     observation_pending = observation_status == "pending"
     if not observation_pending and observation_state is None:
         observation_state = load_observation_analysis(ctx.get("data_date") or "")
@@ -2017,31 +2262,40 @@ h1{{font-size:24px}} h2{{font-size:18px;margin:22px 0 10px;padding-bottom:6px;bo
 table{{width:100%;border-collapse:collapse;margin:12px 0;border-radius:8px;overflow:hidden}}
 th,td{{padding:9px 12px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:14px}}
 th{{background:#1d4ed8;color:#fff;font-size:13px}}
+.w,section,details{{min-width:0;max-width:100%}}
+p,li,td,th,a,code,summary{{overflow-wrap:anywhere}}
+details{{margin:12px 0}}summary{{cursor:pointer;font-weight:600;padding:10px 0}}
+section[id],details[id],table[id]{{scroll-margin-top:16px}}
+.summary-table-wrap{{overflow-x:auto;max-width:100%}}
+#market-component-summary{{min-width:540px}}
+@media(max-width:600px){{body{{padding:10px}}.w{{padding:20px 16px}}h1{{font-size:21px}}.score{{font-size:36px}}th,td{{padding:8px}}}}
 .observation-table-wrap{{overflow-x:auto;margin:12px 0}}.observation-table-wrap table{{min-width:1120px}}
 ul{{padding-left:20px;line-height:1.8}}
 .disc{{color:#a1a1a6;font-size:12px;text-align:center;margin-top:28px}}
 </style></head><body><div class="w">
 <h1>📅 今日复盘 {ctx.get('data_date','')}</h1>
 <p class="dt">{ctx.get('generated_at','')}</p>
+<p class="dt">报告状态：{'盘中临时，尚未确认收盘' if ctx.get('intraday') else '收盘口径'}</p>
 <p class="dt">{score_title}</p>
 <div class="score">{regime.get('score',0)} / 100 <span style="font-size:18px">{regime.get('label','')}</span></div>
 <p class="dt">{advice_prefix}{regime.get('advice','')}</p>
 {'<p class="dt">⚠️ ' + ctx.get('stale_note','') + '</p>' if ctx.get('stale_note') else ''}
 {'<p class="dt" style="color:#d97706">⚠️ ' + ctx.get('intraday_note','') + '</p>' if ctx.get('intraday_note') else ''}
 
+{comparison_html}
 <h2>① 市场环境</h2>
-<table id="market-component-summary"><thead><tr><th>组件</th><th>得分</th><th>说明</th><th>详情</th></tr></thead><tbody>
+<div class="summary-table-wrap"><table id="market-component-summary"><thead><tr><th>组件</th><th>得分</th><th>说明</th><th>详情</th></tr></thead><tbody>
 {comp_row('index_trend','大盘趋势')}{comp_row('volume','成交额')}{comp_row('breadth','赚钱效应')}{comp_row('zt_emotion','涨停情绪')}{comp_row('capital','资金')}
-</tbody></table>
-{explanation_html}
-{details_html}
-
-<h2>② 板块</h2>
-<p><strong>最强前{TOP_SECTOR_COUNT}:</strong></p><ul>{top or '<li>—</li>'}</ul>
-<p><strong>最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
+</tbody></table></div>
+<h2 id="market-sectors">② 板块</h2>
+<p><strong>当日排名最强前{TOP_SECTOR_COUNT}:</strong></p><ul>{top or '<li>—</li>'}</ul>
+<p><strong>当日排名最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
+{sector_persistence_html}
 
 {us_html}
 {observation_html}
+{details_html}
+{explanation_html}
 
 <footer><p class="disc">数据来源: 东方财富 + AKShare | {DISCLAIMER}</p></footer>
 </div></body></html>"""

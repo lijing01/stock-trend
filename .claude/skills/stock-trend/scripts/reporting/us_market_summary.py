@@ -272,6 +272,19 @@ def _html_daily_details(summary: Mapping, groups: Sequence[tuple[str, Sequence[M
     )
 
 
+def _html_anchor_details(summary: Mapping) -> str:
+    raw_status, _ = _anchor_status(summary)
+    return (
+        '<details class="us-details us-technical-details">'
+        '<summary>查看锚点资格与原始证据</summary>'
+        '<dl class="us-technical-list">'
+        f'<div><dt>原始资格代码</dt><dd class="us-technical-value">{_h(raw_status)}</dd></div>'
+        f'<div><dt>原始原因</dt><dd class="us-technical-value">{_h(_anchor_reason(summary))}</dd></div>'
+        f'<div><dt>锚点证据摘要</dt><dd class="us-technical-value">{_h(_anchor_digest(summary))}</dd></div>'
+        '</dl></details>'
+    )
+
+
 def render_html(summary) -> str:
     """Render a self-contained, scoped HTML block without network access."""
     summary = _mapping(summary)
@@ -316,7 +329,8 @@ def render_html(summary) -> str:
             f'<tr><td>{_h(row.get("name"))}</td><td><a href="{escape(_symbol_url(row.get("symbol")), quote=True)}" '
             f'rel="noopener noreferrer">{_h(row.get("symbol"))}</a></td><td>{_h(_pct(row.get("interval_pct")))}</td>'
             f'<td>{_h(_pct(row.get("daily_pct")))}</td><td>{_h(_pp(row.get("relative_spy_pp")))}</td>'
-            f'<td>{_h(row.get("actual_end_session"))}</td><td>{_h(row.get("status"), "数据缺失")}</td><td>{_h(_row_reason(row))}</td></tr>'
+            f'<td>{_h(row.get("actual_end_session"))}</td><td>{_h(row.get("status"), "数据缺失")}</td>'
+            f'<td class="us-wrap">{_h(_row_reason(row))}</td></tr>'
         )
 
     stocks_html = []
@@ -328,7 +342,8 @@ def render_html(summary) -> str:
             f'<td>{_h(row.get("name"))}</td><td><a href="{escape(_symbol_url(row.get("symbol")), quote=True)}" '
             f'rel="noopener noreferrer">{_h(row.get("symbol"))}</a></td><td>{_h(row.get("sector"), "未分类")}</td>'
             f'<td>{_h(_pct(row.get("interval_pct")))}</td><td>{_h(_pct(row.get("daily_pct")))}</td>'
-            f'<td>{_h(row.get("actual_end_session"))}</td><td>{_h(row.get("status"), "数据缺失")}</td><td>{_h(_row_reason(row))}</td></tr>'
+            f'<td>{_h(row.get("actual_end_session"))}</td><td>{_h(row.get("status"), "数据缺失")}</td>'
+            f'<td class="us-wrap">{_h(_row_reason(row))}</td></tr>'
         )
 
     errors = summary.get("errors")
@@ -346,10 +361,11 @@ def render_html(summary) -> str:
     details = _html_daily_details(summary, (
         ("大盘ETF", index_rows), ("行业ETF", sector_rows), ("代表个股", stock_rows),
     ))
+    anchor_details = _html_anchor_details(summary)
     return f"""{HTML_BLOCK_START}
 <section id="us-market-summary" data-status="{escape(status_raw, quote=True)}" data-anchor-evidence="{_h(anchor_digest, '')}">
 <style>
-#us-market-summary{{margin:22px 0 10px;color:#1d1d1f}}
+#us-market-summary{{max-width:100%;min-width:0;margin:22px 0 10px;color:#1d1d1f;overflow-wrap:anywhere}}
 #us-market-summary *{{box-sizing:border-box}}
 #us-market-summary .us-head{{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}}
 #us-market-summary .us-head h2{{flex:1 1 260px}}
@@ -360,14 +376,20 @@ def render_html(summary) -> str:
 #us-market-summary .us-card{{min-width:0;border:1px solid #e5e7eb;border-radius:8px;padding:11px;background:#fff}}
 #us-market-summary .us-return{{font-size:22px;font-weight:750;margin:5px 0}}
 #us-market-summary a{{color:#1d4ed8;text-decoration:none}}
-#us-market-summary .us-table-wrap{{overflow-x:auto;max-width:100%;margin:10px 0}}
+#us-market-summary .us-table-wrap{{overflow-x:auto;max-width:100%;margin:10px 0;-webkit-overflow-scrolling:touch}}
 #us-market-summary table{{min-width:760px;width:100%;border-collapse:collapse;margin:0}}
 #us-market-summary th,#us-market-summary td{{padding:8px 10px;text-align:left;border-bottom:1px solid #f0f0f0;font-size:13px;white-space:nowrap}}
+#us-market-summary td.us-wrap{{min-width:180px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}}
 #us-market-summary th{{background:#1d4ed8;color:#fff}}
 #us-market-summary .us-toolbar{{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:8px 0;font-size:13px}}
 #us-market-summary select{{max-width:100%;padding:5px 8px;border:1px solid #d1d5db;border-radius:6px;background:#fff}}
 #us-market-summary .us-details{{margin:12px 0}}
 #us-market-summary .us-details summary{{cursor:pointer;font-weight:650}}
+#us-market-summary .us-technical-list{{margin:8px 0;padding:10px 12px;background:#f8fafc;border-radius:6px;font-size:13px}}
+#us-market-summary .us-technical-list div{{display:grid;grid-template-columns:minmax(110px,auto) minmax(0,1fr);gap:8px;margin:5px 0}}
+#us-market-summary .us-technical-list dt{{font-weight:650}}
+#us-market-summary .us-technical-list dd{{min-width:0;margin:0}}
+#us-market-summary .us-technical-value{{overflow-wrap:anywhere;word-break:break-word}}
 #us-market-summary .us-errors{{margin:10px 0;padding:10px 12px;background:#fff7ed;color:#9a3412;border-radius:6px;font-size:13px}}
 #us-market-summary .us-errors ul{{margin:4px 0 0;padding-left:18px}}
 @media(max-width:600px){{#us-market-summary .us-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}#us-market-summary .us-card{{padding:9px}}}}
@@ -375,15 +397,14 @@ def render_html(summary) -> str:
 </style>
 <div class="us-head"><h2>③ 美股区间概要</h2><span class="us-badge">{_h(badge_label)} · {_h(source_status)}</span></div>
 <p class="us-meta">A股报告依据日：{_h(summary.get('basis_date'))} · 美股锚点交易日：{_h(_anchor_date(summary))} · 锚点时刻：{_h(summary.get('anchor_at'))}</p>
-<p class="us-meta">A股锚点资格：{_h(anchor_status_label)} · 原因：{_h(_anchor_reason(summary))} · 请求截止：{_h(summary.get('requested_as_of') or summary.get('as_of'))} · 数据截止：{_h(summary.get('as_of'))}</p>
-<p class="us-meta">锚点证据摘要：{_h(anchor_digest)}</p>
+<p class="us-meta">A股锚点资格：{_h(anchor_status_label)} · 请求截止：{_h(summary.get('requested_as_of') or summary.get('as_of'))} · 数据截止：{_h(summary.get('as_of'))}</p>
 <p class="us-meta">最近已完成美股交易日：{_h(latest_completed)} · 前一交易日：{_h(latest_previous)} · 美国区间基准日：{_h(summary.get('baseline_session'))} · 预期终点：{_h(summary.get('expected_end_session'))} · 区间新增交易日：{session_count} 个 · 行情抓取于：{_h(summary.get('fetched_at'))}</p>
 <div class="us-note">{narratives}</div>
 <h3>大盘ETF代理</h3><div class="us-grid">{''.join(cards)}</div>
 <h3>标普500主要行业ETF代理</h3><div class="us-table-wrap"><table><thead><tr><th>行业</th><th>ETF</th><th>区间复权涨跌</th><th>最近一日</th><th>相对SPY</th><th>截止日</th><th>状态</th><th>说明</th></tr></thead><tbody>{''.join(sectors_html) or '<tr><td colspan="8">数据缺失</td></tr>'}</tbody></table></div>
 <div class="us-head"><h3>固定代表个股观察池</h3><label class="us-toolbar">排序 <select data-us-sort><option value="return">区间涨跌</option><option value="sector">行业</option></select></label></div>
 <div class="us-table-wrap"><table><thead><tr><th>名称</th><th>代码</th><th>行业</th><th>区间复权涨跌</th><th>最近一日</th><th>截止日</th><th>状态</th><th>说明</th></tr></thead><tbody data-us-stocks>{''.join(stocks_html) or '<tr><td colspan="8">数据缺失</td></tr>'}</tbody></table></div>
-{details}{errors_html}
+{anchor_details}{details}{errors_html}
 <p class="us-meta">口径：仅统计截止时刻前已完成的美股常规交易时段，涨跌使用一致的复权收盘价。行业表现为标普500行业ETF代理；个股为固定代表观察池，不代表全市场排行。</p>
 <p class="us-meta">来源：<a href="https://finance.yahoo.com/" rel="noopener noreferrer">Yahoo Finance 行情</a> · <a href="{_NYSE_CALENDAR_URL}" rel="noopener noreferrer">NYSE交易日历</a> · <a href="{_SECTOR_SOURCE_URL}" rel="noopener noreferrer">State Street行业ETF资料</a> · 提供方 {_h(summary.get('provider'))}</p>
 <p class="us-meta">本区块仅供学习参考，不构成任何投资建议。</p>
@@ -405,11 +426,13 @@ def render_markdown(summary) -> str:
     session_count = len(sessions) if isinstance(sessions, Sequence) and not isinstance(sessions, (str, bytes)) else 0
     lines = [
         MD_BLOCK_START,
+        '<a id="us-market-summary"></a>',
+        "",
         "### ③ 美股区间概要",
         "",
         f"- 数据状态：{_md(status_label)}；来源状态：{_md(summary.get('source_status'))}",
         f"- A股报告依据日：{_md(summary.get('basis_date'))}；美股锚点交易日：{_md(_anchor_date(summary))}；锚点时刻：{_md(summary.get('anchor_at'))}",
-        f"- A股锚点资格：{_md(anchor_status_label)}；原因：{_md(_anchor_reason(summary))}",
+        f"- A股锚点资格：{_md(anchor_status_label)}（原始代码：{_md(_anchor_status(summary)[0])}）；原因：{_md(_anchor_reason(summary))}",
         f"- 锚点证据摘要：{_md(_anchor_digest(summary))}",
         f"- 请求截止：{_md(summary.get('requested_as_of') or summary.get('as_of'))}；数据截止：{_md(summary.get('as_of'))}",
         f"- 最近已完成美股交易日：{_md(latest_completed)}；前一交易日：{_md(latest_previous)}",

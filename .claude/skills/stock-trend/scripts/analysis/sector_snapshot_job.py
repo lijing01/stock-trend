@@ -7,9 +7,14 @@ persists the existing sector caches and candidate-universe history.
 """
 
 import argparse
+import hashlib
 import json
+import math
+import os
+import queue
 import sys
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
@@ -25,12 +30,19 @@ from fetchers.sector_data import (  # noqa: E402
     save_rankings_cache,
     _verified_trading_date,
 )
+from fetchers.sector_kline import batch_fetch_kline  # noqa: E402
+from analysis.sector_persistence import (  # noqa: E402
+    analyze_frozen_artifact,
+    sector_identity,
+)
 
 
 CLOSE_CONFIRMATION_MINUTES = 15 * 60 + 10
 DEFAULT_MIN_STOCKS = 10
 DEFAULT_MIN_UP_RATIO = 0.15
 MINIMUM_COVERAGE_DAYS = 2
+SECTOR_PERSISTENCE_SCHEMA = "sector-persistence/v1"
+SECTOR_KLINE_RECORD_VERSION = "eastmoney-sector-kline/v1"
 
 
 def _status_result(status: str, data_date: str = "", **extra) -> dict:
@@ -57,6 +69,240 @@ def _error_result(stage: str, exc: Exception, data_date: str = "") -> dict:
         data_date=data_date,
         errors=[f"{stage}:{type(exc).__name__}"],
     )
+
+
+def _digest(value) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _atomic_json_write(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(json.dumps(value, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+
+
+def _calendar_identity(calendar_evidence: dict | None) -> dict:
+    evidence = calendar_evidence if isinstance(calendar_evidence, dict) else {}
+    return {
+        "source": str(evidence.get("source") or "unknown"),
+        "fetched_at": str(evidence.get("fetched_at") or ""),
+        "evidence_digest": _digest(evidence) if evidence else "",
+    }
+
+
+def _sector_binding(sectors: list[dict], basis_date: str,
+                    trading_dates: list[str],
+                    calendar_evidence: dict | None = None,
+                    run_as_of: datetime | None = None) -> str:
+    return _digest({
+        "basis_date": basis_date,
+        "trading_dates": list(trading_dates),
+        "calendar": _calendar_identity(calendar_evidence),
+        "run_as_of": run_as_of.isoformat() if run_as_of is not None else None,
+        "sectors": [{**sector_identity(item),
+                     "roles": list(item.get("roles") or [])}
+                    for item in sectors],
+    })
+
+
+def _artifact_digest_valid(artifact: dict) -> bool:
+    expected = artifact.get("content_digest")
+    if not isinstance(expected, str) or not expected:
+        return False
+    content = dict(artifact)
+    content.pop("content_digest", None)
+    return _digest(content) == expected
+
+
+def _parse_aware_datetime(value) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    return value if math.isfinite(numeric) else None
+
+
+def _freeze_sector_fields(sector: dict, identity: dict) -> dict:
+    frozen = {
+        **identity,
+        "roles": [str(role) for role in sector.get("roles") or [] if role],
+    }
+    for key in ("change_pct", "up_count", "down_count", "flat_count",
+                "total_count"):
+        value = _finite_number(sector.get(key))
+        if value is not None:
+            frozen[key] = value
+    return frozen
+
+
+def _load_bound_artifact(path: Path, *, binding: str, basis_date: str,
+                         cutoff: datetime | None) -> tuple[dict | None, str]:
+    try:
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "artifact_missing"
+    except (OSError, ValueError, TypeError):
+        return None, "artifact_invalid"
+    artifact_time = _parse_aware_datetime(artifact.get("fetched_at")) \
+        if isinstance(artifact, dict) else None
+    if (not isinstance(artifact, dict)
+            or artifact.get("schema_version") != SECTOR_PERSISTENCE_SCHEMA
+            or artifact.get("basis_date") != basis_date
+            or artifact.get("binding_digest") != binding
+            or not _artifact_digest_valid(artifact)
+            or artifact_time is None
+            or (cutoff is not None and artifact_time > cutoff)):
+        return None, "artifact_binding_mismatch"
+    return artifact, ""
+
+
+def _bounded_fetch(fetcher, codes: list[str], *, total_timeout: float,
+                   max_workers: int) -> tuple[dict, bool, str]:
+    result_queue = queue.Queue(maxsize=1)
+
+    def run():
+        try:
+            result_queue.put((fetcher(
+                codes, min_records=80,
+                max_workers=max(1, min(int(max_workers), 4)),
+                total_timeout=total_timeout,
+            ), ""))
+        except Exception as exc:
+            result_queue.put(({}, f"fetch_error:{type(exc).__name__}"))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout=max(0.0, total_timeout))
+    if thread.is_alive():
+        return {}, True, "fetch_timeout"
+    try:
+        result, error = result_queue.get_nowait()
+    except queue.Empty:
+        return {}, False, "fetch_empty"
+    return result if isinstance(result, dict) else {}, False, error
+
+
+def freeze_sector_persistence(sectors: list[dict], basis_date: str,
+                              trading_dates: list[str], artifact_path,
+                              *, refresh: bool,
+                              fetcher=batch_fetch_kline,
+                              total_timeout: float = 12.0,
+                              max_workers: int = 4,
+                              fetched_at: str | None = None,
+                              as_of: str | datetime | None = None,
+                              run_as_of: str | datetime | None = None,
+                              calendar_evidence: dict | None = None) -> dict:
+    """Freeze or load the exact artifact bound to one report invocation.
+
+    ``refresh=False`` is strictly offline: it reads only ``artifact_path`` and
+    never searches a latest cache or invokes a calendar/provider loader.
+    """
+    path = Path(artifact_path)
+    run_cutoff = run_as_of if isinstance(run_as_of, datetime) \
+        else _parse_aware_datetime(run_as_of)
+    if isinstance(run_cutoff, datetime) and (
+            run_cutoff.tzinfo is None or run_cutoff.utcoffset() is None):
+        run_cutoff = None
+    binding = _sector_binding(
+        sectors, basis_date, trading_dates, calendar_evidence, run_cutoff)
+    cutoff = as_of if isinstance(as_of, datetime) \
+        else _parse_aware_datetime(as_of)
+    if not isinstance(cutoff, datetime) or cutoff.tzinfo is None \
+            or cutoff.utcoffset() is None:
+        cutoff = datetime.now(timezone.utc)
+    artifact, artifact_error = _load_bound_artifact(
+        path, binding=binding, basis_date=basis_date, cutoff=cutoff)
+    if artifact is not None:
+        return analyze_frozen_artifact(artifact)
+    if not refresh:
+        if artifact_error == "artifact_missing":
+            return {"status": "missing", "reasons": ["artifact_missing"],
+                    "items": [], "basis_date": basis_date}
+        if artifact_error == "artifact_invalid":
+            return {"status": "invalid", "reasons": ["artifact_invalid"],
+                    "items": [], "basis_date": basis_date}
+        return {"status": "mismatched", "reasons": [artifact_error],
+                "items": [], "basis_date": basis_date}
+
+    codes = list(dict.fromkeys(
+        sector_identity(item)["code"] for item in sectors
+        if sector_identity(item)["code"]
+    ))
+    fetched, timed_out, error = _bounded_fetch(
+        fetcher, codes, total_timeout=total_timeout,
+        max_workers=max_workers,
+    )
+    reasons = [reason for reason in ("fetch_timeout" if timed_out else "", error)
+               if reason]
+    frozen_sectors = []
+    for sector in sectors:
+        identity = sector_identity(sector)
+        normalized_records = []
+        for raw in fetched.get(identity["code"], []) or []:
+            if not isinstance(raw, dict):
+                continue
+            raw_date = str(raw.get("trade_date") or "").replace("-", "")
+            if len(raw_date) != 8 or raw_date > basis_date.replace("-", ""):
+                continue
+            close = _finite_number(raw.get("close"))
+            if close is None or close <= 0:
+                continue
+            record = {"trade_date": raw_date, "close": close}
+            for key in ("sector_id", "classification_version", "source",
+                        "price_type"):
+                record[key] = str(raw.get(key) or identity[key])
+            normalized_records.append(record)
+        normalized_records.sort(key=lambda item: str(item.get("trade_date") or ""))
+        frozen_sectors.append({
+            **_freeze_sector_fields(sector, identity),
+            "record_version": SECTOR_KLINE_RECORD_VERSION,
+            "records": normalized_records,
+        })
+    calendar_identity = _calendar_identity(calendar_evidence)
+    actual_fetched_at = fetched_at \
+        if _parse_aware_datetime(fetched_at) is not None \
+        else datetime.now(timezone.utc).isoformat()
+    artifact = {
+        "schema_version": SECTOR_PERSISTENCE_SCHEMA,
+        "basis_date": basis_date,
+        "fetched_at": actual_fetched_at,
+        "run_as_of": run_cutoff.isoformat() if run_cutoff is not None else None,
+        "binding_digest": binding,
+        "trading_dates": list(trading_dates),
+        "calendar_source": calendar_identity["source"],
+        "calendar_fetched_at": calendar_identity["fetched_at"],
+        "calendar_evidence_digest": calendar_identity["evidence_digest"],
+        "reasons": reasons,
+        "sectors": frozen_sectors,
+    }
+    artifact["content_digest"] = _digest(artifact)
+    _atomic_json_write(path, artifact)
+    analysis = analyze_frozen_artifact(artifact)
+    if reasons:
+        analysis["status"] = "degraded"
+        analysis["reasons"] = reasons
+    return analysis
 
 
 def _unwrap_rankings(result):

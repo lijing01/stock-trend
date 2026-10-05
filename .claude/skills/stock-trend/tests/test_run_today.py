@@ -254,14 +254,17 @@ class TodayTests(unittest.TestCase):
         result = {"meta": meta, "regime": {"score": 80}}
         (self.root / "market_regime.json").write_text(json.dumps({**meta, "regime": result["regime"]}))
         html_path = self.root / "daily-review.html"
+        markdown_path = self.root / "daily-review.md"
         html_path.write_text("html", encoding="utf-8")
+        markdown_path.write_text("markdown", encoding="utf-8")
         payload = ('[1/5] 拉取数据\n' + json.dumps(result, indent=2)
-                   + f'\nHTML: {html_path}\nDone in 1.0s\n')
+                   + f'\nMD: {markdown_path}\nHTML: {html_path}\nDone in 1.0s\n')
         with patch.object(job, "CACHE_DIR", self.root), patch.object(
                 job.subprocess, "run", return_value=CompletedProcess([], 0, payload)) as run:
             result = RUN_SCRIPT("analysis/market_regime.py", ["--no-html"])
         self.assertEqual(result["regime"]["score"], 80)
         self.assertEqual(result["report_paths"]["html"], str(html_path.resolve()))
+        self.assertEqual(result["report_paths"]["markdown"], str(markdown_path.resolve()))
         self.assertEqual(run.call_args.kwargs["cwd"], Path(__file__).resolve().parents[4])
         self.assertEqual(run.call_args.kwargs["env"]["TZ"], "Asia/Shanghai")
 
@@ -305,8 +308,10 @@ class TodayTests(unittest.TestCase):
 
     def test_daily_review_path_is_emitted_before_review_update(self):
         daily_path = self.root / "daily-review.html"
+        daily_markdown_path = self.root / "daily-review.md"
         candidate_path = self.root / "candidates.html"
         daily_path.write_text("daily", encoding="utf-8")
+        daily_markdown_path.write_text("daily markdown", encoding="utf-8")
         candidate_path.write_text("candidate", encoding="utf-8")
         calls = []
         events = []
@@ -318,7 +323,8 @@ class TodayTests(unittest.TestCase):
                 return {
                     "meta": {"generated_at": "2026-09-09 16:00:00", "data_date": "2026-09-09"},
                     "regime": {"score": 80},
-                    "report_paths": {"html": str(daily_path)},
+                    "report_paths": {"html": str(daily_path),
+                                     "markdown": str(daily_markdown_path)},
                 }
             return {
                 "recommendations": [{"code": "600000"}],
@@ -338,9 +344,11 @@ class TodayTests(unittest.TestCase):
         self.assertEqual(events, ["analysis/market_regime.py",
                                   "scans/daily_candidates.py", "review_html"])
         self.assertEqual(queued, [(str(daily_path), {
+            "markdown_path": str(daily_markdown_path),
             "data_date": "2026-09-09",
             "background_root": self.root / "background"})])
         self.assertEqual(result["report_paths"]["daily_review_html"], str(daily_path))
+        self.assertEqual(result["report_paths"]["daily_review_markdown"], str(daily_markdown_path))
         self.assertEqual(result["report_paths"]["html"], str(candidate_path))
         self.assertEqual(result["workflow"]["review_html"]["task_id"], "review-1")
 
@@ -374,6 +382,10 @@ class TodayTests(unittest.TestCase):
                 "before\n" + market_regime.render_observation_list_html(pending=True) + "\nafter",
                 encoding="utf-8",
             )
+            markdown_path = root / "daily-review.md"
+            markdown_path.write_text(
+                "before md\n" + market_regime.render_observation_list_markdown(pending=True)
+                + "\nafter md", encoding="utf-8")
             yaml_path = root / "observation_list.yaml"
             yaml_path.write_text("observation_list:\n  - code: '001207'\n", encoding="utf-8")
             artifact = root / "observation-analysis.json"
@@ -386,7 +398,7 @@ class TodayTests(unittest.TestCase):
                            "wyckoff": {}, "data_quality": {"status": "ready"}}]},
                 ensure_ascii=False), encoding="utf-8")
             task = today_background.ensure_review_html_task(
-                html_path, data_date="2026-09-21", artifact_path=artifact,
+                html_path, markdown_path, data_date="2026-09-21", artifact_path=artifact,
                 yaml_path=yaml_path, config_sha256=hashlib.sha256(yaml_path.read_bytes()).hexdigest(),
                 root=root / "background")
             with patch("analysis.observation_list_analysis.analyze_observation_list"):
@@ -394,12 +406,97 @@ class TodayTests(unittest.TestCase):
             status = today_background.read_review_html_status(
                 task["task_id"], root=root / "background")
             updated = html_path.read_text(encoding="utf-8")
+            updated_markdown = markdown_path.read_text(encoding="utf-8")
             self.assertEqual(result["status"], "completed")
             self.assertEqual(status["status"], "completed")
             self.assertIn("观察列表", updated)
             self.assertIn("001207", updated)
             self.assertIn("before", updated)
             self.assertIn("after", updated)
+            self.assertIn("001207", updated_markdown)
+            self.assertIn("before md", updated_markdown)
+            self.assertIn("after md", updated_markdown)
+
+    def test_review_report_partial_failure_is_visible_and_direct_rerun_recovers(self):
+        from analysis import market_regime
+        from bridge import today_background
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            html_path = root / "daily-review.html"
+            markdown_path = root / "daily-review.md"
+            html_path.write_text("html", encoding="utf-8")
+            markdown_path.write_text("markdown", encoding="utf-8")
+            task = today_background.ensure_review_html_task(
+                html_path, markdown_path, data_date="2026-09-21",
+                root=root / "background")
+            degraded = {
+                "status": "degraded", "observation_status": "ready",
+                "files": {"html": {"status": "updated"},
+                          "markdown": {"status": "failed", "reason": "OSError"}},
+                "partial_failures": ["markdown"],
+            }
+            completed = {
+                "status": "completed", "observation_status": "ready",
+                "files": {"html": {"status": "updated"},
+                          "markdown": {"status": "updated"}},
+            }
+            with patch("analysis.observation_list_analysis.analyze_observation_list"), \
+                    patch.object(market_regime, "update_observation_list_reports",
+                                 side_effect=[degraded, completed]):
+                first = today_background.run_review_html_task(
+                    task["task_id"], root=root / "background")
+                second = today_background.run_review_html_task(
+                    task["task_id"], root=root / "background")
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(first["partial_failures"], ["markdown"])
+            self.assertEqual(second["status"], "completed")
+            self.assertEqual(today_background.read_review_html_status(
+                task["task_id"], root=root / "background")["status"], "completed")
+
+    def test_review_analysis_failure_replaces_pending_in_both_reports_and_retry_recovers(self):
+        from analysis import market_regime
+        from bridge import today_background
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            html_path = root / "daily-review.html"
+            markdown_path = root / "daily-review.md"
+            html_path.write_text(
+                "before\n" + market_regime.render_observation_list_html(pending=True) + "\nafter",
+                encoding="utf-8")
+            markdown_path.write_text(
+                "before md\n" + market_regime.render_observation_list_markdown(pending=True)
+                + "\nafter md", encoding="utf-8")
+            task = today_background.ensure_review_html_task(
+                html_path, markdown_path, data_date="2026-09-21",
+                root=root / "background")
+
+            with patch("analysis.observation_list_analysis.analyze_observation_list",
+                       side_effect=RuntimeError("fixture analysis failure")):
+                first = today_background.run_review_html_task(
+                    task["task_id"], root=root / "background")
+            status = today_background.read_review_html_status(
+                task["task_id"], root=root / "background")
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(status["status"], "partial")
+            self.assertEqual(status["analysis"]["status"], "failed")
+            self.assertEqual(status["files"]["html"]["status"], "updated")
+            self.assertEqual(status["files"]["markdown"]["status"], "updated")
+            self.assertIn("观察列表不可用", html_path.read_text(encoding="utf-8"))
+            self.assertIn("观察列表不可用", markdown_path.read_text(encoding="utf-8"))
+            self.assertNotIn("分析进行中", html_path.read_text(encoding="utf-8"))
+            self.assertNotIn("分析进行中", markdown_path.read_text(encoding="utf-8"))
+
+            completed = {"status": "completed", "observation_status": "ready",
+                         "files": {"html": {"status": "updated"},
+                                   "markdown": {"status": "updated"}}}
+            with patch("analysis.observation_list_analysis.analyze_observation_list"), \
+                    patch.object(market_regime, "update_observation_list_reports",
+                                 return_value=completed):
+                second = today_background.run_review_html_task(
+                    task["task_id"], root=root / "background")
+            self.assertEqual(second["status"], "completed")
+            self.assertEqual(today_background.read_review_html_status(
+                task["task_id"], root=root / "background")["status"], "completed")
 
     def test_research_stages_wrap_formal_stages_in_sync_mode(self):
         from bridge import today_background

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests for patching component detail links into historical reviews."""
 
+import re
 import sys
 import tempfile
 import threading
@@ -52,6 +53,7 @@ def legacy_html():
         f"<tbody>{summary_rows}</tbody></table>"
         '<section class="market-explanation"><h2>市场环境解释</h2>'
         "<p>口径：close；基准日 2026-09-30；归一化分母 1.0</p>"
+        "<!-- 评分解释历史注释保留 -->"
         "<table><thead><tr><th>组件</th><th>得分</th><th>权重</th><th>贡献</th>"
         f"<th>证据资格</th><th>说明</th></tr></thead><tbody>{explanation_rows}</tbody></table>"
         "</section>"
@@ -124,6 +126,11 @@ class ReviewDetailLinksTests(unittest.TestCase):
     def test_updates_both_reports_preserves_other_blocks_and_is_idempotent(self):
         original_html = self.html.read_text(encoding="utf-8")
         original_md = self.md.read_text(encoding="utf-8")
+        original_explanation_table = re.search(
+            r"<table><thead><tr><th>组件</th><th>得分</th><th>权重</th>.*?</table>",
+            original_html,
+            re.DOTALL,
+        ).group(0)
 
         result = update_reports(self.html, "2026-09-30")
         updated_html = self.html.read_text(encoding="utf-8")
@@ -142,13 +149,102 @@ class ReviewDetailLinksTests(unittest.TestCase):
             self.assertIn("免责声明", content)
         self.assertEqual(1, updated_html.count('id="market-component-summary"'))
         self.assertEqual(1, updated_md.count('id="market-component-summary"'))
+        self.assertEqual(1, updated_html.count('class="summary-table-wrap"'))
+        self.assertIn('style="overflow-x:auto;max-width:100%"', updated_html)
+        self.assertIn("#market-component-summary{min-width:540px}", updated_html)
         self.assertLess(updated_html.index("market-explanation"), updated_html.index("MARKET_DETAIL_LINKS:START"))
         self.assertLess(updated_html.index("MARKET_DETAIL_LINKS:END"), updated_html.index("② 板块"))
+        self.assertEqual(5, len(re.findall(r'<details class="market-detail"', updated_html)))
+        self.assertIn('<details class="market-explanation">', updated_html)
+        self.assertIn("<summary>评分解释</summary>", updated_html)
+        self.assertIn('class="market-explanation-table-wrap"', updated_html)
+        self.assertIn("table{min-width:760px}", updated_html)
+        self.assertIn("<!-- 评分解释历史注释保留 -->", updated_html)
+        self.assertIn(original_explanation_table, updated_html)
 
         second = update_reports(self.html, "2026-09-30")
         self.assertEqual("unchanged", second["status"])
         self.assertEqual(updated_html, self.html.read_text(encoding="utf-8"))
         self.assertEqual(updated_md, self.md.read_text(encoding="utf-8"))
+        self.assertEqual(1, self.html.read_text(encoding="utf-8").count('class="summary-table-wrap"'))
+
+    def test_existing_generated_block_is_folded_without_recomputing_content(self):
+        articles = "".join(
+            f'<article class="market-detail" id="market-detail-{key}">'
+            f"<h3>{name}</h3><!-- frozen-{key} --><p>历史冻结内容 {score}</p></article>"
+            for key, name, score, _ in COMPONENTS
+        )
+        old_block = (
+            "<!-- MARKET_DETAIL_LINKS:START -->"
+            '<section class="market-detail-links"><h2>历史详情</h2>'
+            f"{articles}</section><!-- MARKET_DETAIL_LINKS:END -->"
+        )
+        html_text = legacy_html().replace("<h2>② 板块</h2>", old_block + "<h2>② 板块</h2>")
+        self.html.write_text(html_text, encoding="utf-8")
+
+        update_reports(self.html, "2026-09-30")
+        updated = self.html.read_text(encoding="utf-8")
+
+        self.assertEqual(5, len(re.findall(r'<details class="market-detail"', updated)))
+        self.assertNotIn('<article class="market-detail"', updated)
+        for key, _, score, _ in COMPONENTS:
+            self.assertIn(f"<!-- frozen-{key} -->", updated)
+            self.assertIn(f"历史冻结内容 {score}", updated)
+        second = update_reports(self.html, "2026-09-30")
+        self.assertEqual("unchanged", second["status"])
+
+    def test_complete_generated_reports_are_idempotent_and_keep_concurrent_update(self):
+        from analysis import market_regime as market
+        from test_market_detail_links import report_context
+
+        ctx = report_context()
+        state = {"status": "unavailable", "reason": "完整样本观察列表"}
+        self.html.write_text(
+            market._generate_html(ctx, "fixture", observation_state=state),
+            encoding="utf-8",
+        )
+        self.md.write_text(
+            market.generate_report(ctx, observation_state=state),
+            encoding="utf-8",
+        )
+
+        first = update_reports(self.html, "2026-09-30")
+        second = update_reports(self.html, "2026-09-30")
+        self.assertEqual("unchanged", first["status"])
+        self.assertEqual("unchanged", second["status"])
+        self.assertEqual(
+            1,
+            self.html.read_text(encoding="utf-8").count('class="summary-table-wrap"'),
+        )
+
+        lock_held = threading.Event()
+        release = threading.Event()
+
+        def observation_writer():
+            with report_lock(self.html):
+                current = self.html.read_text(encoding="utf-8")
+                current = current.replace("完整样本观察列表", "完整样本并发更新")
+                atomic_write_text(self.html, current)
+                lock_held.set()
+                release.wait(timeout=2)
+
+        thread = threading.Thread(target=observation_writer)
+        thread.start()
+        self.assertTrue(lock_held.wait(timeout=2))
+        result = {}
+        detail_thread = threading.Thread(
+            target=lambda: result.update(update_reports(self.html, "2026-09-30"))
+        )
+        detail_thread.start()
+        time.sleep(0.03)
+        release.set()
+        thread.join(timeout=2)
+        detail_thread.join(timeout=2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(detail_thread.is_alive())
+        self.assertEqual("unchanged", result["status"])
+        self.assertIn("完整样本并发更新", self.html.read_text(encoding="utf-8"))
 
     def test_wrong_date_missing_or_duplicate_component_never_writes(self):
         cases = [

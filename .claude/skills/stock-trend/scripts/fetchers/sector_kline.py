@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import argparse
 import json
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -45,8 +46,9 @@ def _parse_kline_response(raw: str, min_records: int) -> list[dict]:
     return records[-min_records:]
 
 
-def fetch_single_kline(sector_code: str, min_records: int = 20,
-                       retries: int = 3) -> list[dict]:
+def fetch_single_kline(sector_code: str, min_records: int = 80,
+                       retries: int = 3, timeout: float = 5.0,
+                       deadline: float | None = None) -> list[dict]:
     """Fetch BK index K-line data for one sector.
 
     Requests 6 months of data (server may return ~28 sparse records).
@@ -54,7 +56,7 @@ def fetch_single_kline(sector_code: str, min_records: int = 20,
 
     Args:
         sector_code: e.g. "BK0477".
-        min_records: minimum records to return (default 20).
+        min_records: maximum trailing records to return (default 80).
         retries: retry count with host rotation.
 
     Returns:
@@ -63,51 +65,71 @@ def fetch_single_kline(sector_code: str, min_records: int = 20,
     Raises:
         RuntimeError: all hosts exhausted.
     """
-    import time as _time
     secid = f"90.{sector_code}"
     last_error = None
 
     for attempt in range(retries + 1):
         host = EM_PUSH2_HOSTS[attempt % len(EM_PUSH2_HOSTS)]
         url = build_em_kline_url(host, secid, lmt=200)
-        url += f"&_={int(_time.time() * 1000)}"  # CDN cache bust
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError("sector kline total deadline exceeded")
+        request_timeout = min(timeout, remaining) \
+            if remaining is not None else timeout
+        url += f"&_={int(time.time() * 1000)}"  # CDN cache bust
         try:
-            raw = fetch_url(url, headers=EM_HEADERS)
+            raw = fetch_url(url, headers=EM_HEADERS,
+                            timeout=max(0.1, request_timeout))
             return _parse_kline_response(raw, min_records)
         except Exception as e:
             last_error = e
             if attempt < retries:
-                _time.sleep(0.5)
+                delay = 0.5
+                if deadline is not None:
+                    delay = min(delay, max(0.0, deadline - time.monotonic()))
+                if delay:
+                    time.sleep(delay)
 
     raise RuntimeError(f"获取板块[{sector_code}]K线失败: {last_error or '所有节点无响应'}")
 
 
-def batch_fetch_kline(sector_codes: list[str], min_records: int = 20,
-                      max_workers: int = 4) -> dict[str, list[dict]]:
+def batch_fetch_kline(sector_codes: list[str], min_records: int = 80,
+                      max_workers: int = 4, total_timeout: float = 12.0,
+                      request_timeout: float = 5.0) -> dict[str, list[dict]]:
     """Fetch BK index K-lines for multiple sectors in parallel.
 
     Failed sectors get empty list (no hard failure).
     """
-    results: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    codes = list(dict.fromkeys(str(code) for code in sector_codes if code))
+    results: dict[str, list[dict]] = {code: [] for code in codes}
+    deadline = time.monotonic() + max(0.0, total_timeout)
+    pool = ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), 4)))
+    try:
         fut_map = {
-            pool.submit(fetch_single_kline, code, min_records): code
-            for code in sector_codes
+            pool.submit(fetch_single_kline, code, min_records, 3,
+                        request_timeout, deadline): code
+            for code in codes
         }
-        for fut in as_completed(fut_map):
-            code = fut_map[fut]
-            try:
-                results[code] = fut.result()
-            except Exception as e:
-                print(f"  [Warn] {code}: {e}", file=sys.stderr)
-                results[code] = []
+        try:
+            for fut in as_completed(
+                    fut_map, timeout=max(0.0, deadline - time.monotonic())):
+                code = fut_map[fut]
+                try:
+                    results[code] = fut.result()
+                except Exception as e:
+                    print(f"  [Warn] {code}: {e}", file=sys.stderr)
+        except TimeoutError:
+            for fut in fut_map:
+                fut.cancel()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="BK板块指数K线获取")
     parser.add_argument("codes", nargs="+", help="BK代码, 如 BK0477 BK0478")
-    parser.add_argument("--records", type=int, default=20, help="返回记录数, 默认20")
+    parser.add_argument("--records", type=int, default=80, help="返回记录数, 默认80")
     parser.add_argument("--workers", type=int, default=4, help="并行数, 默认4")
     parser.add_argument("-o", "--output", type=str, help="输出JSON文件")
     args = parser.parse_args()

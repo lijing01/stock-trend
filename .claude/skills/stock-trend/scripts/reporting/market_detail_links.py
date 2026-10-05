@@ -2,6 +2,7 @@
 
 from html import escape
 import math
+import re
 from urllib.parse import urlparse
 
 
@@ -87,6 +88,29 @@ _MISSING_DETAIL = {
     "zt_emotion": "冻结涨停家数、连板数、最高板或历史基线未保存。",
     "capital": "冻结全市场主力净流入数值未保存。",
 }
+
+_FOLD_STYLE = (
+    '<style data-market-detail-fold>'
+    '.market-detail-links .market-detail>summary{cursor:pointer;font-weight:700;'
+    'font-size:16px;padding:12px 0;overflow-wrap:anywhere}'
+    '.market-detail-links .market-detail[open]>summary{margin-bottom:8px}'
+    '</style>'
+)
+
+_FOLD_SCRIPT = """<script data-market-detail-links>(function(){
+function target(){var h=window.location.hash;if(!h||h.indexOf('#market-detail-')!==0)return null;
+try{return document.getElementById(decodeURIComponent(h.slice(1)));}catch(e){return null;}}
+function revealElement(el,scroll){if(!el)return;var box=el.matches('details.market-detail')?el:el.closest('details.market-detail');
+while(box){box.open=true;box=box.parentElement&&box.parentElement.closest('details');}
+if(scroll)window.requestAnimationFrame(function(){el.scrollIntoView({block:'start'});});}
+function reveal(scroll){revealElement(target(),scroll);}
+document.addEventListener('click',function(event){var link=event.target.closest&&event.target.closest('a.market-detail-link');
+if(!link)return;var id=link.getAttribute('href');if(!id||id.indexOf('#market-detail-')!==0)return;
+revealElement(document.getElementById(id.slice(1)),true);});
+window.addEventListener('hashchange',function(){reveal(true);});
+window.addEventListener('popstate',function(){reveal(true);});
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){reveal(true);});else reveal(true);
+})();</script>"""
 
 
 def _validate_sources():
@@ -290,8 +314,8 @@ def _render_html(ctx):
         score_text = str(score) if _present(score) else "未保存"
         detail_text = str(detail) if _present(detail) else _MISSING_DETAIL[key]
         articles.append(
-            f'<article class="market-detail" id="market-detail-{key}">'
-            f"<h3>{escape(name)}</h3>"
+            f'<details class="market-detail" id="market-detail-{key}">'
+            f"<summary>{escape(name)}</summary>"
             f"<p><strong>本报告冻结得分：</strong>{escape(score_text)}</p>"
             f"<p><strong>冻结说明：</strong>{escape(detail_text)}</p>"
             f"<p><strong>冻结原始字段：</strong>{escape(_raw_detail(ctx, key))}</p>"
@@ -302,7 +326,7 @@ def _render_html(ctx):
             "<p class=\"market-detail-limit\">外部行情页面可能默认显示最新行情或历史缓存，"
             "请核对站内日期；这些页面不展示本项目评分，且不同平台口径可能不同。</p>"
             '<p><a href="#market-component-summary">返回评分表</a></p>'
-            "</article>"
+            "</details>"
         )
     return (
         START
@@ -317,11 +341,42 @@ def _render_html(ctx):
         ".market-detail-links ul{font-size:14px;margin:4px 0 8px}"
         ".market-detail-links .market-detail-limit{color:#6b7280}"
         "</style>"
+        + _FOLD_STYLE
         + '<h2 id="market-detail-links-title">市场评分详情与财经入口</h2>'
         + "".join(articles)
         + "</section>"
+        + _FOLD_SCRIPT
         + END
     )
+
+
+def upgrade_html_block(block):
+    """Fold a previously generated HTML detail block without changing its content."""
+    if not re.search(r'<section\b[^>]*\bclass=["\'][^"\']*\bmarket-detail-links\b', block):
+        return block
+    pattern = re.compile(
+        r'<article(?P<attrs>[^>]*\bclass=(?P<quote>["\'])[^"\']*\bmarket-detail\b[^"\']*(?P=quote)[^>]*)>'
+        r'(?P<body>.*?)</article>',
+        re.DOTALL,
+    )
+
+    def fold(match):
+        body = match.group("body")
+        heading = re.match(r'(?P<space>\s*)<h3>(?P<title>.*?)</h3>', body, re.DOTALL)
+        if not heading:
+            return match.group(0)
+        return (
+            f'<details{match.group("attrs")}>'
+            f'{heading.group("space")}<summary>{heading.group("title")}</summary>'
+            f'{body[heading.end():]}</details>'
+        )
+
+    upgraded = pattern.sub(fold, block)
+    if "data-market-detail-fold" not in upgraded:
+        upgraded = upgraded.replace("</section>", _FOLD_STYLE + "</section>", 1)
+    if "data-market-detail-links" not in upgraded:
+        upgraded = upgraded.replace(END, _FOLD_SCRIPT + END, 1)
+    return upgraded
 
 
 def _render_markdown(ctx):
