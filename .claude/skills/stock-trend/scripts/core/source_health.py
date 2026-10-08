@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import socket
 import threading
 import time
@@ -21,6 +22,7 @@ SOURCES = (
 SCAN_DEADLINE_SECONDS = 450
 FINALIZATION_RESERVE_SECONDS = 10
 KLINE_PHASE_SECONDS = 110
+KLINE_TOPUP_SECONDS = 50
 CAPITAL_PREFETCH_LIMIT = 36
 CAPITAL_PREFETCH_BATCH_SIZE = 12
 CAPITAL_TOPUP_LIMIT = 12
@@ -83,6 +85,10 @@ def capital_topup_reserve_seconds(
 
 
 CAPITAL_TOPUP_RESERVE_SECONDS = capital_topup_reserve_seconds()
+KLINE_DOWNSTREAM_RESERVE_SECONDS = (
+    CAPITAL_TOPUP_RESERVE_SECONDS
+    + LIVE_ATTEMPT_TIMEOUT_SECONDS["capital"]
+)
 # A source only hard-stops after this many *consecutive* live failures.
 # Below that it stays "degraded" and keeps retrying so a transient blip
 # (e.g. 1-2 kline timeouts) never orphans the rest of the run to stale cache.
@@ -276,6 +282,22 @@ class RunSourceHealth:
         # scanner. Keep admission budgets on the shared run object so those
         # windows cannot each allocate a fresh prefetch/top-up queue.
         self._enrichment_admitted = {}
+        self._kline_budgets = {
+            "normal": {
+                "limit_seconds": float(KLINE_PHASE_SECONDS),
+                "used_seconds": 0.0,
+                "reserved_seconds": 0.0,
+                "calls": 0,
+                "deadline_reason": "",
+            },
+            "topup": {
+                "limit_seconds": float(KLINE_TOPUP_SECONDS),
+                "used_seconds": 0.0,
+                "reserved_seconds": 0.0,
+                "calls": 0,
+                "deadline_reason": "",
+            },
+        }
         self._sequence = 0
         self.started_at = time.monotonic()
         self.live_deadline = (
@@ -284,16 +306,99 @@ class RunSourceHealth:
 
     @property
     def kline_deadline(self) -> float:
-        """Absolute deadline for the K-line/Wyckoff phase.
+        """Compatibility preview of the remaining normal K-line budget."""
+        deadline, _, _ = self._kline_budget_window("normal", reserve=False)
+        return deadline
 
-        The property is derived from the run start and the live deadline so
-        callers cannot accidentally move the phase boundary independently of
-        the shared 230-second live window.
+    def _kline_budget_window(
+            self, stage: str, reserve: bool) -> tuple[float, str, float]:
+        stage = str(stage or "normal")
+        if stage not in self._kline_budgets:
+            raise ValueError(f"unsupported K-line budget stage: {stage}")
+        now = time.monotonic()
+        downstream_deadline = (
+            self.live_deadline - KLINE_DOWNSTREAM_RESERVE_SECONDS)
+        with self._lock:
+            budget = self._kline_budgets[stage]
+            remaining = max(
+                0.0,
+                budget["limit_seconds"] - budget["used_seconds"]
+                - budget["reserved_seconds"],
+            )
+            if now >= self.live_deadline:
+                deadline = now
+                reason = "live_deadline"
+            elif now >= downstream_deadline:
+                deadline = now
+                reason = "downstream_reserve"
+            elif remaining <= 0:
+                deadline = now
+                reason = "kline_budget_exhausted"
+            else:
+                stage_deadline = now + remaining
+                deadline = min(stage_deadline, downstream_deadline,
+                               self.live_deadline)
+                if deadline == stage_deadline:
+                    reason = "kline_budget_exhausted"
+                elif deadline == downstream_deadline:
+                    reason = "downstream_reserve"
+                else:
+                    reason = "live_deadline"
+            if reserve:
+                # Reserve the full currently available stage balance while
+                # this scheduling call is active. This prevents concurrent
+                # callers from allocating the same run-scoped budget twice.
+                budget["reserved_seconds"] += remaining
+                budget["calls"] += 1
+                budget["deadline_reason"] = reason
+            return max(now, deadline), reason, remaining if reserve else 0.0
+
+    @contextmanager
+    def kline_budget(self, stage: str = "normal"):
+        """Yield one frozen deadline and charge elapsed wall-clock time.
+
+        The stage budget is shared across all calls in this run. Time spent
+        before entering this context does not consume it, while exceptions and
+        early returns still charge the elapsed scheduling time.
         """
-        return min(
-            self.live_deadline,
-            self.started_at + KLINE_PHASE_SECONDS,
-        )
+        stage = str(stage or "normal")
+        started = time.monotonic()
+        deadline, _, reserved = self._kline_budget_window(stage, reserve=True)
+        try:
+            yield deadline
+        finally:
+            elapsed = max(0.0, time.monotonic() - started)
+            with self._lock:
+                budget = self._kline_budgets[stage]
+                budget["reserved_seconds"] = max(
+                    0.0, budget["reserved_seconds"] - reserved)
+                available = max(
+                    0.0, budget["limit_seconds"] - budget["used_seconds"])
+                budget["used_seconds"] += min(available, elapsed)
+
+    def kline_budget_deadline_reason(self, stage: str = "normal") -> str:
+        """Return the limiting scheduler reason for the latest stage call."""
+        stage = str(stage or "normal")
+        with self._lock:
+            if stage not in self._kline_budgets:
+                raise ValueError(f"unsupported K-line budget stage: {stage}")
+            return str(self._kline_budgets[stage]["deadline_reason"])
+
+    def kline_budget_snapshot(self) -> dict:
+        """Return stable audit metrics for normal and top-up K-line work."""
+        with self._lock:
+            result = {}
+            for stage, budget in self._kline_budgets.items():
+                limit = float(budget["limit_seconds"])
+                used = min(limit, float(budget["used_seconds"]))
+                result[stage] = {
+                    "limit_seconds": limit,
+                    "used_seconds": used,
+                    "remaining_seconds": max(0.0, limit - used),
+                    "calls": int(budget["calls"]),
+                    "deadline_reason": str(budget["deadline_reason"]),
+                }
+            return result
 
     @property
     def capital_initial_deadline(self) -> float:
@@ -612,6 +717,7 @@ def bounded_source_map(
         include_evidence: bool = False,
         cache_fetch_with_reason: Callable[[Any, str], Any] | None = None,
         deadline_reason: str = "deadline",
+        freeze_cache_before_live: bool | None = None,
         ) -> list[tuple[Any, Any]]:
     """Run admitted live work incrementally, then finish cache-only.
 
@@ -628,9 +734,18 @@ def bounded_source_map(
     futures = {}
     exhausted = False
     pool = ThreadPoolExecutor(max_workers=max_workers)
+    missing_fallback = object()
+    freeze_fallback = (
+        source == "kline"
+        if freeze_cache_before_live is None
+        else bool(freeze_cache_before_live)
+    ) and cache_fetch_with_reason is None
 
-    def cached(item: Any, evidence_reason: str = "cache_only") -> Any:
-        if cache_fetch_with_reason is not None:
+    def cached(item: Any, evidence_reason: str = "cache_only",
+               frozen_payload: Any = missing_fallback) -> Any:
+        if frozen_payload is not missing_fallback:
+            payload = frozen_payload
+        elif cache_fetch_with_reason is not None:
             payload = cache_fetch_with_reason(item, evidence_reason)
         else:
             payload = cache_fetch(item)
@@ -674,13 +789,29 @@ def bounded_source_map(
                     health.release_unstarted(token, "exhausted")
                     exhausted = True
                     break
+                frozen_payload = missing_fallback
+                if freeze_fallback:
+                    try:
+                        frozen_payload = copy.deepcopy(cache_fetch(item))
+                    except Exception:
+                        # Freeze the observed cache miss as well. Retrying the
+                        # read after a late live writer completes would revive
+                        # the same race as a successful stale snapshot.
+                        frozen_payload = None
+                    if time.monotonic() >= live_deadline:
+                        health.release_unstarted(token, deadline_reason)
+                        results.append((item, cached(
+                            item, deadline_reason,
+                            frozen_payload=frozen_payload)))
+                        continue
                 try:
                     future = pool.submit(live_fetch, item)
                 except Exception:
                     health.release_unstarted(token, "submit_failed")
-                    results.append((item, cached(item)))
+                    results.append((item, cached(
+                        item, frozen_payload=frozen_payload)))
                     continue
-                futures[future] = (item, token)
+                futures[future] = (item, token, frozen_payload)
 
             if not futures:
                 break
@@ -692,7 +823,7 @@ def bounded_source_map(
             if not done:
                 break
             for future in done:
-                item, token = futures.pop(future)
+                item, token, frozen_payload = futures.pop(future)
                 try:
                     wrapped = future.result()
                     payload = wrapped["payload"]
@@ -721,7 +852,8 @@ def bounded_source_map(
                         reason=classify_failure(exc))
                     health.mark_started(token)
                     health.complete_failure(token, failure)
-                    fallback = cached(item)
+                    fallback = cached(
+                        item, frozen_payload=frozen_payload)
                     if include_evidence:
                         fallback = source_result(
                             fallback["payload"], {
@@ -733,17 +865,22 @@ def bounded_source_map(
                             })
                     results.append((item, fallback))
 
-        for future, (item, token) in list(futures.items()):
+        deadline_expired = time.monotonic() >= live_deadline
+        for future, (item, token, frozen_payload) in list(futures.items()):
             if future.cancel():
-                health.release_unstarted(token, "cancelled")
+                cancellation_reason = (
+                    deadline_reason if deadline_expired else "cancelled")
+                health.release_unstarted(token, cancellation_reason)
                 attempt = live_attempt(
-                    attempted=False, reason="cancelled")
+                    attempted=False, reason=cancellation_reason)
             else:
                 health.mark_started(token)
                 attempt = live_attempt(
                     attempted=True, provider_attempts=1, reason="timeout")
                 health.complete_failure(token, attempt)
-            fallback = cached(item)
+            fallback = cached(
+                item, attempt.get("reason") or "cache_only",
+                frozen_payload=frozen_payload)
             if include_evidence:
                 fallback = source_result(
                     fallback["payload"], {

@@ -2272,7 +2272,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                require_wyckoff_gate=True, peer_cohorts=None,
                include_phase_d_lps_context=False,
                include_formal_event_history=False, kline_diagnostics=None,
-               kline_artifacts=None):
+               kline_artifacts=None, kline_budget_stage="normal"):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2405,24 +2405,36 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         return ts_code, payload, evidence
 
     if isinstance(source_health, RunSourceHealth):
-        def _live_kline(candidate):
-            return _evidenced_fetch(
-                _fetch_kline, candidate["ts_code"],
-                as_of_date=as_of_date,
-                live_deadline=source_health.kline_deadline,
-                usable=_kline_usable)
+        with source_health.kline_budget(kline_budget_stage) as kline_deadline:
+            def _live_kline(candidate):
+                return _evidenced_fetch(
+                    _fetch_kline, candidate["ts_code"],
+                    as_of_date=as_of_date,
+                    live_deadline=kline_deadline,
+                    usable=_kline_usable)
 
-        fetched = bounded_source_map(
-            "kline", fetch_candidates, source_health, _live_kline,
-            lambda candidate: _cache_fetch(
-                _fetch_kline, candidate["ts_code"], as_of_date=as_of_date),
-            source_health.kline_deadline,
-            max_workers=min(worker_count, MAX_IN_FLIGHT["kline"]),
-            cache_usable=_kline_usable,
-            include_evidence=True)
+            fetched = bounded_source_map(
+                "kline", fetch_candidates, source_health, _live_kline,
+                lambda candidate: _cache_fetch(
+                    _fetch_kline, candidate["ts_code"],
+                    as_of_date=as_of_date),
+                kline_deadline,
+                max_workers=min(worker_count, MAX_IN_FLIGHT["kline"]),
+                cache_usable=_kline_usable,
+                include_evidence=True,
+                deadline_reason="deadline")
+        budget_reason = source_health.kline_budget_deadline_reason(
+            kline_budget_stage)
+        metrics_ref["kline_budget"] = (
+            source_health.kline_budget_snapshot())
         for item, result in fetched:
             payload, attempt = _unpack_source_result(result)
             payload = _truncate_kline_as_of(payload, as_of_date)
+            if (not attempt.get("attempted")
+                    and attempt.get("reason") == "deadline"):
+                attempt = dict(attempt)
+                attempt["scheduler_reason"] = budget_reason
+                attempt["kline_budget_stage"] = str(kline_budget_stage)
             evidence = _normalize_source_evidence(
                 "kline", payload, attempt,
                 usable=_kline_usable)
@@ -2477,6 +2489,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 "provider_attempts": meta.get("provider_attempts") or [],
                 "source_status": evidence.get("status") or "",
                 "source_reason": evidence.get("reason") or "",
+                "scheduler_reason": evidence.get("scheduler_reason") or "",
+                "kline_budget_stage": str(kline_budget_stage),
+                "usable": _kline_usable(payload),
                 "detail": meta.get("error") or meta.get("refresh_error") or "",
             }
 

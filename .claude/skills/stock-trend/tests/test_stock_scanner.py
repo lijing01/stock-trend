@@ -15,6 +15,7 @@ Usage:
 import sys
 import json
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -24,6 +25,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from scans import stock_scanner as sc
+from core import source_health as source_health_core
 from fetchers import sector_data as sd
 from fetchers import sector_akshare as sa
 from fetchers import fundamental as fd
@@ -82,6 +84,17 @@ def _make_dated_kline(n=60, ts_code="TEST", trade_date="20260806"):
     for row in kline["data"]:
         row["trade_date"] = trade_date
     return kline
+
+
+class _FakeClock:
+    def __init__(self, now=1000.0):
+        self.now = float(now)
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
 
 
 class TestNormalize(unittest.TestCase):
@@ -1372,6 +1385,335 @@ class TestScoreWyckoff(unittest.TestCase):
 
 
 class TestRunPhase2Funnel(unittest.TestCase):
+    def test_bounded_kline_timeout_uses_cache_frozen_before_live_submit(self):
+        clock = _FakeClock()
+        release_live = threading.Event()
+        live_mutated_cache = threading.Event()
+        stale = {"version": "stale"}
+        fresh = {"version": "fresh"}
+        cache_state = {"payload": stale}
+
+        def live_fetch(_item):
+            cache_state["payload"] = fresh
+            live_mutated_cache.set()
+            release_live.wait(1.0)
+            return sc.source_result(fresh, sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                status="live_success"))
+
+        def fake_wait(futures, **_kwargs):
+            self.assertTrue(live_mutated_cache.wait(1.0))
+            clock.advance(20)
+            return set(), set(futures)
+
+        try:
+            with patch.object(source_health_core.time, "monotonic",
+                              side_effect=clock.monotonic), \
+                    patch.object(source_health_core, "wait",
+                                 side_effect=fake_wait):
+                health = sc.RunSourceHealth()
+                rows = sc.bounded_source_map(
+                    "kline", ["600001"], health, live_fetch,
+                    lambda _item: cache_state["payload"],
+                    live_deadline=clock.now + 10, max_workers=1,
+                    include_evidence=True)
+        finally:
+            release_live.set()
+
+        payload, attempt = rows[0][1]["payload"], rows[0][1]["live_attempt"]
+        self.assertEqual(payload, stale)
+        self.assertEqual(attempt["reason"], "timeout")
+        self.assertEqual(health.snapshot()["kline"]["cache_hits"], 1)
+
+    def test_bounded_kline_live_success_does_not_count_frozen_cache(self):
+        stale = {"version": "stale"}
+        fresh = {"version": "fresh"}
+        cache_calls = []
+        health = sc.RunSourceHealth()
+        rows = sc.bounded_source_map(
+            "kline", ["600001"], health,
+            lambda _item: sc.source_result(fresh, sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                status="live_success")),
+            lambda item: cache_calls.append(item) or stale,
+            live_deadline=time.monotonic() + 1, max_workers=1,
+            include_evidence=True)
+
+        self.assertEqual(rows[0][1]["payload"], fresh)
+        self.assertEqual(cache_calls, ["600001"])
+        self.assertEqual(health.snapshot()["kline"]["cache_hits"], 0)
+
+    def test_bounded_kline_failed_cache_snapshot_is_frozen_as_missing(self):
+        clock = _FakeClock()
+        release_live = threading.Event()
+        live_started = threading.Event()
+        cache_calls = []
+
+        def cache_fetch(item):
+            cache_calls.append(item)
+            raise OSError("cache unreadable")
+
+        def live_fetch(_item):
+            live_started.set()
+            release_live.wait(1.0)
+            return sc.source_result({}, sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                status="live_success"))
+
+        def fake_wait(futures, **_kwargs):
+            self.assertTrue(live_started.wait(1.0))
+            clock.advance(20)
+            return set(), set(futures)
+
+        try:
+            with patch.object(source_health_core.time, "monotonic",
+                              side_effect=clock.monotonic), \
+                    patch.object(source_health_core, "wait",
+                                 side_effect=fake_wait):
+                health = sc.RunSourceHealth()
+                rows = sc.bounded_source_map(
+                    "kline", ["600001"], health, live_fetch, cache_fetch,
+                    live_deadline=clock.now + 10, max_workers=1,
+                    include_evidence=True)
+        finally:
+            release_live.set()
+
+        self.assertEqual(cache_calls, ["600001"])
+        self.assertIsNone(rows[0][1]["payload"])
+        self.assertEqual(rows[0][1]["live_attempt"]["reason"], "timeout")
+
+    def test_bounded_kline_cache_snapshot_crossing_deadline_skips_live(self):
+        clock = _FakeClock()
+        live_calls = []
+
+        def cache_fetch(_item):
+            clock.advance(20)
+            return {"version": "stale"}
+
+        with patch.object(source_health_core.time, "monotonic",
+                          side_effect=clock.monotonic):
+            health = sc.RunSourceHealth()
+            rows = sc.bounded_source_map(
+                "kline", ["600001"], health,
+                lambda item: live_calls.append(item), cache_fetch,
+                live_deadline=clock.now + 10, max_workers=1,
+                include_evidence=True, deadline_reason="deadline")
+
+        self.assertEqual(live_calls, [])
+        self.assertEqual(rows[0][1]["payload"], {"version": "stale"})
+        self.assertEqual(rows[0][1]["live_attempt"]["reason"], "deadline")
+        self.assertEqual(health.snapshot()["kline"]["logical_live_requests"], 0)
+
+    def test_bounded_kline_cancelled_queue_keeps_deadline_reason(self):
+        clock = _FakeClock()
+        release_live = threading.Event()
+        live_started = threading.Event()
+
+        def live_fetch(item):
+            live_started.set()
+            release_live.wait(1.0)
+            return sc.source_result({"item": item}, sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                status="live_success"))
+
+        def fake_wait(futures, **_kwargs):
+            self.assertTrue(live_started.wait(1.0))
+            clock.advance(20)
+            return set(), set(futures)
+
+        try:
+            with patch.object(source_health_core.time, "monotonic",
+                              side_effect=clock.monotonic), \
+                    patch.object(source_health_core, "wait",
+                                 side_effect=fake_wait):
+                health = sc.RunSourceHealth(per_source_max={"kline": 2})
+                rows = sc.bounded_source_map(
+                    "kline", ["first", "queued"], health, live_fetch,
+                    lambda item: {"cached": item},
+                    live_deadline=clock.now + 10, max_workers=1,
+                    include_evidence=True, deadline_reason="deadline")
+        finally:
+            release_live.set()
+
+        attempts = {
+            item: wrapped["live_attempt"] for item, wrapped in rows
+        }
+        self.assertEqual(attempts["first"]["reason"], "timeout")
+        self.assertFalse(attempts["queued"]["attempted"])
+        self.assertEqual(attempts["queued"]["reason"], "deadline")
+
+    def test_run_phase2_maps_deadline_cancelled_kline_to_not_started(self):
+        clock = _FakeClock()
+        release_live = threading.Event()
+        live_started = threading.Event()
+
+        def fetch_kline(ts_code, cache_only=False, with_evidence=False,
+                        **_kwargs):
+            stale = _make_dated_kline(60, ts_code, "20260915")
+            if cache_only:
+                return stale
+            live_started.set()
+            release_live.wait(1.0)
+            fresh = _make_dated_kline(60, ts_code, "20260916")
+            attempt = sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                status="live_success")
+            return (sc.source_result(fresh, attempt)
+                    if with_evidence else fresh)
+
+        def fake_wait(futures, **_kwargs):
+            self.assertTrue(live_started.wait(1.0))
+            clock.advance(120)
+            return set(), set(futures)
+
+        try:
+            with patch.object(source_health_core.time, "monotonic",
+                              side_effect=clock.monotonic), \
+                    patch.object(source_health_core, "wait",
+                                 side_effect=fake_wait), \
+                    patch.object(sc, "_fetch_kline",
+                                 side_effect=fetch_kline), \
+                    patch.object(sc, "_fetch_capital_flow",
+                                 return_value=None), \
+                    patch.object(sc, "_fetch_fundamental",
+                                 return_value=None):
+                health = sc.RunSourceHealth(per_source_max={"kline": 2})
+                result = sc.run_phase2(
+                    [_make_candidate("610982"),
+                     _make_candidate("610983")],
+                    source_health=health, max_workers=1,
+                    as_of_date="2026-09-16", defer_enrichment=True)
+        finally:
+            release_live.set()
+
+        by_code = {item["code"]: item for item in result}
+        queued = by_code["610983"]["source_evidence"]["kline"]
+        self.assertEqual(queued["status"], "not_started_deadline")
+        self.assertEqual(queued["reason"], "deadline")
+        self.assertEqual(queued["scheduler_reason"],
+                         "kline_budget_exhausted")
+
+    def test_kline_budget_starts_after_slow_prework_and_freezes_deadline(self):
+        clock = _FakeClock()
+        with patch.object(sc.time, "monotonic", side_effect=clock.monotonic):
+            health = sc.RunSourceHealth()
+            clock.advance(120)
+            observed = {}
+
+            def bounded(_source, items, _health, live_fetch, _cache_fetch,
+                        live_deadline, **kwargs):
+                observed["scheduler_deadline"] = live_deadline
+                observed["deadline_reason"] = kwargs.get("deadline_reason")
+                item = list(items)[0]
+                result = live_fetch(item)
+                return [(item, result)]
+
+            def fetch_kline(ts_code, with_evidence=False,
+                            live_deadline=None, **_kwargs):
+                observed["fetch_deadline"] = live_deadline
+                payload = _make_dated_kline(60, ts_code, "20260916")
+                attempt = sc.live_attempt(
+                    attempted=True, provider_attempts=1,
+                    status="live_success")
+                return (sc.source_result(payload, attempt)
+                        if with_evidence else payload)
+
+            with patch.object(sc, "bounded_source_map",
+                              side_effect=bounded), \
+                    patch.object(sc, "_fetch_kline",
+                                 side_effect=fetch_kline), \
+                    patch.object(sc, "_fetch_capital_flow",
+                                 return_value=None), \
+                    patch.object(sc, "_fetch_fundamental",
+                                 return_value=None):
+                sc.run_phase2(
+                    [_make_candidate("610980")],
+                    source_health=health, as_of_date="2026-09-16",
+                    defer_enrichment=True)
+
+        self.assertGreater(observed["scheduler_deadline"], 1120.0)
+        self.assertEqual(observed["fetch_deadline"],
+                         observed["scheduler_deadline"])
+        self.assertEqual(observed["deadline_reason"], "deadline")
+
+    def test_kline_budgets_are_cumulative_and_stage_scoped(self):
+        clock = _FakeClock()
+        with patch.object(sc.time, "monotonic", side_effect=clock.monotonic):
+            health = sc.RunSourceHealth()
+            with health.kline_budget("normal") as first_deadline:
+                self.assertEqual(first_deadline, 1110.0)
+                clock.advance(70)
+            with health.kline_budget("normal") as second_deadline:
+                self.assertEqual(second_deadline, 1110.0)
+                clock.advance(50)
+            with health.kline_budget("normal") as exhausted_deadline:
+                self.assertEqual(exhausted_deadline, clock.now)
+            with health.kline_budget("topup") as topup_deadline:
+                self.assertEqual(topup_deadline, clock.now + 50.0)
+                clock.advance(60)
+
+            snapshot = health.kline_budget_snapshot()
+
+        self.assertEqual(snapshot["normal"]["limit_seconds"], 110.0)
+        self.assertEqual(snapshot["normal"]["used_seconds"], 110.0)
+        self.assertEqual(snapshot["normal"]["remaining_seconds"], 0.0)
+        self.assertEqual(snapshot["topup"]["limit_seconds"], 50.0)
+        self.assertEqual(snapshot["topup"]["used_seconds"], 50.0)
+        self.assertEqual(snapshot["topup"]["remaining_seconds"], 0.0)
+
+    def test_kline_budget_charges_elapsed_time_after_exception(self):
+        clock = _FakeClock()
+        with patch.object(sc.time, "monotonic", side_effect=clock.monotonic):
+            health = sc.RunSourceHealth()
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                with health.kline_budget("normal"):
+                    clock.advance(12)
+                    raise RuntimeError("boom")
+            snapshot = health.kline_budget_snapshot()
+
+        self.assertEqual(snapshot["normal"]["used_seconds"], 12.0)
+        self.assertEqual(snapshot["normal"]["remaining_seconds"], 98.0)
+
+    def test_kline_deadline_diagnostics_preserve_compatibility_reason(self):
+        health = sc.RunSourceHealth()
+        health.live_deadline = time.monotonic() - 1.0
+        stale = _make_dated_kline(60, "610981.SH", "20260915")
+        diagnostics = {}
+        with patch.object(sc, "_fetch_kline", return_value=stale), \
+                patch.object(sc, "_fetch_capital_flow", return_value=None), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            result = sc.run_phase2(
+                [_make_candidate("610981")], source_health=health,
+                as_of_date="2026-09-16", defer_enrichment=True,
+                kline_diagnostics=diagnostics)
+
+        evidence = result[0]["source_evidence"]["kline"]
+        self.assertEqual(evidence["reason"], "deadline")
+        self.assertEqual(evidence["scheduler_reason"], "live_deadline")
+        self.assertEqual(evidence["kline_budget_stage"], "normal")
+        self.assertFalse(diagnostics["610981"]["usable"])
+        self.assertEqual(diagnostics["610981"]["scheduler_reason"],
+                         "live_deadline")
+
+    def test_kline_budget_stops_at_global_and_downstream_deadlines(self):
+        clock = _FakeClock()
+        with patch.object(sc.time, "monotonic", side_effect=clock.monotonic):
+            health = sc.RunSourceHealth()
+            health.live_deadline = clock.now
+            with health.kline_budget("normal") as global_deadline:
+                self.assertEqual(global_deadline, clock.now)
+                self.assertEqual(
+                    health.kline_budget_deadline_reason("normal"),
+                    "live_deadline")
+
+            health = sc.RunSourceHealth()
+            health.live_deadline = clock.now + 100.0
+            with health.kline_budget("topup") as downstream_deadline:
+                self.assertEqual(downstream_deadline, clock.now)
+                self.assertEqual(
+                    health.kline_budget_deadline_reason("topup"),
+                    "downstream_reserve")
+
     def test_two_pass_reuses_valid_kline_and_wyckoff_without_reusing_score(self):
         item = _make_candidate("610990")
         kline = _make_dated_kline(60, item["ts_code"], "20260916")
@@ -1385,7 +1727,9 @@ class TestRunPhase2Funnel(unittest.TestCase):
         health = sc.RunSourceHealth()
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patch.object(sc, "CACHE_DIR", tmpdir), \
-                patch.object(sc, "_fetch_kline", return_value=kline) as fetch, \
+                patch.object(sc, "_fetch_kline", side_effect=
+                             lambda ts_code, cache_only=False, **kwargs:
+                             None if cache_only else kline) as fetch, \
                 patch.object(sc, "analyze_kline_dict",
                              return_value=_wk()) as analyze, \
                 patch.object(sc, "_fetch_capital_flow",
@@ -1406,7 +1750,9 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
         self.assertEqual(len(first), 1)
         self.assertEqual(len(second), 1)
-        self.assertEqual(fetch.call_count, 2)  # first pass + baseline
+        # Each live attempt freezes its cache fallback before provider work;
+        # the second pass reuses the first artifact and performs no reads.
+        self.assertEqual(fetch.call_count, 4)  # snapshot + live, twice
         self.assertEqual(analyze.call_count, 2)
         self.assertEqual(health.snapshot()["kline"]["logical_live_requests"], 1)
         self.assertEqual(metrics["kline_reused_count"], 1)

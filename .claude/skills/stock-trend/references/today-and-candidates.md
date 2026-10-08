@@ -154,6 +154,13 @@ publish 使用通过 `scripts/core/evolution_registry.py` 中 `verify_release_ev
 组件在内存中补齐，不得回写。`completeness` 与 `freshness` 独立，时间戳未知只能显示
 `freshness=unknown`/来源时间未记录，不能冒充 fresh 或组件缺失。
 
+K线正常刷新采用本次扫描累计110秒的调度预算，前置板块查询不消耗该预算；
+各批次共享余额，不重新计时。全局报告范围（默认Top30加12只缓冲）另有累计50秒
+补抓预算，仍受总扫描450秒、报告预留10秒及下游增强预留约束。补抓不能保证全池
+当日覆盖；旧缓存继续标记过期。当前K线使旧买点失效时，不能在结果合并中恢复。
+`deadline`诊断另附`scheduler_reason`，区分`kline_budget_exhausted`、
+`downstream_reserve`与`live_deadline`；预算消耗及补抓范围保存于性能审计。
+
 新闻影子风险按四级聚合 `critical > high > medium > none`：单独连续涨停或异常波动
 为 medium；与风险提示、业务未开展、不存在相关业务等组合至少为 high，媒体证据需
 官方公告核验；只有受信官方明确重大风险可 critical 并触发 shadow veto。否定/解除

@@ -842,6 +842,7 @@ def _complete_performance(performance, source_health, candidates, buckets,
             "initial_enrichment_deadline_seconds": round(
                 source_health.capital_initial_deadline - source_health.started_at,
                 3),
+            "kline": source_health.kline_budget_snapshot(),
         }
     if "capital_failure_reasons" not in supplied_fields \
             and isinstance(source_health, RunSourceHealth):
@@ -1028,6 +1029,14 @@ def _performance_markdown(performance):
         f"二轮保留 {performance.get('budget', {}).get('topup_reserve_seconds', '未知')}s | "
         f"首轮增强截止 {performance.get('budget', {}).get('initial_enrichment_deadline_seconds', '未知')}s",
         "",
+        *([
+            "**K线刷新预算**: " + " | ".join(
+                f"{'正常刷新' if stage == 'normal' else '候选补抓'} "
+                f"{values.get('used_seconds', 0)}/{values.get('limit_seconds', 0)}s"
+                for stage, values in performance['budget']['kline'].items()
+            ) + f" | 当前行情已使旧买点失效 {performance.get('global_refresh_invalidated_count', 0)}只",
+            "",
+        ] if performance.get('budget', {}).get('kline') else []),
         "**资金增强审计**: "
         f"增强覆盖范围 {performance.get('report_scope_candidate_count', 0)} | "
         f"最终输出上限 {performance.get('report_scope_output_limit', 0)} | "
@@ -2605,6 +2614,7 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
     if not scope:
         return scored, None
 
+    kline_diagnostics = {}
     enriched = run_phase2(
         scope, max_workers=4, enable_wyckoff=True,
         as_of_date=as_of_date,
@@ -2614,7 +2624,9 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
         disable_early_stop=True,
         include_phase_d_lps_context=True,
         include_formal_event_history=True,
-        kline_artifacts=kline_artifacts)
+        kline_artifacts=kline_artifacts,
+        kline_diagnostics=kline_diagnostics,
+        kline_budget_stage="topup")
     original_by_code = {
         item.get("code"): item for item in scored if item.get("code")
     }
@@ -2629,8 +2641,29 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
         enriched_by_code[code] = _rebind_primary_sector(
             item, peer_cohorts=peer_cohorts, as_of_date=as_of_date)
     metrics["global_enrichment_result_count"] = len(enriched_by_code)
+    # A current K-line can invalidate an old buy point. Do not restore the
+    # original row when phase 2 deliberately filters that refreshed signal.
+    invalidated = {
+        item["code"] for item in scope
+        if item["code"] not in enriched_by_code
+        and kline_diagnostics.get(item["code"], {}).get("usable")
+    }
+    metrics["global_refresh_invalidated_count"] = len(invalidated)
+    metrics["global_refresh_invalidated_codes"] = sorted(invalidated)
+    metrics["global_kline_refresh"] = {
+        "scope_codes": [item["code"] for item in scope],
+        "diagnostics": kline_diagnostics,
+        "current_count": sum(bool(row.get("usable"))
+                             for row in kline_diagnostics.values()),
+        "not_started_count": sum(
+            row.get("source_status") == "not_started_deadline"
+            for row in kline_diagnostics.values()),
+        "timeout_count": sum(row.get("source_reason") == "timeout"
+                             for row in kline_diagnostics.values()),
+    }
     return (
-        [enriched_by_code.get(item.get("code"), item) for item in scored],
+        [enriched_by_code.get(item.get("code"), item) for item in scored
+         if item.get("code") not in invalidated],
         {item.get("code") for item in scope if item.get("code")},
     )
 
@@ -5228,6 +5261,11 @@ def main():
         enriched_by_code.get(item.get("code"), item)
         for item in research_population
     ]
+    invalidated_codes = set(performance.get("global_refresh_invalidated_codes", []))
+    for item in research_population:
+        if item.get("code") in invalidated_codes:
+            item["research_terminal_status"] = "phase2_filtered"
+            item["research_terminal_reason"] = "current_kline_buy_point_invalidated"
 
     # 过滤 + 排序 + 归一化到 top
     output_population = (

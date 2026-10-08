@@ -110,7 +110,7 @@ class ObservationAnalysisTests(unittest.TestCase):
             self.assertEqual(observation.load_artifact(
                 "2026-09-29", artifact_path, yaml_path)["status"], "unavailable")
             historical = observation.load_historical_artifact(
-                "2026-09-29", artifact_path, as_of="2026-10-06T16:00:00+08:00")
+                "2026-09-29", artifact_path, as_of=result["generated_at"])
             self.assertEqual(historical["history_compatibility"], "full")
 
     def test_historical_loader_rejects_tampering_duplicates_and_future_freeze(self):

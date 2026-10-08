@@ -2541,6 +2541,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(kwargs["min_candidates"], 20)
         self.assertTrue(kwargs["disable_early_stop"])
         self.assertIs(kwargs["kline_artifacts"], artifacts)
+        self.assertEqual(kwargs["kline_budget_stage"], "topup")
         self.assertEqual(metrics["global_enrichment_scope_count"], 42)
         selected_codes = {item["code"] for item in candidates}
         self.assertEqual(scope_codes, selected_codes)
@@ -2550,6 +2551,26 @@ class TestRecommendationPolicy(unittest.TestCase):
             == "live_success" for code in selected_codes))
         self.assertEqual(sum(
             "source_evidence" in item for item in enriched), 42)
+
+    def test_global_refresh_does_not_restore_invalidated_buy_point(self):
+        items = [candidate("600001"), candidate("600002")]
+        for item in items:
+            item["ts_code"] = item["code"] + ".SH"
+
+        def refresh(scope, **kwargs):
+            kwargs["kline_diagnostics"].update({
+                "600001": {"usable": True},
+                "600002": {"usable": False, "reason_code": "wrong_trading_date"},
+            })
+            return []
+
+        metrics = {}
+        with patch.object(dc, "run_phase2", side_effect=refresh):
+            output, scope = dc.enrich_global_report_scope(
+                items, top=2, as_of_date="2026-10-08", metrics=metrics)
+        self.assertEqual(scope, {"600001", "600002"})
+        self.assertEqual([item["code"] for item in output], ["600002"])
+        self.assertEqual(metrics["global_refresh_invalidated_count"], 1)
 
     def test_scan_expands_when_first_batch_lacks_required_capital_proof(self):
         calls = []
