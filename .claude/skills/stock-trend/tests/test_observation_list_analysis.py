@@ -272,6 +272,68 @@ class ObservationAnalysisTests(unittest.TestCase):
                               ],
                           }))
 
+    def test_metadata_and_kline_failures_both_render_without_scores(self):
+        row = observation._row(
+            {"code": "301489", "date": "2026-09-21"}, "2026-10-09",
+            {"candidate": {"name": "思泉新材"}, "sector_status": "missing",
+             "error": "缺少本依据日证券元数据/行业成分快照"},
+            kline_diagnostic={
+                "reason_code": "wrong_trading_date", "latest_date": "",
+                "expected_date": "2026-10-09", "provider": "baostock",
+                "provider_attempts": [
+                    {"status": "error", "latest_date": "2026-10-09"},
+                    {"status": "stale", "latest_date": "bad-date"},
+                    {"status": "stale", "latest_date": "2026-10-07"},
+                    {"status": "stale", "latest_date": "20261008"},
+                ],
+            })
+        self.assertEqual(row["reasons"], [
+            "缺少本依据日证券元数据/行业成分快照",
+            "K 线仅到 2026-10-08，要求 2026-10-09（BaoStock）"])
+        self.assertEqual(row["status"], "degraded")
+        self.assertTrue(all(value is None for value in row["dimensions"].values()))
+        rendered = observation.market_regime.render_observation_list_html({
+            "status": "degraded", "data_date": "2026-10-09", "items": [row]})
+        for reason in row["reasons"]:
+            self.assertIn(reason, rendered)
+
+    def test_kline_date_prefers_top_level_and_keeps_unknown_without_evidence(self):
+        diagnostic = {
+            "reason_code": "wrong_trading_date", "expected_date": "2026-10-09",
+            "latest_date": "2026-10-07", "provider_attempts": [
+                {"status": "stale", "latest_date": "2026-10-08"}],
+        }
+        self.assertIn("仅到 2026-10-07", observation._kline_failure_text(diagnostic))
+        diagnostic["latest_date"] = ""
+        diagnostic["provider_attempts"] = [
+            {"status": "stale", "latest_date": "2026-02-30"},
+            {"status": "error", "latest_date": "2026-10-08"}, None]
+        self.assertIn("仅到 未知", observation._kline_failure_text(diagnostic))
+
+    def test_metadata_error_without_failed_kline_adds_no_extra_reason(self):
+        for diagnostic in (None, {}, {"usable": True, "reason_code": ""}):
+            with self.subTest(diagnostic=diagnostic):
+                row = observation._row(
+                    {"code": "301489"}, "2026-10-09",
+                    {"error": "缺少元数据"}, kline_diagnostic=diagnostic)
+                self.assertEqual(row["reasons"], ["缺少元数据"])
+
+    def test_scored_row_does_not_add_kline_failure_and_reasons_deduplicate(self):
+        diagnostic = {"reason_code": "fetch_failed", "expected_date": "2026-10-09"}
+        row = observation._row(
+            {"code": "603336"}, "2026-10-09", scored={
+                "raw_dimensions": {key: 60 for key in observation.DIMENSIONS},
+                "raw_composite_score": 60, "quality_adjusted_score": 60,
+                "wyckoff": {"signal": {"is_buy_signal": False}},
+            }, kline_diagnostic=diagnostic)
+        self.assertEqual(row["reasons"], ["未确认维科夫买点"])
+        self.assertEqual(row["composite_score"], 60)
+        message = observation._kline_failure_text(diagnostic)
+        row = observation._row(
+            {"code": "301489", "error": message}, "2026-10-09",
+            {"error": message}, kline_diagnostic=diagnostic)
+        self.assertEqual(row["reasons"], [message])
+
     def test_yaml_order_bad_rows_and_scanner_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             yaml_path = Path(tmp) / "observation.yaml"

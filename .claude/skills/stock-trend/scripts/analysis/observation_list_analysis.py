@@ -640,7 +640,20 @@ def _kline_failure_text(diagnostic):
     }.get(diagnostic.get("provider"), diagnostic.get("provider") or "")
     source = f"（{provider}）" if provider and provider != "error" else ""
     if reason == "wrong_trading_date":
-        latest = diagnostic.get("latest_date") or "未知"
+        latest = diagnostic.get("latest_date")
+        if not latest:
+            stale_dates = []
+            for attempt in diagnostic.get("provider_attempts") or []:
+                if not isinstance(attempt, dict) or attempt.get("status") != "stale":
+                    continue
+                value = str(attempt.get("latest_date") or "")
+                try:
+                    day = datetime.strptime(
+                        value, "%Y-%m-%d" if "-" in value else "%Y%m%d")
+                except ValueError:
+                    continue
+                stale_dates.append(day.strftime("%Y-%m-%d"))
+            latest = max(stale_dates) if stale_dates else "未知"
         expected = diagnostic.get("expected_date") or "未知"
         return f"K 线仅到 {latest}，要求 {expected}{source}"
     if reason == "insufficient_bars":
@@ -672,7 +685,9 @@ def _row(source, data_date, candidate_result=None, scored=None,
         reasons.append(source["error"])
     if candidate_result.get("error"):
         reasons.append(candidate_result["error"])
-    if not scored and not reasons:
+    kline_failed = isinstance(kline_diagnostic, dict) and kline_diagnostic.get(
+        "reason_code") in {"wrong_trading_date", "insufficient_bars", "fetch_failed"}
+    if not scored and (kline_failed or not reasons):
         reasons.append(_kline_failure_text(kline_diagnostic))
     if candidate_result.get("sector_status") in ("ranking_missing", "missing"):
         if candidate_result.get("sector_status") == "ranking_missing":
