@@ -1739,10 +1739,10 @@ def score_volume_price(candidate, kline_data):
         close = latest.get("close", 0)
         pre_close = latest.get("pre_close", close)
         pct_chg = (close - pre_close) / pre_close * 100 if pre_close else 0
-        vol = latest.get("vol", 0)
+        vol = latest.get("vol", 0) or 0
 
         # 5-day average vol
-        recent_vols = [r.get("vol", 0) for r in records[-5:]]
+        recent_vols = [r.get("vol", 0) or 0 for r in records[-5:]]
         avg_vol = sum(recent_vols) / len(recent_vols) if recent_vols else vol
 
         vol_ratio_day = vol / avg_vol if avg_vol > 0 else 1.0
@@ -1760,7 +1760,7 @@ def score_volume_price(candidate, kline_data):
     if len(records) >= 5:
         recent = records[-5:]
         up_days_vol = sum(1 for r in recent if r.get("close", 0) > r.get("open", 0)
-                          and r.get("vol", 0) > avg_vol)
+                          and (r.get("vol", 0) or 0) > avg_vol)
         if up_days_vol >= 4:
             score += 5  # consistent volume-supported rise
 
@@ -3632,9 +3632,11 @@ def _detect_signals(candidate, kline_data, capital_data, fundamental_data):
     records = kline_data.get("data", [])
     if len(records) >= 5:
         recent = records[-5:]
-        avg_vol = sum(r.get("vol", 0) for r in recent) / len(recent)
+        recent_vols = [r.get("vol", 0) or 0 for r in recent]
+        avg_vol = sum(recent_vols) / len(recent_vols)
         latest = records[-1]
-        vol_ratio = latest.get("vol", 0) / avg_vol if avg_vol > 0 else 1.0
+        latest_vol = latest.get("vol", 0) or 0
+        vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1.0
         close = latest.get("close", 0)
         if vol_ratio > 1.3 and ma20_val and close > ma20_val:
             signals["volume_breakout"] = True

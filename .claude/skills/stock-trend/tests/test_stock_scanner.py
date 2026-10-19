@@ -2967,6 +2967,27 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertEqual(result[0]["membership_cache_error"], "disk full")
 
 
+class TestVolumePrice(unittest.TestCase):
+    def test_missing_volumes_do_not_crash_scoring(self):
+        kline = _make_kline(25)
+        kline["data"][-1]["vol"] = None
+        kline["data"][-2]["vol"] = None
+
+        score = sc.score_volume_price({}, kline)
+
+        self.assertGreaterEqual(score, 0.0)
+        self.assertLessEqual(score, 100.0)
+
+    def test_missing_volumes_do_not_crash_signal_detection(self):
+        kline = _make_kline(25)
+        kline["data"][-1]["vol"] = None
+        kline["data"][-2]["vol"] = None
+
+        signals = sc._detect_signals({}, kline, None, None)
+
+        self.assertIsInstance(signals, dict)
+
+
 class TestFilters(unittest.TestCase):
     def test_counterargument_is_stable_and_non_empty(self):
         self.assertEqual(
