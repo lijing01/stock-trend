@@ -28,6 +28,7 @@ import hashlib
 import html as html_lib
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -1493,6 +1494,52 @@ def _market_explanation_for_report(ctx: dict) -> dict | None:
         return None
 
 
+def sector_quote_url(sector: dict) -> str | None:
+    """Link only verified East Money identities, never cross-source names."""
+    provider = sector.get("provider") or (sector.get("evidence") or {}).get("provider")
+    code = sector.get("code")
+    if provider != "eastmoney" or not isinstance(code, str) or not re.fullmatch(r"BK[0-9]{4}", code):
+        return None
+    return f"https://quote.eastmoney.com/bk/90.{code}.html"
+
+
+def render_sector_rankings(ctx: dict, output_format: str) -> str:
+    """Render the same frozen ranking identities in both report formats."""
+    if output_format not in {"html", "markdown"}:
+        raise ValueError(f"Unsupported sector ranking format: {output_format}")
+    is_html = output_format == "html"
+    lines = []
+    if is_html:
+        lines.append('<style data-sector-links>.sector-link{color:inherit;text-decoration:underline;'
+                     'text-underline-offset:3px}.sector-link:hover{color:#1d4ed8}'
+                     '.sector-link:focus-visible{outline:2px solid #1d4ed8;outline-offset:3px}</style>')
+    for title, sectors in (
+        (f"当日排名最强前{TOP_SECTOR_COUNT}", ctx.get("top_sectors", [])[:TOP_SECTOR_COUNT]),
+        ("当日排名最弱前3", ctx.get("bottom_sectors", [])[:3]),
+    ):
+        items = []
+        for sector in sectors:
+            name = html_lib.escape(str(sector.get("name") or ""), quote=is_html)
+            url = sector_quote_url(sector)
+            if is_html:
+                if url:
+                    name = (f'<a class="sector-link" href="{url}" target="_blank" '
+                            f'rel="noopener noreferrer">{name}</a>')
+                items.append(f"<li><strong>{name}</strong> {_safe_float(sector.get('change_pct')):+.2f}%</li>")
+            else:
+                name = re.sub(r"([\\`*_\[\]()|])", r"\\\1", name).replace("\n", " ").replace("\r", " ")
+                if url:
+                    name = f"[{name}]({url})"
+                items.append(f"- {name} {_safe_float(sector.get('change_pct')):+.2f}%")
+        if is_html:
+            lines.append(f"<p><strong>{title}:</strong></p><ul>{''.join(items) or '<li>—</li>'}</ul>")
+        else:
+            lines.extend([f"**{title}**:", *(items or ["- —"]), ""])
+    note = "东方财富外链显示当前行情，报告涨幅为本次生成时的快照。"
+    lines.append(f'<p class="dt">{note}</p>' if is_html else note)
+    return "\n".join(lines)
+
+
 def generate_report(ctx: dict, *, observation_status: str = "ready",
                     observation_state: dict | None = None) -> str:
     from reporting.market_detail_links import COMPONENTS, render_details, summary_link
@@ -1550,21 +1597,7 @@ def generate_report(ctx: dict, *, observation_status: str = "ready",
     lines.append('<a id="market-sectors"></a>')
     lines.append("### ② 板块")
     lines.append("")
-    top = ctx.get("top_sectors", [])[:TOP_SECTOR_COUNT]
-    bottom = ctx.get("bottom_sectors", [])[:3]
-    lines.append(f"**当日排名最强前{TOP_SECTOR_COUNT}**:")
-    if top:
-        for s in top:
-            lines.append(f"- {s.get('name', '')} {_safe_float(s.get('change_pct')):+.2f}%")
-    else:
-        lines.append("- —")
-    lines.append("")
-    lines.append("**当日排名最弱前3**:")
-    if bottom:
-        for s in bottom:
-            lines.append(f"- {s.get('name', '')} {_safe_float(s.get('change_pct')):+.2f}%")
-    else:
-        lines.append("- —")
+    lines.append(render_sector_rankings(ctx, "markdown"))
     lines.append("")
 
     from reporting.sector_persistence import render_markdown as render_sector_markdown
@@ -2242,12 +2275,7 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
             f"<td>{summary_link(key, 'html')}</td></tr>"
         )
 
-    top = "".join(
-        f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
-        for s in ctx.get("top_sectors", [])[:TOP_SECTOR_COUNT])
-    bottom = "".join(
-        f"<li><strong>{s.get('name','')}</strong> {_safe_float(s.get('change_pct')):+.2f}%</li>"
-        for s in ctx.get("bottom_sectors", [])[:3])
+    sector_rankings_html = render_sector_rankings(ctx, "html")
     from reporting.sector_persistence import render_html as render_sector_html
     sector_persistence_html = render_sector_html(ctx.get("sector_persistence") or {})
     observation_pending = observation_status == "pending"
@@ -2301,8 +2329,7 @@ ul{{padding-left:20px;line-height:1.8}}
 {comp_row('index_trend','大盘趋势')}{comp_row('volume','成交额')}{comp_row('breadth','赚钱效应')}{comp_row('zt_emotion','涨停情绪')}{comp_row('capital','资金')}
 </tbody></table></div>
 <h2 id="market-sectors">② 板块</h2>
-<p><strong>当日排名最强前{TOP_SECTOR_COUNT}:</strong></p><ul>{top or '<li>—</li>'}</ul>
-<p><strong>当日排名最弱前3:</strong></p><ul>{bottom or '<li>—</li>'}</ul>
+{sector_rankings_html}
 {sector_persistence_html}
 
 {us_html}

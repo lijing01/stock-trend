@@ -438,6 +438,8 @@ def test_report():
         ],
         "bottom_sectors": [{"name": "涂料", "change_pct": -1.3}],
     }
+    ctx["top_sectors"][0].update(provider="eastmoney", code="BK1295")
+    ctx["bottom_sectors"][0].update(provider="eastmoney", code="BK1234")
     md = mr.generate_report(ctx)
     test("含标题", "今日复盘" in md)
     test("含评分", "57.5" in md)
@@ -460,11 +462,55 @@ def test_report():
     test("HTML 最强板块保持输入顺序",
          html.index("强势板块1") < html.index("强势板块10"))
     test("最弱板块仍显示前3", "最弱前3" in md and "最弱前3" in html)
+    for label, content in (("HTML", html), ("Markdown", md)):
+        test(f"{label}完整报告含强弱板块详情链接",
+             all(f"https://quote.eastmoney.com/bk/90.{code}.html" in content
+                 for code in ("BK1295", "BK1234")))
+        test(f"{label}说明外站行情与报告快照区别", "报告涨幅为本次生成时的快照" in content)
 
     # stale_note 显示
     ctx["stale_note"] = "数据日期 2026-07-31,非今日"
     md = mr.generate_report(ctx)
     test("stale_note 显示", "非今日" in md)
+
+
+def test_sector_links():
+    print("\n--- sector links ---")
+    ctx = {"top_sectors": [
+        {"name": "照明设备Ⅱ", "provider": "eastmoney", "code": "BK1234", "change_pct": 3.68},
+        {"name": "照明设备Ⅲ", "provider": "eastmoney", "code": "BK5678", "change_pct": 3.68},
+    ], "bottom_sectors": []}
+    html = mr.render_sector_rankings(ctx, "html")
+    md = mr.render_sector_rankings(ctx, "markdown")
+    test("相近板块名称使用各自代码",
+         "[照明设备Ⅱ](https://quote.eastmoney.com/bk/90.BK1234.html) +3.68%" in md
+         and "[照明设备Ⅲ](https://quote.eastmoney.com/bk/90.BK5678.html) +3.68%" in md)
+    test("HTML每个链接在新标签打开且隔离opener",
+         html.count('target="_blank" rel="noopener noreferrer"') == 2)
+    test("链接含键盘焦点样式", ".sector-link:focus-visible" in html)
+    for sector in (
+        {"code": "BK1234"},
+        {"provider": "ths", "code": "BK1234"},
+        {"provider": "eastmoney"},
+        {"provider": "eastmoney", "code": 'BK1234" onclick="bad'},
+        {"provider": "eastmoney", "code": "BK１２３４"},
+    ):
+        sector.update(name="缺失或异源板块", change_pct=1.0)
+        test(f"身份不合格时不生成链接 {sector.get('provider')}/{sector.get('code')}",
+             mr.sector_quote_url(sector) is None)
+        fallback = mr.render_sector_rankings({"top_sectors": [sector]}, "html")
+        test("不合格板块保留普通名称", "缺失或异源板块</strong> +1.00%" in fallback
+             and 'href="' not in fallback)
+    special = {"name": "板块[甲](乙)<script>&", "provider": "eastmoney",
+               "code": "BK1234", "change_pct": 1.0}
+    special_html = mr.render_sector_rankings({"top_sectors": [special]}, "html")
+    special_md = mr.render_sector_rankings({"top_sectors": [special]}, "markdown")
+    test("HTML名称转义", "&lt;script&gt;&amp;" in special_html and "<script>" not in special_html)
+    test("Markdown名称转义且保持单个链接",
+         r"[板块\[甲\]\(乙\)&lt;script&gt;&amp;](https://quote.eastmoney.com/bk/90.BK1234.html)" in special_md)
+    test("证据字段可证明东财来源",
+         mr.sector_quote_url({"code": "BK1234", "evidence": {"provider": "eastmoney"}})
+         == "https://quote.eastmoney.com/bk/90.BK1234.html")
 
 
 def test_observation_list_html():
@@ -835,6 +881,7 @@ def main():
     test_capital()
     test_regime()
     test_report()
+    test_sector_links()
     test_observation_list_html()
     test_index_metrics()
     test_persistence()

@@ -89,6 +89,20 @@ bash tools/python.sh .claude/skills/stock-trend/scripts/bridge/us_review.py \
 **与 /stock-trend 联动**: 每次先跑 `/daily-review` 生成市场上下文,`/stock-trend` 报告自动含「📊 大盘/板块对比」段(个股 vs 沪深300 相对强弱 + 所属板块位置)。
 
 
+### 板块行情链接
+
+最强前10、最弱前3的板块名称在HTML和Markdown中链接至东方财富对应板块行情页；HTML在新标签页打开。链接根据记录中的东方财富来源和有效BK代码生成，来源或代码不合格时保留普通名称。外站展示当前行情，报告涨幅仍为本次生成时的快照。
+
+为已有报告补充链接时显式指定对应运行保存的市场上下文：
+
+```bash
+bash tools/python.sh .claude/skills/stock-trend/scripts/bridge/review_sector_links.py \
+  --html-path reports/lists/daily-review-20261020-133744.html \
+  --context-path /path/to/frozen-market-regime.json
+```
+
+补充器严格校验HTML、同名Markdown与上下文的依据日、生成时间和板块名单；仅替换排行区块，不联网重算。首次写入保存`.pre-sector-links`备份，复用报告锁与原子写入，重复执行保持幂等；双文件部分失败时按返回路径核对并用相同上下文重跑。指定的上下文必须属于该报告，不能用其他运行的最新缓存替代。
+
 ### 板块持续性与观察列表变化
 
 板块排序仍表示当日排名。仅对展示的最强10、最弱3和已有观察标的的可核验关联板块去重取数，最多4路并发、12秒总预算，显式请求80条收盘记录。5/20交易日收益分别要求权威日历对应的末6/21个连续端点，板块ID、分类版本、来源和前复权价格类型一致；不累计每日百分比，不建立全市场中期收益排名。连续上涨按收盘价逐日比较，有限记录未找到起点时显示“≥N”；没有完整上涨/下跌/平盘家数与覆盖范围时，上涨比例显示缺失。盘中未完成或日历未核验时不展示未确认收盘收益。
