@@ -1637,7 +1637,7 @@ def generate_report(ctx: dict, *, observation_status: str = "ready",
         lines.append(f"▸ ⚠️ {ctx['intraday_note']}")
     lines.append("")
 
-    lines.append("目录：[五项简表](#market-component-summary) · [板块](#market-sectors) · "
+    lines.append("目录：[五项简表](#market-component-summary) · [昨日强势反馈](#market-feedback) · [板块](#market-sectors) · "
                  "[美股](#us-market-summary) · [观察列表](#observation-list) · "
                  "[五项详情](#market-component-details)")
     lines.append("")
@@ -1648,6 +1648,9 @@ def generate_report(ctx: dict, *, observation_status: str = "ready",
         lines.append("")
 
     lines.append(render_market_overview(ctx, "markdown"))
+    lines.append("")
+    from reporting.market_feedback import render_market_feedback
+    lines.append(render_market_feedback(ctx.get("market_feedback"), "markdown"))
     lines.append("")
     # ② 板块
     lines.append('<a id="market-sectors"></a>')
@@ -2124,6 +2127,7 @@ def build_agent_output(ctx: dict) -> dict:
         "us_market_summary": ctx.get("us_market_summary"),
         "cross_market_observation": ctx.get("cross_market_observation"),
         "review_comparison": ctx.get("review_comparison"),
+        "market_feedback": ctx.get("market_feedback"),
         "sector_persistence": ctx.get("sector_persistence"),
         "model_version": ctx.get("model_version"),
         "methodology_version": ctx.get("methodology_version"),
@@ -2213,6 +2217,19 @@ def collect_review_comparison(ctx: dict, *, as_of, persist=False) -> dict:
                 "reason": f"交易日对比不可用：{type(exc).__name__}: {exc}", "fields": {}}
 
 
+def collect_market_feedback(ctx, *, as_of, no_refresh=False):
+    """Keep cohort evidence independent of scores and fail only this section."""
+    try:
+        from analysis.market_feedback_job import collect_feedback
+        calendar = None if no_refresh else _review_calendar(as_of)
+        return collect_feedback(ctx, calendar=calendar, as_of=as_of,
+                                cache_dir=CACHE_DIR, no_refresh=no_refresh)
+    except Exception as exc:
+        return {"schema_version": "market-feedback/v1", "status": "unavailable",
+                "basis_date": ctx.get("data_date"), "as_of": as_of.isoformat(),
+                "reason": f"昨日强势股反馈不可用：{type(exc).__name__}", "items": []}
+
+
 def main():
     parser = argparse.ArgumentParser(description="今日复盘 + 市场环境评分")
     parser.add_argument("--no-refresh", action="store_true",
@@ -2290,6 +2307,11 @@ def main():
     from bridge.us_review import collect_summary
     core_ctx = copy.deepcopy(ctx)
     ctx = dict(ctx)
+    ctx["market_feedback"] = collect_market_feedback(
+        ctx, as_of=run_as_of, no_refresh=args.no_refresh)
+    if not args.no_refresh and ctx["market_feedback"].get("run_binding"):
+        core_ctx["market_feedback_binding"] = ctx["market_feedback"]["run_binding"]
+        save_context(core_ctx)
     ctx["review_comparison"] = collect_review_comparison(
         ctx, as_of=run_as_of, persist=not args.no_refresh)
     frozen_closes = []
@@ -2389,6 +2411,8 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
         comparison_html = render_review_comparison(ctx["review_comparison"], "html")
 
     market_overview_html = render_market_overview(ctx, "html")
+    from reporting.market_feedback import render_market_feedback
+    market_feedback_html = render_market_feedback(ctx.get("market_feedback"), "html")
     sector_rankings_html = render_sector_rankings(ctx, "html")
     from reporting.sector_persistence import render_html as render_sector_html
     sector_persistence_html = render_sector_html(ctx.get("sector_persistence") or {})
@@ -2439,6 +2463,7 @@ ul{{padding-left:20px;line-height:1.8}}
 
 {comparison_html}
 {market_overview_html}
+{market_feedback_html}
 <h2 id="market-sectors">② 板块</h2>
 {sector_rankings_html}
 {sector_persistence_html}
