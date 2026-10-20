@@ -149,10 +149,11 @@ def _freeze_sector_fields(sector: dict, identity: dict) -> dict:
         "roles": [str(role) for role in sector.get("roles") or [] if role],
     }
     for key in ("change_pct", "up_count", "down_count", "flat_count",
-                "total_count"):
+                "total_count", "up_down_sample_count", "suspended_count", "uncovered_count"):
         value = _finite_number(sector.get(key))
         if value is not None:
             frozen[key] = value
+    frozen["coverage_status"] = sector.get("coverage_status", "unknown")
     return frozen
 
 
@@ -337,11 +338,12 @@ def _validate_payload(payload: dict, data_date: str) -> list[str]:
             return ["ranking_subsource_incomplete"]
 
     upstream_date = meta.get("data_date", "")
-    if upstream_date:
-        if _verified_trading_date(upstream_date) != upstream_date:
-            return ["ranking_data_date_invalid"]
-        if upstream_date != data_date:
-            return ["ranking_data_date_mismatch"]
+    if not upstream_date or meta.get("date_origin") != "provider":
+        return ["ranking_source_date_unverified"]
+    if _verified_trading_date(upstream_date) != upstream_date:
+        return ["ranking_data_date_invalid"]
+    if upstream_date != data_date:
+        return ["ranking_data_date_mismatch"]
 
     active = sum(
         1 for sector in sectors
@@ -404,7 +406,7 @@ def capture_snapshot(now=None, expected_date: str = "",
             "incomplete", data_date=data_date, errors=errors)
 
     meta = payload.setdefault("meta", {})
-    meta["data_date"] = data_date
+    meta["requested_date"] = data_date
     meta.setdefault("source", "eastmoney")
 
     if dry_run:

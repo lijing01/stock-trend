@@ -1081,9 +1081,10 @@ class TestSectorConstituentFallback(unittest.TestCase):
     def setUp(self):
         self.payload = {
             "rc": 0,
-            "data": {"diff": [{
+            "data": {"total": 1, "diff": [{
                 "f12": "600001", "f14": "测试股份", "f3": 1.2,
-                "f8": 2e8, "f20": 1e10, "f37": 20,
+                "f6": 2e8, "f8": 2.0, "f20": 1e10, "f37": 20,
+                "f124": int(datetime.now().timestamp()),
             }]},
         }
 
@@ -1106,7 +1107,7 @@ class TestSectorConstituentFallback(unittest.TestCase):
             cache = json.loads(
                 (Path(tmpdir) / "BK0001.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(cache["schema_version"], 2)
+        self.assertEqual(cache["schema_version"], 3)
         self.assertEqual(cache["provider"], "eastmoney")
         self.assertEqual(cache["data_date"], datetime.now().strftime("%Y-%m-%d"))
         self.assertEqual(cache["fetched_at"], cache["cached_at"])
@@ -1114,7 +1115,9 @@ class TestSectorConstituentFallback(unittest.TestCase):
     def test_tagged_sector_cache_prefers_explicit_data_date(self):
         cached_at = datetime.now().isoformat()
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
+            "field_semantics_version": sd.SECTOR_FIELD_SEMANTICS_VERSION,
+            "date_origin": "provider",
             "cached_at": cached_at,
             "fetched_at": cached_at,
             "data_date": "2026-08-26",

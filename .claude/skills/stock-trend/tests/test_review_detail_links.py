@@ -199,8 +199,9 @@ class ReviewDetailLinksTests(unittest.TestCase):
 
         ctx = report_context()
         state = {"status": "unavailable", "reason": "完整样本观察列表"}
+        initial_html = market._generate_html(ctx, "fixture", observation_state=state)
         self.html.write_text(
-            market._generate_html(ctx, "fixture", observation_state=state),
+            initial_html,
             encoding="utf-8",
         )
         self.md.write_text(
@@ -213,7 +214,7 @@ class ReviewDetailLinksTests(unittest.TestCase):
         self.assertEqual("unchanged", first["status"])
         self.assertEqual("unchanged", second["status"])
         self.assertEqual(
-            1,
+            initial_html.count('class="summary-table-wrap"'),
             self.html.read_text(encoding="utf-8").count('class="summary-table-wrap"'),
         )
 

@@ -323,23 +323,37 @@ def _read_exact_date_rankings(data_date):
 
 def _expected_sector_size(ranking):
     """Return the provider's expected constituent count when available."""
+    value = ranking.get("total_count")
+    if isinstance(value, bool):
+        return 0
     try:
-        total = int(ranking.get("total_count") or 0)
-    except (TypeError, ValueError):
+        numeric = float(value)
+        total = int(numeric) if numeric.is_integer() else 0
+    except (TypeError, ValueError, OverflowError):
         total = 0
     if total > 0:
         return total
-    try:
-        return int(ranking.get("up_count") or 0) + int(
-            ranking.get("down_count") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return 0
 
 
 def _sector_snapshot_complete(stocks, ranking):
     """Require a full same-day cohort before calculating relative strength."""
     expected = _expected_sector_size(ranking)
-    return bool(stocks) and (not expected or len(stocks) >= expected)
+    if not stocks:
+        return False
+    provider_totals = {
+        stock.get("membership_total_count") for stock in stocks
+        if stock.get("membership_coverage_complete") is True
+    }
+    if len(provider_totals) == 1 and all(
+        stock.get("membership_coverage_complete") is True for stock in stocks
+    ):
+        provider_total = next(iter(provider_totals))
+        if isinstance(provider_total, int) and not isinstance(provider_total, bool) and provider_total > 0:
+            if expected and expected != provider_total:
+                return False
+            expected = provider_total
+    return expected > 0 and len(stocks) == expected and len({stock.get("code") for stock in stocks if stock.get("code")}) == expected
 
 
 def _historical_sector_hints(code, data_date):
@@ -401,7 +415,7 @@ def _same_day_sector_membership(code, data_date, rankings):
     if len(matches) != 1:
         return None
     sector_code, ranking = matches[0]
-    expected = max(1, _expected_sector_size(ranking))
+    expected = _expected_sector_size(ranking) or 500
     try:
         stocks = sector_data.get_sector_stocks(
             sector_code, top_n=expected, as_of_date=data_date)

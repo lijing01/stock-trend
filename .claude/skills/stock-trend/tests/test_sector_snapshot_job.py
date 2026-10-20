@@ -21,6 +21,7 @@ def complete_rankings(data_date="2026-09-03"):
             "complete": True,
             "source": "eastmoney",
             "data_date": data_date,
+            "date_origin": "provider",
             "total_sectors": 12,
             "sources": {"industry": "ok", "concept": "ok"},
         },
@@ -33,6 +34,21 @@ def complete_rankings(data_date="2026-09-03"):
 
 
 class TestSectorSnapshotJob(unittest.TestCase):
+    def test_missing_or_request_only_source_date_is_rejected(self):
+        for origin, source_date in (("unknown", None), ("request", "2026-09-03"), (None, "2026-09-03")):
+            payload = complete_rankings()
+            payload["meta"].update(date_origin=origin, data_date=source_date)
+            with self.subTest(origin=origin), patch.object(
+                    job, "get_last_trading_day", return_value=("2026-09-03", "calendar_open")), \
+                    patch.object(job, "get_sector_rankings", return_value={"payload": payload}), \
+                    patch.object(job, "commit_candidate_sector_snapshot") as commit:
+                result = job.capture_snapshot(now=datetime(2026, 9, 3, 15, 20))
+            self.assertEqual(result["status"], "incomplete")
+            self.assertIn("ranking_source_date_unverified", result["errors"])
+            self.assertEqual(payload["meta"]["data_date"], source_date)
+            self.assertEqual(payload["meta"]["date_origin"], origin)
+            commit.assert_not_called()
+
     def test_capture_saves_complete_post_close_snapshot(self):
         payload = complete_rankings()
         commit_result = {

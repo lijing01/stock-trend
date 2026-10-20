@@ -177,7 +177,8 @@ def analyze_sector_series(sector: dict, records: list[dict], *,
         "constituent_up_ratio": _constituent_up_ratio(sector),
         "constituent_coverage": {
             key: sector.get(key) for key in
-            ("up_count", "down_count", "flat_count", "total_count")
+            ("up_count", "down_count", "flat_count", "total_count", "up_down_sample_count",
+             "suspended_count", "uncovered_count", "coverage_status")
         },
         "ranking_scope": "today_displayed",
         "reasons": list(dict.fromkeys(reasons)),

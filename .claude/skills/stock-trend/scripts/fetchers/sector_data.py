@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
+import math
 import os
 import queue
 import re
@@ -27,6 +28,7 @@ import urllib.request
 from datetime import date as datetime_date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
 from core.source_health import classify_failure, live_attempt, source_result
@@ -149,6 +151,87 @@ def get_sector_list() -> list[dict]:
 
 
 MIN_RANKING_ROWS_PER_SOURCE = 5
+SECTOR_FIELD_SEMANTICS_VERSION = "sector-fields/v2"
+RANKINGS_CACHE_SCHEMA_VERSION = 2
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _provider_timestamp(value) -> Optional[str]:
+    """Normalize an East Money f124 epoch to an aware Shanghai timestamp."""
+    if isinstance(value, bool):
+        return None
+    try:
+        epoch = float(value)
+        if epoch > 10_000_000_000:
+            epoch /= 1000
+        parsed = datetime.fromtimestamp(epoch, tz=SHANGHAI_TZ)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    if not (2000 <= parsed.year <= 2100):
+        return None
+    return parsed.isoformat()
+
+
+def _nonnegative_int_or_none(value) -> Optional[int]:
+    """Preserve missing provider counts instead of inventing a zero."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
+        return None
+    return int(numeric)
+
+
+def _nonnegative_number_or_none(value) -> Optional[float]:
+    """Amounts and rates are nonnegative; missing quotes stay unavailable."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _apply_provider_date_evidence(meta: dict, timestamps: list[Optional[str]],
+                                  row_count: int) -> None:
+    """Set data_date only when every ranking row proves one provider date."""
+    valid = [value for value in timestamps if value]
+    dates = {value[:10] for value in valid}
+    if row_count <= 0 or not valid:
+        status = "missing"
+    elif len(valid) != row_count:
+        status = "incomplete"
+    elif len(dates) != 1:
+        status = "mixed"
+    else:
+        status = "verified"
+    meta["provider_timestamp_status"] = status
+    meta["provider_timestamp_count"] = len(valid)
+    meta["provider_row_count"] = row_count
+    meta["provider_timestamp_min"] = min(valid) if valid else None
+    meta["provider_timestamp_max"] = max(valid) if valid else None
+    if status == "verified":
+        provider_date = next(iter(dates))
+        if _verified_trading_date(provider_date) is None:
+            meta["provider_timestamp_status"] = "invalid_date"
+            meta["data_date"] = None
+            meta["date_origin"] = "unknown"
+            meta["alignment"] = "unknown"
+            return
+        meta["data_date"] = provider_date
+        meta["date_origin"] = "provider"
+        meta["alignment"] = (
+            "matched" if provider_date == meta.get("requested_date")
+            else "mismatched"
+        )
+    else:
+        meta["data_date"] = None
+        meta["date_origin"] = "unknown"
+        meta["alignment"] = "unknown"
 
 
 def get_sector_rankings(timeout: int = 15, retries: int = 3,
@@ -159,15 +242,31 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
 
     Returns:
         dict with meta and sectors list (code, name, change_pct, amount,
-        up_count, down_count, total_count, type).
+        turnover_rate, up_count, down_count, up_down_sample_count,
+        total_count, type). ``total_count`` remains unknown unless complete
+        constituent membership proves it.
     """
+    fetched_at = datetime.now().astimezone().isoformat()
+    requested_date = fetched_at[:10]
     result = {
         "meta": {
             "fetch_time": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "fetched_at": fetched_at,
+            "requested_date": requested_date,
+            "data_date": None,
+            "date_origin": "unknown",
+            "alignment": "unknown",
             "sources": {},
             "errors": [],
             "complete": False,
             "provider": "eastmoney",
+            "field_semantics_version": SECTOR_FIELD_SEMANTICS_VERSION,
+            "field_semantics": {
+                "amount": "f6:yuan",
+                "turnover_rate": "f8:percent",
+                "up_down_sample_count": "f104+f105",
+                "total_count": "unknown_without_complete_membership",
+            },
             "ranking_diagnostics": {},
         },
         "sectors": [],
@@ -176,6 +275,8 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
     base_url = "https://push2.eastmoney.com/api/qt/clist/get"
     provider_attempts = 0
     failure_reason = ""
+    provider_timestamps = []
+    provider_rows = 0
 
     for idx, (stype, sname) in enumerate([("2", "industry"), ("3", "concept")]):
         # Stagger concurrent requests to avoid rate limiting
@@ -185,10 +286,10 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                 delay = min(delay, max(0, deadline - time.monotonic()))
             if delay:
                 time.sleep(delay)
-        # f2=最新价, f3=涨跌幅, f4=涨跌额, f8=换手率/成交额,
+        # f2=最新价, f3=涨跌幅, f4=涨跌额, f6=成交额, f8=换手率,
         # f12=代码, f14=名称, f20=总市值,
-        # f104=涨家数, f105=跌家数, f62=主力净流入
-        fields = "f2,f3,f4,f8,f12,f14,f20,f62,f104,f105,f168,f170,f171"
+        # f104=涨家数, f105=跌家数, f62=主力净流入, f124=更新时间
+        fields = "f2,f3,f4,f6,f8,f12,f14,f20,f62,f104,f105,f124,f168,f170,f171"
         url = (
             f"{base_url}?fs=m:90+t:{stype}&fields={fields}"
             f"&pn=1&pz=500&po=0&np=1&fltt=2"
@@ -210,8 +311,8 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
             valid_items = [item for item in items if item.get("f12")]
             active_items = sum(
                 1 for item in valid_items
-                if (item.get("f104", 0) or 0) > 0
-                or (item.get("f105", 0) or 0) > 0)
+                if (_nonnegative_int_or_none(item.get("f104")) or 0) > 0
+                or (_nonnegative_int_or_none(item.get("f105")) or 0) > 0)
             result["meta"]["ranking_diagnostics"][sname] = {
                 "status": "ok" if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE
                 else ("sparse" if valid_items else "empty"),
@@ -231,7 +332,16 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                 result["meta"]["sources"][sname] = "empty"
                 result["meta"]["errors"].append(f"{sname}: empty response")
             for item in valid_items:
-                total = (item.get("f104", 0) or 0) + (item.get("f105", 0) or 0)
+                up_count = _nonnegative_int_or_none(item.get("f104"))
+                down_count = _nonnegative_int_or_none(item.get("f105"))
+                sample_count = (
+                    up_count + down_count
+                    if up_count is not None and down_count is not None
+                    else None
+                )
+                provider_timestamp = _provider_timestamp(item.get("f124"))
+                provider_timestamps.append(provider_timestamp)
+                provider_rows += 1
                 sector = {
                     "code": item.get("f12", ""),
                     "provider": "eastmoney",
@@ -242,10 +352,17 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                     "name": item.get("f14", ""),
                     "type": sname,
                     "change_pct": item.get("f3"),       # 涨跌幅%
-                    "amount": item.get("f8"),            # 成交额
-                    "up_count": item.get("f104", 0) or 0,   # 涨家数
-                    "down_count": item.get("f105", 0) or 0, # 跌家数
-                    "total_count": total,
+                    "amount": _nonnegative_number_or_none(item.get("f6")),
+                    "turnover_rate": _nonnegative_number_or_none(item.get("f8")),
+                    "up_count": up_count,                 # 涨家数
+                    "down_count": down_count,             # 跌家数
+                    "up_down_sample_count": sample_count,
+                    "flat_count": None,
+                    "suspended_count": None,
+                    "uncovered_count": None,
+                    "total_count": None,
+                    "constituent_coverage_complete": False,
+                    "provider_timestamp": provider_timestamp,
                     "main_force_net": item.get("f62"),   # 主力净流入
                 }
                 if sector["code"]:
@@ -261,6 +378,9 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
                 "detail": str(e),
             }
             print(f"  Warning: 无法获取{sname}板块排行: {e}", file=sys.stderr)
+
+    _apply_provider_date_evidence(
+        result["meta"], provider_timestamps, provider_rows)
 
     # If EM API returned zero active sectors, try AKShare fallback
     active = sum(
@@ -379,7 +499,8 @@ def rank_hot_sectors(rankings: dict, top_n: int = 10,
     if min_stocks > 0:
         sectors = [
             s for s in sectors
-            if (s.get("up_count", 0) + s.get("down_count", 0)) >= min_stocks
+            if ((s.get("up_count", 0) or 0)
+                + (s.get("down_count", 0) or 0)) >= min_stocks
         ]
 
     # Filter by up/down ratio — exclude boards that are overwhelmingly red
@@ -425,7 +546,7 @@ def rank_hot_sectors(rankings: dict, top_n: int = 10,
 
 
 SECTOR_STOCKS_CACHE_DIR = CACHE_DIR / "sector_stocks"
-SECTOR_STOCKS_CACHE_SCHEMA_VERSION = 2
+SECTOR_STOCKS_CACHE_SCHEMA_VERSION = 3
 SECTOR_STOCKS_MAX_AGE_HOURS = 24 * 30
 SECTOR_STOCKS_RECENT_CACHE_MAX_AGE_HOURS = 24 * 5
 
@@ -455,25 +576,54 @@ def _sector_stocks_history_path(sector_code: str, data_date: str) -> Path:
 
 def save_sector_stocks_cache(sector_code: str, stocks: list[dict],
                              data_date: str = "",
-                             provider: str = "eastmoney") -> None:
+                             provider: str = "eastmoney",
+                             requested_date: str = "") -> None:
     """Persist a successful constituent response for outage fallback."""
     path = _sector_stocks_cache_path(sector_code)
     SECTOR_STOCKS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     fetched_at = datetime.now().isoformat()
-    snapshot_date = data_date or fetched_at[:10]
+    snapshot_date = _verified_trading_date(data_date) if data_date else None
     payload = {
         "schema_version": SECTOR_STOCKS_CACHE_SCHEMA_VERSION,
+        "field_semantics_version": SECTOR_FIELD_SEMANTICS_VERSION,
         "cached_at": fetched_at,
         "fetched_at": fetched_at,
         "data_date": snapshot_date,
+        "requested_date": requested_date or fetched_at[:10],
+        "date_origin": "provider" if snapshot_date else "unknown",
         "provider": provider,
         "stocks": stocks,
     }
-    history_path = _sector_stocks_history_path(sector_code, snapshot_date)
     encoded = json.dumps(payload, ensure_ascii=False)
     path.write_text(encoded, encoding="utf-8")
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history_path.write_text(encoded, encoding="utf-8")
+    if snapshot_date:
+        history_path = _sector_stocks_history_path(sector_code, snapshot_date)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(encoded, encoding="utf-8")
+
+
+def _protect_legacy_stock_amounts(payload: dict) -> dict:
+    """Read old f8-as-amount caches without treating percentages as yuan."""
+    if payload.get("field_semantics_version") == SECTOR_FIELD_SEMANTICS_VERSION:
+        return payload
+    protected = dict(payload)
+    claimed_date = payload.get("data_date")
+    protected["legacy_claimed_data_date"] = claimed_date
+    protected["requested_date"] = payload.get("requested_date") or claimed_date
+    protected["data_date"] = None
+    protected["date_origin"] = "unknown"
+    protected_stocks = []
+    for raw in payload.get("stocks") or []:
+        stock = dict(raw)
+        ambiguous = stock.get("amount")
+        if "turnover_rate" not in stock:
+            stock["turnover_rate"] = ambiguous
+        stock["amount"] = None
+        stock["amount_quality"] = "legacy_ambiguous_f8"
+        protected_stocks.append(stock)
+    protected["stocks"] = protected_stocks
+    protected["cache_semantics_status"] = "legacy_protected"
+    return protected
 
 
 def load_sector_stocks_cache(sector_code: str, as_of_date: str = "") -> Optional[dict]:
@@ -486,7 +636,8 @@ def load_sector_stocks_cache(sector_code: str, as_of_date: str = "") -> Optional
         if not path.exists():
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = _protect_legacy_stock_amounts(
+                json.loads(path.read_text(encoding="utf-8")))
             cached_at = datetime.fromisoformat(payload["cached_at"])
             age = datetime.now() - cached_at
             if age.total_seconds() > SECTOR_STOCKS_MAX_AGE_HOURS * 3600:
@@ -553,7 +704,7 @@ def _load_tagged_sector_stocks_cache(sector_code: str,
         return []
     fetched_at = cached.get("fetched_at") or cached.get("cached_at", "")
     cache_metadata = _sector_cache_metadata(fetched_at)
-    data_date = str(cached.get("data_date") or fetched_at)[:10]
+    data_date = str(cached.get("data_date") or "")[:10]
     trusted_fallback = fallback_reason in {
         "dns", "timeout", "connection_error", "proxy_error", "http",
         "cache_only",
@@ -613,7 +764,8 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         top_n: max stocks to return.
 
     Returns:
-        List of {code, name, change_pct, amount, market_cap, pe}.
+        List of {code, name, change_pct, amount, turnover_rate,
+        market_cap, pe}.
     """
     _sector_stocks_cache_path(sector_code)
     today_iso = datetime.now().strftime("%Y-%m-%d")
@@ -633,7 +785,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
     url = (
         f"https://push2.eastmoney.com/api/qt/clist/get"
         f"?fs=b:{sector_code}"
-        f"&fields=f2,f3,f4,f8,f12,f14,f20,f21,f23,f37,f62,f168,f170,f171"
+        f"&fields=f2,f3,f4,f6,f8,f12,f14,f20,f21,f23,f37,f62,f124,f168,f170,f171"
         f"&pn=1&pz={top_n}&po=0&np=1&fltt=2"
         f"&fid=f3&_={today}"
     )
@@ -647,7 +799,16 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         data, attempt = _unpack_fetch_result(fetched)
         if attempt:
             provider_attempts = attempt.get("provider_attempts", 0)
-        items = _check_result(data).get("diff", [])
+        response_data = _check_result(data)
+        items = response_data.get("diff", [])
+        if isinstance(items, dict):
+            items = list(items.values())
+        try:
+            membership_total_count = int(response_data.get("total"))
+            if membership_total_count < 0:
+                membership_total_count = None
+        except (TypeError, ValueError):
+            membership_total_count = None
     except Exception as e:
         provider_attempts += getattr(e, "provider_attempts", 0)
         failure_reason = getattr(e, "reason", "") or classify_failure(e)
@@ -679,14 +840,19 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
             "无有效成分股且无可用快照")
 
     stocks = []
+    provider_timestamps = []
     for item in items:
+        provider_timestamp = _provider_timestamp(item.get("f124"))
+        provider_timestamps.append(provider_timestamp)
         stock = {
             "code": item.get("f12", ""),
             "name": item.get("f14", ""),
             "change_pct": item.get("f3"),
-            "amount": item.get("f8"),
+            "amount": _nonnegative_number_or_none(item.get("f6")),
+            "turnover_rate": _nonnegative_number_or_none(item.get("f8")),
             "market_cap": item.get("f20"),   # 总市值
             "pe": item.get("f37"),           # 动态市盈率
+            "provider_timestamp": provider_timestamp,
         }
         if stock["code"]:
             stocks.append(stock)
@@ -703,12 +869,32 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         raise RuntimeError(
             f"获取板块{sector_code}成分股失败: "
             "实时接口未返回有效股票代码; 无有效成分股且无可用快照")
+    unique_codes = {stock["code"] for stock in stocks}
+    membership_returned_count = len(unique_codes)
+    membership_coverage_complete = bool(
+        membership_total_count is not None
+        and top_n >= membership_total_count
+        and membership_returned_count == membership_total_count
+        and len(stocks) == membership_returned_count
+    )
+    for stock in stocks:
+        stock["membership_total_count"] = membership_total_count
+        stock["membership_returned_count"] = membership_returned_count
+        stock["membership_coverage_complete"] = membership_coverage_complete
     cache_error = ""
-    data_date = as_of_date or today_iso
+    timestamp_dates = {value[:10] for value in provider_timestamps if value}
+    data_date = (
+        next(iter(timestamp_dates))
+        if len(provider_timestamps) == len(stocks) and all(provider_timestamps) and len(timestamp_dates) == 1
+        else ""
+    )
+    if _verified_trading_date(data_date) is None:
+        data_date = ""
     if stocks:
         try:
             save_sector_stocks_cache(
-                sector_code, stocks, data_date=data_date)
+                sector_code, stocks, data_date=data_date,
+                requested_date=as_of_date or today_iso)
         except OSError as exc:
             cache_error = str(exc)
             print(
@@ -719,7 +905,7 @@ def get_sector_stocks(sector_code: str, top_n: int = 50,
         stocks,
         source="realtime",
         data_date=data_date,
-        quality="partial" if cache_error else "good",
+        quality=("partial" if cache_error or not data_date else "good"),
         provider_attempts=provider_attempts,
     )
     if cache_error:
@@ -941,14 +1127,114 @@ def save_rankings_cache(rankings: dict, hot_sectors: Optional[list] = None,
         return
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "schema_version": RANKINGS_CACHE_SCHEMA_VERSION,
+        "field_semantics_version": SECTOR_FIELD_SEMANTICS_VERSION,
         "cached_at": datetime.now().isoformat(),
         "data_date": date_key,
+        "date_origin": "provider",
         "rankings": rankings,
     }
     if hot_sectors:
         payload["hot_sectors"] = hot_sectors
     cache_file.write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def _protect_legacy_ranking_amounts(rankings: dict) -> tuple[dict, bool]:
+    """Protect old amount/coverage fields without inventing provider semantics."""
+    meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
+    if meta.get("field_semantics_version") == SECTOR_FIELD_SEMANTICS_VERSION:
+        return rankings, False
+    provider = meta.get("provider", "")
+    source = meta.get("source", "")
+    eastmoney_f8 = provider in ("", "eastmoney", "realtime") and source != "akshare"
+    protected = dict(rankings)
+    protected_meta = dict(meta)
+    protected_meta["cache_semantics_status"] = "legacy_protected"
+    protected_meta["field_semantics_version"] = "legacy_unknown"
+    claimed_date = meta.get("data_date")
+    protected_meta["legacy_claimed_data_date"] = claimed_date
+    protected_meta["requested_date"] = meta.get("requested_date") or claimed_date
+    protected_meta["data_date"] = None
+    protected_meta["date_origin"] = "unknown"
+    protected_meta["alignment"] = "unknown"
+    protected["meta"] = protected_meta
+    protected_sectors = []
+    for raw in rankings.get("sectors") or []:
+        sector = dict(raw)
+        ambiguous = sector.get("amount")
+        if eastmoney_f8 and "turnover_rate" not in sector:
+            sector["turnover_rate"] = ambiguous
+        sector["amount"] = None
+        sector["amount_quality"] = "legacy_ambiguous_f8" if eastmoney_f8 else "legacy_unverified_amount"
+        up = sector.get("up_count")
+        down = sector.get("down_count")
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               for value in (up, down)):
+            sector["up_down_sample_count"] = up + down
+        elif isinstance(sector.get("total_count"), (int, float)) \
+                and not isinstance(sector.get("total_count"), bool):
+            sector["up_down_sample_count"] = sector["total_count"]
+        else:
+            sector["up_down_sample_count"] = None
+        sector["total_count"] = None
+        sector["flat_count"] = None
+        sector["suspended_count"] = None
+        sector["uncovered_count"] = None
+        sector["constituent_coverage_complete"] = False
+        protected_sectors.append(sector)
+    protected["sectors"] = protected_sectors
+    return protected, True
+
+
+def _protect_rankings_cache_payload(payload: dict) -> dict:
+    """Attach cache provenance and protect pre-v2 East Money field semantics."""
+    protected = dict(payload)
+    rankings, changed = _protect_legacy_ranking_amounts(
+        payload.get("rankings", {}))
+    wrapper_claimed_date = payload.get("data_date")
+    ranking_meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
+    wrapper_date = _verified_trading_date(wrapper_claimed_date)
+    ranking_date = _verified_trading_date(ranking_meta.get("data_date"))
+    provider_date_proven = bool(
+        not changed
+        and wrapper_date
+        and ranking_date == wrapper_date
+        and ranking_meta.get("date_origin") == "provider"
+    )
+    if not provider_date_proven:
+        protected["legacy_claimed_data_date"] = wrapper_claimed_date
+        protected["requested_date"] = (
+            payload.get("requested_date") or wrapper_claimed_date)
+        protected["data_date"] = None
+        protected["date_origin"] = "unknown"
+    provenance = {
+        "schema_version": payload.get("schema_version"),
+        "field_semantics_version": payload.get("field_semantics_version"),
+        "cached_at": payload.get("cached_at"),
+        "data_date": protected.get("data_date"),
+        "legacy_claimed_data_date": (
+            protected.get("legacy_claimed_data_date")),
+        "date_origin": protected.get("date_origin", "provider"),
+        "semantics_status": (
+            "legacy_protected" if changed
+            else "verified" if provider_date_proven
+            else "unverified"
+        ),
+    }
+    rankings = dict(rankings)
+    rankings_meta = dict(rankings.get("meta", {}))
+    rankings_meta["cache_provenance"] = dict(provenance)
+    rankings["meta"] = rankings_meta
+    protected["rankings"] = rankings
+    if changed and isinstance(payload.get("hot_sectors"), list):
+        hot_wrapper, _ = _protect_legacy_ranking_amounts({
+            "meta": payload.get("rankings", {}).get("meta", {}),
+            "sectors": payload["hot_sectors"],
+        })
+        protected["hot_sectors"] = hot_wrapper["sectors"]
+    protected["cache_provenance"] = provenance
+    return protected
 
 
 def load_rankings_cache(provider: str = "eastmoney",
@@ -964,7 +1250,8 @@ def load_rankings_cache(provider: str = "eastmoney",
         if not cache_file.exists():
             continue
         try:
-            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            payload = _protect_rankings_cache_payload(
+                json.loads(cache_file.read_text(encoding="utf-8")))
             cached_at = datetime.fromisoformat(payload["cached_at"])
             age = datetime.now() - cached_at
             age_limit = (MAX_CACHE_AGE_HOURS if max_age_hours is None
@@ -972,7 +1259,12 @@ def load_rankings_cache(provider: str = "eastmoney",
             if age.total_seconds() > age_limit * 3600:
                 continue
             data_date = _verified_trading_date(payload.get("data_date", ""))
-            if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
+            legacy_readable = (
+                payload.get("cache_provenance", {}).get("semantics_status")
+                in {"legacy_protected", "unverified"})
+            if ((not data_date and not legacy_readable)
+                    or (data_date
+                        and data_date > datetime.now().strftime("%Y-%m-%d"))):
                 continue
             # Must have at least some sectors (not an empty cache)
             rankings = payload.get("rankings", {})
@@ -1008,7 +1300,8 @@ def load_rankings_cache_full(provider: str = "eastmoney",
         if not cache_file.exists():
             continue
         try:
-            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            payload = _protect_rankings_cache_payload(
+                json.loads(cache_file.read_text(encoding="utf-8")))
             cached_at = datetime.fromisoformat(payload["cached_at"])
             age = datetime.now() - cached_at
             age_limit = (MAX_CACHE_AGE_HOURS if max_age_hours is None
@@ -1016,7 +1309,12 @@ def load_rankings_cache_full(provider: str = "eastmoney",
             if age.total_seconds() > age_limit * 3600:
                 continue
             data_date = _verified_trading_date(payload.get("data_date", ""))
-            if not data_date or data_date > datetime.now().strftime("%Y-%m-%d"):
+            legacy_readable = (
+                payload.get("cache_provenance", {}).get("semantics_status")
+                in {"legacy_protected", "unverified"})
+            if ((not data_date and not legacy_readable)
+                    or (data_date
+                        and data_date > datetime.now().strftime("%Y-%m-%d"))):
                 continue
             rankings = payload.get("rankings", {})
             if rankings.get("meta", {}).get("complete") is False:
@@ -1201,6 +1499,10 @@ def commit_candidate_sector_snapshot(
                 sources.get(name) == "ok"
                 for name in ("industry", "concept")):
             return {"status": "incomplete", "ranked_count": 0}
+
+    if _resolve_verified_data_date(rankings, data_date) is None:
+        return {"status": "incomplete", "ranked_count": 0,
+                "reason": "ranking_source_date_unverified"}
 
     meta.setdefault("source", "eastmoney")
     ranked = rank_hot_sectors(
@@ -1475,7 +1777,12 @@ def _resolve_verified_data_date(rankings: dict, explicit_date: str = "") -> Opti
         raise ValueError("invalid snapshot data_date")
     if upstream and explicit and upstream != explicit:
         raise ValueError("ranking/snapshot data_date mismatch")
-    resolved = explicit or upstream
+    # An explicit/requested day is only an assertion against provider evidence.
+    # It can never manufacture the represented market session.
+    if not upstream or not isinstance(meta, dict) \
+            or meta.get("date_origin") != "provider":
+        return None
+    resolved = upstream
     if resolved and resolved > datetime.now().strftime("%Y-%m-%d"):
         raise ValueError("future ranking data_date")
     return resolved
@@ -1581,7 +1888,8 @@ def get_last_trading_day(now=None) -> tuple[Optional[str], str]:
     # Tier 2: verified data date from a fresh rankings cache
     if CACHE_FILE.exists():
         try:
-            payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            payload = _protect_rankings_cache_payload(
+                json.loads(CACHE_FILE.read_text(encoding="utf-8")))
             cached_at_str = payload.get("cached_at", "")
             data_date = _verified_trading_date(payload.get("data_date", ""))
             if (cached_at_str and data_date

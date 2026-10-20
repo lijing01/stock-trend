@@ -68,7 +68,7 @@ _METHODS = {
     "breadth": (
         "涨跌家数按东方财富地域板块加总。得分为70×上涨家数/（上涨＋下跌家数）"
         "＋30×行业板块上涨比例（比例取0–1）；"
-        "外部平台的股票覆盖范围可能不同。"
+        "涨跌分母不含平盘和停牌，属于已覆盖涨跌样本；外部平台的股票覆盖范围可能不同。"
     ),
     "zt_emotion": (
         "历史有效样本至少5个时，基础分为50＋（涨停数－最多20个历史样本均值）×1.5；"
@@ -168,11 +168,21 @@ def _component_data(ctx, key):
     return score, detail, evidence
 
 
+def _detail_label(ctx):
+    if not ctx.get("intraday"):
+        return "冻结说明"
+    return {
+        "projection": "盘中外推模型说明",
+        "anchor": "昨收锚定模型说明",
+        "observed": "观测输入模型说明",
+    }.get((ctx.get("model_inputs") or {}).get("kind"), "模型输入说明（旧记录）")
+
+
 def _time_text(ctx, evidence):
     basis_date = ctx.get("data_date") or (
         ctx.get("market_explanation") or {}
     ).get("basis_date")
-    source_date = evidence.get("data_date")
+    source_date = evidence.get("data_date") if evidence.get("date_origin") != "request" else None
     source_timestamp = evidence.get("source_timestamp")
     generated_at = ctx.get("generated_at")
     parts = [f"报告依据日：{basis_date}" if _present(basis_date) else "报告依据日：未保存"]
@@ -261,9 +271,14 @@ def _raw_detail(ctx, key):
             f"上涨家数：{up or '未保存'}；下跌家数：{down or '未保存'}；"
             f"上涨行业数：{industry_up or '未保存'}；"
             f"行业总数：{industry_count or '未保存'}；"
-            f"覆盖范围：{frozen.get('coverage') or '未保存'}。"
+            f"覆盖范围：{frozen.get('coverage') or '未保存'}；"
+            f"平盘家数：{_number(frozen.get('flat_count')) or '未保存'}；"
+            f"真实总数：{_number(frozen.get('total_count')) or '未保存'}；"
+            "涨跌样本不含未提供的平盘和停牌，不代表已核验的股票全集。"
         )
     if key == "zt_emotion":
+        if (ctx.get("zt_evidence") or {}).get("completeness") == "missing":
+            return "原始涨停池抓取不可用；涨停家数、连板家数及最高板未保存。"
         return (
             f"涨停家数：{_number(frozen.get('count')) or '未保存'}；"
             f"连板家数：{_number(frozen.get('streak_count')) or '未保存'}；"
@@ -317,7 +332,7 @@ def _render_html(ctx):
             f'<details class="market-detail" id="market-detail-{key}">'
             f"<summary>{escape(name)}</summary>"
             f"<p><strong>本报告冻结得分：</strong>{escape(score_text)}</p>"
-            f"<p><strong>冻结说明：</strong>{escape(detail_text)}</p>"
+            f"<p><strong>{_detail_label(ctx)}：</strong>{escape(detail_text)}</p>"
             f"<p><strong>冻结原始字段：</strong>{escape(_raw_detail(ctx, key))}</p>"
             f"<p><strong>依据时间：</strong>{escape(_time_text(ctx, evidence))}</p>"
             f"<p><strong>评分口径：</strong>{escape(_METHODS[key])}</p>"
@@ -394,7 +409,7 @@ def _render_markdown(ctx):
             f"### {_md_text(name)}",
             "",
             f"- 本报告冻结得分：{_md_text(score_text)}",
-            f"- 冻结说明：{_md_text(detail_text)}",
+            f"- {_detail_label(ctx)}：{_md_text(detail_text)}",
             f"- 冻结原始字段：{_md_text(_raw_detail(ctx, key))}",
             f"- 依据时间：{_md_text(_time_text(ctx, evidence))}",
             f"- 评分口径：{_md_text(_METHODS[key])}",

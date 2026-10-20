@@ -661,7 +661,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         from fetchers import sector_data
 
         rankings = {
-            "meta": {"complete": True},
+            "meta": {"complete": True, "data_date": "2026-08-06", "date_origin": "provider"},
             "sectors": [{"up_count": 1, "down_count": 0}],
         }
         with tempfile.TemporaryDirectory() as tmpdir, \
@@ -681,6 +681,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         rankings = {
             "meta": {
                 "complete": True, "source": "akshare", "provider": "ths",
+                "data_date": "2026-08-06", "date_origin": "provider",
             },
             "sectors": [{"code": "1", "name": "养殖业",
                          "up_count": 1, "down_count": 0}],
@@ -723,6 +724,8 @@ class TestRecommendationPolicy(unittest.TestCase):
 
         self.assertEqual(
             recovered["rankings"]["meta"]["source"], "akshare")
+        self.assertIsNone(recovered["data_date"])
+        self.assertEqual(recovered["date_origin"], "unknown")
 
     def test_rankings_cache_rejects_unverified_date(self):
         from fetchers import sector_data
@@ -743,7 +746,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         from fetchers import sector_data
 
         rankings = {
-            "meta": {"complete": True, "data_date": "2026-08-06"},
+            "meta": {"complete": True, "data_date": "2026-08-06", "date_origin": "provider"},
             "sectors": [{"code": "BK1", "name": "测试", "up_count": 4,
                          "down_count": 1, "change_pct": 1.0}],
         }
@@ -782,6 +785,7 @@ class TestRecommendationPolicy(unittest.TestCase):
             "meta": {
                 "complete": True,
                 "data_date": date,
+                "date_origin": "provider",
                 "total_sectors": 56,
             },
             "sectors": [{
@@ -821,7 +825,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         from fetchers import sector_data
 
         base = {
-            "meta": {"complete": True, "data_date": "2026-08-06"},
+            "meta": {"complete": True, "data_date": "2026-08-06", "date_origin": "provider"},
             "sectors": [{
                 "code": "BK1", "name": "测试", "up_count": 4,
                 "down_count": 1, "change_pct": 1.0,
@@ -852,6 +856,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                 "complete": True,
                 "source": "eastmoney",
                 "data_date": "2026-09-03",
+                "date_origin": "provider",
                 "total_sectors": 12,
                 "sources": {"industry": "ok", "concept": "ok"},
             },
@@ -943,7 +948,7 @@ class TestRecommendationPolicy(unittest.TestCase):
                  Path(tmpdir) / "candidate-history.json"):
             for date in dates:
                 rankings = {
-                    "meta": {"complete": True, "data_date": date},
+                    "meta": {"complete": True, "data_date": date, "date_origin": "provider"},
                     "sectors": [{
                         "code": "BK1", "name": "测试", "up_count": 4,
                         "down_count": 1,
@@ -968,7 +973,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         from fetchers import sector_data
 
         rankings = {
-            "meta": {"complete": True, "data_date": "2026-08-06"},
+            "meta": {"complete": True, "data_date": "2026-08-06", "date_origin": "provider"},
             "sectors": [{
                 "code": "BK1", "name": "测试", "up_count": 4,
                 "down_count": 1,
@@ -1002,7 +1007,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         from fetchers import sector_data
 
         complete = {
-            "meta": {"complete": True},
+            "meta": {"complete": True, "data_date": "2026-08-06", "date_origin": "provider"},
             "sectors": [{"code": "BK1", "up_count": 1, "down_count": 0}],
         }
         partial = {
@@ -1192,7 +1197,10 @@ class TestRecommendationPolicy(unittest.TestCase):
         payload = {
             "cached_at": "2026-08-06T16:00:00",
             "data_date": "2026-08-05",
-            "rankings": {"meta": {"complete": True}, "sectors": []},
+            "rankings": {"meta": {
+                "complete": True, "data_date": "2026-08-05", "date_origin": "provider",
+                "field_semantics_version": sector_data.SECTOR_FIELD_SEMANTICS_VERSION,
+            }, "sectors": []},
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_file = Path(tmpdir) / "rankings.json"

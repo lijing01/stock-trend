@@ -71,10 +71,12 @@ def get_sector_rankings_akshare() -> Optional[dict]:
                     "name": str,          # 板块名称
                     "type": "industry",   # industry / concept
                     "change_pct": float,  # 涨跌幅%
-                    "amount": float,      # 成交额
+                    "amount": float,      # 成交额（元）
+                    "turnover_rate": float | None,  # 换手率（%）
                     "up_count": int,      # 上涨家数
                     "down_count": int,    # 下跌家数
-                    "total_count": int,   # 总计家数
+                    "up_down_sample_count": int,
+                    "total_count": None,  # 未经完整成分名单核验
                     "main_force_net": float,  # 主力净流入
                 }
             ]
@@ -95,11 +97,12 @@ def get_sector_rankings_akshare() -> Optional[dict]:
         if df is not None and not df.empty:
             for _, row in df.iterrows():
                 change = _safe_float(row.get("涨跌幅"))
-                amount = _safe_float(row.get("总成交额")) * 1e8  # 亿→元
+                amount_value = _optional_float(row.get("总成交额"))
+                amount = amount_value * 1e8 if amount_value is not None else None
                 net = _safe_float(row.get("净流入")) * 1e8
-                up = _safe_int(row.get("上涨家数"))
-                down = _safe_int(row.get("下跌家数"))
-                total = up + down
+                up = _optional_int(row.get("上涨家数"))
+                down = _optional_int(row.get("下跌家数"))
+                total = up + down if up is not None and down is not None else None
 
                 name = str(row.get("板块", "") or "").strip()
                 sector_id = f"ths:industry:{name}"
@@ -117,9 +120,15 @@ def get_sector_rankings_akshare() -> Optional[dict]:
                     "type": "industry",
                     "change_pct": change,
                     "amount": amount,
+                    "turnover_rate": _optional_float(row.get("换手率")),
                     "up_count": up,
                     "down_count": down,
-                    "total_count": total,
+                    "up_down_sample_count": total,
+                    "flat_count": None,
+                    "suspended_count": None,
+                    "uncovered_count": None,
+                    "total_count": None,
+                    "constituent_coverage_complete": False,
                     "main_force_net": net,
                 })
         industry_count = sum(
@@ -154,11 +163,17 @@ def get_sector_rankings_akshare() -> Optional[dict]:
                         "name": name,
                         "type": "concept",
                         "change_pct": 0,
-                        "amount": 0,
-                        "up_count": 0,
-                        "down_count": 0,
-                        "total_count": 0,
-                        "main_force_net": 0,
+                        "amount": None,
+                        "turnover_rate": None,
+                        "up_count": None,
+                        "down_count": None,
+                        "up_down_sample_count": None,
+                        "flat_count": None,
+                        "suspended_count": None,
+                        "uncovered_count": None,
+                        "total_count": None,
+                        "constituent_coverage_complete": False,
+                        "main_force_net": None,
                     })
         concept_count = sum(
             1 for sector in sectors if sector["type"] == "concept"
@@ -187,6 +202,19 @@ def get_sector_rankings_akshare() -> Optional[dict]:
             "total_sectors": len(sectors),
             "source": "akshare",
             "provider": "ths",
+            "field_semantics_version": "sector-fields/v2",
+            "field_semantics": {
+                "amount": "provider_total_amount:yuan",
+                "turnover_rate": "provider_turnover_rate:percent",
+                "up_down_sample_count": "up_count+down_count",
+                "total_count": "unknown_without_complete_membership",
+            },
+            "fetched_at": datetime.now().astimezone().isoformat(),
+            "requested_date": datetime.now().strftime("%Y-%m-%d"),
+            "data_date": None,
+            "date_origin": "unknown",
+            "alignment": "unknown",
+            "provider_timestamp_status": "missing",
             "sources": sources,
             "errors": errors,
             "complete": complete,
@@ -322,6 +350,8 @@ def _normalise_constituent_row(row: Any) -> dict:
         "name": name,
         "change_pct": _number(_row_value(row, "涨跌幅", "change_pct")),
         "amount": _number(_row_value(row, "成交额", "amount")),
+        "turnover_rate": _number(
+            _row_value(row, "换手率", "turnover_rate")),
         "market_cap": _number(
             _row_value(row, "总市值", "总市值(元)", "market_cap")),
         "pe": _number(_row_value(
@@ -382,15 +412,19 @@ def _tag_ths_stocks(stocks: list[dict], *, source: str, data_date: str,
 def _save_ths_stock_cache(sector_name: str, sector_type: str,
                           stocks: list[dict], data_date: str,
                           membership_provider="akshare", provider_code="",
-                          mapping="", membership_quality="") -> None:
+                          mapping="", membership_quality="",
+                          requested_date="") -> None:
     path = _ths_stock_cache_path(sector_name, sector_type)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now().isoformat()
-    snapshot_date = data_date or now[:10]
+    snapshot_date = data_date or None
     payload = {
         "schema_version": 2,
+        "field_semantics_version": "sector-fields/v2",
         "cached_at": now,
         "data_date": snapshot_date,
+        "requested_date": requested_date or now[:10],
+        "date_origin": "provider" if snapshot_date else "unknown",
         "provider": "akshare",
         "membership_provider": membership_provider,
         "membership_provider_code": provider_code or sector_name,
@@ -400,12 +434,13 @@ def _save_ths_stock_cache(sector_name: str, sector_type: str,
         "sector_type": sector_type,
         "stocks": stocks,
     }
-    history_path = _ths_stock_history_path(
-        sector_name, sector_type, snapshot_date)
     encoded = json.dumps(payload, ensure_ascii=False)
     path.write_text(encoded, encoding="utf-8")
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history_path.write_text(encoded, encoding="utf-8")
+    if snapshot_date:
+        history_path = _ths_stock_history_path(
+            sector_name, sector_type, snapshot_date)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(encoded, encoding="utf-8")
 
 
 def _load_ths_stock_cache(sector_name: str, sector_type: str,
@@ -427,8 +462,8 @@ def _load_ths_stock_cache(sector_name: str, sector_type: str,
                 continue
             if not payload.get("stocks") or payload.get("provider") != "akshare":
                 continue
-            data_date = str(payload.get("data_date") or cached_at.date())
-            if data_date > datetime.now().strftime("%Y-%m-%d"):
+            data_date = str(payload.get("data_date") or "")
+            if data_date and data_date > datetime.now().strftime("%Y-%m-%d"):
                 continue
             if as_of_date and data_date != as_of_date:
                 continue
@@ -552,7 +587,12 @@ def _fetch_named_em_stocks(sector_name, sector_type, top_n, timeout,
     can fail while the project's alternate hosts are healthy. Parse fields
     by key here, preserving market cap and avoiding positional schema drift.
     """
-    from fetchers.sector_data import _fetch_json, _check_result
+    from fetchers.sector_data import (
+        _check_result,
+        _fetch_json,
+        _provider_timestamp,
+        _verified_trading_date,
+    )
 
     attempts = 0
 
@@ -591,17 +631,41 @@ def _fetch_named_em_stocks(sector_name, sector_type, top_n, timeout,
     code = matches.pop()
 
     data = fetch(
-        f"fs=b:{code}+f:!50&fields=f12,f14,f3,f6,f20,f9"
+        f"fs=b:{code}+f:!50&fields=f12,f14,f3,f6,f8,f20,f9,f124"
         f"&pn=1&pz={top_n}&po=1&np=1&fltt=2&fid=f3")
     rows = data.get("diff") or []
     if isinstance(rows, dict):
         rows = list(rows.values())
-    stocks = [_normalise_constituent_row({
-        "代码": row.get("f12"), "名称": row.get("f14"),
-        "涨跌幅": row.get("f3"), "成交额": row.get("f6"),
-        "总市值": row.get("f20"), "市盈率-动态": row.get("f9"),
-    }) for row in rows]
-    return [stock for stock in stocks if stock["code"]], attempts, code
+    stocks = []
+    for row in rows:
+        stock = _normalise_constituent_row({
+            "代码": row.get("f12"), "名称": row.get("f14"),
+            "涨跌幅": row.get("f3"), "成交额": row.get("f6"),
+            "换手率": row.get("f8"),
+            "总市值": row.get("f20"), "市盈率-动态": row.get("f9"),
+        })
+        stock["provider_timestamp"] = _provider_timestamp(row.get("f124"))
+        stocks.append(stock)
+    stocks = [stock for stock in stocks if stock["code"]]
+    try:
+        membership_total_count = int(data.get("total"))
+        if membership_total_count < 0:
+            membership_total_count = None
+    except (TypeError, ValueError):
+        membership_total_count = None
+    unique_codes = {stock["code"] for stock in stocks}
+    membership_returned_count = len(unique_codes)
+    membership_coverage_complete = bool(
+        membership_total_count is not None
+        and top_n >= membership_total_count
+        and membership_returned_count == membership_total_count
+        and len(stocks) == membership_returned_count
+    )
+    for stock in stocks:
+        stock["membership_total_count"] = membership_total_count
+        stock["membership_returned_count"] = membership_returned_count
+        stock["membership_coverage_complete"] = membership_coverage_complete
+    return stocks, attempts, code
 
 
 def get_sector_stocks_akshare(
@@ -692,13 +756,25 @@ def get_sector_stocks_akshare(
                   file=sys.stderr)
 
     if stocks:
-        data_date = as_of_date or datetime.now().strftime("%Y-%m-%d")
+        timestamp_dates = {
+            stock["provider_timestamp"][:10]
+            for stock in stocks if stock.get("provider_timestamp")
+        }
+        data_date = (
+            next(iter(timestamp_dates))
+            if len(timestamp_dates) == 1
+            and all(stock.get("provider_timestamp") for stock in stocks)
+            else ""
+        )
+        if _verified_trading_date(data_date) is None:
+            data_date = ""
         try:
             _save_ths_stock_cache(
                 sector_name, sector_type, stocks[:top_n], data_date,
                 membership_provider="eastmoney", provider_code=provider_code,
                 mapping="cross_source_exact_name_unverified",
-                membership_quality="cross_source_unverified")
+                membership_quality="cross_source_unverified",
+                requested_date=as_of_date or today)
         except OSError as exc:
             print(f"  Warning: 同花顺板块缓存保存失败: {exc}", file=sys.stderr)
         tagged = _tag_ths_stocks(
@@ -824,6 +900,25 @@ def _safe_float(val) -> float:
         return float(val)
     except (ValueError, TypeError):
         return 0.0
+
+
+def _optional_float(val) -> Optional[float]:
+    """Parse a provider number while preserving missing as unknown."""
+    if val is None or str(val).strip() in {"", "--", "nan", "None"}:
+        return None
+    try:
+        parsed = float(val)
+    except (ValueError, TypeError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _optional_int(val) -> Optional[int]:
+    """Parse a non-negative provider count while preserving missing values."""
+    parsed = _optional_float(val)
+    if parsed is None or parsed < 0 or not parsed.is_integer():
+        return None
+    return int(parsed)
 
 
 def _safe_int(val) -> int:

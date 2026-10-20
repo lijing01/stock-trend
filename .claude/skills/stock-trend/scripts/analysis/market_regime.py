@@ -27,6 +27,7 @@ import copy
 import hashlib
 import html as html_lib
 import json
+import math
 import os
 import re
 import statistics
@@ -56,6 +57,7 @@ OBSERVATION_ANALYSIS_DIR = CACHE_DIR / "observation_analyses"
 HISTORY_MAX_DAYS = 30
 MIN_AMOUNT_HISTORY_DAYS = 5
 TOP_SECTOR_COUNT = 10
+OBSERVATION_SEMANTICS_VERSION = "market-observations/v1"
 RETIRED_CONTEXT_KEYS = (
     "holdings", "portfolio_snapshot", "holdings_refreshed_at",
     "holdings_sync_note", "plan",
@@ -294,7 +296,8 @@ def fetch_sector_rankings() -> list[dict]:
             "requested_date": datetime.now().date().isoformat(),
             "fetched_at": _observed_at(),
             "source_timestamp": meta.get("source_timestamp"),
-            "completeness": "complete" if sectors else "missing",
+            "field_semantics_version": meta.get("field_semantics_version"),
+            "completeness": "complete" if sectors and meta.get("complete") is True else ("partial" if sectors else "missing"),
         }
         return [dict(sector, evidence=copy.deepcopy(evidence)) for sector in sectors]
     except Exception:
@@ -355,7 +358,7 @@ def fetch_zt_stats() -> dict:
 def fetch_market_activity() -> dict | None:
     """全市场涨跌家数 + 主力净流入: 东财地域板块(t:1)加总.
 
-    地域板块每个股票恰属一个 → 加总精确,避免申万行业层级/概念板块重复计数.
+    按提供方地域板块覆盖加总；缺少平盘/停牌/股票全集时不宣称完整股票覆盖。
     复用 sector_data._fetch_json(host轮换 + 无代理fallback).
     """
     try:
@@ -364,14 +367,39 @@ def fetch_market_activity() -> dict | None:
                "?pn=1&pz=60&po=0&np=1&fltt=2&fid=f3&fs=m:90+t:1"
                "&fields=f12,f14,f104,f105,f62,f124")
         data = _fetch_json(url)
-        items = (data.get("data") or {}).get("diff", [])
+        payload = data.get("data") or {}
+        items = payload.get("diff", [])
+        if isinstance(items, dict):
+            items = list(items.values())
         if not items:
             return None
-        up = sum(int(x.get("f104") or 0) for x in items)
-        down = sum(int(x.get("f105") or 0) for x in items)
-        main_force_yi = sum(float(x.get("f62") or 0) for x in items) / 1e8
+
+        def number(value, *, count=False):
+            if isinstance(value, bool):
+                return None
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value) or (count and (value < 0 or not value.is_integer())):
+                return None
+            return int(value) if count else value
+
+        up_counts = [number(x.get("f104"), count=True) for x in items]
+        down_counts = [number(x.get("f105"), count=True) for x in items]
+        if any(value is None for value in up_counts + down_counts):
+            return None
+        up, down = sum(up_counts), sum(down_counts)
+        flows = [number(x.get("f62")) for x in items]
+        main_force_yi = sum(flows) / 1e8 if all(value is not None for value in flows) else None
         if up + down <= 0:
             return None
+        reported_regions = number(payload.get("total"), count=True)
+        codes = [item.get("f12") for item in items]
+        duplicate_regions = len([code for code in codes if code]) != len(set(code for code in codes if code))
+        if duplicate_regions:
+            return None
+        region_coverage_complete = reported_regions == len(items) and all(codes)
         timestamps = []
         for item in items:
             try:
@@ -383,8 +411,16 @@ def fetch_market_activity() -> dict | None:
         return {
             "up": up,
             "down": down,
-            "main_force_yi": round(main_force_yi, 1),
+            "main_force_yi": round(main_force_yi, 1) if main_force_yi is not None else None,
             "main_force_raw_yi": main_force_yi,
+            "up_down_sample_count": up + down,
+            "flat_count": None,
+            "total_count": None,
+            "suspended_count": None,
+            "uncovered_count": None,
+            "coverage_status": "up_down_sample_only",
+            "returned_region_count": len(items),
+            "reported_region_count": reported_regions,
             "evidence": {
                 "schema_version": "market-component-evidence/v1",
                 "provider": "eastmoney",
@@ -393,9 +429,11 @@ def fetch_market_activity() -> dict | None:
                 "date_origin": "provider" if verified else "unknown",
                 "fetched_at": _observed_at(),
                 "source_timestamp": min(timestamps).isoformat() if verified else None,
-                "completeness": "complete",
-                "usage": "scorable",
-                "reasons": [] if verified else ["provider_event_timestamp_missing"],
+                "completeness": "complete" if region_coverage_complete and main_force_yi is not None else "partial",
+                "usage": "scorable" if region_coverage_complete else "reference_only",
+                "reasons": ([] if verified else ["provider_event_timestamp_missing"])
+                           + ([] if region_coverage_complete else ["region_coverage_unverified"])
+                           + ([] if main_force_yi is not None else ["capital_value_missing"]),
             },
         }
     except Exception:
@@ -1540,9 +1578,47 @@ def render_sector_rankings(ctx: dict, output_format: str) -> str:
     return "\n".join(lines)
 
 
+def render_market_overview(ctx: dict, output_format: str) -> str:
+    """Present captured observations separately from the unchanged model scores."""
+    from analysis.market_observations import build_market_observations
+    from reporting.market_observations import render_market_observations
+    from reporting.market_detail_links import COMPONENTS, summary_link
+
+    observations = render_market_observations(build_market_observations(ctx), output_format)
+    components = ctx.get("components") or {}
+    model_note = "以下五项得分及说明为模型评分输入；盘中外推和昨收锚定数值不代表当前实测，原始观测见上表。" if ctx.get("intraday") else "以下五项得分为模型计算，原始观测及来源日期见上表。"
+    if output_format == "html":
+        rows = []
+        for key, name in COMPONENTS:
+            score = (components.get(key) or {}).get("score", "—")
+            detail = str((components.get(key) or {}).get("detail") or "未保存")
+            rows.append(
+                f"<tr><td>{html_lib.escape(name)}</td><td><strong>{html_lib.escape(str(score))}</strong></td>"
+                f"<td>{html_lib.escape(detail)}</td>"
+                f"<td>{summary_link(key, 'html')}</td></tr>"
+            )
+        return (
+            '<h2>① 市场环境</h2>\n' + observations + f'\n<p>{model_note}</p>\n'
+            '<div class="summary-table-wrap"><table id="market-component-summary">'
+            '<thead><tr><th>组件</th><th>得分</th><th>说明</th><th>详情</th></tr></thead><tbody>'
+            + "".join(rows) + '</tbody></table></div>'
+        )
+    if output_format != "markdown":
+        raise ValueError(f"Unsupported market overview format: {output_format}")
+    lines = ["### ① 市场环境", "", observations, "", model_note, "", '<a id="market-component-summary"></a>', "",
+             "| 组件 | 得分 | 说明 | 详情 |", "|------|------|------|------|"]
+    for key, name in COMPONENTS:
+        detail = html_lib.escape(str((components.get(key) or {}).get("detail") or "未保存")).replace("\n", " ")
+        for char in ("\\", "`", "*", "_", "[", "]", "(", ")", "|"):
+            detail = detail.replace(char, "\\" + char)
+        score = (components.get(key) or {}).get("score", "—")
+        lines.append(f"| {name} | **{score}** | {detail} | {summary_link(key, 'markdown')} |")
+    return "\n".join(lines)
+
+
 def generate_report(ctx: dict, *, observation_status: str = "ready",
                     observation_state: dict | None = None) -> str:
-    from reporting.market_detail_links import COMPONENTS, render_details, summary_link
+    from reporting.market_detail_links import render_details
 
     lines = []
     lines.append(f"## 📅 今日复盘 ({ctx.get('data_date', '')})")
@@ -1571,27 +1647,7 @@ def generate_report(ctx: dict, *, observation_status: str = "ready",
         lines.append(render_review_comparison(ctx["review_comparison"], "markdown"))
         lines.append("")
 
-    # ① 市场环境
-    lines.append("### ① 市场环境")
-    lines.append("")
-    lines.append('<a id="market-component-summary"></a>')
-    lines.append("")
-    lines.append("| 组件 | 得分 | 说明 | 详情 |")
-    lines.append("|------|------|------|------|")
-    for key, name in COMPONENTS:
-        comp = (ctx.get("components") or {}).get(key) or {}
-        detail = html_lib.escape(str(comp.get("detail", "—"))).replace("\n", " ")
-        for char in ("\\", "`", "*", "_", "[", "]", "(", ")", "|"):
-            detail = detail.replace(char, "\\" + char)
-        lines.append(
-            f"| {name} | **{comp.get('score', '—')}** | {detail} | "
-            f"{summary_link(key, 'markdown')} |"
-        )
-    lines.append("")
-    breadth = (ctx.get("components") or {}).get("breadth") or {}
-    lines.append(f"▸ 涨跌家数: 涨 {breadth.get('up') if breadth.get('up') is not None else '—'} / 跌 {breadth.get('down') if breadth.get('down') is not None else '—'} | "
-                 f"两市成交 {ctx.get('amount_yi', 0):.0f}亿 | "
-                 f"涨停 {ctx.get('zt', {}).get('count', 0)}家(连板{ctx.get('zt', {}).get('streak_count', 0)})")
+    lines.append(render_market_overview(ctx, "markdown"))
     lines.append("")
     # ② 板块
     lines.append('<a id="market-sectors"></a>')
@@ -1771,6 +1827,14 @@ def collect_context(now=None) -> dict:
         "source_timestamp": zt_evidence.get("source_timestamp"),
     })
     regime = compute_regime(components)
+    raw_components = copy.deepcopy(components)
+    model_inputs = {
+        "kind": "observed",
+        "volume": {"amount_yi": today_amount_yi},
+        "breadth": {"up": (activity or {}).get("up"), "down": (activity or {}).get("down")},
+        "zt_emotion": {key: zt.get(key) for key in ("count", "streak_count", "max_streak")},
+        "capital": {"main_force_yi": (activity or {}).get("main_force_yi")},
+    }
 
     # ── 盘中混合: 昨收锚 + 盘中外推(避免半日数据对全天基线误判弱势) ──
     now = now or datetime.now()
@@ -1795,6 +1859,13 @@ def collect_context(now=None) -> dict:
             if activity.get("main_force_yi") is not None:
                 est_activity["main_force_yi"] = (
                     activity["main_force_yi"] / max(fraction, FLOOR_FRACTION))
+            model_inputs = {
+                "kind": "projection",
+                "volume": {"amount_yi": est_amount},
+                "breadth": {key: est_activity.get(key) for key in ("up", "down")},
+                "zt_emotion": {key: est_zt.get(key) for key in ("count", "streak_count", "max_streak")},
+                "capital": {"main_force_yi": est_activity.get("main_force_yi")},
+            }
             ext_components = {
                 "index_trend": components["index_trend"],
                 "volume": score_volume(est_amount, amount_history_yi, amount_evidence),
@@ -1829,6 +1900,11 @@ def collect_context(now=None) -> dict:
                 {k: {"score": v} for k, v in stored.items() if v is not None}
                 if stored else components)
             ext_regime = compute_regime(ext_components)
+            if stored:
+                model_inputs = {
+                    "kind": "anchor", "source_date": last_close.get("date"),
+                    "component_scores": copy.deepcopy(stored),
+                }
         anchor_score = (last_close or {}).get("score") if last_close else None
         calculation_anchor_score = anchor_score if anchor_score is not None else 50.0
         blended = round((1 - w) * _safe_float(calculation_anchor_score) + w * ext_regime["score"], 1)
@@ -1858,7 +1934,7 @@ def collect_context(now=None) -> dict:
         intraday_note = (
             f"盘中快照 {fraction:.0%} 时段: 评分为 {anchor_label} 与按 "
             f"{max(fraction, FLOOR_FRACTION):.0%} 外推盘中分的混合(权重 {w:.0%}); "
-            f"收盘后请复跑 /daily-review 确认"
+            f"原始观测与模型输入分列，收盘后请复跑 /daily-review 确认"
         )
 
     # 板块最强/最弱(industry, 按 change_pct)
@@ -1870,6 +1946,7 @@ def collect_context(now=None) -> dict:
         "model_version": "market-regime-score/v1",
         "methodology_version": "daily-review-close/v1",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "as_of": _observed_at(),
         "data_date": data_date,
         "stale_note": (
             "" if not data_date or data_date == date.today().isoformat()
@@ -1877,6 +1954,9 @@ def collect_context(now=None) -> dict:
         ),
         "regime": regime,
         "components": components,
+        "raw_components": raw_components,
+        "model_inputs": model_inputs,
+        "observation_semantics_version": OBSERVATION_SEMANTICS_VERSION,
         "amount_evidence": amount_evidence,
         "zt_evidence": zt_evidence,
         "activity_evidence": activity_evidence,
@@ -1930,9 +2010,13 @@ def collect_context(now=None) -> dict:
         "data_date": next(iter(sector_dates)) if sector_verified else None,
         "date_origin": "provider" if sector_verified and all((row.get("evidence") or {}).get("date_origin") == "provider" for row in sectors) else "unknown",
         "provider": "+".join(sorted({str((row.get("evidence") or {}).get("provider") or "unknown") for row in sectors})),
-        "completeness": "complete" if sectors else "missing",
+        "completeness": "complete" if sectors and all(
+            (row.get("evidence") or {}).get("completeness") == "complete" for row in sectors
+        ) else ("partial" if sectors else "missing"),
         "dates": sorted(value for value in sector_dates if value),
-        "source_timestamp": None,
+        "source_timestamp": min(
+            str((row.get("evidence") or {}).get("source_timestamp")) for row in sectors
+        ) if sector_verified and all((row.get("evidence") or {}).get("source_timestamp") for row in sectors) else None,
         "fetched_at": _observed_at(),
     }
     ctx["detail_inputs"] = {
@@ -1949,6 +2033,12 @@ def collect_context(now=None) -> dict:
         "breadth": {
             "up": (activity or {}).get("up"),
             "down": (activity or {}).get("down"),
+            "up_down_sample_count": (activity or {}).get("up_down_sample_count"),
+            "flat_count": (activity or {}).get("flat_count"),
+            "total_count": (activity or {}).get("total_count"),
+            "suspended_count": (activity or {}).get("suspended_count"),
+            "uncovered_count": (activity or {}).get("uncovered_count"),
+            "coverage_status": (activity or {}).get("coverage_status", "unknown"),
             "industry_up_count": sum(_safe_float(row.get("change_pct")) > 0 for row in sectors),
             "industry_count": len(sectors),
             "coverage": "eastmoney_region_boards",
@@ -1970,19 +2060,50 @@ def collect_context(now=None) -> dict:
     for key, evidence in (("volume", amount_evidence), ("zt_emotion", zt_evidence), ("breadth", activity_evidence), ("capital", activity_evidence)):
         ctx["components"][key]["date_origin"] = evidence.get("date_origin", "unknown")
         ctx["components"][key]["requested_date"] = evidence.get("requested_date")
+        ctx["raw_components"][key]["date_origin"] = evidence.get("date_origin", "unknown")
+        ctx["raw_components"][key]["requested_date"] = evidence.get("requested_date")
+    from analysis.market_observations import build_market_observations
+    ctx["market_observations"] = build_market_observations(ctx)
     ctx["market_explanation"] = build_market_explanation(
         ctx, data_date or date.today().isoformat())
     ctx["conclusion_qualification"] = copy.deepcopy(ctx["market_explanation"]["conclusion_qualification"])
     return ctx
 
 
+def _sector_output_rows(rows):
+    """Interpret legacy review rows with the same protection as ranking caches."""
+    from fetchers.sector_data import _protect_legacy_ranking_amounts
+
+    protected = []
+    for row in rows or []:
+        evidence = row.get("evidence") or {}
+        meta = {
+            "provider": row.get("provider") or evidence.get("provider"),
+            "field_semantics_version": row.get("field_semantics_version")
+                                       or evidence.get("field_semantics_version"),
+        }
+        ranking, changed = _protect_legacy_ranking_amounts({"meta": meta, "sectors": [row]})
+        item = dict(ranking["sectors"][0])
+        if changed:
+            item["field_semantics_version"] = "legacy_unknown"
+        protected.append(item)
+    return protected
+
+
 def build_agent_output(ctx: dict) -> dict:
     """Build the compact JSON contract consumed by agents."""
+    from analysis.market_observations import build_market_observations
     return {
         "meta": {"generated_at": ctx["generated_at"],
-                 "data_date": ctx["data_date"]},
+                 "data_date": ctx["data_date"],
+                 "as_of": ctx.get("as_of"),
+                 "observation_semantics_version": OBSERVATION_SEMANTICS_VERSION,
+                 "legacy_display_fields": "amount_yi/zt/components are legacy model inputs; raw facts are in market_observations.raw_inputs"},
         "regime": ctx["regime"],
         "components": ctx["components"],
+        "raw_components": ctx.get("raw_components", {}),
+        "model_inputs": ctx.get("model_inputs", {}),
+        "market_observations": build_market_observations(ctx),
         "market_explanation": ctx.get("market_explanation"),
         "conclusion_qualification": ctx.get("conclusion_qualification"),
         "detail_inputs": ctx.get("detail_inputs", {}),
@@ -1998,8 +2119,8 @@ def build_agent_output(ctx: dict) -> dict:
         "intraday_note": ctx.get("intraday_note", ""),
         "index_data_quality": ctx.get("index_data_quality", {}),
         "zt": ctx["zt"],
-        "top_sectors": ctx["top_sectors"],
-        "bottom_sectors": ctx["bottom_sectors"],
+        "top_sectors": _sector_output_rows(ctx["top_sectors"]),
+        "bottom_sectors": _sector_output_rows(ctx["bottom_sectors"]),
         "us_market_summary": ctx.get("us_market_summary"),
         "cross_market_observation": ctx.get("cross_market_observation"),
         "review_comparison": ctx.get("review_comparison"),
@@ -2125,6 +2246,8 @@ def main():
         from analysis.market_explanation import build_market_explanation
         ctx["market_explanation"] = build_market_explanation(ctx, ctx.get("data_date") or "")
         ctx["conclusion_qualification"] = copy.deepcopy(ctx["market_explanation"]["conclusion_qualification"])
+        from analysis.market_observations import build_market_observations
+        ctx["market_observations"] = build_market_observations(ctx)
         save_context(ctx)
     else:
         print("[1/5] 拉取指数K线 + 成交额...")
@@ -2249,7 +2372,6 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
     """Lightweight HTML mirror of the MD report."""
     regime = ctx.get("regime", {})
     label_color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime.get("label", ""), "#86868b")
-    comps = ctx.get("components", {})
     explanation = _market_explanation_for_report(ctx)
     qualified = bool((explanation or {}).get("conclusion_qualification", {}).get("eligible"))
     score_title = "市场环境评分" if qualified else "参考评分（模型计算分）"
@@ -2259,22 +2381,14 @@ def _generate_html(ctx: dict, now_ts: str, *, observation_status: str = "ready",
         from reporting.market_explanation import render_market_explanation
         explanation_html = render_market_explanation(explanation, "html")
 
-    from reporting.market_detail_links import render_details, summary_link
+    from reporting.market_detail_links import render_details
     details_html = render_details(ctx, "html")
     comparison_html = ""
     if ctx.get("review_comparison") is not None:
         from reporting.review_comparison import render_review_comparison
         comparison_html = render_review_comparison(ctx["review_comparison"], "html")
 
-    def comp_row(key, name):
-        c = comps.get(key) or {}
-        return (
-            f"<tr><td>{html_lib.escape(name)}</td>"
-            f"<td><strong>{html_lib.escape(str(c.get('score', '—')))}</strong></td>"
-            f"<td>{html_lib.escape(str(c.get('detail', '—')))}</td>"
-            f"<td>{summary_link(key, 'html')}</td></tr>"
-        )
-
+    market_overview_html = render_market_overview(ctx, "html")
     sector_rankings_html = render_sector_rankings(ctx, "html")
     from reporting.sector_persistence import render_html as render_sector_html
     sector_persistence_html = render_sector_html(ctx.get("sector_persistence") or {})
@@ -2324,10 +2438,7 @@ ul{{padding-left:20px;line-height:1.8}}
 {'<p class="dt" style="color:#d97706">⚠️ ' + ctx.get('intraday_note','') + '</p>' if ctx.get('intraday_note') else ''}
 
 {comparison_html}
-<h2>① 市场环境</h2>
-<div class="summary-table-wrap"><table id="market-component-summary"><thead><tr><th>组件</th><th>得分</th><th>说明</th><th>详情</th></tr></thead><tbody>
-{comp_row('index_trend','大盘趋势')}{comp_row('volume','成交额')}{comp_row('breadth','赚钱效应')}{comp_row('zt_emotion','涨停情绪')}{comp_row('capital','资金')}
-</tbody></table></div>
+{market_overview_html}
 <h2 id="market-sectors">② 板块</h2>
 {sector_rankings_html}
 {sector_persistence_html}

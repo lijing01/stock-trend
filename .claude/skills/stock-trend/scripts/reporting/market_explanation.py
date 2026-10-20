@@ -81,6 +81,8 @@ def _render_markdown(explanation):
     ]
     if not qualified:
         lines.extend(["- 证据不足，以下为模型提示。"])
+    if explanation.get("mode") == "intraday":
+        lines.append("- 下表说明为盘中模型评分输入；采集到的原始值见[原始观测与模型口径](#market-observations)。")
     lines.extend([
         "",
         "| 组件 | 得分 | 权重 | 贡献 | 证据资格 | 说明 |",
@@ -122,6 +124,9 @@ def _render_html(explanation):
     qualified = qualification.get("eligible") is True
     score_label = "模型计算分" if qualified else "参考评分（模型计算分）"
     model_note = "" if qualified else "<p><strong>证据不足，以下为模型提示。</strong></p>"
+    if explanation.get("mode") == "intraday":
+        model_note += ('<p>下表说明为盘中模型评分输入；采集到的原始值见'
+                       '<a href="#market-observations">原始观测与模型口径</a>。</p>')
     rows = []
     for component in explanation.get("components", []):
         evidence = component.get("evidence") or {}

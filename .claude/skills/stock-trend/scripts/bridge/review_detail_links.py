@@ -197,6 +197,14 @@ def _parse_html_report(content: str, basis_date: str) -> dict:
                     (parent.attrs.get("class") or "").split()
                     for parent in _parents(table))
     ]
+    anchored = [table for table in tables if table.attrs.get("id") == SUMMARY_ANCHOR]
+    if anchored:
+        tables = anchored
+    else:
+        # P0 adds a separate raw-observation table before the score table.
+        tables = [table for table in tables if _descendants(table, "tr")
+                  and [_norm(cell.text) for cell in _direct_cells(_descendants(table, "tr")[0])] in (
+                      ["组件", "得分", "说明"], ["组件", "得分", "说明", "详情"])]
     summary_table = _require_single(tables, "market_component_table_invalid")
     if summary_table.end is None:
         raise ValueError("market_component_table_unclosed")
