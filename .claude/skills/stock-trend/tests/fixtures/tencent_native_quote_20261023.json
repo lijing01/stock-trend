@@ -1,0 +1,54 @@
+{
+  "retrieved_at": "2026-10-23T16:32:28+08:00",
+  "source_urls": [
+    "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600519,day,,,5,qfq",
+    "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sz000001,day,,,5,qfq"
+  ],
+  "limitations": [
+    "Observed response fields are undocumented; production must validate every field before acceptance.",
+    "No suspension or Beijing-market contract was observed.",
+    "The qfqday array is intentionally omitted and must not be used to derive percentage change."
+  ],
+  "responses": {
+    "600519.SH": {
+      "code": 0,
+      "msg": "",
+      "data": {
+        "sh600519": {
+          "qt": {
+            "sh600519": [
+              "1", "sample-sh", "600519", "1335.00", "1318.49", "1311.84",
+              "57686", "", "", "", "", "", "", "", "", "", "", "",
+              "", "", "", "", "", "", "", "", "", "", "", "",
+              "20261023161458", "16.51", "1.25", "1343.88", "1310.00",
+              "1335.00/57686/7677216283"
+            ],
+            "market": [
+              "2026-10-23 16:32:28|SH_close_已收盘|SZ_close_已收盘"
+            ]
+          }
+        }
+      }
+    },
+    "000001.SZ": {
+      "code": 0,
+      "msg": "",
+      "data": {
+        "sz000001": {
+          "qt": {
+            "sz000001": [
+              "51", "sample-sz", "000001", "11.20", "11.30", "11.27",
+              "1448806", "", "", "", "", "", "", "", "", "", "", "",
+              "", "", "", "", "", "", "", "", "", "", "", "",
+              "20261023161500", "-0.10", "-0.88", "11.35", "11.17",
+              "11.20/1448806/1628277173"
+            ],
+            "market": [
+              "2026-10-23 16:32:28|SH_close_已收盘|SZ_close_已收盘"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

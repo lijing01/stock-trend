@@ -1077,6 +1077,12 @@ class TestSourceEvidenceAdapters(unittest.TestCase):
         self.assertEqual(wrapped["live_attempt"]["reason"], "")
 
 
+class _FrozenSectorDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 8, 6, 16, 0, 0)
+
+
 class TestSectorConstituentFallback(unittest.TestCase):
     def setUp(self):
         self.payload = {
@@ -1084,13 +1090,15 @@ class TestSectorConstituentFallback(unittest.TestCase):
             "data": {"total": 1, "diff": [{
                 "f12": "600001", "f14": "测试股份", "f3": 1.2,
                 "f6": 2e8, "f8": 2.0, "f20": 1e10, "f37": 20,
-                "f124": int(datetime.now().timestamp()),
+                # 2026-08-06 16:00:00 Asia/Shanghai (a trading day).
+                "f124": 1786003200,
             }]},
         }
 
     def test_live_sector_stocks_are_cached_with_source_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "datetime", _FrozenSectorDateTime), \
              patch.object(sd, "_fetch_json", return_value=self.payload):
             stocks = sd.get_sector_stocks("BK0001")
             cache_file = Path(tmpdir) / "BK0001.json"
@@ -1102,6 +1110,7 @@ class TestSectorConstituentFallback(unittest.TestCase):
     def test_live_sector_cache_persists_refresh_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "datetime", _FrozenSectorDateTime), \
              patch.object(sd, "_fetch_json", return_value=self.payload):
             sd.get_sector_stocks("BK0001")
             cache = json.loads(
@@ -1109,7 +1118,7 @@ class TestSectorConstituentFallback(unittest.TestCase):
 
         self.assertEqual(cache["schema_version"], 3)
         self.assertEqual(cache["provider"], "eastmoney")
-        self.assertEqual(cache["data_date"], datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(cache["data_date"], "2026-08-06")
         self.assertEqual(cache["fetched_at"], cache["cached_at"])
 
     def test_tagged_sector_cache_prefers_explicit_data_date(self):
@@ -1189,7 +1198,8 @@ class TestSectorConstituentFallback(unittest.TestCase):
 
     def test_sector_stocks_fall_back_to_snapshot_after_live_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
-             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)):
+             patch.object(sd, "SECTOR_STOCKS_CACHE_DIR", Path(tmpdir)), \
+             patch.object(sd, "datetime", _FrozenSectorDateTime):
             with patch.object(sd, "_fetch_json", return_value=self.payload):
                 sd.get_sector_stocks("BK0001")
             with patch.object(

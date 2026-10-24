@@ -1963,7 +1963,9 @@ def run_script_unit_tests():
                  "test_sector_persistence", "test_observation_comparison",
                  "test_observation_comparison_reporting", "test_observation_list_analysis",
                  "test_observation_report_update", "test_review_stage5_integration",
-                 "test_cross_market_observation", "test_review_stage6_integration"):
+                 "test_cross_market_observation", "test_review_stage6_integration",
+                 "test_market_feedback", "test_market_feedback_fetcher",
+                 "test_market_feedback_reporting"):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     global PASSED, FAILED, SKIPPED

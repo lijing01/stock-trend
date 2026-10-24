@@ -2217,16 +2217,20 @@ def collect_review_comparison(ctx: dict, *, as_of, persist=False) -> dict:
                 "reason": f"交易日对比不可用：{type(exc).__name__}: {exc}", "fields": {}}
 
 
-def collect_market_feedback(ctx, *, as_of, no_refresh=False):
+def collect_market_feedback(ctx, *, as_of, no_refresh=False, refresh_mode="historical"):
     """Keep cohort evidence independent of scores and fail only this section."""
     try:
         from analysis.market_feedback_job import collect_feedback
-        calendar = None if no_refresh else _review_calendar(as_of)
+        calendar = (None if no_refresh or refresh_mode != "live_refresh"
+                    else _review_calendar(as_of))
         return collect_feedback(ctx, calendar=calendar, as_of=as_of,
-                                cache_dir=CACHE_DIR, no_refresh=no_refresh)
+                                cache_dir=CACHE_DIR, no_refresh=no_refresh,
+                                refresh_mode="no_refresh" if no_refresh else refresh_mode)
     except Exception as exc:
-        return {"schema_version": "market-feedback/v1", "status": "unavailable",
-                "basis_date": ctx.get("data_date"), "as_of": as_of.isoformat(),
+        feedback_day = as_of.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        return {"schema_version": "market-feedback/v2", "status": "unavailable",
+                "basis_date": feedback_day, "feedback_basis_date": feedback_day,
+                "market_basis_date": ctx.get("data_date"), "as_of": as_of.isoformat(),
                 "reason": f"昨日强势股反馈不可用：{type(exc).__name__}", "items": []}
 
 
@@ -2308,7 +2312,8 @@ def main():
     core_ctx = copy.deepcopy(ctx)
     ctx = dict(ctx)
     ctx["market_feedback"] = collect_market_feedback(
-        ctx, as_of=run_as_of, no_refresh=args.no_refresh)
+        ctx, as_of=run_as_of, no_refresh=args.no_refresh,
+        refresh_mode="live_refresh")
     if not args.no_refresh and ctx["market_feedback"].get("run_binding"):
         core_ctx["market_feedback_binding"] = ctx["market_feedback"]["run_binding"]
         save_context(core_ctx)

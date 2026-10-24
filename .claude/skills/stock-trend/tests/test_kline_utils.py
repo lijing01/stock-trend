@@ -4,10 +4,12 @@
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
@@ -23,6 +25,7 @@ from core.kline_utils import (  # noqa: E402
     validate_kline_coverage,
 )
 from fetchers import kline_eastmoney  # noqa: E402
+from core import eastmoney_utils  # noqa: E402
 from scans import stock_scanner  # noqa: E402
 
 
@@ -208,6 +211,96 @@ class TestKlineProviderFallback(unittest.TestCase):
             self.assertEqual(payload["meta"]["usable_record_count"], 1)
             self.assertEqual(payload["data"], [])
             save.assert_not_called()
+
+    def test_fetch_url_cancelled_before_primary_does_not_start_transport(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        with patch.object(eastmoney_utils.urllib.request, "urlopen") as primary:
+            with self.assertRaises(TimeoutError):
+                eastmoney_utils.fetch_url(
+                    "https://example.com/data", deadline=time.monotonic() + 1,
+                    cancel_event=cancelled)
+        primary.assert_not_called()
+
+    def test_fetch_url_cancelled_after_primary_skips_proxy_and_curl(self):
+        cancelled = threading.Event()
+
+        def fail_primary(*args, **kwargs):
+            cancelled.set()
+            raise OSError("primary failed")
+
+        with patch.object(eastmoney_utils.urllib.request, "urlopen",
+                          side_effect=fail_primary), \
+                patch.object(eastmoney_utils.urllib.request,
+                             "build_opener") as proxyless, \
+                patch.object(eastmoney_utils, "_fetch_via_curl") as curl:
+            with self.assertRaises(TimeoutError):
+                eastmoney_utils.fetch_url(
+                    "https://example.com/data", deadline=time.monotonic() + 1,
+                    cancel_event=cancelled)
+        proxyless.assert_not_called()
+        curl.assert_not_called()
+
+    def test_legacy_proxy_timeout_still_attempts_curl(self):
+        opener = MagicMock()
+        opener.open.side_effect = TimeoutError("proxy timeout")
+        with patch.object(eastmoney_utils.urllib.request, "urlopen",
+                          side_effect=OSError("primary failed")), \
+                patch.object(eastmoney_utils.urllib.request, "build_opener",
+                             return_value=opener), \
+                patch.object(eastmoney_utils, "_fetch_via_curl",
+                             return_value="curl-ok") as curl:
+            result = eastmoney_utils.fetch_url("https://example.com/data")
+        self.assertEqual(result, "curl-ok")
+        curl.assert_called_once()
+
+    def test_curl_cancelled_after_dns_does_not_start_subprocess(self):
+        cancelled = threading.Event()
+
+        def resolve_then_cancel(*_args, **_kwargs):
+            cancelled.set()
+            return [(None, None, None, None, ("127.0.0.1", 443))]
+
+        with patch.object(eastmoney_utils.socket, "getaddrinfo",
+                          side_effect=resolve_then_cancel), \
+                patch.object(eastmoney_utils.subprocess, "run") as run:
+            with self.assertRaises(TimeoutError):
+                eastmoney_utils._fetch_via_curl(
+                    "https://example.com/data", "example.com", None, 1,
+                    deadline=time.monotonic() + 1, cancel_event=cancelled)
+        run.assert_not_called()
+
+    def test_native_adjustment_is_explicit_and_default_is_unchanged(self):
+        default_url = eastmoney_utils.build_em_kline_url(
+            "push2his.eastmoney.com", "1.600001", beg="20261020",
+            end="20261020")
+        native_url = eastmoney_utils.build_em_kline_url(
+            "push2his.eastmoney.com", "1.600001", beg="20261020",
+            end="20261020", adjustment=0)
+        self.assertIn("&fqt=1&", default_url)
+        self.assertIn("&fqt=0&", native_url)
+
+    def test_fetch_eastmoney_only_forwards_optional_gates_when_present(self):
+        response = json.dumps({
+            "rc": 0,
+            "data": {"name": "sample", "code": "600001", "klines": [
+                "2026-10-20,10,10.5,10.8,9.9,100,1000,0,5,0.5,1"
+            ]},
+        })
+        with patch.object(kline_eastmoney, "fetch_url",
+                          return_value=response) as fetch:
+            kline_eastmoney.fetch_eastmoney("1.600001", "D")
+        self.assertNotIn("deadline", fetch.call_args.kwargs)
+        self.assertNotIn("cancel_event", fetch.call_args.kwargs)
+
+        cancel = threading.Event()
+        deadline = time.monotonic() + 1
+        with patch.object(kline_eastmoney, "fetch_url",
+                          return_value=response) as fetch:
+            kline_eastmoney.fetch_eastmoney(
+                "1.600001", "D", deadline=deadline, cancel_event=cancel)
+        self.assertEqual(fetch.call_args.kwargs["deadline"], deadline)
+        self.assertIs(fetch.call_args.kwargs["cancel_event"], cancel)
 
 
 class TestScannerKlineRefresh(unittest.TestCase):

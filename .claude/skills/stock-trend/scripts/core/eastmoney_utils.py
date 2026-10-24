@@ -189,7 +189,27 @@ def rotate_em_host(fetch_fn, max_retries=3):
     raise RuntimeError(f"East Money全节点失败: {last_error}")
 
 
-def fetch_url(url, headers=None, timeout=15, fallback_timeout=None):
+def _bounded_timeout(requested, deadline=None, cancel_event=None):
+    if cancel_event is not None and cancel_event.is_set():
+        raise TimeoutError("request cancelled before transport start")
+    value = float(requested)
+    if deadline is not None:
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request deadline exhausted before transport start")
+        return max(0.01, min(max(0.05, value), remaining))
+    return value
+
+
+def _transport_gate_closed(deadline=None, cancel_event=None):
+    return bool(
+        (cancel_event is not None and cancel_event.is_set())
+        or (deadline is not None and time.monotonic() >= float(deadline))
+    )
+
+
+def fetch_url(url, headers=None, timeout=15, fallback_timeout=None, *,
+              deadline=None, cancel_event=None):
     """Fetch URL via HTTP GET. Falls back to proxyless if proxy fails.
 
     Args:
@@ -211,15 +231,21 @@ def fetch_url(url, headers=None, timeout=15, fallback_timeout=None):
     req = urllib.request.Request(url, headers=headers or EM_HEADERS)
     first_error = None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        primary_timeout = _bounded_timeout(timeout, deadline, cancel_event)
+        with urllib.request.urlopen(req, timeout=primary_timeout) as resp:
             return resp.read().decode("utf-8")
     except Exception as e:
         first_error = e
         try:
+            proxy_timeout = _bounded_timeout(
+                fallback_timeout, deadline, cancel_event)
             proxyless = urllib.request.ProxyHandler({})
             opener = urllib.request.build_opener(proxyless)
-            with opener.open(req, timeout=fallback_timeout) as resp:
+            with opener.open(req, timeout=proxy_timeout) as resp:
                 return resp.read().decode("utf-8")
+        except TimeoutError:
+            if _transport_gate_closed(deadline, cancel_event):
+                raise
         except Exception:
             pass
 
@@ -227,7 +253,13 @@ def fetch_url(url, headers=None, timeout=15, fallback_timeout=None):
     hostname = _extract_host(url)
     if hostname:
         try:
-            return _fetch_via_curl(url, hostname, headers, fallback_timeout)
+            curl_timeout = _bounded_timeout(
+                fallback_timeout, deadline, cancel_event)
+            return _fetch_via_curl(
+                url, hostname, headers, curl_timeout,
+                deadline=deadline, cancel_event=cancel_event)
+        except TimeoutError:
+            raise
         except Exception:
             raise first_error
     raise first_error
@@ -239,7 +271,8 @@ def _extract_host(url):
     return m.group(1) if m else None
 
 
-def _fetch_via_curl(url, hostname, headers, timeout):
+def _fetch_via_curl(url, hostname, headers, timeout, *, deadline=None,
+                    cancel_event=None):
     """Fetch URL using curl subprocess with forced IPv4 resolution.
 
     Works around CDN DNS issues where the traffic manager redirects
@@ -254,6 +287,8 @@ def _fetch_via_curl(url, hostname, headers, timeout):
     except socket.gaierror:
         raise RuntimeError(f"DNS resolution failed for {hostname}")
 
+    timeout = _bounded_timeout(timeout, deadline, cancel_event)
+
     cmd = [
         "curl", "-s", "--max-time", str(timeout),
         "--resolve", f"{hostname}:443:{ip}",
@@ -264,7 +299,12 @@ def _fetch_via_curl(url, hostname, headers, timeout):
         cmd.extend(["-H", f"{k}: {v}"])
     cmd.append(url)
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+    process_timeout = (
+        timeout + 5 if deadline is None and cancel_event is None
+        else _bounded_timeout(timeout, deadline, cancel_event)
+    )
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=process_timeout)
     if result.returncode != 0:
         raise RuntimeError(f"curl failed (exit={result.returncode}): {result.stderr[:200]}")
     if not result.stdout.strip():
@@ -272,7 +312,8 @@ def _fetch_via_curl(url, hostname, headers, timeout):
     return result.stdout
 
 
-def build_em_kline_url(host, secid, freq='D', lmt=250, beg=None, end=None):
+def build_em_kline_url(host, secid, freq='D', lmt=250, beg=None, end=None,
+                       adjustment=1):
     """Build East Money K-line API URL.
 
     Args:
@@ -293,9 +334,11 @@ def build_em_kline_url(host, secid, freq='D', lmt=250, beg=None, end=None):
     if not beg:
         delta = 730 if freq == "W" else 365
         beg = (datetime.now() - timedelta(days=delta)).strftime("%Y%m%d")
+    if adjustment not in (0, 1, 2):
+        raise ValueError("adjustment must be 0, 1, or 2")
     return (f"https://{host}/api/qt/stock/kline/get"
             f"?secid={secid}&fields1={f1}&fields2={f2}"
-            f"&klt={klt}&fqt=1&beg={beg}&end={end}&lmt={lmt}")
+            f"&klt={klt}&fqt={adjustment}&beg={beg}&end={end}&lmt={lmt}")
 
 
 def parse_em_kline_line(line):

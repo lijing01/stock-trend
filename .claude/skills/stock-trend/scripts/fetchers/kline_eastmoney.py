@@ -35,16 +35,24 @@ from core.eastmoney_utils import (
 
 
 def fetch_eastmoney(secid, freq, lmt=250, host="push2his.eastmoney.com",
-                    timeout=15, fallback_timeout=None):
+                    timeout=15, fallback_timeout=None, *, adjustment=1,
+                    deadline=None, cancel_event=None):
     """Fetch K-line data from East Money API.
 
     Returns a list of parsed records or raises on error.
     """
-    url = build_em_kline_url(host, secid, freq=freq, lmt=lmt)
+    url = build_em_kline_url(
+        host, secid, freq=freq, lmt=lmt, adjustment=adjustment)
     try:
-        raw = fetch_url(
-            url, headers=EM_HEADERS, timeout=timeout,
-            fallback_timeout=fallback_timeout)
+        fetch_kwargs = {
+            "headers": EM_HEADERS, "timeout": timeout,
+            "fallback_timeout": fallback_timeout,
+        }
+        if deadline is not None:
+            fetch_kwargs["deadline"] = deadline
+        if cancel_event is not None:
+            fetch_kwargs["cancel_event"] = cancel_event
+        raw = fetch_url(url, **fetch_kwargs)
         result = json.loads(raw)
     except Exception as e:
         raise RuntimeError(f"东方财富API请求失败({host}): {e}")

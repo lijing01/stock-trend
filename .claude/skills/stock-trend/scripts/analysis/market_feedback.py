@@ -9,8 +9,8 @@ from statistics import median
 from zoneinfo import ZoneInfo
 
 
-SCHEMA_VERSION = "market-feedback/v1"
-RULE_VERSION = "strong-stock-next-session-feedback/v1"
+SCHEMA_VERSION = "market-feedback/v2"
+RULE_VERSION = "strong-stock-next-session-feedback/v2"
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 GROUPS = ("limit_up", "height_core", "core")
 
@@ -84,6 +84,22 @@ def _member_rows(cohort):
     return result
 
 
+def _confirmed_close(raw, basis_date, fetched):
+    if raw.get("mode") != "close" or raw.get("close_confirmed") is not True:
+        return False
+    source_time = str(raw.get("source_time_raw") or "")
+    if raw.get("finality") == "live_daily_close":
+        return source_time.replace("-", "") == basis_date.replace("-", "")
+    if raw.get("finality") != "live_native_quote_close":
+        return False
+    try:
+        event = datetime.strptime(source_time, "%Y%m%d%H%M%S").replace(tzinfo=SHANGHAI)
+    except ValueError:
+        return False
+    close_at = datetime.combine(date.fromisoformat(basis_date), time(15, 10), SHANGHAI)
+    return event.date().isoformat() == basis_date and close_at <= event <= fetched
+
+
 def _quote_index(quotes, basis_date, cutoff, mode):
     result = {}
     session_start = datetime.combine(date.fromisoformat(basis_date), time(0, 0), SHANGHAI)
@@ -97,7 +113,9 @@ def _quote_index(quotes, basis_date, cutoff, mode):
                 or not raw.get("source")
                 or fetched is None or fetched > cutoff
                 or fetched.astimezone(SHANGHAI) < session_start
-                or (mode == "close" and (raw.get("mode") == "intraday"
+                or raw.get("pct_chg_origin") != "provider"
+                or raw.get("price_basis") != "native"
+                or (mode == "close" and (not _confirmed_close(raw, basis_date, fetched)
                                           or fetched.astimezone(SHANGHAI) < close_at))):
             continue
         result[code] = raw
@@ -126,7 +144,7 @@ def _summary(rows):
     }
 
 
-def build_feedback(cohort, quotes, *, basis_date, as_of):
+def build_feedback(cohort, quotes, *, basis_date, as_of, report_as_of=None):
     """Left join today's eligible quote onto every frozen prior member.
 
     ``pct_chg`` is the provider's session change, not an executable return.
@@ -136,14 +154,21 @@ def build_feedback(cohort, quotes, *, basis_date, as_of):
     if not valid_date(basis_date) or cutoff is None:
         raise ValueError("basis_date and aware as_of are required")
     members = _member_rows(cohort)
-    mode = feedback_mode(basis_date, cutoff)
+    request_cutoff = aware_datetime(report_as_of) if report_as_of else cutoff
+    if request_cutoff is None or request_cutoff > cutoff:
+        raise ValueError("report_as_of must not follow the evidence cutoff")
+    mode = feedback_mode(basis_date, request_cutoff)
     quote_by_code = _quote_index(quotes, basis_date, cutoff, mode)
+    raw_by_code = {str(row.get("code") or "").strip().upper(): row
+                   for row in quotes or [] if isinstance(row, dict)}
     rows = []
     for member in members:
         quote = quote_by_code.get(member["code"])
         feedback = "missing"
         pct_chg = close = volume = None
         source = fetched_at = None
+        raw_quote = raw_by_code.get(member["code"], {})
+        reason = raw_quote.get("reason") or "quote_evidence_ineligible"
         if quote is not None:
             status = str(quote.get("status") or "").lower()
             source = quote.get("source")
@@ -159,6 +184,9 @@ def build_feedback(cohort, quotes, *, basis_date, as_of):
                     feedback = "up" if pct_chg > 0 else "down" if pct_chg < 0 else "flat"
                 else:
                     pct_chg = close = volume = None
+                    reason = "invalid_quote"
+        if feedback != "missing":
+            reason = ""
         rows.append({
             **member,
             "feedback": feedback,
@@ -167,6 +195,9 @@ def build_feedback(cohort, quotes, *, basis_date, as_of):
             "volume": volume,
             "quote_source": source,
             "quote_fetched_at": fetched_at,
+            "reason": reason,
+            "provider_attempts": copy.deepcopy(raw_quote.get("provider_attempts") or []),
+            "source_time_raw": raw_quote.get("source_time_raw"),
         })
     groups = {
         role: _summary([row for row in rows if role in row["roles"]])
