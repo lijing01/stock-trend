@@ -1960,7 +1960,8 @@ def run_script_unit_tests():
     suite = unittest.TestSuite()
     for name in ("test_review_comparison", "test_review_comparison_reporting",
                  "test_review_comparison_integration", "test_review_reading",
-                 "test_sector_persistence", "test_observation_comparison",
+                 "test_sector_persistence", "test_sector_data_semantics",
+                 "test_observation_comparison",
                  "test_observation_comparison_reporting", "test_observation_list_analysis",
                  "test_observation_report_update", "test_review_stage5_integration",
                  "test_cross_market_observation", "test_review_stage6_integration",

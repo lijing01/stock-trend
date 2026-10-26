@@ -1062,7 +1062,7 @@ class TestSourceEvidenceAdapters(unittest.TestCase):
             "f12": f"BK{i}", "f14": f"板块{i}", "f3": 1,
             "f104": 3, "f105": 2,
         } for i in range(5)]
-        payload = {"rc": 0, "data": {"diff": rows}}
+        payload = {"rc": 0, "data": {"total": len(rows), "diff": rows}}
         attempts = [
             sc.source_result(payload, sc.live_attempt(
                 attempted=True, provider_attempts=2)),

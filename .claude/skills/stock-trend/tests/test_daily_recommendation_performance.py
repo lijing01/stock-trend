@@ -485,9 +485,8 @@ class TestProductionPerformanceContract(unittest.TestCase):
         self.assertEqual(set(contract.LIVE_ATTEMPT_TIMEOUT_SECONDS), set(SOURCES))
         self.assertEqual(set(contract.MAX_PROVIDER_ATTEMPTS), set(SOURCES))
 
-        ranking_path = (
-            contract.LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_ranking"]
-            * contract.MAX_PROVIDER_ATTEMPTS["sector_ranking"])
+        ranking_path = contract.SECTOR_RANKING_BUDGET_SECONDS
+        self.assertEqual(ranking_path, 45)
         membership_path = (
             contract.LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_membership"]
             * contract.MAX_PROVIDER_ATTEMPTS["sector_membership"])

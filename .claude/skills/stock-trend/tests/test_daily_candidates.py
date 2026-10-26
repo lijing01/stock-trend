@@ -2088,6 +2088,7 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("质量分 + 严格买点奖励", html)
 
     def test_pick_hot_sectors_uses_absolute_threshold(self):
+        metrics = {}
         rankings = {"meta": {"complete": True}, "sectors": [
             {"code": "BK1", "name": "弱中最强", "change_pct": -1.0,
              "main_force_net": -1e8, "up_count": 2, "down_count": 8},
@@ -2096,8 +2097,42 @@ class TestRecommendationPolicy(unittest.TestCase):
         ]}
         with patch("fetchers.sector_data.get_sector_rankings",
                    return_value=rankings):
-            picked = dc.pick_hot_sectors(top_n=20, min_hot=45, min_stocks=1)
+            picked = dc.pick_hot_sectors(
+                top_n=20, min_hot=45, min_stocks=1, metrics=metrics)
         self.assertEqual(picked, [])
+        self.assertEqual(metrics["sector_selection_status"], "no_qualified_sectors")
+        self.assertTrue(metrics["sector_ranking_complete"])
+        self.assertIn("获取成功", metrics["sector_selection_reason"])
+        self.assertNotIn("sector_ranking_unavailable",
+                         metrics.get("degradation_reasons", []))
+
+    def test_main_empty_qualified_ranking_is_not_an_outage(self):
+        def no_hot_sectors(*_args, metrics=None, **_kwargs):
+            metrics.update({
+                "sector_universe_count": 200,
+                "sector_selection_status": "no_qualified_sectors",
+                "sector_selection_reason": "板块排行获取成功，但没有板块通过热度门槛",
+            })
+            return []
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             patch.object(dc, "load_regime_context", return_value={}), \
+             patch("fetchers.sector_data.get_last_trading_day",
+                   return_value=("2026-08-06", "snapshot")), \
+             patch.object(dc, "resolve_recommendation_date", return_value="2026-08-06"), \
+             patch.object(dc, "pick_hot_sectors", side_effect=no_hot_sectors), \
+             patch.object(dc, "scan_sectors", return_value=[]), \
+             patch.object(dc, "REPORTS_DIR", Path(temp_dir)), \
+             patch.object(sys, "argv", ["daily_candidates.py", "--json", "--no-html"]):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                dc.main()
+        performance = json.loads(stdout.getvalue())["meta"]["performance"]
+        self.assertNotIn("sector_ranking_unavailable", performance["degradation_reasons"])
+        self.assertIn("获取成功", stderr.getvalue())
+        self.assertNotIn("无可用同源", stderr.getvalue())
+        self.assertIn("获取成功", dc._performance_html(performance))
+        self.assertIn("获取成功", "\n".join(dc._performance_markdown(performance)))
 
     def test_pick_hot_sectors_falls_back_for_provider_exceptions(self):
         rankings, history = _complete_rankings_and_history()

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -41,7 +42,240 @@ def _ranking_response(*, day: str | None = "2026-10-20",
     return {"rc": 0, "data": {"total": 5, "diff": rows}}
 
 
+def _ranking_page(prefix: str, start: int, count: int, total,
+                  day: str = "2026-10-20") -> dict:
+    rows = [{
+        "f12": f"{prefix}{index:04d}",
+        "f14": f"板块{index}",
+        "f3": 2.5,
+        "f6": 123_456_789,
+        "f8": 6.25,
+        "f62": 10_000,
+        "f104": 7,
+        "f105": 3,
+        "f124": _epoch(day),
+    } for index in range(start, start + count)]
+    return {"rc": 0, "data": {"total": total, "diff": rows}}
+
+
 class SectorFieldSemanticsTests(unittest.TestCase):
+    def test_rankings_fetch_every_page_with_stable_code_order(self):
+        calls = []
+
+        def fetch(url, **_kwargs):
+            query = parse_qs(urlparse(url).query)
+            calls.append(query)
+            page = int(query["pn"][0])
+            prefix = "I" if "t:2" in query["fs"][0] else "C"
+            start = (page - 1) * 100
+            count = min(100, 250 - start)
+            return _ranking_page(prefix, start, count, 250)
+
+        with patch.object(sector_data, "_fetch_json", side_effect=fetch), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                allow_cross_source_fallback=False)
+
+        self.assertTrue(rankings["meta"]["complete"])
+        self.assertEqual(len(rankings["sectors"]), 500)
+        self.assertEqual([int(call["pn"][0]) for call in calls],
+                         [1, 2, 3, 1, 2, 3])
+        self.assertTrue(all(call["pz"] == ["100"] for call in calls))
+        self.assertTrue(all(call["fid"] == ["f12"] for call in calls))
+        self.assertTrue(all(call["po"] == ["1"] for call in calls))
+        for name in ("industry", "concept"):
+            diagnostic = rankings["meta"]["ranking_diagnostics"][name]
+            self.assertEqual(diagnostic["status"], "ok")
+            self.assertEqual(diagnostic["reported_total"], 250)
+            self.assertEqual(diagnostic["unique_rows"], 250)
+            self.assertEqual(diagnostic["pages_fetched"], 3)
+
+    def test_duplicate_page_keeps_rows_but_marks_source_partial(self):
+        responses = [
+            _ranking_page("I", 0, 100, 150),
+            _ranking_page("I", 0, 50, 150),
+            _ranking_page("C", 0, 5, 5),
+        ]
+        with patch.object(sector_data, "_fetch_json", side_effect=responses), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                allow_cross_source_fallback=False)
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(len(rankings["sectors"]), 105)
+        diagnostic = rankings["meta"]["ranking_diagnostics"]["industry"]
+        self.assertEqual(diagnostic["status"], "partial")
+        self.assertEqual(diagnostic["unique_rows"], 100)
+        self.assertEqual(diagnostic["duplicate_rows"], 50)
+        self.assertIn("duplicate_codes", diagnostic["reasons"])
+        self.assertIn("coverage_mismatch", diagnostic["reasons"])
+
+    def test_changed_reported_total_is_partial(self):
+        responses = [
+            _ranking_page("I", 0, 100, 150),
+            _ranking_page("I", 100, 50, 160),
+            _ranking_page("C", 0, 5, 5),
+        ]
+        with patch.object(sector_data, "_fetch_json", side_effect=responses), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                allow_cross_source_fallback=False)
+
+        self.assertFalse(rankings["meta"]["complete"])
+        diagnostic = rankings["meta"]["ranking_diagnostics"]["industry"]
+        self.assertEqual(diagnostic["unique_rows"], 150)
+        self.assertEqual(diagnostic["reported_totals"], [150, 160])
+        self.assertIn("reported_total_changed", diagnostic["reasons"])
+
+    def test_failed_later_page_preserves_partial_rows_and_attempt_count(self):
+        def fetched(payload, attempts=1):
+            return {
+                "payload": payload,
+                "live_attempt": {
+                    "attempted": True, "provider_attempts": attempts,
+                    "reason": "",
+                },
+            }
+
+        responses = [
+            fetched(_ranking_page("I", 0, 100, 150)),
+            sector_data.ProviderFetchError("page failed", 3, "timeout"),
+            fetched(_ranking_page("C", 0, 5, 5)),
+        ]
+        with patch.object(sector_data, "_fetch_json", side_effect=responses), \
+             patch.object(sector_data.time, "sleep"):
+            wrapped = sector_data.get_sector_rankings(
+                with_evidence=True, allow_cross_source_fallback=False)
+
+        rankings = wrapped["payload"]
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(len(rankings["sectors"]), 105)
+        self.assertEqual(wrapped["live_attempt"]["provider_attempts"], 5)
+        diagnostic = rankings["meta"]["ranking_diagnostics"]["industry"]
+        self.assertEqual(diagnostic["status"], "partial")
+        self.assertEqual(diagnostic["unique_rows"], 100)
+        self.assertIn("page_fetch_error:timeout", diagnostic["reasons"])
+
+    def test_missing_reported_total_is_partial_even_with_many_rows(self):
+        response = _ranking_page("I", 0, 100, None)
+        concept = _ranking_page("C", 0, 100, None)
+        with patch.object(sector_data, "_fetch_json",
+                          side_effect=[response, concept]), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                allow_cross_source_fallback=False)
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(len(rankings["sectors"]), 200)
+        self.assertIn(
+            "reported_total_missing",
+            rankings["meta"]["ranking_diagnostics"]["industry"]["reasons"])
+
+    def test_deadline_keeps_first_page_and_marks_coverage_partial(self):
+        clock = {"now": 0.0}
+
+        def fetch(_url, **_kwargs):
+            clock["now"] = 2.0
+            return _ranking_page("I", 0, 100, 150)
+
+        with patch.object(sector_data, "_fetch_json", side_effect=fetch), \
+             patch.object(sector_data.time, "monotonic",
+                          side_effect=lambda: clock["now"]), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                deadline=1.0, allow_cross_source_fallback=False)
+
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertEqual(len(rankings["sectors"]), 100)
+        industry = rankings["meta"]["ranking_diagnostics"]["industry"]
+        self.assertEqual(industry["status"], "partial")
+        self.assertIn("deadline_exhausted", industry["reasons"])
+        self.assertIn("coverage_mismatch", industry["reasons"])
+
+    def test_default_ranking_budget_bounds_slow_pagination(self):
+        clock = {"now": 100.0}
+        deadlines = []
+
+        def fetch(url, **kwargs):
+            deadlines.append(kwargs["deadline"])
+            page = int(parse_qs(urlparse(url).query)["pn"][0])
+            clock["now"] += 23.0
+            return _ranking_page("I", (page - 1) * 100, 100, 500)
+
+        with patch.object(sector_data, "_fetch_json", side_effect=fetch), \
+             patch.object(sector_data.time, "monotonic",
+                          side_effect=lambda: clock["now"]), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                allow_cross_source_fallback=False)
+
+        self.assertEqual(deadlines, [145.0, 145.0])
+        self.assertEqual(len(rankings["sectors"]), 200)
+        self.assertFalse(rankings["meta"]["complete"])
+        reasons = rankings["meta"]["ranking_diagnostics"]["industry"]["reasons"]
+        self.assertIn("deadline_exhausted", reasons)
+        self.assertIn("coverage_mismatch", reasons)
+
+    def test_caller_deadline_shorter_than_ranking_budget_wins(self):
+        clock = {"now": 100.0}
+        deadlines = []
+
+        def fetch(_url, **kwargs):
+            deadlines.append(kwargs["deadline"])
+            clock["now"] += 11.0
+            return _ranking_page("I", 0, 100, 500)
+
+        with patch.object(sector_data, "_fetch_json", side_effect=fetch), \
+             patch.object(sector_data.time, "monotonic",
+                          side_effect=lambda: clock["now"]), \
+             patch.object(sector_data.time, "sleep"):
+            rankings = sector_data.get_sector_rankings(
+                deadline=110.0, allow_cross_source_fallback=False)
+
+        self.assertEqual(deadlines, [110.0])
+        self.assertEqual(len(rankings["sectors"]), 100)
+        self.assertFalse(rankings["meta"]["complete"])
+        self.assertIn(
+            "deadline_exhausted",
+            rankings["meta"]["ranking_diagnostics"]["industry"]["reasons"])
+
+    def test_cache_with_explicit_truncation_evidence_is_downgraded(self):
+        data_date = datetime.now().strftime("%Y-%m-%d")
+        payload = {
+            "schema_version": sector_data.RANKINGS_CACHE_SCHEMA_VERSION,
+            "field_semantics_version": sector_data.SECTOR_FIELD_SEMANTICS_VERSION,
+            "cached_at": datetime.now().isoformat(),
+            "data_date": data_date,
+            "rankings": {
+                "meta": {
+                    "complete": True,
+                    "provider": "eastmoney",
+                    "field_semantics_version": sector_data.SECTOR_FIELD_SEMANTICS_VERSION,
+                    "data_date": data_date,
+                    "date_origin": "provider",
+                    "ranking_diagnostics": {
+                        "industry": {"reported_total": 496, "valid_rows": 100},
+                        "concept": {"reported_total": 516, "valid_rows": 100},
+                    },
+                },
+                "sectors": [{"code": f"BK{i}", "up_count": 1,
+                             "down_count": 0} for i in range(200)],
+            },
+        }
+        protected = sector_data._protect_rankings_cache_payload(payload)
+        meta = protected["rankings"]["meta"]
+        self.assertFalse(meta["complete"])
+        self.assertEqual(meta["coverage_status"], "partial")
+        self.assertIn("industry:coverage_mismatch", meta["coverage_reasons"])
+        self.assertIn("concept:coverage_mismatch", meta["coverage_reasons"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_file = Path(tmpdir) / "rankings.json"
+            cache_file.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.object(sector_data, "CACHE_FILE", cache_file):
+                loaded = sector_data.load_rankings_cache_full()
+        self.assertIsNone(loaded)
+
     def test_legacy_alternative_source_does_not_certify_total_or_guess_rate(self):
         rankings = {"meta": {"provider": "ths", "source": "akshare"}, "sectors": [{
             "amount": 100_000_000, "up_count": 2, "down_count": 1, "total_count": 3}]}

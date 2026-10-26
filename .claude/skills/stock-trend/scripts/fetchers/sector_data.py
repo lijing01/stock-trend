@@ -31,7 +31,12 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from core.eastmoney_utils import EM_HEADERS, EM_PUSH2_HOSTS, rotate_em_host
-from core.source_health import classify_failure, live_attempt, source_result
+from core.source_health import (
+    SECTOR_RANKING_BUDGET_SECONDS,
+    classify_failure,
+    live_attempt,
+    source_result,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 CACHE_DIR = SCRIPT_DIR.parent.parent.parent.parent / ".cache" / "stock-trend"
@@ -151,6 +156,8 @@ def get_sector_list() -> list[dict]:
 
 
 MIN_RANKING_ROWS_PER_SOURCE = 5
+RANKING_PAGE_SIZE = 100
+MAX_RANKING_PAGES_PER_SOURCE = 20
 SECTOR_FIELD_SEMANTICS_VERSION = "sector-fields/v2"
 RANKINGS_CACHE_SCHEMA_VERSION = 2
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -246,6 +253,9 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
         total_count, type). ``total_count`` remains unknown unless complete
         constituent membership proves it.
     """
+    budget_deadline = time.monotonic() + SECTOR_RANKING_BUDGET_SECONDS
+    deadline = min(deadline, budget_deadline) \
+        if deadline is not None else budget_deadline
     fetched_at = datetime.now().astimezone().isoformat()
     requested_date = fetched_at[:10]
     result = {
@@ -290,94 +300,181 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
         # f12=代码, f14=名称, f20=总市值,
         # f104=涨家数, f105=跌家数, f62=主力净流入, f124=更新时间
         fields = "f2,f3,f4,f6,f8,f12,f14,f20,f62,f104,f105,f124,f168,f170,f171"
-        url = (
-            f"{base_url}?fs=m:90+t:{stype}&fields={fields}"
-            f"&pn=1&pz=500&po=0&np=1&fltt=2"
-            f"&fid=f3&_={today}"
-        )
-        try:
-            fetched = _fetch_json(
-                url, timeout=timeout, retries=retries,
-                # Evidence is collected internally even for the historical
-                # payload-only public API.
-                with_evidence=True, deadline=deadline)
-            data, attempt = _unpack_fetch_result(fetched)
-            if attempt:
-                provider_attempts += attempt.get("provider_attempts", 0)
-            payload = _check_result(data)
+        source_rows = []
+        seen_codes = set()
+        reported_total = None
+        reported_totals = []
+        returned_rows = 0
+        valid_rows = 0
+        duplicate_rows = 0
+        pages_fetched = 0
+        source_reasons = []
+        source_failure_reason = ""
+        for page in range(1, MAX_RANKING_PAGES_PER_SOURCE + 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                source_reasons.append("deadline_exhausted")
+                source_failure_reason = "timeout"
+                break
+            # f12 is a stable identity.  Paging a live f3 sort can move rows
+            # between pages while prices change and silently lose/duplicate
+            # sectors.
+            url = (
+                f"{base_url}?fs=m:90+t:{stype}&fields={fields}"
+                f"&pn={page}&pz={RANKING_PAGE_SIZE}&po=1&np=1&fltt=2"
+                f"&fid=f12&_={today}"
+            )
+            try:
+                fetched = _fetch_json(
+                    url, timeout=timeout, retries=retries,
+                    # Evidence is collected internally even for the historical
+                    # payload-only public API.
+                    with_evidence=True, deadline=deadline)
+                data, attempt = _unpack_fetch_result(fetched)
+                if attempt:
+                    provider_attempts += attempt.get("provider_attempts", 0)
+                payload = _check_result(data)
+            except Exception as exc:
+                provider_attempts += getattr(exc, "provider_attempts", 0)
+                source_failure_reason = getattr(exc, "reason", "") \
+                    or classify_failure(exc)
+                source_reasons.append(
+                    f"page_fetch_error:{source_failure_reason}")
+                result["meta"]["errors"].append(
+                    f"{sname}: page {page}: {exc}")
+                break
+
+            pages_fetched += 1
+            page_total = _nonnegative_int_or_none(payload.get("total"))
+            if page_total is None:
+                if "reported_total_missing" not in source_reasons:
+                    source_reasons.append("reported_total_missing")
+            else:
+                reported_totals.append(page_total)
+                if reported_total is None:
+                    reported_total = page_total
+                elif page_total != reported_total:
+                    if "reported_total_changed" not in source_reasons:
+                        source_reasons.append("reported_total_changed")
+
             items = payload.get("diff", [])
             if isinstance(items, dict):
                 items = list(items.values())
-            valid_items = [item for item in items if item.get("f12")]
-            active_items = sum(
-                1 for item in valid_items
-                if (_nonnegative_int_or_none(item.get("f104")) or 0) > 0
-                or (_nonnegative_int_or_none(item.get("f105")) or 0) > 0)
-            result["meta"]["ranking_diagnostics"][sname] = {
-                "status": "ok" if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE
-                else ("sparse" if valid_items else "empty"),
-                "returned_rows": len(items),
-                "valid_rows": len(valid_items),
-                "active_rows": active_items,
-                "reported_total": payload.get("total"),
+            if not isinstance(items, list):
+                items = []
+            returned_rows += len(items)
+            page_valid = [item for item in items
+                          if isinstance(item, dict) and item.get("f12")]
+            valid_rows += len(page_valid)
+            for item in page_valid:
+                code = str(item.get("f12"))
+                if code in seen_codes:
+                    duplicate_rows += 1
+                    continue
+                seen_codes.add(code)
+                source_rows.append(item)
+
+            if duplicate_rows and "duplicate_codes" not in source_reasons:
+                source_reasons.append("duplicate_codes")
+            if reported_total is None:
+                break
+            if len(seen_codes) >= reported_total:
+                break
+            if not items:
+                source_reasons.append("premature_empty_page")
+                break
+            if len(items) < RANKING_PAGE_SIZE:
+                source_reasons.append("premature_short_page")
+                break
+        else:
+            source_reasons.append("page_limit_exhausted")
+
+        if reported_total is not None and len(seen_codes) != reported_total:
+            source_reasons.append("coverage_mismatch")
+        if len(reported_totals) > 1 and len(set(reported_totals)) != 1 \
+                and "reported_total_changed" not in source_reasons:
+            source_reasons.append("reported_total_changed")
+
+        active_items = sum(
+            1 for item in source_rows
+            if (_nonnegative_int_or_none(item.get("f104")) or 0) > 0
+            or (_nonnegative_int_or_none(item.get("f105")) or 0) > 0)
+        source_complete = bool(
+            reported_total is not None
+            and reported_total >= MIN_RANKING_ROWS_PER_SOURCE
+            and len(seen_codes) == reported_total
+            and not source_reasons)
+        if source_complete:
+            source_status = "ok"
+        elif source_rows:
+            source_status = (
+                "sparse"
+                if (len(source_rows) < MIN_RANKING_ROWS_PER_SOURCE
+                    and not source_failure_reason)
+                else "partial"
+            )
+        else:
+            source_status = "error" if source_failure_reason else "empty"
+        result["meta"]["ranking_diagnostics"][sname] = {
+            "status": source_status,
+            "returned_rows": returned_rows,
+            "valid_rows": valid_rows,
+            "unique_rows": len(seen_codes),
+            "duplicate_rows": duplicate_rows,
+            "active_rows": active_items,
+            "reported_total": reported_total,
+            "reported_totals": reported_totals,
+            "pages_fetched": pages_fetched,
+            "reasons": source_reasons,
+        }
+        result["meta"]["sources"][sname] = source_status
+        if source_status != "ok" and not any(
+                message.startswith(f"{sname}:")
+                for message in result["meta"]["errors"]):
+            detail = ",".join(source_reasons) or \
+                f"only {len(source_rows)} valid rows"
+            result["meta"]["errors"].append(f"{sname}: {detail}")
+
+        for item in source_rows:
+            up_count = _nonnegative_int_or_none(item.get("f104"))
+            down_count = _nonnegative_int_or_none(item.get("f105"))
+            sample_count = (
+                up_count + down_count
+                if up_count is not None and down_count is not None
+                else None
+            )
+            provider_timestamp = _provider_timestamp(item.get("f124"))
+            provider_timestamps.append(provider_timestamp)
+            provider_rows += 1
+            sector = {
+                "code": item.get("f12", ""),
+                "provider": "eastmoney",
+                "provider_code": item.get("f12", ""),
+                "sector_id": f"eastmoney:{sname}:{item.get('f12', '')}",
+                "expand_symbol": item.get("f12", ""),
+                "expandable": bool(item.get("f12")),
+                "name": item.get("f14", ""),
+                "type": sname,
+                "change_pct": item.get("f3"),       # 涨跌幅%
+                "amount": _nonnegative_number_or_none(item.get("f6")),
+                "turnover_rate": _nonnegative_number_or_none(item.get("f8")),
+                "up_count": up_count,                 # 涨家数
+                "down_count": down_count,             # 跌家数
+                "up_down_sample_count": sample_count,
+                "flat_count": None,
+                "suspended_count": None,
+                "uncovered_count": None,
+                "total_count": None,
+                "constituent_coverage_complete": False,
+                "provider_timestamp": provider_timestamp,
+                "main_force_net": item.get("f62"),   # 主力净流入
             }
-            if len(valid_items) >= MIN_RANKING_ROWS_PER_SOURCE:
-                result["meta"]["sources"][sname] = "ok"
-            elif valid_items:
-                result["meta"]["sources"][sname] = "sparse"
-                result["meta"]["errors"].append(
-                    f"{sname}: only {len(valid_items)} valid rows"
-                )
-            else:
-                result["meta"]["sources"][sname] = "empty"
-                result["meta"]["errors"].append(f"{sname}: empty response")
-            for item in valid_items:
-                up_count = _nonnegative_int_or_none(item.get("f104"))
-                down_count = _nonnegative_int_or_none(item.get("f105"))
-                sample_count = (
-                    up_count + down_count
-                    if up_count is not None and down_count is not None
-                    else None
-                )
-                provider_timestamp = _provider_timestamp(item.get("f124"))
-                provider_timestamps.append(provider_timestamp)
-                provider_rows += 1
-                sector = {
-                    "code": item.get("f12", ""),
-                    "provider": "eastmoney",
-                    "provider_code": item.get("f12", ""),
-                    "sector_id": f"eastmoney:{sname}:{item.get('f12', '')}",
-                    "expand_symbol": item.get("f12", ""),
-                    "expandable": bool(item.get("f12")),
-                    "name": item.get("f14", ""),
-                    "type": sname,
-                    "change_pct": item.get("f3"),       # 涨跌幅%
-                    "amount": _nonnegative_number_or_none(item.get("f6")),
-                    "turnover_rate": _nonnegative_number_or_none(item.get("f8")),
-                    "up_count": up_count,                 # 涨家数
-                    "down_count": down_count,             # 跌家数
-                    "up_down_sample_count": sample_count,
-                    "flat_count": None,
-                    "suspended_count": None,
-                    "uncovered_count": None,
-                    "total_count": None,
-                    "constituent_coverage_complete": False,
-                    "provider_timestamp": provider_timestamp,
-                    "main_force_net": item.get("f62"),   # 主力净流入
-                }
-                if sector["code"]:
-                    result["sectors"].append(sector)
-        except Exception as e:
-            provider_attempts += getattr(e, "provider_attempts", 0)
-            failure_reason = getattr(e, "reason", "") \
-                or classify_failure(e)
-            result["meta"]["sources"][sname] = "error"
-            result["meta"]["errors"].append(f"{sname}: {e}")
-            result["meta"]["ranking_diagnostics"][sname] = {
-                "status": "error", "reason": failure_reason,
-                "detail": str(e),
-            }
-            print(f"  Warning: 无法获取{sname}板块排行: {e}", file=sys.stderr)
+            if sector["code"]:
+                result["sectors"].append(sector)
+        if source_failure_reason:
+            failure_reason = source_failure_reason
+            print(
+                f"  Warning: {sname}板块排行仅获取部分分页: "
+                f"{source_failure_reason}", file=sys.stderr)
 
     _apply_provider_date_evidence(
         result["meta"], provider_timestamps, provider_rows)
@@ -427,7 +524,7 @@ def get_sector_rankings(timeout: int = 15, retries: int = 3,
     if result["meta"]["complete"] and active:
         failure_reason = ""
     elif not failure_reason:
-        failure_reason = "empty"
+        failure_reason = "incomplete"
     result["meta"]["live_attempt"] = live_attempt(
         attempted=provider_attempts > 0,
         provider_attempts=provider_attempts,
@@ -1194,6 +1291,30 @@ def _protect_rankings_cache_payload(payload: dict) -> dict:
         payload.get("rankings", {}))
     wrapper_claimed_date = payload.get("data_date")
     ranking_meta = rankings.get("meta", {}) if isinstance(rankings, dict) else {}
+    coverage_reasons = []
+    diagnostics = ranking_meta.get("ranking_diagnostics", {}) \
+        if isinstance(ranking_meta, dict) else {}
+    if isinstance(diagnostics, dict):
+        for source_name, diagnostic in diagnostics.items():
+            if not isinstance(diagnostic, dict):
+                continue
+            total = _nonnegative_int_or_none(
+                diagnostic.get("reported_total"))
+            covered = _nonnegative_int_or_none(
+                diagnostic.get("unique_rows"))
+            if covered is None:
+                covered = _nonnegative_int_or_none(
+                    diagnostic.get("valid_rows"))
+            if total is not None and covered is not None and covered < total:
+                coverage_reasons.append(
+                    f"{source_name}:coverage_mismatch")
+    if coverage_reasons:
+        rankings = dict(rankings)
+        ranking_meta = dict(ranking_meta)
+        ranking_meta["complete"] = False
+        ranking_meta["coverage_status"] = "partial"
+        ranking_meta["coverage_reasons"] = coverage_reasons
+        rankings["meta"] = ranking_meta
     wrapper_date = _verified_trading_date(wrapper_claimed_date)
     ranking_date = _verified_trading_date(ranking_meta.get("data_date"))
     provider_date_proven = bool(

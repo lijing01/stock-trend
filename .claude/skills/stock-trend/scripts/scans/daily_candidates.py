@@ -58,7 +58,6 @@ from core.source_health import (
     CAPITAL_TOPUP_RESERVE_SECONDS,
     FINALIZATION_RESERVE_SECONDS,
     LIVE_ATTEMPT_TIMEOUT_SECONDS,
-    MAX_PROVIDER_ATTEMPTS,
     RunSourceHealth,
     SCAN_DEADLINE_SECONDS,
     SOURCES as SOURCE_HEALTH_NAMES,
@@ -1071,6 +1070,8 @@ def _performance_markdown(performance):
         "",
         f"**扫描状态**: {performance.get('scan_status', 'complete')} | "
         f"降级原因: {'、'.join(performance.get('degradation_reasons', [])) or '无'}",
+        *([f"板块筛选: {performance['sector_selection_reason']}"]
+          if performance.get("sector_selection_reason") else []),
         "",
         f"**辅助提示**: "
         f"{'、'.join(performance.get('advisory_reasons', [])) or '无'}",
@@ -1280,6 +1281,9 @@ def _performance_html(performance):
         "、".join(performance.get("degradation_reasons", [])) or "无")
     advisory_reasons = escape(
         "、".join(performance.get("advisory_reasons", [])) or "无")
+    selection_html = (
+        f"<p class='dt'>板块筛选：{escape(str(performance['sector_selection_reason']))}</p>"
+        if performance.get("sector_selection_reason") else "")
     coverage_text = (
         f"扫描模式={performance.get('scan_mode', 'exploratory')} | "
         f"范围策略={performance.get('scope_policy', 'adaptive_bounded')} | "
@@ -1315,6 +1319,7 @@ def _performance_html(performance):
         f"<p class='dt'>{escape(capital_text)}</p>"
         f"<p class='dt'>{escape(budget_text)}</p>"
         f"<p class='dt'>扫描状态={scan_status} | 降级原因={degradation_reasons}</p>"
+        f"{selection_html}"
         f"<p class='dt'>辅助提示={advisory_reasons}</p>"
         "<table><thead><tr><th>数据源</th><th>逻辑请求</th>"
         "<th>Provider尝试</th><th>缓存</th><th>失败</th><th>熔断</th>"
@@ -1954,8 +1959,9 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
                 and ranking_token is not None:
             wrapped = get_sector_rankings(
                 timeout=LIVE_ATTEMPT_TIMEOUT_SECONDS["sector_ranking"],
-                retries=max(
-                    0, MAX_PROVIDER_ATTEMPTS["sector_ranking"] // 2 - 1),
+                # Retry each page once; the fetcher bounds the complete
+                # paginated request with its independent ranking deadline.
+                retries=1,
                 with_evidence=True,
                 deadline=source_health.live_deadline,
                 # Formal candidate eligibility uses the same provider for
@@ -2136,6 +2142,9 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
     metrics["sector_ranking_fallback_reason"] = ranking_meta.get(
         "fallback_reason", "")
     metrics["ranking_provenance"] = copy.deepcopy(ranking_meta)
+    metrics["sector_ranking_complete"] = rankings.get("meta", {}).get("complete") is True
+    metrics["sector_ranking_diagnostics"] = copy.deepcopy(
+        rankings.get("meta", {}).get("ranking_diagnostics", {}))
     # If the live request failed and a verified cache was selected, the
     # report's universe must describe the selected snapshot, not the failed
     # live payload (which is usually zero sectors).
@@ -2187,6 +2196,15 @@ def pick_hot_sectors(top_n=None, min_hot=45, min_stocks=10, regime=None,
         if sector.get("absolute_hot_score", 0) >= min_hot
     ]
     metrics["sector_qualified_count"] = len(qualified)
+    if qualified:
+        metrics["sector_selection_status"] = "qualified"
+        metrics["sector_selection_reason"] = "已有板块通过热度门槛"
+    elif metrics["sector_ranking_complete"] and rankings.get("sectors"):
+        metrics["sector_selection_status"] = "no_qualified_sectors"
+        metrics["sector_selection_reason"] = "板块排行获取成功，但没有板块通过成分数量、上涨比例和热度门槛"
+    else:
+        metrics["sector_selection_status"] = "ranking_unavailable"
+        metrics["sector_selection_reason"] = "板块排行缺失或覆盖不完整，无法确认完整板块筛选结果"
     hs300_change = (regime or {}).get("hs300_change")
     history_load_errors = []
     candidate_history = load_candidate_sector_history(
@@ -5192,12 +5210,13 @@ def main():
             time.monotonic() - ranking_start, 3)
         performance["sector_ranking_requests"] = 1
         if not sector_codes:
-            # An unavailable same-source ranking is a valid observation
-            # outcome.  Continue through the normal serializers so scheduled
-            # runs leave an auditable "no recommendation" report.
-            performance.setdefault("degradation_reasons", []).append(
-                "sector_ranking_unavailable")
-            print("⚠️ 无可用同源板块排行,生成空候选报告", file=sys.stderr)
+            if performance.get("sector_selection_status") == "no_qualified_sectors":
+                print(performance["sector_selection_reason"] + ",生成空候选报告",
+                      file=sys.stderr)
+            else:
+                performance.setdefault("degradation_reasons", []).append(
+                    "sector_ranking_unavailable")
+                print("⚠️ 板块排行缺失或覆盖不完整,生成空候选报告", file=sys.stderr)
         else:
             sector_preview = [
                 f"{sector['name']}({sector['sector_score']:.0f})"
