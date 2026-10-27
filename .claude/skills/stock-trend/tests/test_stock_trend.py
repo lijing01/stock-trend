@@ -1807,6 +1807,7 @@ def run_daily_recommendation_tests():
         from test_stock_scanner import run_stock_scanner_tests
         from test_candidate_news import run_candidate_news_tests
         from test_weak_to_strong_integration import run_weak_to_strong_tests
+        from test_weak_to_strong_followup import run_weak_to_strong_followup_tests
 
         global PASSED, FAILED
         for runner in (
@@ -1816,6 +1817,7 @@ def run_daily_recommendation_tests():
             run_daily_candidates_tests,
             run_candidate_news_tests,
             run_weak_to_strong_tests,
+            run_weak_to_strong_followup_tests,
             run_candidate_trade_plan_tests,
             run_recommendation_snapshot_tests,
             run_recommendation_attribution_tests,

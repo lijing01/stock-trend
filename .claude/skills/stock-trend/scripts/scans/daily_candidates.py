@@ -16,6 +16,7 @@ import argparse
 import copy
 import logging
 import math
+import hashlib
 from html import escape
 import time
 from datetime import datetime, timedelta, time as datetime_time
@@ -89,6 +90,11 @@ from reporting import candidate_formatters
 from reporting import weak_to_strong as weak_to_strong_report
 from analysis.daily_weak_to_strong import DEFAULT_CONFIG as WEAK_TO_STRONG_CONFIG
 from core.weak_to_strong_snapshot import save_snapshot as save_weak_to_strong_snapshot
+from core.weak_to_strong_snapshot import load_previous_snapshot as load_previous_weak_snapshot
+from analysis.weak_to_strong_followup import build_follow_up_baseline, evaluate_follow_up
+from analysis.daily_weak_to_strong import analyze_daily_weak_to_strong
+from scans import stock_scanner as weak_scanner
+from core.source_health import bounded_source_map
 SIGNAL_LABELS = candidate_formatters.SIGNAL_LABELS
 LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
@@ -5103,6 +5109,11 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .weak-to-strong-table th:nth-child(8){{width:90px}}
 .weak-to-strong-table th:nth-child(9){{width:155px}}
 .weak-to-strong-table th:nth-child(10){{width:260px}}
+.weak-follow-up-table th:nth-child(1){{width:145px}}
+.weak-follow-up-table th:nth-child(2){{width:180px}}
+.weak-follow-up-table th:nth-child(3),.weak-follow-up-table th:nth-child(4),.weak-follow-up-table th:nth-child(5){{width:130px}}
+.weak-follow-up-table th:nth-child(6){{width:260px}}
+.weak-follow-up-table th:nth-child(7),.weak-follow-up-table th:nth-child(8){{width:150px}}
 .weak-to-strong-table td:nth-child(4),.weak-to-strong-table td:nth-child(6),.weak-to-strong-table td:nth-child(7),.weak-to-strong-table td:nth-child(8){{font-variant-numeric:tabular-nums}}
 .weak-sector+.weak-sector{{margin-top:8px}}
 .weak-sector .sector-tag{{white-space:normal;overflow-wrap:anywhere}}
@@ -5200,7 +5211,7 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
 
 
 def build_weak_to_strong_output(collected, population, sectors, as_of_date,
-                                policy, buckets, performance):
+                                policy, buckets, performance, calendar_dates=None):
     """Build the independent report from all phase-1 stocks, before top-N."""
     universe = {str(item.get("code")): item for item in population
                 if isinstance(item, dict) and item.get("code")}
@@ -5214,7 +5225,7 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
               if row.get("code")}
     result = {"schema_version": "daily-weak-to-strong/v1", "as_of_date": as_of_date,
               "parameters": copy.deepcopy(WEAK_TO_STRONG_CONFIG),
-              "confirmed": [], "watching": [], "provisional": [], "diagnostics": []}
+              "confirmed": [], "watching": [], "pullback": [], "provisional": [], "diagnostics": []}
     status = performance.get("weak_to_strong_collector_status", "ready")
     if set(universe) - set(by_code):
         status = "collector_not_supported" if not by_code else "partial"
@@ -5250,6 +5261,17 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
             result["provisional"].append(item)
         else:
             result["diagnostics"].append(item)
+            if state == "PULLBACK" and ready:
+                observed = copy.deepcopy(item)
+                dates = sorted({str(day) for day in (calendar_dates or []) if str(day) <= as_of_date})
+                recent = dates[-3:]
+                closes = ([_follow_up_close(entry.get("kline_payload"), day) for day in recent]
+                          if entry and len(recent) == 3 and recent[-1] == as_of_date else [])
+                observed["two_day_decline"] = (
+                    closes[2] < closes[1] < closes[0]
+                    if len(closes) == 3 and all(value is not None and value > 0 for value in closes)
+                    else None)
+                result["pullback"].append(observed)
     insufficient = sum(row.get("evidence_status") == "data_insufficient"
                        for row in result["diagnostics"])
     result["summary"] = {"attempted": len(universe), "evaluated": len(universe) - insufficient,
@@ -5263,6 +5285,96 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
                                           and performance.get("sector_selection_status") != "ranking_unavailable"),
                        "collector_status": status}
     return result
+
+
+def _follow_up_close(payload, day):
+    """Return a closing price only for the requested trading date."""
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    matches = [row for row in rows if isinstance(row, dict) and
+               str(row.get("trade_date") or row.get("date") or "").replace("-", "")
+               == day.replace("-", "")]
+    if len(matches) != 1:
+        return None
+    value = matches[0].get("close")
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+def build_weak_follow_up(as_of_date, calendar_dates, calendar, collected, health, *, provisional=False):
+    """Evaluate prior signals independently from the formal candidate universe."""
+    loaded = load_previous_weak_snapshot(CACHE_DIR / "weak_to_strong", as_of_date, calendar_dates)
+    output = {"status": loaded.get("status", "invalid"),
+              "reason": loaded.get("reason", ""),
+              "baseline": {**(loaded.get("tracking") or {}),
+                           "as_of_date": loaded.get("previous_trading_date", "")},
+              "rows": []}
+    if output["status"] != "loaded":
+        return output
+    snapshot = loaded["snapshot"]
+    prior = snapshot.get("result") or {}
+    inputs = snapshot.get("inputs") or {}
+    source_date = loaded["previous_trading_date"]
+    baselines = {}
+    old_follow = prior.get("follow_up") or {}
+    if old_follow and (old_follow.get("status") != "loaded" or old_follow.get("coverage_warning")):
+        output["coverage_warning"] = "此前跟踪链存在缺口，历史信号可能不完整。"
+    for item in list(prior.get("confirmed") or []) + list(prior.get("watching") or []) + list(old_follow.get("rows") or []):
+        if not isinstance(item, dict):
+            continue
+        ts_code = str(item.get("ts_code") or "")
+        entry = inputs.get(ts_code) or {}
+        old_close = _follow_up_close(entry.get("kline_payload"), source_date) if isinstance(entry, dict) else None
+        # Preserved follow-up rows carry the last valid close; never replace it
+        # with an unconfirmed or missing previous session's K-line.
+        if item.get("follow_up_status"):
+            old_close = None
+        baseline = build_follow_up_baseline(item, source_date, latest_close=old_close)
+        if not baseline or not ts_code:
+            continue
+        key = (ts_code, baseline.get("origin_cycle_id"))
+        baselines[key] = baseline
+    missing = sorted({key[0] for key in baselines if key[0] not in collected})
+    fetched = {}
+    if missing:
+        # The normal K-line budget reserves time for downstream enrichment,
+        # which is already complete here. Use the remaining overall deadline
+        # with a separate cap; never consume the report finalization reserve.
+        deadline = min(health.live_deadline, time.monotonic() + 50)
+        fetched_pairs = bounded_source_map(
+            "kline", missing, health,
+            lambda code: weak_scanner._evidenced_fetch(
+                weak_scanner._fetch_kline, code, as_of_date=as_of_date,
+                live_deadline=deadline, require_close_confirmation=True),
+            lambda code: weak_scanner._cache_fetch(
+                weak_scanner._fetch_kline, code, as_of_date=as_of_date,
+                require_close_confirmation=True),
+            deadline, max_workers=4, include_evidence=True)
+        fetched = {code: weak_scanner._unpack_source_result(value)[0]
+                   for code, value in fetched_pairs}
+    for (ts_code, _), baseline in sorted(baselines.items()):
+        entry = collected.get(ts_code) or {}
+        payload = entry.get("kline_payload") if entry else fetched.get(ts_code)
+        if entry:
+            result = copy.deepcopy(entry.get("result") or {})
+        else:
+            close = weak_scanner._kline_close_confirmation(payload, as_of_date, required=True)
+            try:
+                result = analyze_daily_weak_to_strong(payload, as_of_date=as_of_date,
+                                                     close_evidence=close, calendar_evidence=calendar)
+                if result.get("cycle_id"):
+                    result["cycle_id"] = hashlib.sha256(
+                        (ts_code + ":" + result["cycle_id"]).encode("utf-8")).hexdigest()
+                for event in result.get("events", []):
+                    if event.get("cycle_id"):
+                        event["cycle_id"] = hashlib.sha256(
+                            (ts_code + ":" + event["cycle_id"]).encode("utf-8")).hexdigest()
+            except (TypeError, ValueError, KeyError, ArithmeticError):
+                result = {"as_of_date": as_of_date, "evidence_status": "data_insufficient"}
+        price = _follow_up_close(payload, as_of_date)
+        row = evaluate_follow_up(baseline, result, latest_close=price, data_date=as_of_date,
+                                 close_confirmed=False if provisional else None)
+        row["data_date"] = (result.get("kline_evidence") or {}).get("data_date", "")
+        output["rows"].append(row)
+    return output
 
 
 def main():
@@ -5640,7 +5752,11 @@ def main():
 
     weak_output = build_weak_to_strong_output(
         weak_results, research_population, sector_codes, expected_date,
-        policy, buckets, performance)
+        policy, buckets, performance, calendar_dates=calendar_dates)
+    weak_output["follow_up"] = build_weak_follow_up(
+        expected_date, calendar_dates, weak_calendar, weak_results, source_health,
+        provisional=bool(policy.get("provisional")))
+    weak_to_strong_report.sort_payload(weak_output)
     weak_output["tracking"] = save_weak_to_strong_snapshot(
         weak_output, weak_results, weak_calendar, regime, CACHE_DIR / "weak_to_strong",
         provisional=bool(policy.get("provisional")))

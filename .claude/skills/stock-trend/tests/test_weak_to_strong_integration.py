@@ -12,11 +12,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from scans import daily_candidates as dc
 from scans import stock_scanner as sc
 from reporting import weak_to_strong as report
-from core.weak_to_strong_snapshot import save_snapshot
+from core.weak_to_strong_snapshot import (
+    load_latest_snapshot,
+    load_previous_snapshot,
+    save_snapshot,
+)
 from test_daily_weak_to_strong import payload_with_pattern, row, trading_days
 
 
 class WeakToStrongIntegrationTests(unittest.TestCase):
+    def test_pullback_observation_preserves_diagnostics_and_calendar_evidence(self):
+        dates = ["2026-10-23", "2026-10-26", "2026-10-27"]
+        candidate = {"code": "300005", "name": "测试股"}
+        item = {"code": "300005", "name": "测试股", "state": "PULLBACK",
+                "evidence_status": "ready", "drawdown_ratio": 0.08}
+        rows = [{"trade_date": day.replace("-", ""), "close": close}
+                for day, close in zip(dates, (10.3, 10.2, 9.95))]
+        collected = {"300005.SZ": {"result": item, "kline_payload": {"data": rows}}}
+        output = dc.build_weak_to_strong_output(collected, [candidate], [], dates[-1],
+                                               {}, {}, {}, calendar_dates=dates)
+        self.assertTrue(output["pullback"][0]["two_day_decline"])
+        self.assertEqual(len(output["diagnostics"]), 1)
+        self.assertEqual(output["summary"]["evaluated"], 1)
+        rows.pop(1)
+        output = dc.build_weak_to_strong_output(collected, [candidate], [], dates[-1],
+                                               {}, {}, {}, calendar_dates=dates)
+        self.assertIsNone(output["pullback"][0]["two_day_decline"])
+        item["evidence_status"] = "data_insufficient"
+        output = dc.build_weak_to_strong_output(collected, [candidate], [], dates[-1],
+                                               {}, {}, {}, calendar_dates=dates)
+        self.assertEqual(output["pullback"], [])
+        self.assertEqual(output["summary"]["data_insufficient"], 1)
+
     def test_wyckoff_filtered_stock_survives_in_independent_report(self):
         payload, _ = payload_with_pattern()
         days = trading_days(100)
@@ -141,6 +168,75 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
             provisional = save_snapshot(payload, {}, {}, {}, root, provisional=True)
             self.assertIn("provisional", provisional["path"])
             self.assertTrue(Path(first["path"]).exists())
+
+    def test_snapshot_latest_run_index_and_previous_trading_date(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"as_of_date": "2026-10-26", "scope": {}, "confirmed": []}
+            first = save_snapshot(
+                payload, {"600001": [1]}, {}, {}, root,
+                generated_at="2026-10-26T15:01:00+08:00")
+            second = save_snapshot(
+                payload, {"600001": [2]}, {}, {}, root,
+                generated_at="2026-10-26T15:02:00+08:00")
+            third = save_snapshot(
+                payload, {"600001": [3]}, {}, {}, root,
+                generated_at="2026-10-26T15:00:00+08:00")
+
+            loaded = load_previous_snapshot(
+                root, "2026-10-27", ["2026-10-24", "2026-10-26", "2026-10-27"])
+
+            self.assertEqual(loaded["status"], "loaded")
+            self.assertEqual(loaded["previous_trading_date"], "2026-10-26")
+            self.assertEqual(loaded["snapshot"]["inputs"], {"600001": [2]})
+            self.assertEqual(loaded["tracking"]["content_sha256"],
+                             second["content_sha256"])
+            self.assertEqual(loaded["tracking"]["selection_method"],
+                             "run_index_generated_at_sequence")
+            self.assertNotEqual(first["run_index_path"], second["run_index_path"])
+            self.assertNotEqual(second["run_index_path"], third["run_index_path"])
+
+            missing_current = load_previous_snapshot(
+                root, "2026-10-27", ["2026-10-24", "2026-10-26"])
+            self.assertEqual(missing_current["status"], "invalid")
+            self.assertEqual(missing_current["reason"],
+                             "as_of_date_not_in_trading_calendar")
+
+    def test_snapshot_latest_corruption_is_not_silently_skipped(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"as_of_date": "2026-10-26", "scope": {}, "confirmed": []}
+            save_snapshot(payload, {"600001": [1]}, {}, {}, root)
+            latest = save_snapshot(payload, {"600001": [2]}, {}, {}, root)
+            Path(latest["path"]).write_text("{}", encoding="utf-8")
+
+            loaded = load_latest_snapshot(root, "2026-10-26")
+
+            self.assertEqual(loaded["status"], "invalid")
+            self.assertEqual(loaded["reason"], "snapshot_hash_mismatch")
+
+    def test_snapshot_legacy_mtime_fallback_is_visible(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"as_of_date": "2026-10-26", "scope": {}, "confirmed": []}
+            saved = save_snapshot(payload, {"600001": [1]}, {}, {}, root)
+            Path(saved["run_index_path"]).unlink()
+
+            loaded = load_latest_snapshot(root, "2026-10-26")
+
+            self.assertEqual(loaded["status"], "loaded")
+            self.assertEqual(loaded["tracking"]["selection_method"],
+                             "legacy_mtime_fallback")
+
+    def test_snapshot_invalid_index_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            payload = {"as_of_date": "2026-10-26", "scope": {}, "confirmed": []}
+            saved = save_snapshot(payload, {"600001": [1]}, {}, {}, root)
+            index_dir = Path(saved["run_index_path"]).parent
+            (index_dir / "00000000000000000000-broken.json").write_text(
+                "{}", encoding="utf-8")
+
+            loaded = load_latest_snapshot(root, "2026-10-26")
+
+            self.assertEqual(loaded["status"], "invalid")
+            self.assertEqual(loaded["reason"], "run_index_invalid")
 
 
 def run_weak_to_strong_tests():
