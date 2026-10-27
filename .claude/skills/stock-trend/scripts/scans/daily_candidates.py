@@ -85,6 +85,9 @@ from core.lps_event_index import (
 )
 from reporting.market_explanation import render_market_explanation
 from reporting import candidate_formatters
+from reporting import weak_to_strong as weak_to_strong_report
+from analysis.daily_weak_to_strong import DEFAULT_CONFIG as WEAK_TO_STRONG_CONFIG
+from core.weak_to_strong_snapshot import save_snapshot as save_weak_to_strong_snapshot
 SIGNAL_LABELS = candidate_formatters.SIGNAL_LABELS
 LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
@@ -2280,7 +2283,9 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                  max_sector_expansion=DEFAULT_MAX_SECTOR_EXPANSION,
                  policy=None, return_research_population=False,
                  scan_mode="exploratory", defer_enrichment=False,
-                 prior_lps_records=None, kline_artifacts=None):
+                 prior_lps_records=None, kline_artifacts=None,
+                 weak_to_strong_results=None, weak_to_strong_calendar=None,
+                 weak_to_strong_intraday=False):
     """Scan the bounded sector universe, optionally completing a fixed scope."""
     metrics = metrics if metrics is not None else {}
     formal_scope = scan_mode == "post_close_final"
@@ -2492,15 +2497,22 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     include_phase_d_lps_context=True,
                     include_formal_event_history=True,
                     require_close_confirmation=formal_scope,
-                    kline_artifacts=kline_artifacts)
+                    kline_artifacts=kline_artifacts,
+                    **({"weak_to_strong_results": weak_to_strong_results,
+                        "weak_to_strong_calendar": weak_to_strong_calendar,
+                        "weak_to_strong_intraday": weak_to_strong_intraday}
+                       if weak_to_strong_results is not None else {}))
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
                         "source_health", "metrics", "capital_expected_date",
                         "top", "min_candidates", "min_score",
                         "defer_enrichment", "include_phase_d_lps_context",
                         "include_formal_event_history", "kline_artifacts",
-                        "require_close_confirmation")):
+                        "require_close_confirmation", "weak_to_strong_results",
+                        "weak_to_strong_calendar", "weak_to_strong_intraday")):
                     raise
+                if weak_to_strong_results is not None:
+                    metrics["weak_to_strong_collector_status"] = "collector_not_supported"
                 try:
                     scored = run_phase2(
                         new_candidates, enable_wyckoff=True,
@@ -2597,6 +2609,14 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                 if isinstance(membership, dict))
         for row in prior_by_code.values()
     )
+    if isinstance(weak_to_strong_results, dict):
+        for item in phase1_candidates.values():
+            entry = weak_to_strong_results.get(item.get("ts_code"))
+            if entry:
+                signal = entry["result"]
+                signal["sector_memberships"] = merge_sector_memberships(
+                    signal.get("sector_memberships", []),
+                    item.get("sector_memberships", []))
     selected = [all_scored[code] for code in sorted(all_scored)]
     if not return_research_population:
         return selected
@@ -2641,7 +2661,9 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
                                capital_expected_date="", policy=None,
                                priority_bonuses=None, source_health=None,
                                metrics=None, kline_artifacts=None,
-                               require_close_confirmation=False):
+                               require_close_confirmation=False,
+                               weak_to_strong_results=None, weak_to_strong_calendar=None,
+                               weak_to_strong_intraday=False):
     """Run one enrichment queue over the global report scope plus buffer."""
     scored = list(scored or [])
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -2672,12 +2694,23 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
         "kline_budget_stage": "topup",
         "require_close_confirmation": require_close_confirmation,
     }
+    if weak_to_strong_results is not None:
+        phase2_kwargs.update(weak_to_strong_results=weak_to_strong_results,
+                             weak_to_strong_calendar=weak_to_strong_calendar,
+                             weak_to_strong_intraday=weak_to_strong_intraday)
     try:
         enriched = run_phase2(scope, **phase2_kwargs)
     except TypeError as exc:
-        if "require_close_confirmation" not in str(exc):
+        if not any(name in str(exc) for name in (
+                "require_close_confirmation", "weak_to_strong_results",
+                "weak_to_strong_calendar", "weak_to_strong_intraday")):
             raise
-        phase2_kwargs.pop("require_close_confirmation")
+        phase2_kwargs.pop("require_close_confirmation", None)
+        for key in ("weak_to_strong_results", "weak_to_strong_calendar",
+                    "weak_to_strong_intraday"):
+            phase2_kwargs.pop(key, None)
+        if weak_to_strong_results is not None:
+            metrics["weak_to_strong_collector_status"] = "collector_not_supported"
         enriched = run_phase2(scope, **phase2_kwargs)
     original_by_code = {
         item.get("code"): item for item in scored if item.get("code")
@@ -4472,7 +4505,8 @@ def _phase_d_lps_shadow_html(shadow):
 
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                     performance=None, tracking=None, market_regime=None,
-                    style_shadow=None, news_shadow=None, phase_d_lps_shadow=None):
+                    style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
+                    weak_to_strong=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -4571,6 +4605,8 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     _append_candidate_table(
         lines, "次日确认观察（非推荐）", buckets.get("next_day_confirmation", []),
         "暂无可供次日确认的观察标的。")
+    if weak_to_strong is not None:
+        lines.extend(["", weak_to_strong_report.render_markdown(weak_to_strong)])
     _append_observation_pool_tables(lines, buckets["observation"])
     _append_candidate_table(
         lines, "数据失效/待修复", buckets.get("data_rejected", []),
@@ -4913,7 +4949,8 @@ def _html_decision_notice(buckets, candidates, policy, regime):
 
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                    performance=None, tracking=None, market_regime=None,
-                   style_shadow=None, news_shadow=None, phase_d_lps_shadow=None):
+                   style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
+                   weak_to_strong=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
     regime = market_regime
@@ -5190,6 +5227,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {actionable_section_html}
 {waiting_section_html}
 {confirmation_section_html}
+{weak_to_strong_report.render_html(weak_to_strong)}
 {observation_section_html}
 {rejected_details_html}
 {unenriched_details_html}
@@ -5202,7 +5240,8 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
                       performance=None, tracking=None, market_regime=None,
-                      style_shadow=None, news_shadow=None, phase_d_lps_shadow=None):
+                      style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
+                      weak_to_strong=None):
     output = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -5231,7 +5270,75 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         output["news_shadow"] = copy.deepcopy(news_shadow)
     if phase_d_lps_shadow is not None:
         output["phase_d_lps_shadow"] = copy.deepcopy(phase_d_lps_shadow)
+    if weak_to_strong is not None:
+        output["weak_to_strong"] = copy.deepcopy(weak_to_strong)
     return output
+
+
+def build_weak_to_strong_output(collected, population, sectors, as_of_date,
+                                policy, buckets, performance):
+    """Build the independent report from all phase-1 stocks, before top-N."""
+    universe = {str(item.get("code")): item for item in population
+                if isinstance(item, dict) and item.get("code")}
+    by_code = {str(entry.get("result", {}).get("code")): entry
+               for entry in collected.values() if entry.get("result", {}).get("code")}
+    bucket_names = {"actionable": "原正式可执行", "waiting_trigger": "等待触发",
+                    "next_day_confirmation": "次日确认观察", "observation": "仅观察",
+                    "data_rejected": "数据失效", "unenriched_observation": "未增强观察"}
+    formal = {str(row.get("code")): (name, row)
+              for name in bucket_names for row in buckets.get(name, [])
+              if row.get("code")}
+    result = {"schema_version": "daily-weak-to-strong/v1", "as_of_date": as_of_date,
+              "parameters": copy.deepcopy(WEAK_TO_STRONG_CONFIG),
+              "confirmed": [], "watching": [], "provisional": [], "diagnostics": []}
+    status = performance.get("weak_to_strong_collector_status", "ready")
+    if set(universe) - set(by_code):
+        status = "collector_not_supported" if not by_code else "partial"
+    for code, candidate in sorted(universe.items()):
+        entry = by_code.get(code)
+        if entry:
+            item = copy.deepcopy(entry["result"])
+        else:
+            item = {"code": code, "name": candidate.get("name", ""),
+                    "state": "WAIT", "evidence_status": "data_insufficient",
+                    "reason_codes": ["collector_not_supported"]}
+        bucket, formal_row = formal.get(code, (None, {}))
+        reasons = list(policy.get("reasons") or []) + list(formal_row.get("observation_reasons") or [])
+        memberships = [member for member in item.get("sector_memberships", [])
+                       if isinstance(member, dict)]
+        if memberships and not any(member.get("sector_actionable") is True for member in memberships):
+            reasons.append("板块持续性或来源资格未验证")
+        item["context"] = {"market_status": policy.get("mode", "observation"),
+                           "sector_persistence_status": sorted({str(member.get("persistence_status") or "unknown")
+                                                                for member in memberships}),
+                           "formal_bucket_or_not_selected": bucket or "not_selected",
+                           "formal_bucket_label": bucket_names.get(bucket, "未进入正式候选"),
+                           "formal_blockers": [REASON_LABELS.get(x, x) for x in dict.fromkeys(reasons)]}
+        state = item.get("state")
+        ready = item.get("evidence_status") == "ready"
+        allowed_provisional = (state == "PROVISIONAL_BREAKOUT" and
+                               set(item.get("reason_codes") or []) <= {"close_unconfirmed"})
+        if state == "BREAKOUT_CONFIRMED" and ready and item.get("signal_date") == as_of_date:
+            result["confirmed"].append(item)
+        elif state == "SUPPLY_DRY" and ready:
+            result["watching"].append(item)
+        elif allowed_provisional:
+            result["provisional"].append(item)
+        else:
+            result["diagnostics"].append(item)
+    insufficient = sum(row.get("evidence_status") == "data_insufficient"
+                       for row in result["diagnostics"])
+    result["summary"] = {"attempted": len(universe), "evaluated": len(universe) - insufficient,
+                         "data_insufficient": insufficient,
+                         "confirmed": len(result["confirmed"]), "watching": len(result["watching"]),
+                         "provisional": len(result["provisional"])}
+    result["scope"] = {"sector_codes": [s.get("code") for s in sectors],
+                       "codes": sorted(universe), "codes_sha256": content_sha256(sorted(universe)),
+                       "scan_mode": performance.get("scan_mode"),
+                       "scope_complete": (bool(performance.get("scope_complete")) and status == "ready"
+                                          and performance.get("sector_selection_status") != "ranking_unavailable"),
+                       "collector_status": status}
+    return result
 
 
 def main():
@@ -5312,17 +5419,30 @@ def main():
         last_trading_date=last_trading_date or "",
         is_trading_day=is_trading_day,
     )
+    calendar_dates = sorted(_load_authoritative_trading_dates(current_time))
+    try:
+        weak_calendar_start = (datetime.fromisoformat(expected_date) -
+                               timedelta(days=730)).date().isoformat()
+    except (TypeError, ValueError):
+        weak_calendar_start = ""
+    weak_dates = [day for day in calendar_dates
+                  if weak_calendar_start <= day <= expected_date]
+    weak_calendar = {"source": "authoritative_trading_calendar",
+                     "trading_dates": weak_dates,
+                     "coverage_start": weak_dates[0] if weak_dates else "",
+                     "coverage_end": weak_dates[-1] if weak_dates else "",
+                     "identity": content_sha256(weak_dates)}
     capital_expected_date = resolve_capital_expected_date(
         now=current_time,
         recommendation_date=expected_date,
         is_trading_day=is_trading_day,
-        trading_dates=_load_authoritative_trading_dates(current_time)
+        trading_dates=set(calendar_dates)
         if is_trading_day is True and is_recommendation_session(current_time)
         else None,
     )
     performance["capital_expected_date"] = capital_expected_date
     prior_lps_records, prior_lps_load = load_prior_lps(
-        expected_date, _load_authoritative_trading_dates(current_time))
+        expected_date, set(calendar_dates))
     performance["prior_lps_index"] = prior_lps_load
     policy = build_recommendation_policy(
         regime, expected_date, market_open=is_recommendation_session())
@@ -5377,6 +5497,7 @@ def main():
 
     # 漏斗扫描
     print("[2/3] 维科夫漏斗扫描成分股...", file=sys.stderr)
+    weak_results = {}
     scan_result = scan_sectors(
         [c["code"] for c in sector_codes],
         min_candidates=args.min_candidates,
@@ -5394,6 +5515,10 @@ def main():
         defer_enrichment=True,
         prior_lps_records=prior_lps_records,
         kline_artifacts=kline_artifacts,
+        weak_to_strong_results=weak_results,
+        weak_to_strong_calendar=weak_calendar,
+        weak_to_strong_intraday=bool(policy.get("provisional") and
+                                    expected_date == current_time.date().isoformat()),
     )
     # Compatibility for injected legacy scanner stubs in downstream callers.
     if isinstance(scan_result, tuple):
@@ -5409,7 +5534,11 @@ def main():
         priority_bonuses=active_policy["priority_bonuses"],
         source_health=source_health, metrics=performance,
         kline_artifacts=kline_artifacts,
-        require_close_confirmation=post_close_final)
+        require_close_confirmation=post_close_final,
+        weak_to_strong_results=weak_results,
+        weak_to_strong_calendar=weak_calendar,
+        weak_to_strong_intraday=bool(policy.get("provisional") and
+                                    expected_date == current_time.date().isoformat()))
     if kline_artifacts is not None:
         kline_artifacts.clear()
     event_index = build_daily_index(
@@ -5585,6 +5714,13 @@ def main():
     tracking["research_snapshot"] = research_tracking
     tracking["strategy_shadow"] = strategy_shadow
 
+    weak_output = build_weak_to_strong_output(
+        weak_results, research_population, sector_codes, expected_date,
+        policy, buckets, performance)
+    weak_output["tracking"] = save_weak_to_strong_snapshot(
+        weak_output, weak_results, weak_calendar, regime, CACHE_DIR / "weak_to_strong",
+        provisional=bool(policy.get("provisional")))
+
     report_candidates = copy.deepcopy(candidates)
     report_buckets = copy.deepcopy(buckets)
     shadow_scanned_candidates = copy.deepcopy(scored)
@@ -5629,14 +5765,14 @@ def main():
             performance=performance,
             tracking=tracking, market_regime=regime,
             style_shadow=style_shadow_report, news_shadow=news_shadow,
-            phase_d_lps_shadow=phase_d_lps_shadow))]
+            phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
                 report_candidates, sector_codes, elapsed, ts, policy,
                 report_buckets, performance=performance,
                 tracking=tracking, market_regime=regime,
                 style_shadow=style_shadow_report, news_shadow=news_shadow,
-                phase_d_lps_shadow=phase_d_lps_shadow)))
+                phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -5671,7 +5807,7 @@ def main():
         performance=performance,
         tracking=tracking, market_regime=regime,
         style_shadow=style_shadow_report, news_shadow=news_shadow,
-        phase_d_lps_shadow=phase_d_lps_shadow))]
+        phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
@@ -5679,7 +5815,7 @@ def main():
             report_buckets, performance=performance,
             tracking=tracking, market_regime=regime,
             style_shadow=style_shadow_report, news_shadow=news_shadow,
-            phase_d_lps_shadow=phase_d_lps_shadow)))
+            phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(

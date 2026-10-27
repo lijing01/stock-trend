@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -55,6 +56,7 @@ from analysis.wyckoff import (
     BUY_PHASES, BUY_SUB_PHASES, NON_HEALTHY_EVENT_STATES,
     build_period_alignment, is_buy_signal, normalize_score_100,
 )
+from analysis.daily_weak_to_strong import analyze_daily_weak_to_strong
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 LOGGER = logging.getLogger(__name__)
@@ -2464,7 +2466,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                include_phase_d_lps_context=False,
                include_formal_event_history=False, kline_diagnostics=None,
                kline_artifacts=None, kline_budget_stage="normal",
-               require_close_confirmation=False):
+               require_close_confirmation=False, weak_to_strong_results=None,
+               weak_to_strong_calendar=None, weak_to_strong_intraday=False):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2710,6 +2713,65 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         ts_code = candidate["ts_code"]
         kline = kline_data.get(ts_code)
         records = kline.get("data", []) if isinstance(kline, dict) else []
+        if isinstance(weak_to_strong_results, dict):
+            close = _kline_close_confirmation(kline, as_of_date, required=True)
+            if weak_to_strong_intraday and not close.get("confirmed"):
+                close["provisional"] = True
+            prior = weak_to_strong_results.get(ts_code, {})
+            evidence = source_evidence["kline"].get(ts_code, {})
+            fingerprint = hashlib.sha256(json.dumps(
+                [kline, close], sort_keys=True, default=str,
+                ensure_ascii=False).encode("utf-8")).hexdigest()
+            if prior.get("fingerprint") == fingerprint:
+                result = copy.deepcopy(prior["result"])
+            else:
+                try:
+                    result = analyze_daily_weak_to_strong(
+                        kline, as_of_date=as_of_date, close_evidence=close,
+                        calendar_evidence=weak_to_strong_calendar)
+                except (TypeError, ValueError, KeyError, ArithmeticError) as exc:
+                    LOGGER.warning("Weak-to-strong detector failed for %s: %s", ts_code, type(exc).__name__)
+                    result = {"schema_version": "daily-weak-to-strong/v1",
+                              "as_of_date": as_of_date, "state": "WAIT",
+                              "evidence_status": "data_insufficient",
+                              "reason_codes": ["detector_error"], "kline_evidence": {}}
+                if result.get("cycle_id"):
+                    result["cycle_id"] = hashlib.sha256(
+                        (ts_code + ":" + result["cycle_id"]).encode("utf-8")).hexdigest()
+                for event in result.get("events", []):
+                    if event.get("cycle_id"):
+                        event["cycle_id"] = hashlib.sha256(
+                            (ts_code + ":" + event["cycle_id"]).encode("utf-8")).hexdigest()
+                if result.get("signal_date"):
+                    result["signal_id"] = hashlib.sha256(
+                        (result.get("cycle_id", "") + ":" + result["signal_date"] + ":" +
+                         result.get("kline_evidence", {}).get("input_sha256", ""))
+                        .encode("utf-8")).hexdigest()
+            if not _kline_usable(kline):
+                result["evidence_status"] = "data_insufficient"
+                metadata = kline.get("meta", {}) if isinstance(kline, dict) else {}
+                metadata = metadata if isinstance(metadata, dict) else {}
+                reason = ("shared_fetch_history_insufficient"
+                          if metadata.get("error_type") == "insufficient_data"
+                          else "shared_kline_unavailable")
+                result["reason_codes"] = list(dict.fromkeys(
+                    result.get("reason_codes", []) + [reason]))
+                if result.get("state") == "BREAKOUT_CONFIRMED":
+                    result["state"] = "UNVERIFIED_BREAKOUT"
+                    result["confirmation"] = "evidence_incomplete"
+            result.update({
+                "code": candidate.get("code", ""), "ts_code": ts_code,
+                "name": candidate.get("name", ""),
+                "sector_memberships": merge_sector_memberships(
+                    prior.get("result", {}).get("sector_memberships", []),
+                    candidate.get("sector_memberships", [])),
+                "refresh_stage": "global" if kline_budget_stage == "topup" else "initial",
+            })
+            result.setdefault("kline_evidence", {})["source_evidence"] = copy.deepcopy(evidence)
+            weak_to_strong_results[ts_code] = {
+                "result": result, "kline_payload": copy.deepcopy(kline),
+                "close_evidence": copy.deepcopy(close), "fingerprint": fingerprint,
+            }
         if len(records) < 20:
             continue
         if enable_wyckoff:
