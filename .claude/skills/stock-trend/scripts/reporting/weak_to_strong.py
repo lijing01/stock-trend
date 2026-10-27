@@ -1,6 +1,7 @@
 """Report an independent daily weak-to-strong observation."""
 
 from html import escape
+from reporting.sector_display import _sector_html
 
 
 def _value(value):
@@ -50,6 +51,21 @@ def _summary(payload):
     return f"本次已评估 {evaluated} 只。"
 
 
+def _memberships_html(item):
+    rendered = []
+    for member in item.get("sector_memberships") or []:
+        if not isinstance(member, dict):
+            continue
+        name = member.get("name") or member.get("sector_name") or member.get("code")
+        if not name:
+            continue
+        evidence = dict(member, sector_name=str(name),
+                        sector_hot_score=member.get("hot_score"))
+        rendered.append("<div class='weak-sector'>" +
+                        _sector_html(evidence, unknown_heat_plain=True) + "</div>")
+    return "".join(rendered) or "未记录"
+
+
 def render_markdown(payload):
     if payload is None:
         return ""
@@ -77,10 +93,13 @@ def render_html(payload):
            "<p>独立日线形态观察；收盘确认仅代表形态成立，正式推荐资格见状态与限制。</p>",
            "<p>" + escape(_summary(payload)) + "</p>"]
     if rows:
-        out.append("<div class='candidate-table-wrap'><table class='candidate-table'><thead><tr>" +
+        out.append("<div class='candidate-table-wrap'><table class='weak-to-strong-table'><thead><tr>" +
                    "".join("<th>" + escape(x) + "</th>" for x in HEADERS) + "</tr></thead><tbody>")
         for item in rows:
-            out.append("<tr>" + "".join("<td>" + escape(x) + "</td>" for x in _cells(item)) + "</tr>")
+            cells = _cells(item)
+            out.append("<tr>" + "".join(
+                "<td>" + (_memberships_html(item) if index == 1 else escape(value)) + "</td>"
+                for index, value in enumerate(cells)) + "</tr>")
         out.append("</tbody></table></div>")
     else:
         out.append("<p>无满足条件的形态；覆盖不足时不代表完整扫描无信号。</p>")

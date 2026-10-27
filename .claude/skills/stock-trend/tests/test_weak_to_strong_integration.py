@@ -83,6 +83,51 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>", html)
 
+    def test_sector_display_reuses_observation_pool_rendering(self):
+        memberships = [
+            {"code": "BK01", "name": "高热<板块>", "hot_score": 85,
+             "history_window_days": 5, "history_coverage_days": 3,
+             "hot_appearance_days": 2, "hot_streak": 1,
+             "persistence_status": "verified",
+             "ranking_source": "eastmoney", "ranking_data_date": "2026-10-27",
+             "ranking_quality": "good", "membership_source": "eastmoney",
+             "membership_data_date": "2026-10-27", "membership_quality": "good"},
+            {"code": "BK02", "name": "温热板块", "hot_score": 65,
+             "persistence_status": "single_day_pulse"},
+            {"code": "BK03", "name": "热度缺失板块"},
+        ]
+        payload = {
+            "scope": {"scope_complete": True, "collector_status": "ready"},
+            "summary": {"evaluated": 1, "data_insufficient": 0},
+            "confirmed": [],
+            "watching": [{"name": "测试股", "code": "600001",
+                          "state": "SUPPLY_DRY", "sector_memberships": memberships}],
+            "provisional": [], "diagnostics": [],
+        }
+
+        html = report.render_html(payload)
+        for membership in memberships[:2]:
+            observation_item = {
+                "sector_name": membership["name"],
+                "sector_hot_score": membership["hot_score"],
+                **{key: value for key, value in membership.items()
+                   if key not in {"code", "name", "hot_score"}},
+            }
+            self.assertIn(dc._sector_html(observation_item), html)
+        self.assertEqual(html.count("class='weak-sector'"), 3)
+        self.assertIn("sector-tag sector-hot", html)
+        self.assertIn("sector-tag sector-warm", html)
+        self.assertIn("高热&lt;板块&gt;", html)
+        self.assertNotIn("高热<板块>", html)
+        self.assertIn("持续性：快照覆盖 3/5", html)
+        self.assertIn("排行 来源 eastmoney", html)
+        self.assertIn("成分 来源 eastmoney", html)
+        self.assertIn("<div class='weak-sector'>热度缺失板块</div>", html)
+        self.assertNotIn("sector-cool'>热度缺失板块", html)
+
+        payload["watching"][0]["sector_memberships"] = []
+        self.assertIn("<td>未记录</td>", report.render_html(payload))
+
     def test_snapshot_is_idempotent_and_distinct_inputs_do_not_overwrite(self):
         with tempfile.TemporaryDirectory() as root:
             payload = {"as_of_date": "2026-10-27", "scope": {}, "confirmed": []}

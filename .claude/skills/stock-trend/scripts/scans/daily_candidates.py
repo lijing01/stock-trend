@@ -84,6 +84,7 @@ from core.lps_event_index import (
     build_daily_index, load_prior_lps, save_daily_index,
 )
 from reporting.market_explanation import render_market_explanation
+from reporting.sector_display import _sector_persistence_text, _sector_text, _sector_html
 from reporting import candidate_formatters
 from reporting import weak_to_strong as weak_to_strong_report
 from analysis.daily_weak_to_strong import DEFAULT_CONFIG as WEAK_TO_STRONG_CONFIG
@@ -3139,97 +3140,6 @@ def _kline_close_report_summary(candidates, performance):
     }
 
 
-def _sector_persistence_text(item):
-    """Explain history coverage separately from hot-sector appearances."""
-    values = (
-        item.get("history_window_days"),
-        item.get("history_coverage_days"),
-        item.get("hot_appearance_days"),
-        item.get("hot_streak"),
-    )
-    if all(value is None for value in values):
-        return ""
-    coverage = item.get("history_coverage_days")
-    window = item.get("history_window_days")
-    appearances = item.get("hot_appearance_days")
-    if appearances is None:
-        appearances = item.get("persistence_days", 0)
-    streak = item.get("hot_streak", 0)
-    if coverage is None:
-        coverage = 0
-    if window is None:
-        window = coverage
-    status = (
-        item.get("sector_persistence_status")
-        or item.get("persistence_status")
-        or item.get("sector_type", "")
-    )
-    history_unknown = status == "history_unknown"
-    status_label = {
-        "history_insufficient": "历史不足",
-        "history_unknown": "本板块历史未匹配，持续性未知",
-        "single_day_pulse": "单日脉冲",
-        "verified": "已验证",
-        "mainline": "主线",
-        "emerging": "新兴",
-    }.get(status, status or "未标记")
-    appearance_text = "—" if history_unknown else f"{appearances}/{window}"
-    streak_text = "—" if history_unknown else f"{streak}"
-    return (
-        f"持续性：快照覆盖 {coverage}/{window}｜"
-        f"热点出现 {appearance_text}｜连续 {streak_text} 日｜{status_label}"
-    )
-
-
-def _sector_text(item):
-    text = item.get("sector_name", "")
-    persistence = _sector_persistence_text(item)
-    provenance = []
-    for label, prefix in (("排行", "ranking"), ("成分", "membership")):
-        source = item.get(f"{prefix}_source", "")
-        if not source:
-            continue
-        data_date = item.get(f"{prefix}_data_date", "") or "未知"
-        quality = item.get(f"{prefix}_quality", "") or "未知"
-        provenance.append(
-            f"{label} 来源 {source}｜日期 {data_date}｜质量 {quality}"
-        )
-    details = ([persistence] if persistence else []) + provenance
-    if details:
-        return f"{text}（{'；'.join(details)}）"
-    return text
-
-
-def _sector_html(item):
-    """Render the sector name as a high-contrast heat-level badge."""
-    text = _sector_text(item)
-    if not text:
-        return ""
-
-    sector_name = str(item.get("sector_name", "")).strip()
-    safe_text = escape(text)
-    safe_name = escape(sector_name)
-    if not safe_name or safe_name not in safe_text:
-        return safe_text
-
-    try:
-        heat_score = float(item.get("sector_hot_score") or
-                           item.get("sector_score") or 0)
-    except (TypeError, ValueError):
-        heat_score = 0
-    if heat_score >= 80:
-        heat_class = "sector-hot"
-    elif heat_score >= 60:
-        heat_class = "sector-warm"
-    elif heat_score >= 40:
-        heat_class = "sector-neutral"
-    else:
-        heat_class = "sector-cool"
-
-    badge = f"<span class='sector-tag {heat_class}'>{safe_name}</span>"
-    return safe_text.replace(safe_name, badge, 1)
-
-
 def _minor_phase_text(wyckoff):
     return format_minor_phase_text(wyckoff)
 
@@ -5182,6 +5092,20 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .candidate-table th,.candidate-table td{{overflow-wrap:anywhere}}
 .candidate-table td.candidate-diagnostic{{min-width:220px;vertical-align:top;overflow-wrap:break-word;word-break:normal}}
 .candidate-table .wyckoff-buy-level-badge{{white-space:normal}}
+.weak-to-strong-table{{table-layout:fixed;min-width:1550px;margin:0}}
+.weak-to-strong-table th,.weak-to-strong-table td{{vertical-align:top;line-height:1.5;overflow-wrap:break-word}}
+.weak-to-strong-table th:nth-child(1){{width:145px}}
+.weak-to-strong-table th:nth-child(2){{width:180px}}
+.weak-to-strong-table th:nth-child(3){{width:140px}}
+.weak-to-strong-table th:nth-child(4){{width:90px}}
+.weak-to-strong-table th:nth-child(5){{width:140px}}
+.weak-to-strong-table th:nth-child(6),.weak-to-strong-table th:nth-child(7){{width:125px}}
+.weak-to-strong-table th:nth-child(8){{width:90px}}
+.weak-to-strong-table th:nth-child(9){{width:155px}}
+.weak-to-strong-table th:nth-child(10){{width:260px}}
+.weak-to-strong-table td:nth-child(4),.weak-to-strong-table td:nth-child(6),.weak-to-strong-table td:nth-child(7),.weak-to-strong-table td:nth-child(8){{font-variant-numeric:tabular-nums}}
+.weak-sector+.weak-sector{{margin-top:8px}}
+.weak-sector .sector-tag{{white-space:normal;overflow-wrap:anywhere}}
 .sector-tag{{display:inline-block;padding:3px 8px;border-radius:6px;color:#fff;font-size:13px;font-weight:800;line-height:1.35;white-space:nowrap;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 1px 2px rgba(15,23,42,.16)}}
 .sector-hot{{background:#b91c1c;border-color:#991b1b}}
 .sector-warm{{background:#c2410c;border-color:#9a3412}}
