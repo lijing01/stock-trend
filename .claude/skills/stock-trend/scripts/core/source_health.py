@@ -95,6 +95,9 @@ KLINE_DOWNSTREAM_RESERVE_SECONDS = (
 # (e.g. 1-2 kline timeouts) never orphans the rest of the run to stale cache.
 HARD_FAILURE_THRESHOLD = 8
 DATE_LAG_FAILURE_REASONS = frozenset({"stale_data"})
+ITEM_QUALITY_FAILURE_REASONS = frozenset({
+    "intraday_unconfirmed", "wrong_trading_date",
+})
 
 
 def classify_failure(error: BaseException | str | None) -> str:
@@ -546,7 +549,22 @@ class RunSourceHealth:
                 reason = evidence.get("reason") or "unknown"
                 reasons = state["failure_reasons"]
                 reasons[reason] = reasons.get(reason, 0) + 1
-                if reason in DATE_LAG_FAILURE_REASONS:
+                event = "failure"
+                if (token.source == "kline"
+                        and reason in ITEM_QUALITY_FAILURE_REASONS):
+                    # The provider returned data for this symbol, but it does
+                    # not satisfy the expected-date or close-confirmation
+                    # requirement. Reject this item while allowing later
+                    # symbols to receive their own refresh.
+                    state["consecutive_live_failures"] = 0
+                    if state["state"] not in {"unavailable", "date_lagging"}:
+                        state["state"] = (
+                            "degraded" if reason == "wrong_trading_date"
+                            else "healthy")
+                    event = ("item_date_lagging"
+                             if reason == "wrong_trading_date"
+                             else "item_quality_rejected")
+                elif reason in DATE_LAG_FAILURE_REASONS:
                     # A stale result is scoped to the fetched item unless the
                     # adapter explicitly proves that the source is stale as a
                     # whole. Neither kind contributes to outage/circuit counts.
@@ -633,7 +651,6 @@ class RunSourceHealth:
                             "source": token.source,
                             "reason": reason,
                         })
-                event = "failure"
             self._events.append({
                 "event": event, "source": token.source,
                 "token": token.sequence,

@@ -4666,6 +4666,38 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("调度原因码source_unavailable", detail)
         self.assertNotIn("抓取原因码source_unavailable", detail)
 
+    def test_kline_source_unavailable_is_rendered_as_scheduler_state(self):
+        item = candidate("kline-source-unavailable", eligible=False)
+        item["data_quality"] = {
+            "eligible": False,
+            "coverage": 0.45,
+            "reasons": ["kline_stale"],
+            "dimensions": {
+                "kline": {
+                    "available": False,
+                    "data_date": "2026-09-16",
+                    "expected_date": "2026-09-16",
+                    "source": "eastmoney",
+                    "source_status": "source_unavailable",
+                    "stale_reason": "kline_stale",
+                },
+            },
+        }
+        item["source_evidence"] = {
+            "kline": {
+                "attempted": False,
+                "status": "source_unavailable",
+                "reason": "source_unavailable",
+                "cache_used": False,
+            },
+        }
+
+        detail = _candidate_diagnostic_text(item)
+
+        self.assertIn("调度原因码source_unavailable", detail)
+        self.assertIn("未调用", detail)
+        self.assertNotIn("抓取原因码source_unavailable", detail)
+
     def test_source_date_lagging_capital_is_not_rendered_as_outage(self):
         item = candidate("source-date-lagging", eligible=False)
         item["data_quality"] = {

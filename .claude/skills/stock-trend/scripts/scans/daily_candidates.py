@@ -2755,6 +2755,13 @@ def _reason_detail(code, item):
         evidence = item.get("source_evidence", {})
         evidence = evidence.get(dimension_name, {}) \
             if isinstance(evidence, dict) else {}
+        scheduler_reason = (
+            code in NON_PROVIDER_ENRICHMENT_STATUSES
+            or evidence.get("reason") in NON_PROVIDER_ENRICHMENT_STATUSES
+            or (evidence.get("attempted") is False
+                and evidence.get("status")
+                in NON_PROVIDER_ENRICHMENT_STATUSES)
+        )
         details = []
         if dimension.get("data_date"):
             details.append(f"数据日期{dimension['data_date']}")
@@ -2806,8 +2813,7 @@ def _reason_detail(code, item):
             details.append(f"调度阶段{stage_label}")
         if evidence.get("attempted"):
             details.append("接口已调用")
-        elif code in NON_PROVIDER_ENRICHMENT_STATUSES \
-                and evidence.get("attempted") is False:
+        elif scheduler_reason and evidence.get("attempted") is False:
             details.append("未调用")
         failure_chain = (evidence.get("failure_chain")
                          or evidence.get("date_lag_evidence", []))
@@ -2825,8 +2831,7 @@ def _reason_detail(code, item):
                 f"/证据源{evidence.get('evidence_source', '未知')}")
         if evidence.get("reason"):
             reason_label = (
-                "调度原因码" if code in NON_PROVIDER_ENRICHMENT_STATUSES
-                else "抓取原因码")
+                "调度原因码" if scheduler_reason else "抓取原因码")
             details.append(f"{reason_label}{evidence['reason']}")
         if evidence.get("scheduler_reason"):
             details.append(

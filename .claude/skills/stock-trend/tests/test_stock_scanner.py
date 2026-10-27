@@ -413,6 +413,7 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--em-fallback-timeout") + 1], "2")
         self.assertEqual(cmd[cmd.index("--em-host-retries") + 1], "1")
         self.assertEqual(cmd[cmd.index("--fallback-timeout") + 1], "8")
+        self.assertNotIn("--no-cache", cmd)
 
     def test_wrong_date_capital_cache_invokes_fetcher(self):
         cached = self._valid_capital("20260812")
@@ -571,10 +572,14 @@ class TestMetadata(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(sc, "CACHE_DIR", tmpdir), \
              patch.object(sc, "_read_json", side_effect=[cached, refreshed]), \
-             patch.object(sc, "run_script", return_value={"success": True}):
+             patch.object(
+                 sc, "run_script", return_value={"success": True}
+             ) as run_script:
             wrapped = sc._fetch_kline(
                 "600001.SH", as_of_date="2026-08-13",
                 require_close_confirmation=True, with_evidence=True)
+        run_script.assert_called_once()
+        self.assertIn("--no-cache", run_script.call_args.args[0])
         self.assertEqual(wrapped["live_attempt"]["status"], "live_success")
         evidence = sc._normalize_source_evidence(
             "kline", wrapped["payload"], wrapped["live_attempt"],
@@ -604,6 +609,44 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(evidence["degraded_reason"],
                          "intraday_unconfirmed")
         self.assertEqual(evidence["status"], "cache_stale")
+
+    def test_failed_post_close_refresh_preserves_error_and_does_not_fake_date_lag(self):
+        cached = self._valid_kline()
+        cached["meta"]["fetch_time"] = "20260813-135718"
+        failed = {
+            "meta": {
+                "data_source": "error",
+                "error": "EastMoney remote end closed connection",
+                "provider_attempts": [
+                    {"source": "eastmoney", "status": "error"},
+                ],
+            },
+            "data": [],
+        }
+        verdict = sc._validate_kline_cache(
+            failed, "2026-08-13", require_close_confirmation=True)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[cached, failed]), \
+             patch.object(sc, "run_script", return_value={"success": True}):
+            wrapped = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13",
+                require_close_confirmation=True, with_evidence=True)
+
+        self.assertIn("source_error", verdict["reasons"])
+        self.assertNotIn("wrong_trading_date", verdict["reasons"])
+        self.assertEqual(verdict["close_confirmation"]["reason"],
+                         "fetch_failed")
+        self.assertTrue(wrapped["payload"]["data"])
+        self.assertEqual(wrapped["live_attempt"]["reason"],
+                         "connection_error")
+        self.assertTrue(wrapped["live_attempt"]["cache_used"])
+        self.assertEqual(
+            wrapped["payload"]["meta"]["refresh_provider_attempts"],
+            failed["meta"]["provider_attempts"])
+        self.assertIn(
+            "remote end closed connection",
+            wrapped["payload"]["meta"]["refresh_error"])
 
     def test_valid_capital_cache_skips_subprocess(self):
         payload = {
@@ -918,6 +961,24 @@ class TestGatherPerformance(unittest.TestCase):
         self.assertEqual(primary["code"], "BK2")
 
 class TestSourceEvidenceAdapters(unittest.TestCase):
+    def test_intraday_kline_quality_failure_does_not_block_compatibility_fetches(self):
+        health = {"kline": {"state": "healthy", "failures": 0}}
+
+        for _ in range(10):
+            sc._source_failed(health, "kline", "intraday_unconfirmed")
+
+        self.assertEqual(health["kline"]["state"], "healthy")
+        self.assertEqual(health["kline"]["failures"], 0)
+
+    def test_wrong_trading_date_kline_does_not_block_compatibility_fetches(self):
+        health = {"kline": {"state": "healthy", "failures": 0}}
+
+        for _ in range(10):
+            sc._source_failed(health, "kline", "wrong_trading_date")
+
+        self.assertEqual(health["kline"]["state"], "degraded")
+        self.assertEqual(health["kline"]["failures"], 0)
+
     def test_subprocess_timeout_is_capped_by_absolute_deadline(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(sc, "CACHE_DIR", tmpdir), \

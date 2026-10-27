@@ -166,6 +166,74 @@ class TestRunSourceHealthContract(unittest.TestCase):
             result[1]["live_attempt"]["status"] for result in results
         ])
 
+    def test_intraday_unconfirmed_kline_does_not_open_source_circuit(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth(
+            failure_threshold=2, hard_failure_threshold=3)
+        candidates = list(range(8))
+        calls = []
+
+        def live(item):
+            calls.append(item)
+            return contract.source_result(item, contract.live_attempt(
+                attempted=True, provider_attempts=1,
+                reason="intraday_unconfirmed", status="cache_stale"))
+
+        results = contract.bounded_source_map(
+            "kline", candidates, health, live, lambda _item: None,
+            time.monotonic() + 2, max_workers=1, include_evidence=True)
+
+        state = health.snapshot()["kline"]
+        self.assertEqual(calls, candidates)
+        self.assertEqual(state["state"], "healthy")
+        self.assertEqual(state["failures"], len(candidates))
+        self.assertEqual(state["failure_reasons"], {
+            "intraday_unconfirmed": len(candidates),
+        })
+        self.assertEqual(state["circuit_breaks"], 0)
+        self.assertEqual(health.live_block_reason("kline"), "")
+        self.assertTrue(all(
+            result[1]["live_attempt"]["status"] == "cache_stale"
+            for result in results
+        ))
+        self.assertEqual(sum(
+            event.get("event") == "item_quality_rejected"
+            for event in health.events()
+        ), len(candidates))
+
+    def test_wrong_trading_date_kline_does_not_block_later_symbol_refreshes(self):
+        contract = _source_health_contract(self)
+        health = contract.RunSourceHealth(
+            failure_threshold=2, hard_failure_threshold=3)
+        candidates = list(range(12))
+        calls = []
+
+        def live(item):
+            calls.append(item)
+            return contract.source_result(item, contract.live_attempt(
+                attempted=True, provider_attempts=1,
+                reason="wrong_trading_date", status="cache_stale"))
+
+        results = contract.bounded_source_map(
+            "kline", candidates, health, live, lambda _item: None,
+            time.monotonic() + 2, max_workers=1, include_evidence=True)
+
+        state = health.snapshot()["kline"]
+        self.assertEqual(calls, candidates)
+        self.assertEqual(state["state"], "degraded")
+        self.assertEqual(state["failures"], len(candidates))
+        self.assertEqual(state["failure_reasons"], {
+            "wrong_trading_date": len(candidates),
+        })
+        self.assertEqual(state["consecutive_live_failures"], 0)
+        self.assertEqual(state["circuit_breaks"], 0)
+        self.assertEqual(health.live_block_reason("kline"), "")
+        self.assertEqual(len(results), len(candidates))
+        self.assertEqual(sum(
+            event.get("event") == "item_date_lagging"
+            for event in health.events()
+        ), len(candidates))
+
     def test_explicit_source_date_lag_proof_blocks_and_reaches_skipped_items(self):
         contract = _source_health_contract(self)
         health = contract.RunSourceHealth()

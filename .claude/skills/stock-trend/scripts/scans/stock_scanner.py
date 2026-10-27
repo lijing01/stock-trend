@@ -349,11 +349,20 @@ def _source_succeeded(source_health, source):
         state.update({"state": "healthy", "failures": 0})
 
 
-def _source_failed(source_health, source):
+def _source_failed(source_health, source, reason=""):
     if isinstance(source_health, RunSourceHealth):
         return
     state = _source_state(source_health, source)
     if state is None:
+        return
+    if source == "kline" and reason in {
+            "intraday_unconfirmed", "wrong_trading_date"}:
+        if state.get("state") != "unavailable":
+            state.update({
+                "state": ("degraded" if reason == "wrong_trading_date"
+                          else "healthy"),
+                "failures": 0,
+            })
         return
     state["failures"] = state.get("failures", 0) + 1
     state["state"] = (
@@ -1101,6 +1110,9 @@ def _kline_close_confirmation(payload, expected_trading_date="",
     data_date = latest_data_date(payload) if isinstance(payload, dict) else ""
     meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
     meta = meta if isinstance(meta, dict) else {}
+    if (not data_date and meta.get("error_type") == "stale_data"
+            and isinstance(meta.get("cache_validation"), dict)):
+        data_date = str(meta["cache_validation"].get("latest_date") or "")
     rows = payload.get("data", []) if isinstance(payload, dict) else []
     latest_row = rows[-1] if isinstance(rows, list) and rows else {}
     latest_row = latest_row if isinstance(latest_row, dict) else {}
@@ -1114,6 +1126,9 @@ def _kline_close_confirmation(payload, expected_trading_date="",
         "data_date": str(data_date or ""),
     }
     if not required:
+        return evidence
+    if not data_date:
+        evidence["reason"] = "fetch_failed"
         return evidence
     if expected_trading_date and not _date_covers(data_date,
                                                   expected_trading_date):
@@ -1200,8 +1215,14 @@ def _validate_kline_cache(payload, expected_trading_date="",
     if len(usable_rows) < WYCKOFF_MIN_BARS:
         reasons.append("insufficient_data")
     data_date = latest_data_date({"data": usable_rows})
-    if expected_trading_date and not _date_covers(
-            data_date, expected_trading_date):
+    payload_meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    if (not data_date and isinstance(payload_meta, dict)
+            and payload_meta.get("error_type") == "stale_data"):
+        validation = payload_meta.get("cache_validation", {})
+        if isinstance(validation, dict):
+            data_date = str(validation.get("latest_date") or "")
+    if (expected_trading_date and data_date
+            and not _date_covers(data_date, expected_trading_date)):
         reasons.append("wrong_trading_date")
     confirmation = _kline_close_confirmation(
         payload, expected_trading_date, required=require_close_confirmation)
@@ -1345,6 +1366,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
             cmd = build_kline_fetch_command(
                 "eastmoney", ts_code, output_path,
                 asset="E", freq="D", expected_date=as_of_date,
+                no_cache=require_close_confirmation,
                 provider_args=(
                     "--em-timeout", "4", "--em-fallback-timeout", "2",
                     "--em-host-retries", "1", "--fallback-timeout", "8",
@@ -1376,11 +1398,33 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     if not result["success"]:
         result, refreshed, refreshed_verdict = _run_kline_subprocess()
         attempt["provider_attempts"] = 2
+    refreshed_meta = (refreshed.get("meta", {})
+                      if isinstance(refreshed, dict) else {})
+    refresh_error = (str(refreshed_meta.get("error") or "")
+                     if isinstance(refreshed_meta, dict) else "")
+    refresh_provider_attempts = (
+        refreshed_meta.get("provider_attempts", [])
+        if isinstance(refreshed_meta, dict) else [])
+    refresh_failure_reason = (
+        "insufficient_bars"
+        if isinstance(refreshed_meta, dict)
+        and refreshed_meta.get("error_type") == "insufficient_data"
+        else classify_failure(
+            refresh_error or result.get("stderr") or result.get("error"))
+        if (refresh_error or result.get("stderr") or result.get("error"))
+        else "empty")
     if refreshed_verdict["valid"]:
         attempt["status"] = "live_success"
         wrapped = source_result(refreshed, attempt)
         return wrapped if with_evidence else refreshed
-    if refreshed:
+    refreshed_has_data = (
+        isinstance(refreshed, dict)
+        and isinstance(refreshed.get("data"), list)
+        and bool(refreshed["data"]))
+    refreshed_has_stale_date = (
+        isinstance(refreshed_meta, dict)
+        and refreshed_meta.get("error_type") == "stale_data")
+    if refreshed and (refreshed_has_data or refreshed_has_stale_date):
         refreshed = _with_cache_verdict(refreshed, refreshed_verdict)
         close_reason = refreshed_verdict.get(
             "close_confirmation", {}).get("reason", "")
@@ -1401,17 +1445,19 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     if cached:
         cached = _with_cache_verdict(cached, cache_verdict)
         cached.setdefault("meta", {})["refresh_error"] = (
-            result.get("error") or f"K线刷新失败，未覆盖{as_of_date}")
+            refresh_error or result.get("stderr") or result.get("error")
+            or f"K线刷新失败，未覆盖{as_of_date}")
+        if isinstance(refresh_provider_attempts, list) and refresh_provider_attempts:
+            cached["meta"]["refresh_provider_attempts"] = copy.deepcopy(
+                refresh_provider_attempts)
         attempt.update({
-            "reason": classify_failure(
-                result.get("stderr") or result.get("error")),
+            "reason": refresh_failure_reason,
             "cache_used": True, "stale": True,
         })
         attempt["status"] = attempt["reason"]
         wrapped = source_result(cached, attempt)
         return wrapped if with_evidence else cached
-    attempt["reason"] = classify_failure(
-        result.get("stderr") or result.get("error"))
+    attempt["reason"] = refresh_failure_reason
     attempt["status"] = attempt["reason"]
     wrapped = source_result(None, attempt)
     return wrapped if with_evidence else None
@@ -2544,7 +2590,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             if _kline_usable(payload) and not evidence.get("reason"):
                 _source_succeeded(source_health, "kline")
             else:
-                _source_failed(source_health, "kline")
+                _source_failed(
+                    source_health, "kline", evidence.get("reason", ""))
         elif evidence.get("status") == "cache_valid":
             metrics_ref["kline_cache_hits"] = (
                 metrics_ref.get("kline_cache_hits", 0) + 1)
@@ -2644,7 +2691,9 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 "provider": (meta.get("stale_data_source") or
                              meta.get("insufficient_data_source") or
                              meta.get("data_source") or ""),
-                "provider_attempts": meta.get("provider_attempts") or [],
+                "provider_attempts": (
+                    meta.get("refresh_provider_attempts")
+                    or meta.get("provider_attempts") or []),
                 "source_status": evidence.get("status") or "",
                 "source_reason": evidence.get("reason") or "",
                 "scheduler_reason": evidence.get("scheduler_reason") or "",
