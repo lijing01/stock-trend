@@ -18,6 +18,32 @@ def payload(rows, quality="good", source="fixture", fetched_at="20260806-160000"
 
 
 class TestRecommendationQuality(unittest.TestCase):
+    def test_kline_close_confirmation_evidence_is_preserved(self):
+        result = assess_candidate_data(
+            kline=payload(
+                [{"trade_date": "20261027", "close": 10.0}],
+                fetched_at="20261027-135718"),
+            capital=payload([{"trade_date": "20261027"}]),
+            fundamental=payload([], fetched_at="20261027-160000"),
+            as_of_date="2026-10-27",
+            source_evidence={"kline": {
+                "status": "cache_valid",
+                "close_confirmed": False,
+                "confirmation_source": "fetch_time_cutoff",
+                "degraded_reason": "intraday_unconfirmed",
+                "fetched_at": "20261027-135718",
+                "data_date": "2026-10-27",
+            }},
+        )
+
+        dimension = result["dimensions"]["kline"]
+        self.assertFalse(dimension["close_confirmed"])
+        self.assertEqual(dimension["confirmation_source"],
+                         "fetch_time_cutoff")
+        self.assertEqual(dimension["degraded_reason"],
+                         "intraday_unconfirmed")
+        self.assertEqual(dimension["fetched_at"], "20261027-135718")
+
     def test_malformed_nested_payloads_are_non_actionable_not_exceptions(self):
         malformed = {"meta": [], "summary": "bad", "data": "bad"}
         result = assess_candidate_data(

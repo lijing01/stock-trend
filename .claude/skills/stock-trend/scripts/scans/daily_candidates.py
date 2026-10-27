@@ -121,6 +121,7 @@ REASON_LABELS = {
     "regime_stale": "市场环境数据过期",
     "regime_weak": "市场环境评分偏弱",
     "intraday_provisional": "盘中数据尚未收盘确认",
+    "kline_close_unconfirmed": "盘后K线尚未收盘确认，仅供观察",
     "recommendation_limit": "超出当日推荐数量上限",
     "next_day_confirmation": "等待次日确认（非推荐）",
     "wyckoff_retest_pending": "维科夫突破后回踩，等待重新站稳箱顶",
@@ -163,6 +164,7 @@ DATA_REASON_CODES = {
     "regime_missing",
     "regime_stale",
     "intraday_provisional",
+    "kline_close_unconfirmed",
     "data_quality_ineligible",
     "sector_membership_cross_source_unverified",
 }
@@ -173,6 +175,22 @@ def candidate_quality_score(item):
         item.get("quality_adjusted_score", item.get("composite_score", 0))
         or 0
     )
+
+
+def _post_close_kline_unconfirmed(item):
+    """Identify a post-close fallback that is valid only for observation."""
+    evidence = (item.get("source_evidence") or {}).get("kline") or {}
+    dimension = ((item.get("data_quality") or {}).get("dimensions") or {}).get(
+        "kline") or {}
+    degraded_reason = (
+        evidence.get("degraded_reason") or dimension.get("degraded_reason")
+    )
+    close_confirmed = (
+        evidence.get("close_confirmed")
+        if "close_confirmed" in evidence
+        else dimension.get("close_confirmed")
+    )
+    return degraded_reason == "intraday_unconfirmed" or close_confirmed is False
 
 
 def _wyckoff_current_state(wyckoff):
@@ -324,6 +342,8 @@ def _candidate_gate_pass(item, min_score, policy=None):
         return False
     if not item.get("data_quality", {}).get("eligible", False):
         return False
+    if _post_close_kline_unconfirmed(item):
+        return False
     if not item.get("sector_actionable", True):
         return False
     if policy and policy.get("requires_sector_capital_proof") \
@@ -391,6 +411,8 @@ def _data_quality_gate_pass(item, min_score):
     """Keep data eligibility and the quality score as one hard data gate."""
     quality = item.get("data_quality") or {}
     if not quality.get("eligible", False):
+        return False
+    if _post_close_kline_unconfirmed(item):
         return False
     explicit = item.get("score_eligible")
     return bool(explicit) if explicit is not None else candidate_quality_score(item) >= min_score
@@ -2469,13 +2491,15 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
                     defer_enrichment=defer_enrichment,
                     include_phase_d_lps_context=True,
                     include_formal_event_history=True,
+                    require_close_confirmation=formal_scope,
                     kline_artifacts=kline_artifacts)
             except TypeError as exc:
                 if not any(name in str(exc) for name in (
                         "source_health", "metrics", "capital_expected_date",
                         "top", "min_candidates", "min_score",
                         "defer_enrichment", "include_phase_d_lps_context",
-                        "include_formal_event_history", "kline_artifacts")):
+                        "include_formal_event_history", "kline_artifacts",
+                        "require_close_confirmation")):
                     raise
                 try:
                     scored = run_phase2(
@@ -2616,7 +2640,8 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
                                min_score=50, as_of_date="",
                                capital_expected_date="", policy=None,
                                priority_bonuses=None, source_health=None,
-                               metrics=None, kline_artifacts=None):
+                               metrics=None, kline_artifacts=None,
+                               require_close_confirmation=False):
     """Run one enrichment queue over the global report scope plus buffer."""
     scored = list(scored or [])
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -2633,18 +2658,27 @@ def enrich_global_report_scope(scored, top=30, min_candidates=20,
         return scored, None
 
     kline_diagnostics = {}
-    enriched = run_phase2(
-        scope, max_workers=4, enable_wyckoff=True,
-        as_of_date=as_of_date,
-        capital_expected_date=capital_expected_date,
-        source_health=source_health, metrics=metrics,
-        top=top, min_candidates=min_candidates, min_score=min_score,
-        disable_early_stop=True,
-        include_phase_d_lps_context=True,
-        include_formal_event_history=True,
-        kline_artifacts=kline_artifacts,
-        kline_diagnostics=kline_diagnostics,
-        kline_budget_stage="topup")
+    phase2_kwargs = {
+        "max_workers": 4, "enable_wyckoff": True,
+        "as_of_date": as_of_date,
+        "capital_expected_date": capital_expected_date,
+        "source_health": source_health, "metrics": metrics,
+        "top": top, "min_candidates": min_candidates,
+        "min_score": min_score, "disable_early_stop": True,
+        "include_phase_d_lps_context": True,
+        "include_formal_event_history": True,
+        "kline_artifacts": kline_artifacts,
+        "kline_diagnostics": kline_diagnostics,
+        "kline_budget_stage": "topup",
+        "require_close_confirmation": require_close_confirmation,
+    }
+    try:
+        enriched = run_phase2(scope, **phase2_kwargs)
+    except TypeError as exc:
+        if "require_close_confirmation" not in str(exc):
+            raise
+        phase2_kwargs.pop("require_close_confirmation")
+        enriched = run_phase2(scope, **phase2_kwargs)
     original_by_code = {
         item.get("code"): item for item in scored if item.get("code")
     }
@@ -2946,6 +2980,22 @@ def _candidate_diagnostic_text(item):
         parts.append("信号：" + _signal_text(item.get("signals", {})))
     if transient_reasons:
         parts.append("盘中临时状态：" + "、".join(dict.fromkeys(transient_reasons)))
+    kline_close = _candidate_kline_close_evidence(item)
+    if kline_close:
+        fetched_at = kline_close.get("fetched_at") or "未记录"
+        data_date = kline_close.get("data_date") or "未记录"
+        confirmation_source = kline_close.get("confirmation_source") or "未记录"
+        if kline_close.get("close_confirmed") is True:
+            parts.append(
+                f"K线收盘确认：已确认（数据日期{data_date}；"
+                f"确认依据{confirmation_source}；取数时间{fetched_at}）"
+            )
+        else:
+            reason = kline_close.get("degraded_reason") or "close_unconfirmed"
+            parts.append(
+                f"K线收盘确认：未确认，降级使用（原因{reason}；"
+                f"数据日期{data_date}；取数时间{fetched_at}）"
+            )
     wyckoff = item.get("wyckoff", {})
     signal_status = wyckoff.get("signal_status") or wyckoff.get("short_term", {}).get("signal_status", "")
     current_state = _wyckoff_current_state(wyckoff)
@@ -2999,6 +3049,56 @@ def _candidate_diagnostic_text(item):
             f"{count}条，分数{score:+.2f}，风险{risk}；实验观察，不参与推荐"
         )
     return "；".join(parts)
+
+
+def _candidate_kline_close_evidence(item):
+    """Return report-only close evidence without inferring it from fetch time."""
+    quality = item.get("data_quality") or {}
+    dimensions = quality.get("dimensions") or {}
+    dimension = dimensions.get("kline") or {}
+    sources = item.get("source_evidence") or {}
+    source = sources.get("kline") or {}
+    if not isinstance(dimension, dict):
+        dimension = {}
+    if not isinstance(source, dict):
+        source = {}
+    fields = (
+        "fetched_at", "data_date", "close_confirmed",
+        "confirmation_source", "degraded_reason",
+    )
+    evidence = {}
+    for field in fields:
+        value = source.get(field)
+        if value is None or value == "":
+            value = dimension.get(field)
+        evidence[field] = value
+    if not any(value is not None and value != ""
+               for value in evidence.values()):
+        return {}
+    return evidence
+
+
+def _kline_close_report_summary(candidates, performance):
+    """Summarize post-close evidence for report headers."""
+    if (performance or {}).get("scan_mode") != "post_close_final":
+        return None
+    confirmed = 0
+    degraded = 0
+    unknown = 0
+    for item in candidates:
+        evidence = _candidate_kline_close_evidence(item)
+        if evidence.get("close_confirmed") is True:
+            confirmed += 1
+        elif evidence:
+            degraded += 1
+        else:
+            unknown += 1
+    return {
+        "total": len(candidates),
+        "confirmed": confirmed,
+        "degraded": degraded,
+        "unknown": unknown,
+    }
 
 
 def _sector_persistence_text(item):
@@ -3700,6 +3800,7 @@ def classify_candidates(candidates, policy):
         item for item in eligible_candidates
         if item.get("sector_actionable", True)
         and item.get("score_eligible", True)
+        and not _post_close_kline_unconfirmed(item)
         and (not policy.get("requires_sector_capital_proof", False)
              or item.get("sector_capital_evidence") == "positive_verified")
         and _short_term_observation_reason(item) is None
@@ -3718,6 +3819,7 @@ def classify_candidates(candidates, policy):
     if policy.get("mode") == "waiting_trigger":
         confirmations = [item for item in eligible_candidates
                          if item.get("data_quality", {}).get("eligible", False)
+                         and not _post_close_kline_unconfirmed(item)
                          and item.get("score_eligible", True)
                          and item.get("wyckoff")
                          and _short_term_observation_reason(item) is None
@@ -3736,6 +3838,8 @@ def classify_candidates(candidates, policy):
             continue
         copy = dict(item)
         reasons = list(item.get("data_quality", {}).get("reasons", []))
+        if _post_close_kline_unconfirmed(item):
+            reasons.append("kline_close_unconfirmed")
         if not item.get("sector_actionable", True):
             reasons.append(item.get("sector_persistence_status")
                            or item.get("sector_type") or "sector_unverified")
@@ -4395,6 +4499,23 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         f"**筛选漏斗**: {funnel}",
     ]
     lines.extend(["", *_ranking_provenance_markdown(performance)])
+    kline_close_summary = _kline_close_report_summary(candidates, performance)
+    if kline_close_summary is not None:
+        lines.extend([
+            "",
+            "**K线收盘确认**: "
+            f"已确认 {kline_close_summary['confirmed']}/"
+            f"{kline_close_summary['total']} | "
+            f"降级 {kline_close_summary['degraded']} | "
+            f"证据未记录 {kline_close_summary['unknown']}。"
+            "取数时间仅作审计，不单独证明收盘已确认。",
+        ])
+        if kline_close_summary["degraded"] or kline_close_summary["unknown"]:
+            lines.extend([
+                "",
+                "> ⚠️ **盘后K线数据不足**: 未确认收盘的标的已降级使用，"
+                "仅可进入观察池；详见行级数据诊断。",
+            ])
     regime = market_regime
     if regime and regime.get("score") is not None:
         lines.extend([
@@ -4822,6 +4943,28 @@ def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
         f"可执行 {len(buckets['actionable'])}/等待 {len(buckets['waiting_trigger'])}"
     )
     ranking_provenance_html = _ranking_provenance_html(performance)
+    kline_close_summary = _kline_close_report_summary(candidates, performance)
+    kline_close_html = ""
+    if kline_close_summary is not None:
+        tone = (
+            "notice notice-warning"
+            if kline_close_summary["degraded"] or kline_close_summary["unknown"]
+            else "kline-close-confirmed"
+        )
+        heading = (
+            "盘后K线数据不足"
+            if kline_close_summary["degraded"] or kline_close_summary["unknown"]
+            else "K线已完成收盘确认"
+        )
+        kline_close_html = (
+            f"<aside class='{tone}'><strong>{heading}</strong>"
+            f"<p>已确认 {kline_close_summary['confirmed']}/"
+            f"{kline_close_summary['total']} | "
+            f"降级 {kline_close_summary['degraded']} | "
+            f"证据未记录 {kline_close_summary['unknown']}。"
+            "取数时间仅作审计，不单独证明收盘已确认；"
+            "未确认标的仅可进入观察池。</p></aside>"
+        )
     regime_html = ""
     if regime and regime["score"] is not None:
         color = {"强势": "#dc2626", "中性": "#d97706", "弱势": "#16a34a"}.get(regime["label"], "#86868b")
@@ -5035,6 +5178,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 <p class="dt">{priority_note}</p>
 <p class="dt">{funnel_note}</p>
 {ranking_provenance_html}
+{kline_close_html}
 {tracking_html}
 {provisional_banner}
 {actionable_legend_html}
@@ -5259,7 +5403,8 @@ def main():
         capital_expected_date=capital_expected_date, policy=policy,
         priority_bonuses=active_policy["priority_bonuses"],
         source_health=source_health, metrics=performance,
-        kline_artifacts=kline_artifacts)
+        kline_artifacts=kline_artifacts,
+        require_close_confirmation=post_close_final)
     if kline_artifacts is not None:
         kline_artifacts.clear()
     event_index = build_daily_index(

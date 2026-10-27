@@ -127,7 +127,7 @@ class TestMetadata(unittest.TestCase):
     def _valid_kline(self, trade_date="20260813"):
         payload = _make_dated_kline(trade_date=trade_date)
         payload["meta"].update({
-            "data_source": "eastmoney", "data_quality": "good",
+            "data_source": "eastmoney", "data_quality": "good", "freq": "D",
         })
         return payload
 
@@ -212,6 +212,57 @@ class TestMetadata(unittest.TestCase):
         verdict = sc._validate_kline_cache(payload, "2026-08-13")
         self.assertFalse(verdict["valid"])
         self.assertIn("insufficient_data", verdict["reasons"])
+
+    def test_post_close_kline_rejects_same_day_intraday_cache(self):
+        payload = self._valid_kline()
+        payload["meta"]["fetch_time"] = "20260813-135718"
+        verdict = sc._validate_kline_cache(
+            payload, "2026-08-13", require_close_confirmation=True)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("intraday_unconfirmed", verdict["reasons"])
+        self.assertFalse(verdict["close_confirmation"]["confirmed"])
+
+    def test_post_close_kline_accepts_close_flag_or_post_close_fetch(self):
+        explicit = self._valid_kline()
+        explicit["meta"].update({
+            "fetch_time": "20260813-135718", "close_confirmed": True,
+        })
+        explicit_verdict = sc._validate_kline_cache(
+            explicit, "2026-08-13", require_close_confirmation=True)
+        self.assertTrue(explicit_verdict["valid"])
+        self.assertEqual(
+            explicit_verdict["close_confirmation"]["source"],
+            "provider_flag")
+
+        after_close = self._valid_kline()
+        after_close["meta"]["fetch_time"] = "20260813-151001"
+        time_verdict = sc._validate_kline_cache(
+            after_close, "2026-08-13", require_close_confirmation=True)
+        self.assertTrue(time_verdict["valid"])
+        self.assertEqual(
+            time_verdict["close_confirmation"]["source"],
+            "post_close_fetch_time")
+
+        unknown = self._valid_kline()
+        unknown["meta"].update({
+            "data_source": "unknown_adapter",
+            "fetch_time": "20260813-160000",
+        })
+        unknown_verdict = sc._validate_kline_cache(
+            unknown, "2026-08-13", require_close_confirmation=True)
+        self.assertFalse(unknown_verdict["valid"])
+        self.assertIn("intraday_unconfirmed", unknown_verdict["reasons"])
+
+    def test_file_mtime_timestamp_cannot_confirm_close(self):
+        payload = self._valid_kline()
+        payload["meta"].update({
+            "fetch_time": "20260813-160000",
+            "fetch_time_source": "file_mtime",
+        })
+        verdict = sc._validate_kline_cache(
+            payload, "2026-08-13", require_close_confirmation=True)
+        self.assertFalse(verdict["valid"])
+        self.assertIn("intraday_unconfirmed", verdict["reasons"])
 
     def test_capital_validator_requires_numeric_flow_evidence(self):
         date_only = self._valid_capital()
@@ -511,6 +562,48 @@ class TestMetadata(unittest.TestCase):
              patch.object(sc, "run_script", return_value={"success": True}):
             result = sc._fetch_kline("600001.SH", as_of_date="2026-08-10")
         self.assertEqual(result["data"][-1]["trade_date"], "20260810")
+
+    def test_post_close_fetch_refreshes_intraday_cache_and_exposes_evidence(self):
+        cached = self._valid_kline()
+        cached["meta"]["fetch_time"] = "20260813-135718"
+        refreshed = self._valid_kline()
+        refreshed["meta"]["fetch_time"] = "20260813-151500"
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[cached, refreshed]), \
+             patch.object(sc, "run_script", return_value={"success": True}):
+            wrapped = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13",
+                require_close_confirmation=True, with_evidence=True)
+        self.assertEqual(wrapped["live_attempt"]["status"], "live_success")
+        evidence = sc._normalize_source_evidence(
+            "kline", wrapped["payload"], wrapped["live_attempt"],
+            usable=lambda value: True)
+        self.assertTrue(evidence["close_confirmed"])
+        self.assertEqual(evidence["confirmation_source"],
+                         "post_close_fetch_time")
+        self.assertEqual(evidence["fetched_at"], "20260813-151500")
+
+    def test_post_close_failed_refresh_keeps_intraday_payload_degraded(self):
+        cached = self._valid_kline()
+        cached["meta"]["fetch_time"] = "20260813-135718"
+        refreshed = self._valid_kline()
+        refreshed["meta"]["fetch_time"] = "20260813-145959"
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[cached, refreshed]), \
+             patch.object(sc, "run_script", return_value={"success": True}):
+            wrapped = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13",
+                require_close_confirmation=True, with_evidence=True)
+        self.assertTrue(wrapped["payload"]["data"])
+        evidence = sc._normalize_source_evidence(
+            "kline", wrapped["payload"], wrapped["live_attempt"],
+            usable=lambda value: False)
+        self.assertFalse(evidence["close_confirmed"])
+        self.assertEqual(evidence["degraded_reason"],
+                         "intraday_unconfirmed")
+        self.assertEqual(evidence["status"], "cache_stale")
 
     def test_valid_capital_cache_skips_subprocess(self):
         payload = {
@@ -1707,6 +1800,36 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertFalse(diagnostics["610981"]["usable"])
         self.assertEqual(diagnostics["610981"]["scheduler_reason"],
                          "live_deadline")
+
+    def test_post_close_intraday_fallback_remains_observable_in_phase2(self):
+        payload = _make_dated_kline(60, "610980.SH", "20260916")
+        payload["meta"]["fetch_time"] = "20260916-135700"
+        confirmation = sc._kline_close_confirmation(
+            payload, "2026-09-16", required=True)
+        payload = sc._with_close_confirmation(payload, confirmation)
+
+        def fetch_kline(_ts_code, with_evidence=False, **_kwargs):
+            wrapped = sc.source_result(payload, sc.live_attempt(
+                attempted=True, provider_attempts=1, cache_used=True,
+                stale=True, status="cache_stale",
+                reason="intraday_unconfirmed"))
+            return wrapped if with_evidence else payload
+
+        with patch.object(sc, "_fetch_kline", side_effect=fetch_kline), \
+                patch.object(sc, "_fetch_capital_flow", return_value=None), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            result = sc.run_phase2(
+                [_make_candidate("610980")], as_of_date="2026-09-16",
+                require_close_confirmation=True, defer_enrichment=True,
+                require_wyckoff_gate=False)
+
+        self.assertEqual(len(result), 1)
+        evidence = result[0]["source_evidence"]["kline"]
+        self.assertFalse(evidence["close_confirmed"])
+        self.assertEqual(evidence["degraded_reason"],
+                         "intraday_unconfirmed")
+        self.assertEqual(result[0]["data_quality"]["dimensions"]["kline"][
+            "data_date"], "2026-09-16")
 
     def test_kline_budget_stops_at_global_and_downstream_deadlines(self):
         clock = _FakeClock()

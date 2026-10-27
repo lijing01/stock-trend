@@ -16,6 +16,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from core.cache_utils import run_script, CACHE_DIR
 from core.eastmoney_utils import ma, rsi, macd_direction, volume_ma
@@ -86,6 +87,7 @@ def _read_json(path):
                     meta.get("fetch_time") or meta.get("fetched_at")):
                 modified = datetime.fromtimestamp(Path(path).stat().st_mtime)
                 meta["fetch_time"] = modified.strftime("%Y%m%d-%H%M%S")
+                meta["fetch_time_source"] = "file_mtime"
         return payload
     except (OSError, UnicodeError, ValueError, TypeError,
             OverflowError, RecursionError):
@@ -439,8 +441,22 @@ def _normalize_source_evidence(source, payload, attempt, *, cache_probe=False,
     # actual source for cache auditing and report diagnostics.
     if source == "kline" and isinstance(payload, dict):
         meta = payload.get("meta", {})
-        if isinstance(meta, dict) and meta.get("data_source"):
-            evidence["data_source"] = str(meta["data_source"])
+        if isinstance(meta, dict):
+            if meta.get("data_source"):
+                evidence["data_source"] = str(meta["data_source"])
+            confirmation = meta.get("close_confirmation")
+            if isinstance(confirmation, dict) and confirmation.get("required"):
+                evidence.update({
+                    "fetched_at": str(confirmation.get("fetched_at") or ""),
+                    "data_date": str(confirmation.get("data_date") or ""),
+                    "close_confirmed": bool(confirmation.get("confirmed")),
+                    "confirmation_source": str(
+                        confirmation.get("source") or ""),
+                    "degraded_reason": (
+                        "" if confirmation.get("confirmed") else str(
+                            confirmation.get("reason")
+                            or "intraday_unconfirmed")),
+                })
     if source == "capital" and isinstance(payload, dict):
         meta = payload.get("meta", {})
         if isinstance(meta, dict):
@@ -1059,7 +1075,113 @@ def _append_ttl_reason(reasons, cache_age_seconds, ttl_seconds):
             reasons.append("cache_expired")
 
 
-def _validate_kline_cache(payload, expected_trading_date=""):
+def _parse_kline_fetch_time(value):
+    """Parse provider timestamps as Shanghai time for close qualification."""
+    if not value:
+        return None
+    text = str(value).strip()
+    shanghai = ZoneInfo("Asia/Shanghai")
+    for fmt in ("%Y%m%d-%H%M%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=shanghai)
+        except ValueError:
+            pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=shanghai)
+    return parsed.astimezone(shanghai)
+
+
+def _kline_close_confirmation(payload, expected_trading_date="",
+                              required=False):
+    """Return auditable close-confirmation evidence for the latest daily bar."""
+    data_date = latest_data_date(payload) if isinstance(payload, dict) else ""
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    latest_row = rows[-1] if isinstance(rows, list) and rows else {}
+    latest_row = latest_row if isinstance(latest_row, dict) else {}
+    fetched_at = meta.get("fetch_time") or meta.get("fetched_at") or ""
+    evidence = {
+        "required": bool(required),
+        "confirmed": not required,
+        "source": "not_required" if not required else "",
+        "reason": "" if not required else "intraday_unconfirmed",
+        "fetched_at": str(fetched_at or ""),
+        "data_date": str(data_date or ""),
+    }
+    if not required:
+        return evidence
+    if expected_trading_date and not _date_covers(data_date,
+                                                  expected_trading_date):
+        evidence["reason"] = "wrong_trading_date"
+        return evidence
+
+    explicit_values = (
+        meta.get("close_confirmed"), meta.get("bar_complete"),
+        meta.get("is_final"), latest_row.get("close_confirmed"),
+        latest_row.get("bar_complete"), latest_row.get("is_final"),
+    )
+    if any(value is False for value in explicit_values):
+        evidence["source"] = "provider_flag"
+        return evidence
+    if any(value is True for value in explicit_values):
+        evidence.update({
+            "confirmed": True, "source": "provider_flag", "reason": "",
+        })
+        return evidence
+
+    session_status = str(
+        meta.get("session_status") or latest_row.get("session_status") or ""
+    ).strip().lower()
+    if session_status in {"closed", "close", "complete", "completed",
+                          "final", "post_close"}:
+        evidence.update({
+            "confirmed": True, "source": "provider_session_status",
+            "reason": "",
+        })
+        return evidence
+    if session_status in {"open", "intraday", "trading", "provisional"}:
+        evidence["source"] = "provider_session_status"
+        return evidence
+
+    fetched = _parse_kline_fetch_time(fetched_at)
+    expected_key = _trading_date_key(expected_trading_date)
+    data_source = str(meta.get("data_source") or "").strip().lower()
+    frequency = str(meta.get("freq") or "").strip().lower()
+    finalized_daily_sources = {
+        "eastmoney", "tencent_a", "tencent_hk", "baostock", "tushare",
+    }
+    if (fetched is not None
+            and _trading_date_key(fetched.date().isoformat()) == expected_key
+            and (fetched.hour, fetched.minute) >= (15, 10)
+            and data_source in finalized_daily_sources
+            and frequency in {"d", "day", "daily", "1d"}
+            and meta.get("fetch_time_source") != "file_mtime"):
+        evidence.update({
+            "confirmed": True, "source": "post_close_fetch_time",
+            "reason": "",
+        })
+    return evidence
+
+
+def _with_close_confirmation(payload, confirmation):
+    """Attach close evidence without mutating a cached/provider payload."""
+    if not isinstance(payload, dict):
+        return payload
+    decorated = copy.deepcopy(payload)
+    meta = decorated.setdefault("meta", {})
+    if not isinstance(meta, dict):
+        decorated["meta"] = meta = {}
+    meta["close_confirmation"] = copy.deepcopy(confirmation)
+    return decorated
+
+
+def _validate_kline_cache(payload, expected_trading_date="",
+                          require_close_confirmation=False):
     """Pure validation for a K-line cache candidate."""
     reasons = _payload_validation_reasons(payload)
     rows = payload.get("data", []) if isinstance(payload, dict) else []
@@ -1081,7 +1203,13 @@ def _validate_kline_cache(payload, expected_trading_date=""):
     if expected_trading_date and not _date_covers(
             data_date, expected_trading_date):
         reasons.append("wrong_trading_date")
-    return _cache_verdict(reasons)
+    confirmation = _kline_close_confirmation(
+        payload, expected_trading_date, required=require_close_confirmation)
+    if require_close_confirmation and not confirmation["confirmed"]:
+        reasons.append(confirmation["reason"] or "intraday_unconfirmed")
+    verdict = _cache_verdict(reasons)
+    verdict["close_confirmation"] = confirmation
+    return verdict
 
 
 def _validate_capital_cache(payload, expected_trading_date="",
@@ -1173,7 +1301,8 @@ def _with_cache_verdict(payload, verdict):
 
 
 def _fetch_kline(ts_code, as_of_date="", cache_only=False,
-                 with_evidence=False, live_deadline=None):
+                 with_evidence=False, live_deadline=None,
+                 require_close_confirmation=False):
     """Fetch a current 60-day K-line, refreshing stale caches when required."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "kline.json"
@@ -1181,7 +1310,11 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     # A cache is a hit only when it covers the recommendation date.  A
     # post-close scan must not score T-1 data merely because it has enough bars.
     cached = _read_json(str(cache_path))
-    cache_verdict = _validate_kline_cache(cached, as_of_date)
+    cache_verdict = _validate_kline_cache(
+        cached, as_of_date, require_close_confirmation)
+    if require_close_confirmation and isinstance(cached, dict):
+        cached = _with_close_confirmation(
+            cached, cache_verdict["close_confirmation"])
     if cache_verdict["valid"]:
         result = source_result(cached, live_attempt(
             attempted=False, cache_used=True, stale=False,
@@ -1222,8 +1355,12 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
                 cmd, label=f"kline_{ts_code}",
                 timeout=_remaining_timeout("kline", live_deadline))
             payload = _read_json(str(output_path)) if result["success"] else None
-            verdict = (_validate_kline_cache(payload, as_of_date)
+            verdict = (_validate_kline_cache(
+                payload, as_of_date, require_close_confirmation)
                        if payload else {"valid": False})
+            if require_close_confirmation and isinstance(payload, dict):
+                payload = _with_close_confirmation(
+                    payload, verdict["close_confirmation"])
             if verdict["valid"]:
                 os.replace(output_path, cache_path)
             return result, payload, verdict
@@ -1245,10 +1382,18 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
         return wrapped if with_evidence else refreshed
     if refreshed:
         refreshed = _with_cache_verdict(refreshed, refreshed_verdict)
+        close_reason = refreshed_verdict.get(
+            "close_confirmation", {}).get("reason", "")
+        degraded_reason = (close_reason if close_reason in {
+            "intraday_unconfirmed", "wrong_trading_date"
+        } else "")
         refreshed.setdefault("meta", {})["refresh_error"] = (
-            f"K线刷新后仍未覆盖{as_of_date}")
-        attempt["reason"] = "empty"
-        attempt["status"] = "empty"
+            f"K线刷新后仍未获得{as_of_date}收盘确认"
+            if degraded_reason else f"K线刷新后仍未覆盖{as_of_date}")
+        attempt["reason"] = degraded_reason or "empty"
+        attempt["status"] = "cache_stale"
+        attempt["cache_used"] = True
+        attempt["stale"] = True
         wrapped = source_result(refreshed, attempt)
         return wrapped if with_evidence else refreshed
     # Keep a stale cache observable to the quality gate instead of dropping it
@@ -2272,7 +2417,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                require_wyckoff_gate=True, peer_cohorts=None,
                include_phase_d_lps_context=False,
                include_formal_event_history=False, kline_diagnostics=None,
-               kline_artifacts=None, kline_budget_stage="normal"):
+               kline_artifacts=None, kline_budget_stage="normal",
+               require_close_confirmation=False):
     """Score candidates with bounded K-line work and prioritized enrichment.
 
     K-line/Wyckoff is completed first.  Capital and fundamental cache probes
@@ -2345,7 +2491,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             and payload.get("data")
             and _date_covers(latest_data_date(payload), as_of_date)
             and not payload.get("meta", {}).get("refresh_error")
-            and _validate_kline_cache(payload, as_of_date)["valid"]
+            and _validate_kline_cache(
+                payload, as_of_date, require_close_confirmation)["valid"]
         )
 
     print("  Fetching K-line data...", file=sys.stderr)
@@ -2376,6 +2523,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         ts_code = candidate["ts_code"]
         cache_only = _source_unavailable(source_health, "kline")
         kwargs = {"as_of_date": as_of_date}
+        if require_close_confirmation:
+            kwargs["require_close_confirmation"] = True
         if cache_only:
             kwargs["cache_only"] = True
         try:
@@ -2407,17 +2556,22 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
     if isinstance(source_health, RunSourceHealth):
         with source_health.kline_budget(kline_budget_stage) as kline_deadline:
             def _live_kline(candidate):
+                close_kwargs = ({"require_close_confirmation": True}
+                                if require_close_confirmation else {})
                 return _evidenced_fetch(
                     _fetch_kline, candidate["ts_code"],
                     as_of_date=as_of_date,
                     live_deadline=kline_deadline,
+                    **close_kwargs,
                     usable=_kline_usable)
 
             fetched = bounded_source_map(
                 "kline", fetch_candidates, source_health, _live_kline,
                 lambda candidate: _cache_fetch(
                     _fetch_kline, candidate["ts_code"],
-                    as_of_date=as_of_date),
+                    as_of_date=as_of_date,
+                    **({"require_close_confirmation": True}
+                       if require_close_confirmation else {})),
                 kline_deadline,
                 max_workers=min(worker_count, MAX_IN_FLIGHT["kline"]),
                 cache_usable=_kline_usable,
@@ -2468,6 +2622,10 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
             evidence = source_evidence["kline"].get(ts_code, {})
             if latest and not _date_covers(latest, as_of_date):
                 reason_code = "wrong_trading_date"
+            elif (require_close_confirmation
+                  and evidence.get("close_confirmed") is False):
+                reason_code = (evidence.get("degraded_reason")
+                               or "intraday_unconfirmed")
             elif meta.get("error_type") == "stale_data":
                 reason_code = "wrong_trading_date"
             elif meta.get("error_type") == "insufficient_data":

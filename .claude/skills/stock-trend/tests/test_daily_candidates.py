@@ -1663,6 +1663,41 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertIn("确认过晚",
                       _candidate_diagnostic_text(buckets["observation"][0]))
 
+    def test_unconfirmed_post_close_kline_is_observation_only(self):
+        item = candidate("close-fallback", adjusted_score=90.0)
+        item["source_evidence"] = {"kline": {
+            "close_confirmed": False,
+            "confirmation_source": "fetch_time_cutoff",
+            "degraded_reason": "intraday_unconfirmed",
+            "fetched_at": "20261027-135718",
+            "data_date": "2026-10-27",
+        }}
+        policy = {"mode": "actionable", "max_recommendations": 5,
+                  "reasons": []}
+
+        buckets = classify_candidates([item], policy)
+
+        self.assertEqual(buckets["actionable"], [])
+        self.assertEqual([row["code"] for row in buckets["observation"]],
+                         ["close-fallback"])
+        self.assertIn(
+            "kline_close_unconfirmed",
+            buckets["observation"][0]["observation_reasons"],
+        )
+        audit = build_gate_audit([item], policy, buckets, min_score=50)
+        self.assertEqual(audit["blocked_codes"]["data_quality"],
+                         ["close-fallback"])
+
+    def test_missing_close_evidence_keeps_legacy_intraday_behavior(self):
+        item = candidate("legacy-intraday", adjusted_score=90.0)
+        policy = {"mode": "actionable", "max_recommendations": 5,
+                  "reasons": []}
+
+        buckets = classify_candidates([item], policy)
+
+        self.assertEqual([row["code"] for row in buckets["actionable"]],
+                         ["legacy-intraday"])
+
     def test_entry_timing_wait_is_waiting_not_actionable(self):
         item = _set_buy_level(
             candidate("wait-timing", adjusted_score=90.0), "lps")
@@ -4251,6 +4286,78 @@ class TestRecommendationPolicy(unittest.TestCase):
     def test_final_column_marks_no_data_problem(self):
         detail = _candidate_diagnostic_text(candidate("1"))
         self.assertIn("数据问题/异常：无", detail)
+
+    def test_post_close_report_exposes_confirmed_kline_evidence(self):
+        item = candidate("confirmed")
+        item["source_evidence"] = {"kline": {
+            "data_date": "2026-10-27",
+            "fetched_at": "20261027-152100",
+            "close_confirmed": True,
+            "confirmation_source": "provider_bar_complete",
+            "degraded_reason": "",
+        }}
+        buckets = {
+            "actionable": [item], "waiting_trigger": [], "observation": [],
+        }
+        policy = {"mode": "actionable", "max_recommendations": 1,
+                  "reasons": []}
+        performance = {"scan_mode": "post_close_final"}
+
+        markdown = generate_report(
+            [item], [], 0.1, policy, buckets, performance=performance)
+        html = _generate_html(
+            [item], [], 0.1, "20261027-170000", policy, buckets,
+            performance=performance)
+
+        for output in (markdown, html):
+            self.assertIn("已确认 1/1", output)
+            self.assertIn("取数时间仅作审计", output)
+            self.assertIn("provider_bar_complete", output)
+            self.assertIn("20261027-152100", output)
+        self.assertNotIn("盘后K线数据不足", markdown)
+
+    def test_post_close_report_marks_intraday_fallback_as_degraded(self):
+        item = candidate("degraded")
+        item["source_evidence"] = {"kline": {
+            "data_date": "2026-10-27",
+            "fetched_at": "20261027-135718",
+            "close_confirmed": False,
+            "confirmation_source": "",
+            "degraded_reason": "intraday_unconfirmed",
+        }}
+        buckets = {
+            "actionable": [], "waiting_trigger": [], "observation": [item],
+        }
+        policy = {"mode": "observation", "max_recommendations": 0,
+                  "reasons": []}
+        performance = {"scan_mode": "post_close_final"}
+
+        markdown = generate_report(
+            [item], [], 0.1, policy, buckets, performance=performance)
+        html = _generate_html(
+            [item], [], 0.1, "20261027-170000", policy, buckets,
+            performance=performance)
+
+        for output in (markdown, html):
+            self.assertIn("盘后K线数据不足", output)
+            self.assertIn("降级 1", output)
+            self.assertIn("intraday_unconfirmed", output)
+            self.assertIn("20261027-135718", output)
+            self.assertIn("不单独证明收盘已确认", output)
+
+    def test_non_post_close_report_omits_close_confirmation_summary(self):
+        item = candidate("intraday")
+        buckets = {
+            "actionable": [], "waiting_trigger": [], "observation": [item],
+        }
+        report = generate_report(
+            [item], [], 0.1,
+            {"mode": "observation", "max_recommendations": 0,
+             "reasons": []},
+            buckets,
+            performance={"scan_mode": "exploratory"},
+        )
+        self.assertNotIn("K线收盘确认**", report)
 
     def test_cross_source_sector_diagnostic_is_collapsed(self):
         item = candidate("cross-source", eligible=False)

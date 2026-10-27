@@ -141,7 +141,7 @@ def _dimension(name, payload, expected_date="", require_date=False,
         stale_reason = f"{name}_date_missing"
     elif available and not fresh:
         stale_reason = f"{name}_stale"
-    return {
+    dimension = {
         "returned": returned,
         "available": available,
         "fresh": fresh,
@@ -153,6 +153,36 @@ def _dimension(name, payload, expected_date="", require_date=False,
         "stale_reason": stale_reason,
         "source_status": source_status,
     }
+    if name == "kline":
+        close_confirmation = meta.get("close_confirmation", {})
+        if not isinstance(close_confirmation, dict):
+            close_confirmation = {}
+        dimension.update({
+            "close_confirmed": (
+                evidence.get("close_confirmed")
+                if "close_confirmed" in evidence
+                else close_confirmation.get("confirmed")
+            ),
+            "confirmation_source": (
+                evidence.get("confirmation_source")
+                or close_confirmation.get("source") or ""
+            ),
+            "degraded_reason": (
+                evidence.get("degraded_reason")
+                or close_confirmation.get("reason") or ""
+            ),
+        })
+        dimension["fetched_at"] = (
+            evidence.get("fetched_at")
+            or close_confirmation.get("fetched_at")
+            or dimension["fetched_at"]
+        )
+        dimension["data_date"] = (
+            _iso_date(evidence.get("data_date")
+                      or close_confirmation.get("data_date"))
+            or dimension["data_date"]
+        )
+    return dimension
 
 
 def assess_candidate_data(kline, capital, fundamental, as_of_date="",
