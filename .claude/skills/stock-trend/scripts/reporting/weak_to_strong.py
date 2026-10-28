@@ -1,6 +1,7 @@
 """Report an independent daily weak-to-strong observation."""
 
 import math
+from datetime import date
 from html import escape
 
 from reporting.sector_display import _sector_html
@@ -433,12 +434,20 @@ def _selection_stats(scanned):
 
 
 def _has_current_date(payload, item, stats):
-    expected = str(payload.get("as_of_date") or "")
-    actual = str(item.get("as_of_date") or item.get("data_date") or "")
-    if not expected:
-        stats["date_validation_unknown"] = 1
-        return True
-    if actual != expected:
+    expected = payload.get("as_of_date")
+    try:
+        valid_expected = isinstance(expected, str) and date.fromisoformat(expected).isoformat() == expected
+    except ValueError:
+        valid_expected = False
+    if not valid_expected:
+        stats["date_validation_unknown"] += 1
+    evidence = item.get("kline_evidence")
+    metrics = item.get("metrics")
+    dates = (item.get("as_of_date") or item.get("data_date"),
+             item.get("evaluation_date"),
+             evidence.get("data_date") if isinstance(evidence, dict) else None,
+             metrics.get("metric_date") if isinstance(metrics, dict) else None)
+    if not valid_expected or any(value != expected for value in dates):
         stats["excluded_stale_date"] += 1
         return False
     return True
@@ -453,12 +462,12 @@ def select_v1_rows(payload, limit=DISPLAY_LIMIT):
         if item is None or item.get("evidence_status") != "ready":
             stats["excluded_data"] += 1
             continue
-        if not _has_current_date(payload, item, stats):
-            continue
         state = str(item.get("state") or "")
         if (item.get("provisional") is True or item.get("confirmation") == "provisional"
                 or state == "PROVISIONAL_BREAKOUT"):
             stats["excluded_provisional"] += 1
+            continue
+        if not _has_current_date(payload, item, stats):
             continue
         status = _follow_up_status(follow or {}) if follow else ""
         if status in {"INVALIDATED", "PENDING_REVIEW", "失效", "待复评"}:
@@ -723,11 +732,11 @@ def select_v2_rows(payload, limit=DISPLAY_LIMIT):
             if item.get("evidence_status") != "ready":
                 stats["excluded_data"] += 1
                 continue
-            if not _has_current_date(payload, item, stats):
-                continue
             if (key == "provisional" or item.get("provisional") is True
                     or item.get("confirmation") == "provisional"):
                 stats["excluded_provisional"] += 1
+                continue
+            if not _has_current_date(payload, item, stats):
                 continue
             risks = item.get("risk_flags") or []
             if isinstance(risks, str):

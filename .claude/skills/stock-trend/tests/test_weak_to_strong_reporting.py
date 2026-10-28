@@ -11,6 +11,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from reporting import weak_to_strong as report
 
 
+REPORT_DATE = "2026-10-28"
+
+
+def dated(item, date=REPORT_DATE):
+    item = dict(item)
+    item.setdefault("as_of_date", date)
+    item.setdefault("evaluation_date", date)
+    evidence = dict(item.get("kline_evidence") or {})
+    evidence.setdefault("data_date", date)
+    item["kline_evidence"] = evidence
+    metrics = dict(item.get("metrics") or {})
+    metrics.setdefault("metric_date", date)
+    item["metrics"] = metrics
+    return item
+
+
 class WeakToStrongFollowUpReportingTests(unittest.TestCase):
     def payload(self):
         return {
@@ -42,11 +58,12 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_html_reuses_sector_display_and_escapes_main_table_values(self):
         payload = self.payload()
-        payload["confirmed"] = [{
+        payload["as_of_date"] = REPORT_DATE
+        payload["confirmed"] = [dated({
             "name": "增强<股>", "code": "600001", "cycle_id": "cycle-a",
             "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
             "sector_memberships": [{"name": "强|板块"}],
-        }]
+        })]
         payload["follow_up"]["items"][0]["origin_cycle_id"] = "cycle-a"
         text = report.render_html(payload)
         self.assertEqual(1, text.count("<table"))
@@ -99,14 +116,15 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_render_uses_stage_order_and_marks_pullback_as_observation(self):
         payload = {
+            "as_of_date": REPORT_DATE,
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 4, "data_insufficient": 0},
-            "confirmed": [{"name": "确认", "code": "4", "state": "BREAKOUT_CONFIRMED",
-                           "evidence_status": "ready"}],
-            "watching": [{"name": "待突破", "code": "3", "state": "SUPPLY_DRY",
-                          "evidence_status": "ready"}],
-            "pullback": [{"name": "回调", "code": "2", "state": "PULLBACK",
-                          "two_day_decline": True, "evidence_status": "ready"}],
+            "confirmed": [dated({"name": "确认", "code": "4", "state": "BREAKOUT_CONFIRMED",
+                           "evidence_status": "ready"})],
+            "watching": [dated({"name": "待突破", "code": "3", "state": "SUPPLY_DRY",
+                          "evidence_status": "ready"})],
+            "pullback": [dated({"name": "回调", "code": "2", "state": "PULLBACK",
+                          "two_day_decline": True, "evidence_status": "ready"})],
             "provisional": [{"name": "盘中", "code": "1", "state": "PROVISIONAL_BREAKOUT",
                              "evidence_status": "ready"}],
             "diagnostics": [],
@@ -159,8 +177,9 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_merged_rows_match_cycle_and_preserve_distinct_cycles(self):
         payload = self.payload()
-        payload["confirmed"] = [{"name": "同股", "code": "600001", "cycle_id": "A",
-                                 "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready"}]
+        payload["as_of_date"] = REPORT_DATE
+        payload["confirmed"] = [dated({"name": "同股", "code": "600001", "cycle_id": "A",
+                                 "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready"})]
         payload["follow_up"]["items"] = [
             {"name": "同股", "code": "600001", "origin_cycle_id": "A",
              "follow_up_status": "ENHANCED", "tracking_count": 2},
@@ -176,18 +195,19 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_main_table_filters_deduplicates_and_caps_total_at_thirty(self):
         payload = {
+            "as_of_date": REPORT_DATE,
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 40, "data_insufficient": 1},
             "confirmed": [
-                {"name": f"确认{index}", "code": f"{index:06d}",
+                dated({"name": f"确认{index}", "code": f"{index:06d}",
                  "cycle_id": f"cycle-{index}", "state": "BREAKOUT_CONFIRMED",
                  "evidence_status": "ready", "breakout_volume_ratio": index,
-                 "close_strength": .8, "breakout_ratio": 1.01}
+                 "close_strength": .8, "breakout_ratio": 1.01})
                 for index in range(1, 36)
             ],
             "watching": [
-                {"name": "低阶段重复", "code": "000035", "cycle_id": "duplicate",
-                 "state": "SUPPLY_DRY", "evidence_status": "ready", "va_v0_ratio": .4},
+                dated({"name": "低阶段重复", "code": "000035", "cycle_id": "duplicate",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready", "va_v0_ratio": .4}),
                 {"name": "数据不足", "code": "800001", "cycle_id": "insufficient",
                  "state": "SUPPLY_DRY", "evidence_status": "data_insufficient"},
                 {"name": "盘中临时", "code": "800002", "cycle_id": "provisional",
@@ -228,10 +248,11 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_main_table_keeps_fewer_than_thirty_without_top_up(self):
         payload = {
+            "as_of_date": REPORT_DATE,
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 2, "data_insufficient": 1},
-            "confirmed": [{"name": "有效", "code": "1", "cycle_id": "a",
-                           "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready"}],
+            "confirmed": [dated({"name": "有效", "code": "1", "cycle_id": "a",
+                           "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready"})],
             "watching": [{"name": "不足", "code": "2", "cycle_id": "b",
                           "state": "SUPPLY_DRY", "evidence_status": "data_insufficient"}],
             "pullback": [], "provisional": [], "diagnostics": [],
@@ -244,14 +265,15 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_main_table_describes_and_orders_v1_ma_direction(self):
         def item(code, metrics):
-            return {
+            return dated({
                 "name": code, "code": code, "cycle_id": code,
                 "state": "SUPPLY_DRY", "evidence_status": "ready",
                 "metrics": metrics, "va_v0_ratio": .5,
                 "drawdown_ratio": .04, "adjustment_days": 2,
-            }
+            })
 
         payload = {
+            "as_of_date": REPORT_DATE,
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 4, "data_insufficient": 0},
             "confirmed": [],
@@ -296,7 +318,7 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             "summary": {"evaluated": 2, "data_insufficient": 0},
             "confirmed": [],
             "watching": [
-                {"name": "有依据", "code": "1", "cycle_id": "a",
+                dated({"name": "有依据", "code": "1", "cycle_id": "a",
                  "state": "SUPPLY_DRY", "evidence_status": "ready",
                  "as_of_date": "2026-10-28", "checks": {"ma10_support": {
                      "value": 1.0, "threshold": 0.98, "operator": ">=",
@@ -305,10 +327,10 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
                          "ma10": 10.2, "support_price": 9.996,
                          "margin_ratio": 0.0125,
                      },
-                 }}},
-                {"name": "旧记录", "code": "2", "cycle_id": "b",
+                 }}}),
+                dated({"name": "旧记录", "code": "2", "cycle_id": "b",
                  "state": "SUPPLY_DRY", "evidence_status": "ready",
-                 "as_of_date": "2026-10-28", "checks": {}},
+                 "as_of_date": "2026-10-28", "checks": {}}),
             ],
             "pullback": [], "provisional": [], "diagnostics": [],
         }
@@ -332,12 +354,12 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 2, "data_insufficient": 0},
             "confirmed": [
-                {"name": "当日", "code": "1", "cycle_id": "a",
+                dated({"name": "当日", "code": "1", "cycle_id": "a",
                  "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
-                 "as_of_date": "2026-10-28"},
-                {"name": "旧日", "code": "2", "cycle_id": "b",
+                 "as_of_date": "2026-10-28"}),
+                dated({"name": "旧日", "code": "2", "cycle_id": "b",
                  "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
-                 "as_of_date": "2026-10-27"},
+                 "as_of_date": "2026-10-27"}, date="2026-10-27"),
             ],
             "watching": [], "pullback": [], "provisional": [], "diagnostics": [],
         }
@@ -347,6 +369,47 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
         self.assertEqual(["1"], [item["code"] for item, _follow in shown])
         self.assertEqual(1, excluded["excluded_stale_date"])
         self.assertNotIn("旧日 (2)", report.render_markdown(payload))
+
+    def test_main_table_fails_closed_when_any_date_evidence_is_missing_or_stale(self):
+        valid = dated({"name": "有效", "code": "0", "cycle_id": "valid",
+                       "state": "SUPPLY_DRY", "evidence_status": "ready"})
+        rows = []
+        for index, field in enumerate(("as_of_date", "evaluation_date"), 1):
+            item = dated({"name": field, "code": str(index), "cycle_id": field,
+                          "state": "SUPPLY_DRY", "evidence_status": "ready"})
+            item.pop(field)
+            rows.append(item)
+        missing_kline = dated({"name": "kline", "code": "3", "cycle_id": "kline",
+                               "state": "SUPPLY_DRY", "evidence_status": "ready"})
+        missing_kline["kline_evidence"].pop("data_date")
+        rows.append(missing_kline)
+        stale_metric = dated({"name": "metric", "code": "4", "cycle_id": "metric",
+                              "state": "SUPPLY_DRY", "evidence_status": "ready"})
+        stale_metric["metrics"]["metric_date"] = "2026-10-27"
+        rows.append(stale_metric)
+        payload = {"as_of_date": REPORT_DATE, "confirmed": [],
+                   "watching": [valid, *rows], "pullback": [], "provisional": [],
+                   "diagnostics": []}
+
+        shown, stats = report.select_v1_rows(payload)
+
+        self.assertEqual(["0"], [item["code"] for item, _follow in shown])
+        self.assertEqual(4, stats["excluded_stale_date"])
+        self.assertIn("日期缺失或与报告依据日不一致 4",
+                      report.render_markdown(payload))
+
+    def test_missing_report_date_excludes_rows_and_marks_validation_unknown(self):
+        payload = {"confirmed": [],
+                   "watching": [dated({"name": "旧记录", "code": "1", "cycle_id": "a",
+                                       "state": "SUPPLY_DRY", "evidence_status": "ready"})],
+                   "pullback": [], "provisional": [], "diagnostics": []}
+
+        shown, stats = report.select_v1_rows(payload)
+
+        self.assertEqual([], shown)
+        self.assertEqual(1, stats["excluded_stale_date"])
+        self.assertEqual(1, stats["date_validation_unknown"])
+        self.assertIn("报告依据日缺失", report.render_markdown(payload))
 
 
 if __name__ == "__main__":

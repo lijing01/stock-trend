@@ -13,10 +13,13 @@ def row(code, *, evidence="ready", pattern="base_consolidation", slopes=(.01, .0
         extended=False, distance=.2, volume=1.1, stage="LOCAL_CONFIRMATION"):
     return {
         "code": code, "name": "股<" + code + ">", "as_of_date": "2026-10-22",
+        "evaluation_date": "2026-10-22",
+        "kline_evidence": {"data_date": "2026-10-22"},
         "origin_pattern_type": pattern, "pattern_type": pattern, "stage": stage,
         "evidence_status": evidence, "signal_date": "2026-10-22",
         "risk_flags": ["extended"] if extended else [],
-        "metrics": {"close": 12.03, "ma10": 11.3, "ma20": 10.8,
+        "metrics": {"metric_date": "2026-10-22",
+                    "close": 12.03, "ma10": 11.3, "ma20": 10.8,
                     "ma10_slope_3": slopes[0], "ma20_slope_3": slopes[1],
                     "h5": 11.58, "h10": 11.8, "h20": 13.9,
                     "trigger_distance_atr": distance, "volume_prior5_ratio": volume,
@@ -64,6 +67,7 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
     def test_stage_groups_have_same_order_in_markdown_and_html(self):
         payload = {
             "schema_version": "daily-weak-to-strong/v2",
+            "as_of_date": "2026-10-22",
             "summary": {"stock_count": 4, "new_event_count": 3,
                         "validation_status": "continue_accumulating"},
             "range_breakout": [row("4", stage="RANGE_BREAKOUT")],
@@ -86,7 +90,8 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
         item = row("1")
         item["name"] = "<script>|股"
         item["risk_flags"] = ["<risk>"]
-        payload = {"summary": {}, "range_breakout": [], "local_confirmation": [item],
+        payload = {"as_of_date": "2026-10-22", "summary": {},
+                   "range_breakout": [], "local_confirmation": [item],
                    "early_repair": [], "preparing": [], "provisional": [],
                    "diagnostics": [{"code": "<x>", "reason_codes": ["bad<script>"]}]}
         html = report.render_v2_html(payload)
@@ -108,6 +113,7 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
     def test_selection_shares_thirty_slots_across_stages_and_deduplicates(self):
         payload = {
             "schema_version": "daily-weak-to-strong/v2",
+            "as_of_date": "2026-10-22",
             "summary": {"stock_count": 37, "new_event_count": 37,
                         "validation_status": "continue_accumulating"},
             "range_breakout": [
@@ -148,7 +154,7 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
 
     def test_selection_is_deterministic_when_input_order_changes(self):
         rows = [row(str(index), distance=.2, volume=1.0) for index in range(35, 0, -1)]
-        payload = {"range_breakout": [], "local_confirmation": rows,
+        payload = {"as_of_date": "2026-10-22", "range_breakout": [], "local_confirmation": rows,
                    "early_repair": [], "preparing": [], "provisional": [],
                    "diagnostics": []}
         reversed_payload = dict(payload, local_confirmation=list(reversed(rows)))
@@ -158,6 +164,35 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
 
         self.assertEqual([item["code"] for item in selected["local_confirmation"]],
                          [item["code"] for item in reversed_selected["local_confirmation"]])
+
+    def test_selection_fails_closed_on_missing_or_mismatched_dates(self):
+        valid = row("valid")
+        missing_report = {"range_breakout": [], "local_confirmation": [valid],
+                          "early_repair": [], "preparing": [], "provisional": []}
+        selected, stats = report.select_v2_rows(missing_report)
+        self.assertEqual(0, sum(len(items) for items in selected.values()))
+        self.assertEqual(1, stats["excluded_stale_date"])
+        self.assertEqual(1, stats["date_validation_unknown"])
+
+        fields = (
+            ("as_of_date", None),
+            ("evaluation_date", None),
+            ("kline_evidence", {}),
+            ("metrics", {"metric_date": "2026-10-21"}),
+        )
+        for field, value in fields:
+            with self.subTest(field=field):
+                invalid = row(field)
+                if value is None:
+                    invalid.pop(field)
+                else:
+                    invalid[field] = value
+                payload = {"as_of_date": "2026-10-22", "range_breakout": [],
+                           "local_confirmation": [invalid], "early_repair": [],
+                           "preparing": [], "provisional": [], "diagnostics": []}
+                selected, stats = report.select_v2_rows(payload)
+                self.assertEqual(0, sum(len(items) for items in selected.values()))
+                self.assertEqual(1, stats["excluded_stale_date"])
 
 
 if __name__ == "__main__":

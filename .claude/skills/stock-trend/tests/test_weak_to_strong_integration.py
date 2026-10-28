@@ -197,12 +197,17 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         self.assertEqual(updated["confirmed"], [])
 
     def test_empty_scope_and_escape(self):
-        payload = {"scope": {"scope_complete": True, "collector_status": "ready"},
+        payload = {"as_of_date": "2026-10-27",
+                   "scope": {"scope_complete": True, "collector_status": "ready"},
                    "summary": {"evaluated": 0, "data_insufficient": 0},
                    "confirmed": [], "watching": [], "provisional": [], "diagnostics": []}
         self.assertIn("无满足条件", report.render_html(payload))
         payload["watching"] = [{"name": "<script>", "code": "600001",
-                                "state": "SUPPLY_DRY", "evidence_status": "ready"}]
+                                "state": "SUPPLY_DRY", "evidence_status": "ready",
+                                "as_of_date": "2026-10-27",
+                                "evaluation_date": "2026-10-27",
+                                "kline_evidence": {"data_date": "2026-10-27"},
+                                "metrics": {"metric_date": "2026-10-27"}}]
         html = report.render_html(payload)
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>", html)
@@ -221,11 +226,16 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
             {"code": "BK03", "name": "热度缺失板块"},
         ]
         payload = {
+            "as_of_date": "2026-10-27",
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 1, "data_insufficient": 0},
             "confirmed": [],
             "watching": [{"name": "测试股", "code": "600001",
                           "state": "SUPPLY_DRY", "evidence_status": "ready",
+                          "as_of_date": "2026-10-27",
+                          "evaluation_date": "2026-10-27",
+                          "kline_evidence": {"data_date": "2026-10-27"},
+                          "metrics": {"metric_date": "2026-10-27"},
                           "sector_memberships": memberships}],
             "provisional": [], "diagnostics": [],
         }
