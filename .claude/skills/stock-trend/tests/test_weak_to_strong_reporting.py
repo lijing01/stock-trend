@@ -34,22 +34,26 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             },
         }
 
-    def test_markdown_renders_follow_up_table_and_escapes_pipes(self):
+    def test_markdown_excludes_follow_up_only_rows_from_main_table(self):
         text = report.render_markdown(self.payload())
-        self.assertIn("跟踪状态 / 原信号日 / 判断依据", text)
         self.assertIn("基线 2026-10-26；选择方式 run_index", text)
-        for label in ("增强", "延续", "失效", "待复评"):
-            self.assertIn(label, text)
-        self.assertIn("强\\|板块", text)
-        self.assertIn("收盘 11.2；前收 10.8；压力 H 10.5", text)
+        self.assertNotIn("增强<股>", text)
+        self.assertIn("数据不足或仅有历史跟踪 4", text)
 
-    def test_html_reuses_sector_display_and_escapes_values(self):
-        text = report.render_html(self.payload())
+    def test_html_reuses_sector_display_and_escapes_main_table_values(self):
+        payload = self.payload()
+        payload["confirmed"] = [{
+            "name": "增强<股>", "code": "600001", "cycle_id": "cycle-a",
+            "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
+            "sector_memberships": [{"name": "强|板块"}],
+        }]
+        payload["follow_up"]["items"][0]["origin_cycle_id"] = "cycle-a"
+        text = report.render_html(payload)
         self.assertEqual(1, text.count("<table"))
         self.assertIn("增强&lt;股&gt;", text)
         self.assertNotIn("增强<股>", text)
         self.assertIn("<div class='weak-sector'>强|板块</div>", text)
-        self.assertIn("kline_missing", text)
+        self.assertNotIn("kline_missing", text)
 
     def test_empty_and_malformed_rows_are_tolerated(self):
         payload = self.payload()
@@ -97,20 +101,23 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
         payload = {
             "scope": {"scope_complete": True, "collector_status": "ready"},
             "summary": {"evaluated": 4, "data_insufficient": 0},
-            "confirmed": [{"name": "确认", "code": "4", "state": "BREAKOUT_CONFIRMED"}],
-            "watching": [{"name": "待突破", "code": "3", "state": "SUPPLY_DRY"}],
+            "confirmed": [{"name": "确认", "code": "4", "state": "BREAKOUT_CONFIRMED",
+                           "evidence_status": "ready"}],
+            "watching": [{"name": "待突破", "code": "3", "state": "SUPPLY_DRY",
+                          "evidence_status": "ready"}],
             "pullback": [{"name": "回调", "code": "2", "state": "PULLBACK",
-                          "two_day_decline": True}],
-            "provisional": [{"name": "盘中", "code": "1", "state": "PROVISIONAL_BREAKOUT"}],
+                          "two_day_decline": True, "evidence_status": "ready"}],
+            "provisional": [{"name": "盘中", "code": "1", "state": "PROVISIONAL_BREAKOUT",
+                             "evidence_status": "ready"}],
             "diagnostics": [],
         }
         for text in (report.render_markdown(payload), report.render_html(payload)):
             self.assertLess(text.index("确认 (4)"), text.index("待突破 (3)"))
             self.assertLess(text.index("待突破 (3)"), text.index("回调 (2)"))
-            self.assertLess(text.index("回调 (2)"), text.index("盘中 (1)"))
+            self.assertNotIn("盘中 (1)", text)
             self.assertIn("结构有效回调（观察，尚未缩量）", text)
             self.assertIn("连续两日收盘下跌", text)
-            self.assertIn("同组按形态质量排列", text)
+            self.assertIn("同阶段按均线方向、风险和形态质量排列", text)
 
     def test_summary_and_rows_distinguish_intraday_from_missing_data(self):
         payload = {
@@ -131,9 +138,8 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             self.assertIn("已评估 2 只，数据不足 1 只", text)
             self.assertIn("盘中临时 2 只", text)
             self.assertIn("收盘未确认 1 只", text)
-            self.assertIn("缩量待突破（盘中临时，未收盘）", text)
-            self.assertIn("来源 eastmoney", text)
-            self.assertIn("获取 2026-10-28T13:20:00+08:00", text)
+            self.assertNotIn("缩量待突破（盘中临时，未收盘）", text)
+            self.assertIn("盘中临时 1", text)
 
     def test_follow_up_priority_then_recent_signal_date_then_code(self):
         payload = self.payload()
@@ -154,7 +160,7 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
     def test_merged_rows_match_cycle_and_preserve_distinct_cycles(self):
         payload = self.payload()
         payload["confirmed"] = [{"name": "同股", "code": "600001", "cycle_id": "A",
-                                 "state": "BREAKOUT_CONFIRMED"}]
+                                 "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready"}]
         payload["follow_up"]["items"] = [
             {"name": "同股", "code": "600001", "origin_cycle_id": "A",
              "follow_up_status": "ENHANCED", "tracking_count": 2},
@@ -164,9 +170,99 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
         for text in (report.render_markdown(payload), report.render_html(payload)):
             self.assertEqual(1, text.count("同股 (600001)"))
             self.assertIn("跟踪 2 次", text)
-            self.assertIn("跟踪次数未知", text)
-            self.assertIn("周期 B", text)
-            self.assertLess(text.index("旧周期"), text.index("同股"))
+            self.assertNotIn("跟踪次数未知", text)
+            self.assertNotIn("周期 B", text)
+            self.assertNotIn("旧周期", text)
+
+    def test_main_table_filters_deduplicates_and_caps_total_at_thirty(self):
+        payload = {
+            "scope": {"scope_complete": True, "collector_status": "ready"},
+            "summary": {"evaluated": 40, "data_insufficient": 1},
+            "confirmed": [
+                {"name": f"确认{index}", "code": f"{index:06d}",
+                 "cycle_id": f"cycle-{index}", "state": "BREAKOUT_CONFIRMED",
+                 "evidence_status": "ready", "breakout_volume_ratio": index,
+                 "close_strength": .8, "breakout_ratio": 1.01}
+                for index in range(1, 36)
+            ],
+            "watching": [
+                {"name": "低阶段重复", "code": "000035", "cycle_id": "duplicate",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready", "va_v0_ratio": .4},
+                {"name": "数据不足", "code": "800001", "cycle_id": "insufficient",
+                 "state": "SUPPLY_DRY", "evidence_status": "data_insufficient"},
+                {"name": "盘中临时", "code": "800002", "cycle_id": "provisional",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready", "provisional": True},
+                {"name": "待复评", "code": "800003", "cycle_id": "pending",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready"},
+                {"name": "失效", "code": "800004", "cycle_id": "invalid",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready"},
+            ],
+            "pullback": [], "provisional": [], "diagnostics": [],
+            "follow_up": {"items": [
+                {"name": "待复评", "code": "800003", "origin_cycle_id": "pending",
+                 "follow_up_status": "PENDING_REVIEW", "evidence_status": "ready"},
+                {"name": "失效", "code": "800004", "origin_cycle_id": "invalid",
+                 "follow_up_status": "INVALIDATED", "evidence_status": "ready"},
+                {"name": "仅跟踪", "code": "800005", "origin_cycle_id": "old",
+                 "follow_up_status": "CONTINUED", "evidence_status": "ready"},
+            ]},
+        }
+
+        shown, excluded = report.select_v1_rows(payload)
+
+        self.assertEqual(30, len(shown))
+        shown_codes = [item["code"] for item, _follow in shown]
+        self.assertEqual(30, len(set(shown_codes)))
+        self.assertEqual("000035", shown_codes[0])
+        self.assertNotIn("000005", shown_codes)
+        self.assertFalse({"800001", "800002", "800003", "800004", "800005"}
+                         & set(shown_codes))
+        self.assertGreaterEqual(sum(excluded.values()), 10)
+        self.assertEqual(35, len(payload["confirmed"]), "selection must not truncate raw evidence")
+
+        for rendered in (report.render_markdown(payload), report.render_html(payload)):
+            self.assertIn("确认35 (000035)", rendered)
+            self.assertNotIn("确认5 (000005)", rendered)
+            self.assertNotIn("待复评 (800003)", rendered)
+            self.assertIn("展示 30", rendered)
+
+    def test_main_table_keeps_fewer_than_thirty_without_top_up(self):
+        payload = {
+            "scope": {"scope_complete": True, "collector_status": "ready"},
+            "summary": {"evaluated": 2, "data_insufficient": 1},
+            "confirmed": [{"name": "有效", "code": "1", "cycle_id": "a",
+                           "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready"}],
+            "watching": [{"name": "不足", "code": "2", "cycle_id": "b",
+                          "state": "SUPPLY_DRY", "evidence_status": "data_insufficient"}],
+            "pullback": [], "provisional": [], "diagnostics": [],
+        }
+
+        shown, _excluded = report.select_v1_rows(payload)
+
+        self.assertEqual(["1"], [item["code"] for item, _follow in shown])
+        self.assertIn("展示 1", report.render_markdown(payload))
+
+    def test_main_table_excludes_rows_from_an_older_data_date(self):
+        payload = {
+            "as_of_date": "2026-10-28",
+            "scope": {"scope_complete": True, "collector_status": "ready"},
+            "summary": {"evaluated": 2, "data_insufficient": 0},
+            "confirmed": [
+                {"name": "当日", "code": "1", "cycle_id": "a",
+                 "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
+                 "as_of_date": "2026-10-28"},
+                {"name": "旧日", "code": "2", "cycle_id": "b",
+                 "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
+                 "as_of_date": "2026-10-27"},
+            ],
+            "watching": [], "pullback": [], "provisional": [], "diagnostics": [],
+        }
+
+        shown, excluded = report.select_v1_rows(payload)
+
+        self.assertEqual(["1"], [item["code"] for item, _follow in shown])
+        self.assertEqual(1, excluded["excluded_stale_date"])
+        self.assertNotIn("旧日 (2)", report.render_markdown(payload))
 
 
 if __name__ == "__main__":

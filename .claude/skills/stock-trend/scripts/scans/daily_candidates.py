@@ -5108,6 +5108,8 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .weak-to-strong-table th:nth-child(2){{width:180px}}
 .weak-to-strong-table th:nth-child(3){{width:140px}}
 .weak-to-strong-table th:nth-child(4){{width:90px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table){{min-width:1800px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(4){{width:340px}}
 .weak-to-strong-table th:nth-child(5){{width:140px}}
 .weak-to-strong-table th:nth-child(6),.weak-to-strong-table th:nth-child(7){{width:125px}}
 .weak-to-strong-table th:nth-child(8){{width:90px}}
@@ -5805,6 +5807,9 @@ def main():
     weak_v2["tracking"] = save_weak_to_strong_snapshot(
         weak_v2, weak_results, weak_calendar, regime, CACHE_DIR / "weak_to_strong",
         provisional=bool(policy.get("provisional")), requested_version="v2")
+    # JSON keeps the complete evidence arrays and exposes the exact report-table selection separately.
+    weak_output["display_selection"] = weak_to_strong_report.build_v1_display_selection(weak_output)
+    weak_v2["display_selection"] = weak_to_strong_report.build_v2_display_selection(weak_v2)
     performance["weak_to_strong_v2"] = copy.deepcopy(weak_v2["performance"])
 
     report_candidates = copy.deepcopy(candidates)

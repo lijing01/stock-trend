@@ -85,6 +85,60 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
         self.assertNotIn("v2", report.render_markdown(payload))
         self.assertNotIn("v2", report.render_html(payload))
 
+    def test_selection_shares_thirty_slots_across_stages_and_deduplicates(self):
+        payload = {
+            "schema_version": "daily-weak-to-strong/v2",
+            "summary": {"stock_count": 37, "new_event_count": 37,
+                        "validation_status": "continue_accumulating"},
+            "range_breakout": [
+                row(f"{index:06d}", stage="RANGE_BREAKOUT", distance=index / 100)
+                for index in range(1, 30)
+            ],
+            "local_confirmation": [
+                row("000001", stage="LOCAL_CONFIRMATION", distance=.01),
+                row("100001", stage="LOCAL_CONFIRMATION", distance=.01),
+                row("100002", stage="LOCAL_CONFIRMATION", distance=.02),
+            ],
+            "early_repair": [row("200001", stage="EARLY_REPAIR")],
+            "preparing": [row("300001", stage="PREPARING")],
+            "provisional": [row("400001", stage="PREPARING")],
+            "diagnostics": [],
+        }
+        payload["provisional"][0]["provisional"] = True
+        payload["preparing"].append(
+            row("300002", stage="PREPARING", evidence="data_insufficient"))
+
+        selected, excluded = report.select_v2_rows(payload)
+
+        self.assertEqual(30, sum(len(items) for items in selected.values()))
+        self.assertEqual(29, len(selected["range_breakout"]))
+        self.assertEqual(["100001"], [item["code"] for item in selected["local_confirmation"]])
+        self.assertEqual([], selected["early_repair"])
+        self.assertEqual([], selected["preparing"])
+        selected_codes = [item["code"] for items in selected.values() for item in items]
+        self.assertEqual(30, len(set(selected_codes)))
+        self.assertGreaterEqual(sum(excluded.values()), 6)
+        self.assertEqual(29, len(payload["range_breakout"]),
+                         "selection must retain the complete research payload")
+
+        for rendered in (report.render_v2_markdown(payload), report.render_v2_html(payload)):
+            self.assertIn("股&lt;100001&gt;" if rendered.startswith("<") else "股<100001>", rendered)
+            self.assertNotIn("股&lt;100002&gt;" if rendered.startswith("<") else "股<100002>", rendered)
+            self.assertIn("展示 30", rendered)
+
+    def test_selection_is_deterministic_when_input_order_changes(self):
+        rows = [row(str(index), distance=.2, volume=1.0) for index in range(35, 0, -1)]
+        payload = {"range_breakout": [], "local_confirmation": rows,
+                   "early_repair": [], "preparing": [], "provisional": [],
+                   "diagnostics": []}
+        reversed_payload = dict(payload, local_confirmation=list(reversed(rows)))
+
+        selected, _ = report.select_v2_rows(payload)
+        reversed_selected, _ = report.select_v2_rows(reversed_payload)
+
+        self.assertEqual([item["code"] for item in selected["local_confirmation"]],
+                         [item["code"] for item in reversed_selected["local_confirmation"]])
+
 
 if __name__ == "__main__":
     unittest.main()

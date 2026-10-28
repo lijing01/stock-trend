@@ -33,9 +33,10 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         self.assertEqual(["600001"], [row["code"] for row in output["provisional"]])
         self.assertEqual(1, len(output["diagnostics"]))
         for rendered in (report.render_html(output), report.render_markdown(output)):
-            self.assertIn("未收盘", rendered)
+            self.assertIn("收盘未确认", rendered)
             self.assertIn("数据不足", rendered)
             self.assertIn("calendar_missing", rendered)
+            self.assertIn("主表未展示", rendered)
         item["current_bar_evaluated"] = False
         output = dc.build_weak_to_strong_output(
             collected, [candidate], [], "2026-10-28", {}, {}, {})
@@ -200,7 +201,8 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
                    "summary": {"evaluated": 0, "data_insufficient": 0},
                    "confirmed": [], "watching": [], "provisional": [], "diagnostics": []}
         self.assertIn("无满足条件", report.render_html(payload))
-        payload["watching"] = [{"name": "<script>", "code": "600001", "state": "SUPPLY_DRY"}]
+        payload["watching"] = [{"name": "<script>", "code": "600001",
+                                "state": "SUPPLY_DRY", "evidence_status": "ready"}]
         html = report.render_html(payload)
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>", html)
@@ -223,7 +225,8 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
             "summary": {"evaluated": 1, "data_insufficient": 0},
             "confirmed": [],
             "watching": [{"name": "测试股", "code": "600001",
-                          "state": "SUPPLY_DRY", "sector_memberships": memberships}],
+                          "state": "SUPPLY_DRY", "evidence_status": "ready",
+                          "sector_memberships": memberships}],
             "provisional": [], "diagnostics": [],
         }
 
@@ -234,7 +237,8 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         self.assertNotIn("持续性：快照覆盖 3/5", html)
         self.assertNotIn("排行 来源 eastmoney", html)
         self.assertNotIn("成分 来源 eastmoney", html)
-        self.assertIn("<div class='weak-sector'>温热板块</div>", html)
+        self.assertIn("<span class='sector-tag sector-hot'>高热&lt;板块&gt;</span>", html)
+        self.assertIn("<span class='sector-tag sector-warm'>温热板块</span>", html)
         self.assertIn("<div class='weak-sector'>热度缺失板块</div>", html)
         self.assertNotIn("sector-cool'>热度缺失板块", html)
 

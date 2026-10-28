@@ -3,6 +3,11 @@
 import math
 from html import escape
 
+from reporting.sector_display import _sector_html
+
+
+DISPLAY_LIMIT = 30
+
 
 def _value(value):
     if value is None or value == "":
@@ -291,11 +296,16 @@ def _memberships_html(item):
         name = member.get("name") or member.get("sector_name") or member.get("code")
         if not name:
             continue
-        rendered.append("<div class='weak-sector'>" + escape(str(name)) + "</div>")
+        badge = _sector_html({"sector_name": str(name),
+                              "sector_hot_score": member.get("hot_score"),
+                              "sector_score": member.get("sector_score")},
+                             unknown_heat_plain=True)
+        rendered.append("<div class='weak-sector'>" + badge + "</div>")
     return "".join(rendered) or "未记录"
 
 
 MERGED_HEADERS = HEADERS[:3] + ["跟踪状态 / 原信号日 / 判断依据"] + HEADERS[3:]
+DISPLAY_HEADERS = ["名次 / 入选依据"] + MERGED_HEADERS
 
 
 def _merged_rows(payload):
@@ -344,6 +354,134 @@ def _merged_rows(payload):
     return sorted(rows, key=key)
 
 
+def _item_metrics(item):
+    metrics = item.get("metrics") or {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _v1_trend_tier(item):
+    """Prefer established upward MA direction when v1 happens to carry it."""
+    metrics = _item_metrics(item)
+    ma10 = _number(metrics.get("ma10_slope_3", metrics.get("ma10_slope_3d",
+                                                           item.get("ma10_slope_3"))))
+    ma20 = _number(metrics.get("ma20_slope_3", metrics.get("ma20_slope_3d",
+                                                           item.get("ma20_slope_3"))))
+    if ma10 is None or ma20 is None:
+        direction = str(metrics.get("ma_direction") or item.get("ma_direction") or "").lower()
+        return {"both_up": 0, "ma20_up": 1}.get(direction, 3 if not direction else 2)
+    tolerance = _number(metrics.get("ma_flat_tolerance"))
+    threshold = 0.002 if tolerance is None else tolerance
+    return 0 if ma10 > threshold and ma20 > threshold else 1 if ma20 > threshold else 2
+
+
+def _risk_tier(item):
+    risks = item.get("risk_flags") or []
+    if isinstance(risks, str):
+        risks = [risks]
+    material = {"extended", "weak_volume", "lost_level", "parent_overhead", "flat_bar"}
+    return (any(str(risk) in material for risk in risks),
+            sum(str(risk) in material for risk in risks))
+
+
+def _v1_quality_key(item):
+    state = str(item.get("state") or "")
+    if state == "BREAKOUT_CONFIRMED":
+        return (_descending(item.get("close_strength")),
+                _descending(item.get("breakout_volume_ratio")),
+                _ascending(item.get("breakout_ratio")))
+    if state == "SUPPLY_DRY":
+        return (_ascending(item.get("va_v0_ratio")),
+                _ascending(item.get("drawdown_ratio", item.get("drawdown"))),
+                _ascending(item.get("adjustment_days")))
+    return (item.get("two_day_decline") is True,
+            _ascending(item.get("drawdown_ratio", item.get("drawdown"))),
+            _ascending(item.get("adjustment_days")))
+
+
+def _v1_display_key(pair):
+    item, follow = pair
+    status = _follow_up_status(follow or {}) if follow else ""
+    state = str(item.get("state") or "")
+    if state == "BREAKOUT_CONFIRMED" or status in {"ENHANCED", "STRENGTHENED", "增强"}:
+        stage = 0
+    elif state == "SUPPLY_DRY" or status in {"CONTINUED", "延续"}:
+        stage = 1
+    else:
+        stage = 2
+    return (stage, _v1_trend_tier(item), _risk_tier(item),
+            _v1_quality_key(item), _code(item), str(item.get("cycle_id") or ""))
+
+
+def _selection_stats(scanned):
+    return {"scanned_rows": scanned, "eligible_securities": 0, "displayed": 0,
+            "not_displayed": scanned, "omitted_by_limit": 0,
+            "excluded_data": 0, "excluded_provisional": 0,
+            "excluded_status": 0, "excluded_duplicate": 0,
+            "excluded_lost_level": 0, "excluded_stale_date": 0,
+            "date_validation_unknown": 0}
+
+
+def _has_current_date(payload, item, stats):
+    expected = str(payload.get("as_of_date") or "")
+    actual = str(item.get("as_of_date") or item.get("data_date") or "")
+    if not expected:
+        stats["date_validation_unknown"] = 1
+        return True
+    if actual != expected:
+        stats["excluded_stale_date"] += 1
+        return False
+    return True
+
+
+def select_v1_rows(payload, limit=DISPLAY_LIMIT):
+    """Select the investment-review main table without mutating source evidence."""
+    raw = _merged_rows(payload)
+    stats = _selection_stats(len(raw))
+    candidates = []
+    for item, follow in raw:
+        if item is None or item.get("evidence_status") != "ready":
+            stats["excluded_data"] += 1
+            continue
+        if not _has_current_date(payload, item, stats):
+            continue
+        state = str(item.get("state") or "")
+        if (item.get("provisional") is True or item.get("confirmation") == "provisional"
+                or state == "PROVISIONAL_BREAKOUT"):
+            stats["excluded_provisional"] += 1
+            continue
+        status = _follow_up_status(follow or {}) if follow else ""
+        if status in {"INVALIDATED", "PENDING_REVIEW", "失效", "待复评"}:
+            stats["excluded_status"] += 1
+            continue
+        risks = item.get("risk_flags") or []
+        if isinstance(risks, str):
+            risks = [risks]
+        if "lost_level" in risks:
+            stats["excluded_lost_level"] += 1
+            continue
+        if state not in {"BREAKOUT_CONFIRMED", "SUPPLY_DRY", "PULLBACK"}:
+            stats["excluded_status"] += 1
+            continue
+        candidates.append((item, follow))
+
+    selected = []
+    seen = set()
+    for pair in sorted(candidates, key=_v1_display_key):
+        code = _code(pair[0])
+        if not code or code in seen:
+            stats["excluded_duplicate"] += 1
+            continue
+        seen.add(code)
+        selected.append(pair)
+    stats["eligible_securities"] = len(selected)
+    cap = max(0, int(limit)) if isinstance(limit, (int, float)) and not isinstance(limit, bool) else DISPLAY_LIMIT
+    stats["omitted_by_limit"] = max(0, len(selected) - cap)
+    selected = selected[:cap]
+    stats["displayed"] = len(selected)
+    stats["not_displayed"] = max(0, stats["scanned_rows"] - stats["displayed"])
+    return selected, stats
+
+
 def _merged_cells(item, follow):
     if item:
         cells = _cells(item)
@@ -353,8 +491,8 @@ def _merged_cells(item, follow):
                  f"{fc[6]} / {fc[7]}", "未记录"]
     if follow:
         count = follow.get("tracking_count")
-        count_label = "跟踪 " + str(count) + " 次" if isinstance(count, int) and not isinstance(count, bool) and count > 0 else "跟踪次数未知"
-        cells[0] += "（" + count_label + "）"
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            cells[0] += "（跟踪 " + str(count) + " 次）"
         fc = _follow_up_cells(follow)
         detail = f"{fc[3]} → {fc[4]}；原信号日 {fc[2]}；{fc[5]}；数据 {fc[6]} / {fc[7]}"
         if not item:
@@ -364,10 +502,53 @@ def _merged_cells(item, follow):
     return cells[:3] + [detail] + cells[3:]
 
 
-def _report_preamble(payload):
+def _selection_summary(stats):
+    text = (f"主表筛选：扫描 {stats['scanned_rows']} 行，有效证券 "
+            f"{stats['eligible_securities']} 只，展示 {stats['displayed']} 只，"
+            f"未展示 {stats['not_displayed']} 行。")
+    if stats.get("date_validation_unknown"):
+        text += " 报告依据日缺失，无法验证记录是否为当日数据。"
+    return text
+
+
+def _selection_exclusions(stats):
+    labels = (("excluded_data", "数据不足或仅有历史跟踪"),
+              ("excluded_provisional", "盘中临时"),
+              ("excluded_status", "失效、待复评或状态不支持"),
+              ("excluded_stale_date", "日期缺失或与报告依据日不一致"),
+              ("excluded_lost_level", "跌回触发位"),
+              ("excluded_duplicate", "同证券重复记录"),
+              ("omitted_by_limit", "超过30只展示上限"))
+    parts = [f"{label} {stats.get(key, 0)}" for key, label in labels if stats.get(key, 0)]
+    return "；".join(parts)
+
+
+def _v1_selection_reason(item):
+    stage = {"BREAKOUT_CONFIRMED": "收盘确认", "SUPPLY_DRY": "缩量待突破",
+             "PULLBACK": "结构有效回调"}.get(str(item.get("state") or ""), "有效形态")
+    trend = {0: "MA10/MA20向上", 1: "MA20向上", 2: "均线未形成上行",
+             3: "均线方向未记录"}[_v1_trend_tier(item)]
+    return stage + "；" + trend
+
+
+def build_v1_display_selection(payload, limit=DISPLAY_LIMIT):
+    """Return the JSON companion for the v1 Markdown/HTML main table."""
+    rows, stats = select_v1_rows(payload, limit=limit)
+    return {
+        "schema_version": "weak-to-strong-display-selection/v1",
+        "limit": limit,
+        "stats": stats,
+        "items": [{"rank": rank, "code": _code(item),
+                   "cycle_id": str(item.get("cycle_id") or ""),
+                   "reason": _v1_selection_reason(item)}
+                  for rank, (item, _follow) in enumerate(rows, 1)],
+    }
+
+
+def _report_preamble(payload, stats):
     parts = ["独立日线形态观察；收盘确认仅代表形态成立，正式推荐资格见状态与限制。",
-             "排序：失效、待复评、收盘确认或增强、缩量待突破或延续、结构有效回调、盘中临时；同组按形态质量排列。",
-             _summary(payload)]
+             "排序：收盘确认或增强、缩量待突破或延续、结构有效回调；同阶段按均线方向、风险和形态质量排列。",
+             _selection_summary(stats), _summary(payload)]
     summary = _follow_up_summary(payload)
     if summary:
         parts.append(summary)
@@ -381,23 +562,26 @@ def _report_preamble(payload):
 def render_markdown(payload):
     if payload is None:
         return ""
-    rows = _merged_rows(payload)
+    rows, stats = select_v1_rows(payload)
     lines = ["## 日线弱转强", ""]
-    for part in _report_preamble(payload):
+    for part in _report_preamble(payload, stats):
         lines += [part, ""]
     if rows:
-        lines += ["| " + " | ".join(MERGED_HEADERS) + " |", "| " + " | ".join(["---"] * len(MERGED_HEADERS)) + " |"]
-        for item, follow in rows:
-            cells = _merged_cells(item, follow)
+        lines += ["| " + " | ".join(DISPLAY_HEADERS) + " |", "| " + " | ".join(["---"] * len(DISPLAY_HEADERS)) + " |"]
+        for rank, (item, follow) in enumerate(rows, 1):
+            cells = [f"{rank} / {_v1_selection_reason(item)}"] + _merged_cells(item, follow)
             source = item or follow
             memberships = source.get("sector_memberships") or []
-            cells[1] = "、".join(str(m.get("name") or m.get("sector_name") or m.get("code") or "") for m in memberships if isinstance(m, dict)) or "未记录"
+            cells[2] = "、".join(str(m.get("name") or m.get("sector_name") or m.get("code") or "") for m in memberships if isinstance(m, dict)) or "未记录"
             lines.append("| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |")
     else:
         lines.append("无满足条件的形态；覆盖不足时不代表完整扫描无信号。")
     diagnostics = payload.get("diagnostics") or []
-    if diagnostics:
+    exclusions = _selection_exclusions(stats)
+    if diagnostics or exclusions:
         lines += ["", "弱转强诊断："]
+        if exclusions:
+            lines.append("- 主表未展示：" + exclusions)
         lines.extend("- " + _diagnostic_detail(item) for item in diagnostics)
     return "\n".join(lines)
 
@@ -405,21 +589,24 @@ def render_markdown(payload):
 def render_html(payload):
     if payload is None:
         return ""
-    rows = _merged_rows(payload)
+    rows, stats = select_v1_rows(payload)
     out = ["<section class='candidate-section'><h2>日线弱转强</h2>"]
-    out.extend("<p>" + escape(part) + "</p>" for part in _report_preamble(payload))
+    out.extend("<p>" + escape(part) + "</p>" for part in _report_preamble(payload, stats))
     if rows:
         out.append("<div class='candidate-table-wrap'><table class='weak-to-strong-table'><thead><tr>" +
-                   "".join("<th>" + escape(x) + "</th>" for x in MERGED_HEADERS) + "</tr></thead><tbody>")
-        for item, follow in rows:
-            cells = _merged_cells(item, follow)
-            out.append("<tr>" + "".join("<td>" + (_memberships_html(item or follow) if i == 1 else escape(value)) + "</td>" for i, value in enumerate(cells)) + "</tr>")
+                   "".join("<th>" + escape(x) + "</th>" for x in DISPLAY_HEADERS) + "</tr></thead><tbody>")
+        for rank, (item, follow) in enumerate(rows, 1):
+            cells = [f"{rank} / {_v1_selection_reason(item)}"] + _merged_cells(item, follow)
+            out.append("<tr>" + "".join("<td>" + (_memberships_html(item or follow) if i == 2 else escape(value)) + "</td>" for i, value in enumerate(cells)) + "</tr>")
         out.append("</tbody></table></div>")
     else:
         out.append("<p>无满足条件的形态；覆盖不足时不代表完整扫描无信号。</p>")
     diagnostics = payload.get("diagnostics") or []
-    if diagnostics:
+    exclusions = _selection_exclusions(stats)
+    if diagnostics or exclusions:
         out.append("<details><summary>弱转强诊断</summary><ul>")
+        if exclusions:
+            out.append("<li>主表未展示：" + escape(exclusions) + "</li>")
         out.extend("<li>" + escape(_diagnostic_detail(item)) + "</li>" for item in diagnostics)
         out.append("</ul></details>")
     return "".join(out) + "</section>"
@@ -448,6 +635,7 @@ V2_RISK_LABELS = {
 
 V2_HEADERS = ["名称/代码", "阶段/背景", "均线位置与方向", "局部/区间/父结构压力",
               "量能/收盘强度", "偏离风险", "依据日/数据资格"]
+V2_DISPLAY_HEADERS = ["名次 / 入选依据"] + V2_HEADERS
 
 
 def _v2_trend_tier(item):
@@ -509,6 +697,54 @@ def sort_v2_rows(rows):
     return sorted((row for row in rows if isinstance(row, dict)), key=_v2_sort_key)
 
 
+def select_v2_rows(payload, limit=DISPLAY_LIMIT):
+    """Select at most *limit* unique, current, close-qualified v2 securities."""
+    groups = {key: [] for key, _label in V2_GROUPS if key != "provisional"}
+    scanned = sum(len(payload.get(key) or []) for key, _label in V2_GROUPS
+                  if isinstance(payload.get(key) or [], list))
+    stats = _selection_stats(scanned)
+    eligible = []
+    for key, _label in V2_GROUPS:
+        rows = payload.get(key) or []
+        if not isinstance(rows, list):
+            continue
+        for item in sort_v2_rows(rows):
+            if item.get("evidence_status") != "ready":
+                stats["excluded_data"] += 1
+                continue
+            if not _has_current_date(payload, item, stats):
+                continue
+            if (key == "provisional" or item.get("provisional") is True
+                    or item.get("confirmation") == "provisional"):
+                stats["excluded_provisional"] += 1
+                continue
+            risks = item.get("risk_flags") or []
+            if isinstance(risks, str):
+                risks = [risks]
+            if "lost_level" in risks:
+                stats["excluded_lost_level"] += 1
+                continue
+            eligible.append((key, item))
+
+    unique = []
+    seen = set()
+    for key, item in eligible:
+        code = _code(item)
+        if not code or code in seen:
+            stats["excluded_duplicate"] += 1
+            continue
+        seen.add(code)
+        unique.append((key, item))
+    stats["eligible_securities"] = len(unique)
+    cap = max(0, int(limit)) if isinstance(limit, (int, float)) and not isinstance(limit, bool) else DISPLAY_LIMIT
+    stats["omitted_by_limit"] = max(0, len(unique) - cap)
+    for key, item in unique[:cap]:
+        groups[key].append(item)
+    stats["displayed"] = sum(len(rows) for rows in groups.values())
+    stats["not_displayed"] = max(0, stats["scanned_rows"] - stats["displayed"])
+    return groups, stats
+
+
 def _v2_cells(item):
     metrics = item.get("metrics") or {}
     structure = item.get("structure") or {}
@@ -555,6 +791,28 @@ def _v2_cells(item):
             pressure, quality, risk_text, f"{_value(basis_date)} / {evidence}"]
 
 
+def _v2_selection_reason(item):
+    stage = V2_STAGE_LABELS.get(str(item.get("stage")), _value(item.get("stage")))
+    trend = {0: "MA10/MA20向上", 1: "MA20向上", 2: "均线未形成上行",
+             3: "均线方向未记录"}[_v2_trend_tier(item)]
+    return stage + "；" + trend
+
+
+def build_v2_display_selection(payload, limit=DISPLAY_LIMIT):
+    """Return the JSON companion for the v2 Markdown/HTML main table."""
+    groups, stats = select_v2_rows(payload, limit=limit)
+    items = []
+    rank = 0
+    for key, _label in V2_GROUPS:
+        for item in groups.get(key, []):
+            rank += 1
+            items.append({"rank": rank, "group": key, "code": _code(item),
+                          "cycle_id": str(item.get("cycle_id") or ""),
+                          "reason": _v2_selection_reason(item)})
+    return {"schema_version": "weak-to-strong-display-selection/v1",
+            "limit": limit, "stats": stats, "items": items}
+
+
 def _v2_summary(payload):
     summary = payload.get("summary") or {}
     status = summary.get("validation_status") or payload.get("validation_status")
@@ -569,23 +827,31 @@ def render_v2_markdown(payload):
     """Render the parallel research v2 view without replacing the v1 report."""
     if payload is None:
         return ""
+    selected, stats = select_v2_rows(payload)
     lines = ["## 日线弱转强 v2（研究版）", "",
-             "按转强阶段分组；结构识别不等同于正式推荐资格。", "", _v2_summary(payload)]
+             "按转强阶段分组；结构识别不等同于正式推荐资格。", "",
+             _selection_summary(stats), "", _v2_summary(payload)]
     any_rows = False
+    rank = 0
     for key, label in V2_GROUPS:
-        rows = sort_v2_rows(payload.get(key) or [])
+        rows = selected.get(key, [])
         if not rows:
             continue
         any_rows = True
-        lines += ["", f"### {label}", "", "| " + " | ".join(V2_HEADERS) + " |",
-                  "| " + " | ".join(["---"] * len(V2_HEADERS)) + " |"]
+        lines += ["", f"### {label}", "", "| " + " | ".join(V2_DISPLAY_HEADERS) + " |",
+                  "| " + " | ".join(["---"] * len(V2_DISPLAY_HEADERS)) + " |"]
         for item in rows:
-            lines.append("| " + " | ".join(_markdown_cell(cell) for cell in _v2_cells(item)) + " |")
+            rank += 1
+            cells = [f"{rank} / {_v2_selection_reason(item)}"] + _v2_cells(item)
+            lines.append("| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |")
     if not any_rows:
         lines += ["", "当前没有可展示的 v2 研究形态。"]
     diagnostics = payload.get("diagnostics") or []
-    if isinstance(diagnostics, list) and diagnostics:
+    exclusions = _selection_exclusions(stats)
+    if (isinstance(diagnostics, list) and diagnostics) or exclusions:
         lines += ["", "<details><summary>v2 诊断</summary>", ""]
+        if exclusions:
+            lines.append("- 主表未展示：" + _markdown_cell(exclusions))
         for item in diagnostics:
             if isinstance(item, dict):
                 reasons = item.get("reason_codes") or ["无"]
@@ -599,29 +865,37 @@ def render_v2_html(payload):
     """Render the parallel research v2 view with all values HTML-escaped."""
     if payload is None:
         return ""
+    selected, stats = select_v2_rows(payload)
     out = ["<section class='candidate-section weak-to-strong-v2'>",
            "<h2>日线弱转强 v2（研究版）</h2>",
            "<p>按转强阶段分组；结构识别不等同于正式推荐资格。</p>",
+           "<p>" + escape(_selection_summary(stats)) + "</p>",
            "<p>" + escape(_v2_summary(payload)) + "</p>"]
     any_rows = False
+    rank = 0
     for key, label in V2_GROUPS:
-        rows = sort_v2_rows(payload.get(key) or [])
+        rows = selected.get(key, [])
         if not rows:
             continue
         any_rows = True
         out.append("<h3>" + escape(label) + "</h3>")
         out.append("<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-to-strong-v2-table'>"
-                   "<thead><tr>" + "".join("<th>" + escape(header) + "</th>" for header in V2_HEADERS) +
+                   "<thead><tr>" + "".join("<th>" + escape(header) + "</th>" for header in V2_DISPLAY_HEADERS) +
                    "</tr></thead><tbody>")
         for item in rows:
+            rank += 1
+            cells = [f"{rank} / {_v2_selection_reason(item)}"] + _v2_cells(item)
             out.append("<tr>" + "".join("<td>" + escape(str(cell)) + "</td>"
-                                         for cell in _v2_cells(item)) + "</tr>")
+                                         for cell in cells) + "</tr>")
         out.append("</tbody></table></div>")
     if not any_rows:
         out.append("<p>当前没有可展示的 v2 研究形态。</p>")
     diagnostics = payload.get("diagnostics") or []
-    if isinstance(diagnostics, list) and diagnostics:
+    exclusions = _selection_exclusions(stats)
+    if (isinstance(diagnostics, list) and diagnostics) or exclusions:
         out.append("<details><summary>v2 诊断</summary><ul>")
+        if exclusions:
+            out.append("<li>主表未展示：" + escape(exclusions) + "</li>")
         for item in diagnostics:
             if isinstance(item, dict):
                 detail = _code(item) + "：" + "、".join(str(reason) for reason in
