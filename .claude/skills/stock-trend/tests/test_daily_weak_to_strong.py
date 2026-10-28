@@ -114,6 +114,45 @@ class DailyWeakToStrongTests(unittest.TestCase):
                     "cycle_id", "signal_date"):
             self.assertEqual(replayed[key], result[key])
 
+    def test_direction_metrics_use_evaluation_date_and_three_session_ma_slope(self):
+        payload, days = payload_with_pattern()
+        result = self.analyze(payload, days)
+
+        closes = [float(item["close"]) for item in payload["data"]]
+        expected_ma10 = (sum(closes[-10:]) / 10) / (sum(closes[-13:-3]) / 10) - 1
+        expected_ma20 = (sum(closes[-20:]) / 20) / (sum(closes[-23:-3]) / 20) - 1
+        metrics = result["metrics"]
+        self.assertEqual(result["evaluation_date"], metrics["metric_date"])
+        self.assertAlmostEqual(expected_ma10, metrics["ma10_slope_3"])
+        self.assertAlmostEqual(expected_ma20, metrics["ma20_slope_3"])
+        self.assertEqual(0.002, metrics["ma_flat_tolerance"])
+
+    def test_unconfirmed_close_direction_metrics_exclude_current_bar(self):
+        payload, days = payload_with_pattern()
+        kwargs = evidence(payload, days, confirmed=False)
+        kwargs["close_evidence"].pop("provisional")
+
+        result = analyze_daily_weak_to_strong(payload, **kwargs)
+
+        closes = [float(item["close"]) for item in payload["data"][:-1]]
+        expected_ma10 = (sum(closes[-10:]) / 10) / (sum(closes[-13:-3]) / 10) - 1
+        expected_ma20 = (sum(closes[-20:]) / 20) / (sum(closes[-23:-3]) / 20) - 1
+        metrics = result["metrics"]
+        self.assertEqual(result["evaluation_date"], metrics["metric_date"])
+        self.assertNotEqual(result["as_of_date"], metrics["metric_date"])
+        self.assertAlmostEqual(expected_ma10, metrics["ma10_slope_3"])
+        self.assertAlmostEqual(expected_ma20, metrics["ma20_slope_3"])
+
+    def test_insufficient_history_keeps_direction_metrics_unknown(self):
+        payload, days = payload_with_pattern()
+        payload["data"] = payload["data"][:19]
+
+        result = self.analyze(payload, days, as_of_date=days[18])
+
+        self.assertEqual("data_insufficient", result["evidence_status"])
+        self.assertIsNone(result["metrics"]["ma10_slope_3"])
+        self.assertIsNone(result["metrics"]["ma20_slope_3"])
+
     def test_supply_dry_is_a_visible_state_before_breakout(self):
         payload, days = payload_with_pattern(adjustments=3, breakout=False)
         result = self.analyze(payload, days)

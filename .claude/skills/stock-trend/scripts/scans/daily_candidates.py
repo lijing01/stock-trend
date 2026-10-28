@@ -5108,13 +5108,22 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .weak-to-strong-table th:nth-child(2){{width:180px}}
 .weak-to-strong-table th:nth-child(3){{width:140px}}
 .weak-to-strong-table th:nth-child(4){{width:90px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table){{min-width:1800px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(4){{width:340px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table){{min-width:2200px}}
 .weak-to-strong-table th:nth-child(5){{width:140px}}
 .weak-to-strong-table th:nth-child(6),.weak-to-strong-table th:nth-child(7){{width:125px}}
 .weak-to-strong-table th:nth-child(8){{width:90px}}
 .weak-to-strong-table th:nth-child(9){{width:155px}}
 .weak-to-strong-table th:nth-child(10){{width:260px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(1){{width:160px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(2){{width:150px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(3){{width:180px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(4){{width:120px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(5){{width:350px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(6){{width:90px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(7){{width:150px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(8),.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(9),.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(10){{width:120px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(11){{width:240px}}
+.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(12){{width:280px}}
 .weak-follow-up-table th:nth-child(1){{width:145px}}
 .weak-follow-up-table th:nth-child(2){{width:180px}}
 .weak-follow-up-table th:nth-child(3),.weak-follow-up-table th:nth-child(4),.weak-follow-up-table th:nth-child(5){{width:130px}}

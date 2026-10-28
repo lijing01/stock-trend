@@ -93,6 +93,8 @@ def _empty_result(as_of_date, config, reasons=None):
         "breakout_ratio": None,
         "provisional_match": False,
         "checks": {},
+        "metrics": {"metric_date": "", "ma10_slope_3": None,
+                    "ma20_slope_3": None, "ma_flat_tolerance": 0.002},
         "kline_evidence": {},
         "events": [],
     }
@@ -199,6 +201,19 @@ def _ma(rows, index, window):
     if index + 1 < window:
         return None
     return sum(row["close"] for row in rows[index + 1 - window:index + 1]) / window
+
+
+def _direction_metrics(rows):
+    metrics = {"metric_date": rows[-1]["date"] if rows else "",
+               "ma10_slope_3": None, "ma20_slope_3": None,
+               "ma_flat_tolerance": 0.002}
+    index = len(rows) - 1
+    for window in (10, 20):
+        current = _ma(rows, index, window)
+        previous = _ma(rows, index - 3, window)
+        if current is not None and previous is not None and previous > 0:
+            metrics[f"ma{window}_slope_3"] = current / previous - 1
+    return metrics
 
 
 def _check(value, threshold, passed, operator):
@@ -526,6 +541,7 @@ def analyze_daily_weak_to_strong(
     replay_result["current_bar_evaluated"] = bool(close_confirmed or intraday)
     replay_result["evaluation_date"] = (
         replay_rows[-1]["date"] if replay_rows else "")
+    replay_result["metrics"] = _direction_metrics(replay_rows)
     if intraday and not close_confirmed:
         replay_result = _mark_provisional(replay_result, target_date)
     replay_result["as_of_date"] = target_date

@@ -242,6 +242,53 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
         self.assertEqual(["1"], [item["code"] for item, _follow in shown])
         self.assertIn("展示 1", report.render_markdown(payload))
 
+    def test_main_table_describes_and_orders_v1_ma_direction(self):
+        def item(code, metrics):
+            return {
+                "name": code, "code": code, "cycle_id": code,
+                "state": "SUPPLY_DRY", "evidence_status": "ready",
+                "metrics": metrics, "va_v0_ratio": .5,
+                "drawdown_ratio": .04, "adjustment_days": 2,
+            }
+
+        payload = {
+            "scope": {"scope_complete": True, "collector_status": "ready"},
+            "summary": {"evaluated": 4, "data_insufficient": 0},
+            "confirmed": [],
+            "watching": [
+                item("1", {}),
+                item("2", {"ma10_slope_3": .002,
+                            "ma20_slope_3": .002,
+                            "ma_flat_tolerance": .002}),
+                item("3", {"ma10_slope_3": -.01,
+                            "ma20_slope_3": .003,
+                            "ma_flat_tolerance": .002}),
+                item("4", {"ma10_slope_3": .003,
+                            "ma20_slope_3": .004,
+                            "ma_flat_tolerance": .002}),
+            ],
+            "pullback": [], "provisional": [], "diagnostics": [],
+        }
+
+        shown, _stats = report.select_v1_rows(payload)
+
+        self.assertEqual(["4", "3", "2", "1"],
+                         [row["code"] for row, _follow in shown])
+        for rendered in (report.render_markdown(payload), report.render_html(payload)):
+            self.assertIn("MA10/MA20向上", rendered)
+            self.assertIn("MA20向上", rendered)
+            self.assertIn("均线未形成上行", rendered)
+            self.assertIn("均线方向未记录", rendered)
+
+    def test_legacy_ma_direction_field_remains_compatible(self):
+        both_up = {"ma_direction": "both_up"}
+        ma20_up = {"metrics": {"ma_direction": "ma20_up"}}
+        unknown = {}
+
+        self.assertEqual(0, report._v1_trend_tier(both_up))
+        self.assertEqual(1, report._v1_trend_tier(ma20_up))
+        self.assertEqual(3, report._v1_trend_tier(unknown))
+
     def test_main_table_excludes_rows_from_an_older_data_date(self):
         payload = {
             "as_of_date": "2026-10-28",
