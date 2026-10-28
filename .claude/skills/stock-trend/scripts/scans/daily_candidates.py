@@ -93,6 +93,8 @@ from core.weak_to_strong_snapshot import save_snapshot as save_weak_to_strong_sn
 from core.weak_to_strong_snapshot import load_previous_snapshot as load_previous_weak_snapshot
 from analysis.weak_to_strong_followup import build_follow_up_baseline, evaluate_follow_up
 from analysis.daily_weak_to_strong import analyze_daily_weak_to_strong
+from scans.weak_to_strong_v2 import build_v2_output
+from analysis.weak_to_strong_v2_follow_up import build_v2_follow_up
 from scans import stock_scanner as weak_scanner
 from core.source_health import bounded_source_map
 SIGNAL_LABELS = candidate_formatters.SIGNAL_LABELS
@@ -4422,7 +4424,7 @@ def _phase_d_lps_shadow_html(shadow):
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                     performance=None, tracking=None, market_regime=None,
                     style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
-                    weak_to_strong=None):
+                    weak_to_strong=None, weak_to_strong_v2=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -4523,6 +4525,8 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
         "暂无可供次日确认的观察标的。")
     if weak_to_strong is not None:
         lines.extend(["", weak_to_strong_report.render_markdown(weak_to_strong)])
+    if weak_to_strong_v2 is not None:
+        lines.extend(["", weak_to_strong_report.render_v2_markdown(weak_to_strong_v2)])
     _append_observation_pool_tables(lines, buckets["observation"])
     _append_candidate_table(
         lines, "数据失效/待修复", buckets.get("data_rejected", []),
@@ -4866,7 +4870,7 @@ def _html_decision_notice(buckets, candidates, policy, regime):
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                    performance=None, tracking=None, market_regime=None,
                    style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
-                   weak_to_strong=None):
+                   weak_to_strong=None, weak_to_strong_v2=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
     regime = market_regime
@@ -5163,6 +5167,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {waiting_section_html}
 {confirmation_section_html}
 {weak_to_strong_report.render_html(weak_to_strong)}
+{weak_to_strong_report.render_v2_html(weak_to_strong_v2) if weak_to_strong_v2 is not None else ""}
 {observation_section_html}
 {rejected_details_html}
 {unenriched_details_html}
@@ -5176,7 +5181,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
                       performance=None, tracking=None, market_regime=None,
                       style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
-                      weak_to_strong=None):
+                      weak_to_strong=None, weak_to_strong_v2=None):
     output = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -5207,6 +5212,8 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         output["phase_d_lps_shadow"] = copy.deepcopy(phase_d_lps_shadow)
     if weak_to_strong is not None:
         output["weak_to_strong"] = copy.deepcopy(weak_to_strong)
+    if weak_to_strong_v2 is not None:
+        output["weak_to_strong_v2"] = copy.deepcopy(weak_to_strong_v2)
     return output
 
 
@@ -5410,6 +5417,8 @@ def main():
                         help="跳过新闻影子层（仅用于诊断）")
     parser.add_argument("--news-lookback", type=int, default=14,
                         help="新闻回看自然日数（默认14）")
+    parser.add_argument("--weak-to-strong-v2", action="store_true",
+                        help="附加弱转强 v2 研究分组报告（验证积累中）")
     parser.add_argument("--json", action="store_true", help="stdout 输出 JSON")
     parser.add_argument("--html", dest="html", action="store_true", default=True,
                         help="(默认) 生成 HTML 报告")
@@ -5761,6 +5770,20 @@ def main():
         weak_output, weak_results, weak_calendar, regime, CACHE_DIR / "weak_to_strong",
         provisional=bool(policy.get("provisional")))
 
+    weak_v2 = build_v2_output(weak_results, weak_output, weak_calendar,
+                              deadline=source_health.live_deadline)
+    previous_v2 = load_previous_weak_snapshot(
+        CACHE_DIR / "weak_to_strong", expected_date, calendar_dates,
+        requested_version="v2")
+    weak_v2["follow_up"] = build_v2_follow_up(
+        (previous_v2.get("snapshot") or {}).get("result"), weak_v2)
+    weak_v2["follow_up"]["baseline_status"] = previous_v2.get("status")
+    weak_v2["follow_up"]["baseline_reason"] = previous_v2.get("reason")
+    weak_v2["tracking"] = save_weak_to_strong_snapshot(
+        weak_v2, weak_results, weak_calendar, regime, CACHE_DIR / "weak_to_strong",
+        provisional=bool(policy.get("provisional")), requested_version="v2")
+    performance["weak_to_strong_v2"] = copy.deepcopy(weak_v2["performance"])
+
     report_candidates = copy.deepcopy(candidates)
     report_buckets = copy.deepcopy(buckets)
     shadow_scanned_candidates = copy.deepcopy(scored)
@@ -5805,14 +5828,16 @@ def main():
             performance=performance,
             tracking=tracking, market_regime=regime,
             style_shadow=style_shadow_report, news_shadow=news_shadow,
-            phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output))]
+            phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output,
+            weak_to_strong_v2=weak_v2))]
         if args.html:
             builders.append(("html", lambda: _generate_html(
                 report_candidates, sector_codes, elapsed, ts, policy,
                 report_buckets, performance=performance,
                 tracking=tracking, market_regime=regime,
                 style_shadow=style_shadow_report, news_shadow=news_shadow,
-                phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output)))
+                phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output,
+                weak_to_strong_v2=weak_v2 if args.weak_to_strong_v2 else None)))
         outputs, performance = _freeze_output_envelope(
             performance, builders, run_started_at=monotonic_start)
         out = outputs["json"]
@@ -5847,7 +5872,8 @@ def main():
         performance=performance,
         tracking=tracking, market_regime=regime,
         style_shadow=style_shadow_report, news_shadow=news_shadow,
-        phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output))]
+        phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output,
+        weak_to_strong_v2=weak_v2 if args.weak_to_strong_v2 else None))]
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.html:
         builders.append(("html", lambda: _generate_html(
@@ -5855,7 +5881,8 @@ def main():
             report_buckets, performance=performance,
             tracking=tracking, market_regime=regime,
             style_shadow=style_shadow_report, news_shadow=news_shadow,
-            phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output)))
+            phase_d_lps_shadow=phase_d_lps_shadow, weak_to_strong=weak_output,
+                weak_to_strong_v2=weak_v2 if args.weak_to_strong_v2 else None)))
     outputs, performance = _freeze_output_envelope(
         performance, builders, run_started_at=monotonic_start)
     report = _attach_performance_audit(

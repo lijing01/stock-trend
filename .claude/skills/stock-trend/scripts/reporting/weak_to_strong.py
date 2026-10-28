@@ -351,3 +351,209 @@ def render_html(payload):
             message = FOLLOW_UP_REASONS.get(message, message)
             out.append("<p>" + escape(str(message)) + "</p>")
     return "".join(out) + "</section>"
+
+
+V2_GROUPS = (
+    ("range_breakout", "区间突破"),
+    ("local_confirmation", "局部转强"),
+    ("early_repair", "早期修复"),
+    ("preparing", "准备观察"),
+    ("provisional", "盘中候选"),
+)
+
+V2_STAGE_LABELS = {
+    "RANGE_BREAKOUT": "区间突破", "LOCAL_CONFIRMATION": "局部转强",
+    "EARLY_REPAIR": "早期修复", "PREPARING": "准备观察", "NONE": "无阶段",
+}
+V2_PATTERN_LABELS = {
+    "short_pullback": "短线强势回调", "base_consolidation": "平台/趋势整理",
+    "deep_repair": "深回撤修复",
+}
+V2_RISK_LABELS = {
+    "extended": "偏离较大", "weak_volume": "量能偏弱", "lost_level": "跌回触发位",
+    "parent_overhead": "父结构压力", "flat_bar": "一字线",
+}
+
+V2_HEADERS = ["名称/代码", "阶段/背景", "均线位置与方向", "局部/区间/父结构压力",
+              "量能/收盘强度", "偏离风险", "依据日/数据资格"]
+
+
+def _v2_trend_tier(item):
+    """Return the plan-defined MA direction tier (lower sorts first)."""
+    metrics = item.get("metrics") or {}
+    if not isinstance(metrics, dict):
+        return 3
+    ma10 = _number(metrics.get("ma10_slope_3", metrics.get("ma10_slope_3d")))
+    ma20 = _number(metrics.get("ma20_slope_3", metrics.get("ma20_slope_3d")))
+    if ma10 is None or ma20 is None:
+        direction = str(metrics.get("ma_direction") or "").lower()
+        return {"both_up": 0, "ma20_up": 1}.get(direction, 3 if not direction else 2)
+    tolerance = _number(metrics.get("ma_flat_tolerance"))
+    threshold = 0.002 if tolerance is None else tolerance
+    ma10_up, ma20_up = ma10 > threshold, ma20 > threshold
+    return 0 if ma10_up and ma20_up else 1 if ma20_up else 2
+
+
+def _v2_quality_key(item):
+    pattern = str(item.get("pattern_type") or "")
+    metrics = item.get("metrics") or {}
+    checks = item.get("checks") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    if not isinstance(checks, dict):
+        checks = {}
+    if pattern == "short_pullback":
+        if item.get("stage") in {"LOCAL_CONFIRMATION", "RANGE_BREAKOUT"}:
+            return (_descending(metrics.get("breakout_volume_ratio")),
+                    _descending(metrics.get("close_strength")),
+                    _ascending(metrics.get("breakout_ratio")))
+        return (_ascending(metrics.get("va_v0_ratio")),
+                _ascending(metrics.get("drawdown_ratio")),
+                _ascending(metrics.get("adjustment_days")))
+    distance = metrics.get("trigger_distance_atr", metrics.get("distance_to_trigger_atr"))
+    volume = metrics.get("volume_prior5_ratio", metrics.get("volume_ratio_5"))
+    if pattern == "deep_repair":
+        holds = checks.get("holds_trigger_level")
+        holds = holds.get("passed") if isinstance(holds, dict) else holds
+        return (holds is not True, _ascending(distance))
+    return (_ascending(distance), _descending(volume))
+
+
+def _v2_sort_key(item):
+    evidence = str(item.get("evidence_status") or "")
+    risks = item.get("risk_flags") or []
+    if isinstance(risks, str):
+        risks = [risks]
+    pattern_rank = {"short_pullback": 0, "base_consolidation": 1,
+                    "deep_repair": 2}.get(str(item.get("pattern_type") or ""), 3)
+    return (evidence != "ready", _v2_trend_tier(item), "extended" in risks,
+            pattern_rank, _v2_quality_key(item), _code(item))
+
+
+def sort_v2_rows(rows):
+    """Return valid v2 rows in deterministic plan-defined display order."""
+    if not isinstance(rows, list):
+        return []
+    return sorted((row for row in rows if isinstance(row, dict)), key=_v2_sort_key)
+
+
+def _v2_cells(item):
+    metrics = item.get("metrics") or {}
+    structure = item.get("structure") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    if not isinstance(structure, dict):
+        structure = {}
+    stage = V2_STAGE_LABELS.get(str(item.get("stage")), _value(item.get("stage")))
+    pattern = V2_PATTERN_LABELS.get(str(item.get("pattern_type")),
+                                    _value(item.get("pattern_type")))
+    origin = item.get("origin_pattern_type")
+    if origin and origin != item.get("pattern_type"):
+        pattern += "（起始：" + V2_PATTERN_LABELS.get(str(origin), str(origin)) + "）"
+    close = metrics.get("close")
+    ma10, ma20 = metrics.get("ma10"), metrics.get("ma20")
+    slope10 = metrics.get("ma10_slope_3", metrics.get("ma10_slope_3d"))
+    slope20 = metrics.get("ma20_slope_3", metrics.get("ma20_slope_3d"))
+    def direction(slope):
+        value = _number(slope)
+        if value is None:
+            return "方向未知"
+        tolerance = _number(metrics.get("ma_flat_tolerance"))
+        tolerance = 0.002 if tolerance is None else tolerance
+        label = "向上" if value > tolerance else "向下" if value < -tolerance else "走平"
+        return f"{label} {value:+.2%}"
+    ma_text = (f"收 {_value(close)}；MA10 {_value(ma10)} ({direction(slope10)})；"
+               f"MA20 {_value(ma20)} ({direction(slope20)})")
+    h5 = metrics.get("h5", structure.get("h5"))
+    h10 = metrics.get("h10", structure.get("h10"))
+    h20 = metrics.get("h20", structure.get("h20"))
+    parent = structure.get("anchor_high", structure.get("parent_high"))
+    pressure = f"H5 {_value(h5)} / H10 {_value(h10)} / H20 {_value(h20)} / 父高 {_value(parent)}"
+    volume = metrics.get("volume_prior5_ratio", metrics.get("volume_ratio_5"))
+    strength = metrics.get("close_strength")
+    quality = f"量/前5日 {_value(volume)}；收盘强度 {_value(strength)}"
+    risks = item.get("risk_flags") or []
+    if isinstance(risks, str):
+        risks = [risks]
+    risk_text = "、".join(V2_RISK_LABELS.get(str(risk), str(risk)) for risk in risks) or "无"
+    evidence = {"ready": "数据合格", "data_insufficient": "数据不足"}.get(
+        item.get("evidence_status"), _value(item.get("evidence_status")))
+    basis_date = item.get("signal_date") or item.get("stage_first_at") or item.get("as_of_date")
+    return [f"{item.get('name', '')} ({_code(item)})", f"{stage} / {pattern}", ma_text,
+            pressure, quality, risk_text, f"{_value(basis_date)} / {evidence}"]
+
+
+def _v2_summary(payload):
+    summary = payload.get("summary") or {}
+    status = summary.get("validation_status") or payload.get("validation_status")
+    if not status:
+        status = "continue_accumulating"
+    stock_count = summary.get("stock_count", 0)
+    event_count = summary.get("new_event_count", 0)
+    return f"研究验证状态：{status}；股票 {stock_count} 只，当日新事件 {event_count} 个。"
+
+
+def render_v2_markdown(payload):
+    """Render the parallel research v2 view without replacing the v1 report."""
+    if payload is None:
+        return ""
+    lines = ["## 日线弱转强 v2（研究版）", "",
+             "按转强阶段分组；结构识别不等同于正式推荐资格。", "", _v2_summary(payload)]
+    any_rows = False
+    for key, label in V2_GROUPS:
+        rows = sort_v2_rows(payload.get(key) or [])
+        if not rows:
+            continue
+        any_rows = True
+        lines += ["", f"### {label}", "", "| " + " | ".join(V2_HEADERS) + " |",
+                  "| " + " | ".join(["---"] * len(V2_HEADERS)) + " |"]
+        for item in rows:
+            lines.append("| " + " | ".join(_markdown_cell(cell) for cell in _v2_cells(item)) + " |")
+    if not any_rows:
+        lines += ["", "当前没有可展示的 v2 研究形态。"]
+    diagnostics = payload.get("diagnostics") or []
+    if isinstance(diagnostics, list) and diagnostics:
+        lines += ["", "<details><summary>v2 诊断</summary>", ""]
+        for item in diagnostics:
+            if isinstance(item, dict):
+                reasons = item.get("reason_codes") or ["无"]
+                lines.append(f"- {_markdown_cell(_code(item))}：" +
+                             "、".join(_markdown_cell(reason) for reason in reasons))
+        lines += ["", "</details>"]
+    return "\n".join(lines)
+
+
+def render_v2_html(payload):
+    """Render the parallel research v2 view with all values HTML-escaped."""
+    if payload is None:
+        return ""
+    out = ["<section class='candidate-section weak-to-strong-v2'>",
+           "<h2>日线弱转强 v2（研究版）</h2>",
+           "<p>按转强阶段分组；结构识别不等同于正式推荐资格。</p>",
+           "<p>" + escape(_v2_summary(payload)) + "</p>"]
+    any_rows = False
+    for key, label in V2_GROUPS:
+        rows = sort_v2_rows(payload.get(key) or [])
+        if not rows:
+            continue
+        any_rows = True
+        out.append("<h3>" + escape(label) + "</h3>")
+        out.append("<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-to-strong-v2-table'>"
+                   "<thead><tr>" + "".join("<th>" + escape(header) + "</th>" for header in V2_HEADERS) +
+                   "</tr></thead><tbody>")
+        for item in rows:
+            out.append("<tr>" + "".join("<td>" + escape(str(cell)) + "</td>"
+                                         for cell in _v2_cells(item)) + "</tr>")
+        out.append("</tbody></table></div>")
+    if not any_rows:
+        out.append("<p>当前没有可展示的 v2 研究形态。</p>")
+    diagnostics = payload.get("diagnostics") or []
+    if isinstance(diagnostics, list) and diagnostics:
+        out.append("<details><summary>v2 诊断</summary><ul>")
+        for item in diagnostics:
+            if isinstance(item, dict):
+                detail = _code(item) + "：" + "、".join(str(reason) for reason in
+                                                        (item.get("reason_codes") or ["无"]))
+                out.append("<li>" + escape(detail) + "</li>")
+        out.append("</ul></details>")
+    return "".join(out) + "</section>"
