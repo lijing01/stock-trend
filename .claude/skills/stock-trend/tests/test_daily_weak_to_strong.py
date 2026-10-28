@@ -183,7 +183,11 @@ class DailyWeakToStrongTests(unittest.TestCase):
         kwargs["close_evidence"].pop("provisional")
         result = analyze_daily_weak_to_strong(payload, **kwargs)
         self.assertNotEqual(result["state"], "PROVISIONAL_BREAKOUT")
-        self.assertEqual(result["evidence_status"], "data_insufficient")
+        self.assertEqual(result["evidence_status"], "ready")
+        self.assertFalse(result["provisional"])
+        self.assertFalse(result["current_bar_evaluated"])
+        self.assertNotEqual(result["evaluation_date"], result["as_of_date"])
+        self.assertIn("close_unconfirmed", result["reason_codes"])
 
     def test_missing_window_trading_day_blocks_confirmation(self):
         payload, days = payload_with_pattern()
@@ -253,8 +257,38 @@ class DailyWeakToStrongTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "PROVISIONAL_BREAKOUT")
         self.assertEqual(result["confirmation"], "provisional")
+        self.assertEqual(result["evidence_status"], "ready")
+        self.assertTrue(result["provisional"])
+        self.assertTrue(result["current_bar_evaluated"])
+        self.assertEqual(result["evaluation_date"], result["as_of_date"])
         self.assertTrue(result["provisional_match"])
         self.assertIn("close_unconfirmed", result["reason_codes"])
+        self.assertFalse(any(event.get("date") == result["as_of_date"]
+                             for event in result["events"]))
+
+    def test_intraday_non_breakout_uses_current_bar_and_is_provisional(self):
+        payload, days = payload_with_pattern(adjustments=3, breakout=False)
+        result = self.analyze(payload, days, confirmed=False)
+
+        self.assertEqual(result["state"], "SUPPLY_DRY")
+        self.assertEqual(result["adjustment_days"], 3)
+        self.assertEqual(result["confirmation"], "provisional")
+        self.assertTrue(result["provisional"])
+        self.assertTrue(result["current_bar_evaluated"])
+        self.assertEqual(result["evaluation_date"], result["as_of_date"])
+        self.assertEqual(result["evidence_status"], "ready")
+
+    def test_intraday_flag_overrides_conflicting_close_confirmation(self):
+        payload, days = payload_with_pattern()
+        kwargs = evidence(payload, days, confirmed=True)
+        kwargs["close_evidence"]["provisional"] = True
+
+        result = analyze_daily_weak_to_strong(payload, **kwargs)
+
+        self.assertEqual(result["state"], "PROVISIONAL_BREAKOUT")
+        self.assertEqual(result["confirmation"], "provisional")
+        self.assertTrue(result["provisional"])
+        self.assertNotEqual(result["state"], "BREAKOUT_CONFIRMED")
 
     def test_missing_calendar_downgrades_formal_breakout(self):
         payload, days = payload_with_pattern()

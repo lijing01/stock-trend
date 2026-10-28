@@ -21,6 +21,81 @@ from test_daily_weak_to_strong import payload_with_pattern, row, trading_days
 
 
 class WeakToStrongIntegrationTests(unittest.TestCase):
+    def test_intraday_policy_overrides_erroneous_provider_close_confirmation(self):
+        payload, _ = payload_with_pattern()
+        days = trading_days(100)
+        prefix = [row(days[i], 10 + (0.03 if i % 2 else 0), volume=700)
+                  for i in range(50)]
+        for index, bar in enumerate(payload["data"]):
+            bar["trade_date"] = days[50 + index].replace("-", "")
+        payload["data"] = prefix + payload["data"]
+        payload["meta"]["close_confirmed"] = True
+        as_of = days[len(payload["data"]) - 1]
+        calendar = {"trading_dates": days, "coverage_start": days[0],
+                    "coverage_end": days[-1], "identity": "fixture"}
+        candidate = {"code": "600001", "ts_code": "600001.SH",
+                     "name": "测试股", "sector_memberships": []}
+        collected = {}
+
+        with patch.object(sc, "_fetch_kline", return_value=payload), \
+             patch.object(sc, "_fetch_capital_flow", return_value=None), \
+             patch.object(sc, "_fetch_fundamental", return_value=None):
+            sc.run_phase2(
+                [candidate], max_workers=1, as_of_date=as_of,
+                weak_to_strong_results=collected,
+                weak_to_strong_calendar=calendar,
+                weak_to_strong_intraday=True,
+                require_wyckoff_gate=False,
+                defer_enrichment=True)
+
+        result = collected["600001.SH"]["result"]
+        self.assertEqual(result["state"], "PROVISIONAL_BREAKOUT")
+        self.assertEqual(result["confirmation"], "provisional")
+        self.assertTrue(result["provisional"])
+        self.assertNotEqual(result["state"], "BREAKOUT_CONFIRMED")
+
+    def test_intraday_states_are_evaluated_and_post_close_unconfirmed_is_diagnostic(self):
+        candidates = [
+            {"code": "600001", "name": "盘中缩量"},
+            {"code": "600002", "name": "盘中回调"},
+            {"code": "600003", "name": "盘后未确认"},
+            {"code": "600004", "name": "真实缺数"},
+        ]
+        collected = {
+            "600001.SH": {"result": {
+                "code": "600001", "name": "盘中缩量", "state": "SUPPLY_DRY",
+                "confirmation": "provisional", "provisional": True,
+                "evidence_status": "ready", "reason_codes": ["close_unconfirmed"],
+            }},
+            "600002.SH": {"result": {
+                "code": "600002", "name": "盘中回调", "state": "PULLBACK",
+                "confirmation": "provisional", "provisional": True,
+                "evidence_status": "ready", "reason_codes": ["close_unconfirmed"],
+            }, "kline_payload": {"data": []}},
+            "600003.SH": {"result": {
+                "code": "600003", "name": "盘后未确认", "state": "SUPPLY_DRY",
+                "confirmation": "none", "provisional": False,
+                "evidence_status": "ready", "reason_codes": ["close_unconfirmed"],
+            }},
+            "600004.SH": {"result": {
+                "code": "600004", "name": "真实缺数", "state": "WAIT",
+                "confirmation": "none", "provisional": False,
+                "evidence_status": "data_insufficient", "reason_codes": ["history_insufficient"],
+            }},
+        }
+
+        output = dc.build_weak_to_strong_output(
+            collected, candidates, [], "2026-10-28", {}, {},
+            {"scope_complete": True}, calendar_dates=[])
+
+        self.assertEqual(["600001"], [row["code"] for row in output["watching"]])
+        self.assertEqual(["600002"], [row["code"] for row in output["pullback"]])
+        self.assertEqual({"attempted": 4, "evaluated": 2, "data_insufficient": 1,
+                          "close_unconfirmed": 1, "intraday_provisional": 2,
+                          "confirmed": 0, "watching": 1, "provisional": 0},
+                         output["summary"])
+        self.assertIn("600003", [row["code"] for row in output["diagnostics"]])
+
     def test_pullback_observation_preserves_diagnostics_and_calendar_evidence(self):
         dates = ["2026-10-23", "2026-10-26", "2026-10-27"]
         candidate = {"code": "300005", "name": "测试股"}

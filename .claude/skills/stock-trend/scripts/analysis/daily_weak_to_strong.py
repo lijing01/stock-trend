@@ -66,6 +66,9 @@ def _empty_result(as_of_date, config, reasons=None):
         "as_of_date": _normalise_date(as_of_date),
         "state": "WAIT",
         "confirmation": "none",
+        "provisional": False,
+        "current_bar_evaluated": False,
+        "evaluation_date": "",
         "evidence_status": "data_insufficient" if reasons else "ready",
         "reason_codes": list(dict.fromkeys(reasons or [])),
         "cycle_id": "",
@@ -447,24 +450,21 @@ def _replay(rows, config):
     return result, active
 
 
-def _provisional_projection(base_result, active, rows, config):
-    projected = copy.deepcopy(base_result)
-    projected["as_of_date"] = rows[-1]["date"]
-    projected["confirmation"] = "provisional"
-    projected["provisional_match"] = False
-    if active is None:
-        return projected
-    is_breakout, passed, metrics, checks = _breakout(
-        rows, active, len(rows) - 1, config)
-    if is_breakout and passed:
-        projected.update(_base_from_active(rows, active, len(rows) - 1, config))
-        _apply_metrics(projected, metrics)
-        projected.update(
-            state="PROVISIONAL_BREAKOUT", signal_date=rows[-1]["date"],
-            provisional_match=True, checks=checks,
-            reason_codes=["close_unconfirmed"],
-        )
-    return projected
+def _mark_provisional(result, target_date):
+    """Mark a full intraday replay without persisting its current-day event."""
+    result["provisional"] = True
+    result["current_bar_evaluated"] = True
+    result["evaluation_date"] = target_date
+    result["confirmation"] = "provisional"
+    result["events"] = [
+        event for event in result.get("events", [])
+        if event.get("date") != target_date
+    ]
+    if (result.get("state") == "BREAKOUT_CONFIRMED"
+            and result.get("signal_date") == target_date):
+        result["state"] = "PROVISIONAL_BREAKOUT"
+        result["provisional_match"] = True
+    return result
 
 
 def analyze_daily_weak_to_strong(
@@ -515,16 +515,19 @@ def analyze_daily_weak_to_strong(
         result["kline_evidence"]["calendar_coverage"] = {}
         return result
 
-    close_confirmed = bool(
-        isinstance(close_evidence, dict) and close_evidence.get("confirmed") is True
-        and close_evidence.get("source") != "not_required")
     intraday = bool(isinstance(close_evidence, dict)
                     and close_evidence.get("provisional") is True)
-    replay_rows = rows if close_confirmed else rows[:-1]
-    replay_result, active = _replay(replay_rows, resolved_config)
-    if not close_confirmed and intraday:
-        replay_result = _provisional_projection(
-            replay_result, active, rows, resolved_config)
+    close_confirmed = bool(
+        isinstance(close_evidence, dict) and close_evidence.get("confirmed") is True
+        and close_evidence.get("source") != "not_required"
+        and not intraday)
+    replay_rows = rows if close_confirmed or intraday else rows[:-1]
+    replay_result, _ = _replay(replay_rows, resolved_config)
+    replay_result["current_bar_evaluated"] = bool(close_confirmed or intraday)
+    replay_result["evaluation_date"] = (
+        replay_rows[-1]["date"] if replay_rows else "")
+    if intraday and not close_confirmed:
+        replay_result = _mark_provisional(replay_result, target_date)
     replay_result["as_of_date"] = target_date
     replay_result["parameter_hash"] = result["parameter_hash"]
     replay_result["kline_evidence"] = result["kline_evidence"]
@@ -544,18 +547,20 @@ def analyze_daily_weak_to_strong(
         evidence_reasons.extend(replay_result.get("reason_codes") or [])
     if not basis_ready:
         evidence_reasons.append("basis_unknown")
-    if not close_confirmed:
-        evidence_reasons.append("close_unconfirmed")
+    non_fatal_reasons = [] if close_confirmed else ["close_unconfirmed"]
     if evidence_reasons:
         replay_result["evidence_status"] = "data_insufficient"
         replay_result["reason_codes"] = list(dict.fromkeys(
-            list(replay_result.get("reason_codes") or []) + evidence_reasons))
+            list(replay_result.get("reason_codes") or []) + evidence_reasons
+            + non_fatal_reasons))
         if replay_result["state"] == "BREAKOUT_CONFIRMED":
             replay_result["state"] = "UNVERIFIED_BREAKOUT"
             replay_result["confirmation"] = "evidence_incomplete"
             replay_result["provisional_match"] = False
     else:
         replay_result["evidence_status"] = calendar_status
+        replay_result["reason_codes"] = list(dict.fromkeys(
+            list(replay_result.get("reason_codes") or []) + non_fatal_reasons))
     return replay_result
 
 

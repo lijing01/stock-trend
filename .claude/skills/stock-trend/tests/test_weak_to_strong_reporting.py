@@ -112,6 +112,29 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             self.assertIn("连续两日收盘下跌", text)
             self.assertIn("各阶段按形态质量排列", text)
 
+    def test_summary_and_rows_distinguish_intraday_from_missing_data(self):
+        payload = {
+            "scope": {"scope_complete": False, "collector_status": "partial"},
+            "summary": {"evaluated": 2, "data_insufficient": 1,
+                        "intraday_provisional": 2, "close_unconfirmed": 1},
+            "confirmed": [],
+            "watching": [{
+                "name": "盘中缩量", "code": "1", "state": "SUPPLY_DRY",
+                "confirmation": "provisional", "provisional": True,
+                "evidence_status": "ready", "as_of_date": "2026-10-28",
+                "kline_evidence": {"provider": "eastmoney",
+                                   "fetched_at": "2026-10-28T13:20:00+08:00"},
+            }],
+            "pullback": [], "provisional": [], "diagnostics": [],
+        }
+        for text in (report.render_markdown(payload), report.render_html(payload)):
+            self.assertIn("已评估 2 只，数据不足 1 只", text)
+            self.assertIn("盘中临时 2 只", text)
+            self.assertIn("收盘未确认 1 只", text)
+            self.assertIn("缩量待突破（盘中临时）", text)
+            self.assertIn("来源 eastmoney", text)
+            self.assertIn("获取 2026-10-28T13:20:00+08:00", text)
+
     def test_follow_up_priority_then_recent_signal_date_then_code(self):
         payload = self.payload()
         payload["follow_up"]["items"] = [

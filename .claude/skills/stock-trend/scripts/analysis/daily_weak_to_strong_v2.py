@@ -161,6 +161,8 @@ def _empty(target_date, code, name, config, reasons=None):
         "as_of_date": target_date,
         "origin_pattern_type": None, "pattern_type": None,
         "stage": "NONE", "confirmation": "none",
+        "provisional": False, "current_bar_evaluated": False,
+        "evaluation_date": "",
         "evidence_status": "data_insufficient" if reasons else "ready",
         "cycle_id": "", "known_at": "", "stage_first_at": "",
         "signal_date": "", "reason_codes": list(dict.fromkeys(reasons or [])),
@@ -641,11 +643,12 @@ def analyze_daily_weak_to_strong_v2(
     _, calendar_reasons, detail = _calendar_status(
         calendar_evidence, rows, required_start, target)
     result["kline_evidence"]["calendar_coverage"] = detail
-    close_confirmed = bool(isinstance(close_evidence, dict)
-                           and close_evidence.get("confirmed") is True
-                           and close_evidence.get("source") != "not_required")
     provisional = bool(isinstance(close_evidence, dict)
                        and close_evidence.get("provisional") is True)
+    close_confirmed = bool(isinstance(close_evidence, dict)
+                           and close_evidence.get("confirmed") is True
+                           and close_evidence.get("source") != "not_required"
+                           and not provisional)
     technical_rows = rows if close_confirmed or provisional else rows[:-1]
     if len(technical_rows) < resolved["min_history_bars"]:
         result.update(evidence_status="data_insufficient",
@@ -658,13 +661,22 @@ def analyze_daily_weak_to_strong_v2(
     candidates = [item for item in (parent, strict) if item]
 
     evidence_reasons = list(calendar_reasons)
-    if not close_confirmed:
-        evidence_reasons.append("close_unconfirmed")
+    non_fatal_reasons = [] if close_confirmed else ["close_unconfirmed"]
     evidence_status = "ready" if not evidence_reasons else "data_insufficient"
     result["evidence_status"] = evidence_status
-    result["reason_codes"] = list(dict.fromkeys(evidence_reasons))
+    result["reason_codes"] = list(dict.fromkeys(
+        evidence_reasons + non_fatal_reasons))
+    result["provisional"] = bool(provisional and not close_confirmed)
+    result["current_bar_evaluated"] = bool(close_confirmed or provisional)
+    result["evaluation_date"] = (
+        technical_rows[-1]["date"] if technical_rows else "")
+    if result["provisional"]:
+        result["confirmation"] = "provisional"
     if not candidates:
-        result["events"] = lifecycle_events
+        result["events"] = [
+            event for event in lifecycle_events
+            if not result["provisional"] or event.get("date") != target
+        ]
         return result
     for candidate in candidates:
         candidate_evidence = evidence_status
@@ -676,27 +688,37 @@ def analyze_daily_weak_to_strong_v2(
             detector_version=DETECTOR_VERSION,
             parameter_hash=result["parameter_hash"],
             evidence_status=candidate_evidence,
+            provisional=bool(provisional and not close_confirmed),
+            current_bar_evaluated=bool(close_confirmed or provisional),
+            evaluation_date=(technical_rows[-1]["date"]
+                             if technical_rows else ""),
         )
         candidate.setdefault("context", {})
         candidate.setdefault("secondary_matches", [])
         candidate.setdefault("reason_codes", [] if candidate_evidence == "ready"
                              else list(result["reason_codes"]) or
                              ["source_evidence_incomplete"])
-        if candidate.get("confirmation") not in {
+        if candidate["provisional"]:
+            candidate["confirmation"] = "provisional"
+        elif candidate.get("confirmation") not in {
                 "close_confirmed", "provisional", "evidence_incomplete"}:
             candidate["confirmation"] = (
                 "close_confirmed" if (close_confirmed and
                                       STAGE_RANK[candidate["stage"]] >= 2)
-                else "provisional" if (provisional and
-                                        STAGE_RANK[candidate["stage"]] >= 2)
                 else "none" if close_confirmed else "evidence_incomplete")
+        if candidate["provisional"]:
+            candidate["events"] = [
+                event for event in candidate.get("events", [])
+                if event.get("date") != target
+            ]
     candidates.sort(key=_main_key, reverse=True)
     main = copy.deepcopy(candidates[0])
     result.update({key: main.get(key, result.get(key)) for key in (
         "origin_pattern_type", "pattern_type", "stage", "cycle_id", "known_at",
         "stage_first_at", "signal_date", "metrics", "checks", "risk_flags",
         "structure", "events", "lifecycle_status", "confirmation",
-        "evidence_status")})
+        "evidence_status", "provisional", "current_bar_evaluated",
+        "evaluation_date")})
     secondary = []
     for candidate in candidates[1:]:
         item = copy.deepcopy(candidate)

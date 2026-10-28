@@ -26,15 +26,29 @@ def _cells(item):
     if restrictions:
         status += "；" + "、".join(str(x) for x in restrictions)
     signal = labels.get(item.get("state"), _value(item.get("state")))
+    provisional = (item.get("provisional") is True or
+                   item.get("confirmation") == "provisional")
+    if provisional and item.get("state") != "PROVISIONAL_BREAKOUT":
+        signal += "（盘中临时）"
     if item.get("state") == "PULLBACK" and item.get("two_day_decline") is True:
         signal += "；连续两日收盘下跌"
+    evidence = {"ready": "数据合格", "data_insufficient": "数据不足"}.get(
+        item.get("evidence_status"), _value(item.get("evidence_status")))
+    kline_evidence = item.get("kline_evidence") or {}
+    source = kline_evidence.get("provider")
+    fetched_at = kline_evidence.get("fetched_at")
+    evidence_parts = [f"{_value(item.get('as_of_date'))} / {evidence}"]
+    if source:
+        evidence_parts.append("来源 " + str(source))
+    if fetched_at:
+        evidence_parts.append("获取 " + str(fetched_at))
     return [f"{item.get('name', '')} ({item.get('code', '')})", sectors,
             signal,
             _value(item.get("adjustment_days")),
             f"{_value(item.get('H'))} / {_value(item.get('L'))}",
             _value(item.get("va_v0_ratio")), _value(item.get("breakout_volume_ratio")),
             _value(item.get("close_strength")),
-            f"{_value(item.get('as_of_date'))} / {_value(item.get('evidence_status'))}", status]
+            "；".join(evidence_parts), status]
 
 
 HEADERS = ["名称/代码", "板块", "信号状态", "调整天数", "压力 H / 支撑 L",
@@ -167,9 +181,17 @@ def _summary(payload):
     summary = payload.get("summary") or {}
     evaluated = summary.get("evaluated", 0)
     insufficient = summary.get("data_insufficient", 0)
+    provisional = summary.get("intraday_provisional", 0)
+    close_unconfirmed = summary.get("close_unconfirmed", 0)
+    details = []
+    if provisional:
+        details.append(f"其中盘中临时 {provisional} 只")
+    if close_unconfirmed:
+        details.append(f"收盘未确认 {close_unconfirmed} 只")
+    suffix = "；" + "，".join(details) if details else ""
     if not scope.get("scope_complete") or insufficient or scope.get("collector_status") != "ready":
-        return f"覆盖不足：已评估 {evaluated} 只，数据不足 {insufficient} 只；详见诊断。"
-    return f"本次已评估 {evaluated} 只。"
+        return f"覆盖不足：已评估 {evaluated} 只，数据不足 {insufficient} 只{suffix}；详见诊断。"
+    return f"本次已评估 {evaluated} 只{suffix}。"
 
 
 def _follow_up(payload):
@@ -177,6 +199,20 @@ def _follow_up(payload):
     if isinstance(value, list):
         return {"rows": value}
     return value if isinstance(value, dict) else {}
+
+
+def _diagnostic_detail(item):
+    reasons = item.get("reason_codes") or ["无"]
+    detail = f"{item.get('code', '')}：{item.get('state', '未知')}；" + "、".join(
+        FOLLOW_UP_REASONS.get(str(reason), str(reason)) for reason in reasons)
+    evidence = item.get("kline_evidence") or {}
+    provider = evidence.get("provider")
+    fetched_at = evidence.get("fetched_at")
+    if provider:
+        detail += "；来源 " + str(provider)
+    if fetched_at:
+        detail += "；获取 " + str(fetched_at)
+    return detail
 
 
 def _follow_up_rows(payload):
@@ -278,7 +314,7 @@ def render_markdown(payload):
     if diagnostics:
         lines += ["", "弱转强诊断："]
         for item in diagnostics:
-            lines.append(f"- {item.get('code', '')}：{item.get('state', '未知')}；" + "、".join(item.get("reason_codes") or ["无"]))
+            lines.append("- " + _diagnostic_detail(item))
     follow_up = _follow_up(payload)
     follow_up_rows = _follow_up_rows(payload)
     if follow_up:
@@ -326,8 +362,7 @@ def render_html(payload):
     if diagnostics:
         out.append("<details><summary>弱转强诊断</summary><ul>")
         for item in diagnostics:
-            detail = f"{item.get('code', '')}：{item.get('state', '未知')}；" + "、".join(item.get("reason_codes") or ["无"])
-            out.append("<li>" + escape(detail) + "</li>")
+            out.append("<li>" + escape(_diagnostic_detail(item)) + "</li>")
         out.append("</ul></details>")
     follow_up = _follow_up(payload)
     follow_up_rows = _follow_up_rows(payload)

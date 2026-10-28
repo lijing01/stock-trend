@@ -5236,6 +5236,7 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
     status = performance.get("weak_to_strong_collector_status", "ready")
     if set(universe) - set(by_code):
         status = "collector_not_supported" if not by_code else "partial"
+    assessed_items = []
     for code, candidate in sorted(universe.items()):
         entry = by_code.get(code)
         if entry:
@@ -5256,19 +5257,24 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
                            "formal_bucket_or_not_selected": bucket or "not_selected",
                            "formal_bucket_label": bucket_names.get(bucket, "未进入正式候选"),
                            "formal_blockers": [REASON_LABELS.get(x, x) for x in dict.fromkeys(reasons)]}
+        assessed_items.append(item)
         state = item.get("state")
         ready = item.get("evidence_status") == "ready"
-        allowed_provisional = (state == "PROVISIONAL_BREAKOUT" and
-                               set(item.get("reason_codes") or []) <= {"close_unconfirmed"})
-        if state == "BREAKOUT_CONFIRMED" and ready and item.get("signal_date") == as_of_date:
+        reason_codes = set(item.get("reason_codes") or [])
+        provisional = (item.get("provisional") is True or
+                       item.get("confirmation") == "provisional")
+        close_unconfirmed = "close_unconfirmed" in reason_codes and not provisional
+        allowed_provisional = (state == "PROVISIONAL_BREAKOUT" and provisional and ready)
+        if (state == "BREAKOUT_CONFIRMED" and ready and not provisional and
+                not close_unconfirmed and item.get("signal_date") == as_of_date):
             result["confirmed"].append(item)
-        elif state == "SUPPLY_DRY" and ready:
+        elif state == "SUPPLY_DRY" and ready and not close_unconfirmed:
             result["watching"].append(item)
         elif allowed_provisional:
             result["provisional"].append(item)
         else:
             result["diagnostics"].append(item)
-            if state == "PULLBACK" and ready:
+            if state == "PULLBACK" and ready and not close_unconfirmed:
                 observed = copy.deepcopy(item)
                 dates = sorted({str(day) for day in (calendar_dates or []) if str(day) <= as_of_date})
                 recent = dates[-3:]
@@ -5279,10 +5285,22 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
                     if len(closes) == 3 and all(value is not None and value > 0 for value in closes)
                     else None)
                 result["pullback"].append(observed)
-    insufficient = sum(row.get("evidence_status") == "data_insufficient"
-                       for row in result["diagnostics"])
-    result["summary"] = {"attempted": len(universe), "evaluated": len(universe) - insufficient,
+    insufficient = sum(item.get("evidence_status") == "data_insufficient"
+                       for item in assessed_items)
+    close_unconfirmed = sum(
+        "close_unconfirmed" in set(item.get("reason_codes") or []) and
+        item.get("evidence_status") == "ready" and
+        not (item.get("provisional") is True or
+             item.get("confirmation") == "provisional")
+        for item in assessed_items)
+    intraday_provisional = sum(
+        item.get("provisional") is True or item.get("confirmation") == "provisional"
+        for item in assessed_items if item.get("evidence_status") == "ready")
+    result["summary"] = {"attempted": len(universe),
+                         "evaluated": len(universe) - insufficient - close_unconfirmed,
                          "data_insufficient": insufficient,
+                         "close_unconfirmed": close_unconfirmed,
+                         "intraday_provisional": intraday_provisional,
                          "confirmed": len(result["confirmed"]), "watching": len(result["watching"]),
                          "provisional": len(result["provisional"])}
     result["scope"] = {"sector_codes": [s.get("code") for s in sectors],

@@ -183,8 +183,31 @@ class DailyWeakToStrongV2Tests(unittest.TestCase):
         provisional = analyze_daily_weak_to_strong_v2(
             payload, code="000001.SZ", name="fixture", **kwargs)
         self.assertEqual(provisional["confirmation"], "provisional")
-        self.assertEqual(provisional["evidence_status"], "data_insufficient")
+        self.assertEqual(provisional["evidence_status"], "ready")
+        self.assertTrue(provisional["provisional"])
+        self.assertTrue(provisional["current_bar_evaluated"])
+        self.assertEqual(provisional["evaluation_date"], provisional["as_of_date"])
         self.assertIn("close_unconfirmed", provisional["reason_codes"])
+        self.assertFalse(any(event.get("date") == provisional["as_of_date"]
+                             for event in provisional["events"]))
+
+        stale = copy.deepcopy(kwargs)
+        stale["close_evidence"].pop("provisional")
+        not_evaluated = analyze_daily_weak_to_strong_v2(
+            payload, code="000001.SZ", name="fixture", **stale)
+        self.assertFalse(not_evaluated["provisional"])
+        self.assertFalse(not_evaluated["current_bar_evaluated"])
+        self.assertNotEqual(not_evaluated["evaluation_date"],
+                            not_evaluated["as_of_date"])
+        self.assertIn("close_unconfirmed", not_evaluated["reason_codes"])
+
+        conflicting = evidence(payload, days, confirmed=True)
+        conflicting["close_evidence"]["provisional"] = True
+        guarded = analyze_daily_weak_to_strong_v2(
+            payload, code="000001.SZ", name="fixture", **conflicting)
+        self.assertEqual(guarded["confirmation"], "provisional")
+        self.assertTrue(guarded["provisional"])
+        self.assertNotEqual(guarded["confirmation"], "close_confirmed")
 
     def test_bad_config_fails_closed(self):
         payload, days = fixture([])

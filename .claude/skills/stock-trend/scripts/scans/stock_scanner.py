@@ -68,6 +68,8 @@ CAPITAL_REPORT_FRONTIER_BUFFER = CAPITAL_TOPUP_LIMIT
 # failures; only hard-stop after many consecutive failures.
 SOURCE_FAILURE_THRESHOLD = 2
 SOURCE_HARD_FAILURE_THRESHOLD = 8
+INTRADAY_KLINE_MAX_AGE_SECONDS = 600
+INTRADAY_KLINE_FUTURE_TOLERANCE_SECONDS = 60
 SOURCE_EVIDENCE_STATUSES = frozenset({
     "live_success", "cache_valid", "cache_miss", "cache_stale",
     "not_selected_for_enrichment", "not_started_deadline",
@@ -455,6 +457,14 @@ def _normalize_source_evidence(source, payload, attempt, *, cache_probe=False,
         if isinstance(meta, dict):
             if meta.get("data_source"):
                 evidence["data_source"] = str(meta["data_source"])
+            evidence.setdefault(
+                "fetched_at", str(
+                    meta.get("fetch_time") or meta.get("fetched_at") or ""))
+            evidence.setdefault(
+                "data_date", str(latest_data_date(payload) or ""))
+            refresh = meta.get("intraday_refresh")
+            if isinstance(refresh, dict):
+                evidence["intraday_refresh"] = copy.deepcopy(refresh)
             confirmation = meta.get("close_confirmation")
             if isinstance(confirmation, dict) and confirmation.get("required"):
                 evidence.update({
@@ -1185,6 +1195,44 @@ def _kline_close_confirmation(payload, expected_trading_date="",
     return evidence
 
 
+def _intraday_kline_refresh_verdict(payload, expected_trading_date="", *,
+                                    now=None):
+    """Verify that a live intraday response is a recent provider snapshot."""
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    fetched_at = meta.get("fetch_time") or meta.get("fetched_at") or ""
+    fetched = _parse_kline_fetch_time(fetched_at)
+    reasons = []
+    if not fetched_at:
+        reasons.append("fetch_time_missing")
+    elif meta.get("fetch_time_source") == "file_mtime":
+        reasons.append("fetch_time_untrusted")
+    elif fetched is None:
+        reasons.append("fetch_time_invalid")
+    else:
+        expected_key = _trading_date_key(expected_trading_date)
+        if expected_key and fetched.strftime("%Y%m%d") != expected_key:
+            reasons.append("fetch_time_wrong_date")
+        shanghai = ZoneInfo("Asia/Shanghai")
+        current = now or datetime.now(shanghai)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=shanghai)
+        else:
+            current = current.astimezone(shanghai)
+        age_seconds = (current - fetched).total_seconds()
+        if age_seconds < -INTRADAY_KLINE_FUTURE_TOLERANCE_SECONDS:
+            reasons.append("fetch_time_future")
+        elif age_seconds > INTRADAY_KLINE_MAX_AGE_SECONDS:
+            reasons.append("fetch_time_stale")
+    verdict = _cache_verdict(reasons)
+    verdict.update({
+        "fetched_at": str(fetched_at or ""),
+        "data_date": str(latest_data_date(payload) or ""),
+        "max_age_seconds": INTRADAY_KLINE_MAX_AGE_SECONDS,
+    })
+    return verdict
+
+
 def _with_close_confirmation(payload, confirmation):
     """Attach close evidence without mutating a cached/provider payload."""
     if not isinstance(payload, dict):
@@ -1325,7 +1373,8 @@ def _with_cache_verdict(payload, verdict):
 
 def _fetch_kline(ts_code, as_of_date="", cache_only=False,
                  with_evidence=False, live_deadline=None,
-                 require_close_confirmation=False):
+                 require_close_confirmation=False,
+                 force_live_refresh=False, refresh_now=None):
     """Fetch a current 60-day K-line, refreshing stale caches when required."""
     code = ts_code.split(".")[0]
     cache_path = Path(CACHE_DIR) / code / "kline.json"
@@ -1338,12 +1387,18 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
     if require_close_confirmation and isinstance(cached, dict):
         cached = _with_close_confirmation(
             cached, cache_verdict["close_confirmation"])
-    if cache_verdict["valid"]:
+    if cache_verdict["valid"] and not force_live_refresh:
         result = source_result(cached, live_attempt(
             attempted=False, cache_used=True, stale=False,
             status="cache_valid"))
         return result if with_evidence else cached
     if cache_only:
+        if force_live_refresh and cache_verdict["valid"]:
+            cache_verdict = _cache_verdict(["live_refresh_required"])
+            cache_verdict["close_confirmation"] = (
+                _kline_close_confirmation(
+                    cached, as_of_date,
+                    required=require_close_confirmation))
         cache_present = isinstance(cached, dict) and bool(cached)
         cached = _with_cache_verdict(cached, cache_verdict)
         status = _cache_status(cached, cache_verdict,
@@ -1368,7 +1423,7 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
             cmd = build_kline_fetch_command(
                 "eastmoney", ts_code, output_path,
                 asset="E", freq="D", expected_date=as_of_date,
-                no_cache=require_close_confirmation,
+                no_cache=(require_close_confirmation or force_live_refresh),
                 provider_args=(
                     "--em-timeout", "4", "--em-fallback-timeout", "2",
                     "--em-host-retries", "1", "--fallback-timeout", "8",
@@ -1382,6 +1437,17 @@ def _fetch_kline(ts_code, as_of_date="", cache_only=False,
             verdict = (_validate_kline_cache(
                 payload, as_of_date, require_close_confirmation)
                        if payload else {"valid": False})
+            if force_live_refresh and isinstance(payload, dict):
+                refresh_verdict = _intraday_kline_refresh_verdict(
+                    payload, as_of_date, now=refresh_now)
+                verdict = _cache_verdict(
+                    list(verdict.get("reasons", []))
+                    + list(refresh_verdict.get("reasons", [])))
+                verdict["close_confirmation"] = _kline_close_confirmation(
+                    payload, as_of_date,
+                    required=require_close_confirmation)
+                payload.setdefault("meta", {})["intraday_refresh"] = (
+                    refresh_verdict)
             if require_close_confirmation and isinstance(payload, dict):
                 payload = _with_close_confirmation(
                     payload, verdict["close_confirmation"])
@@ -2556,7 +2622,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     else None)
         payload = artifact.get("kline") if isinstance(artifact, dict) else None
         analysis = artifact.get("analysis") if isinstance(artifact, dict) else None
-        if (not _kline_usable(payload)
+        if (weak_to_strong_intraday
+                or not _kline_usable(payload)
                 or (enable_wyckoff and not isinstance(analysis, dict))):
             fetch_candidates.append(candidate)
             continue
@@ -2572,6 +2639,8 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         ts_code = candidate["ts_code"]
         cache_only = _source_unavailable(source_health, "kline")
         kwargs = {"as_of_date": as_of_date}
+        if weak_to_strong_intraday:
+            kwargs["force_live_refresh"] = True
         if require_close_confirmation:
             kwargs["require_close_confirmation"] = True
         if cache_only:
@@ -2612,6 +2681,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                     _fetch_kline, candidate["ts_code"],
                     as_of_date=as_of_date,
                     live_deadline=kline_deadline,
+                    force_live_refresh=weak_to_strong_intraday,
                     **close_kwargs,
                     usable=_kline_usable)
 
@@ -2620,6 +2690,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
                 lambda candidate: _cache_fetch(
                     _fetch_kline, candidate["ts_code"],
                     as_of_date=as_of_date,
+                    force_live_refresh=weak_to_strong_intraday,
                     **({"require_close_confirmation": True}
                        if require_close_confirmation else {})),
                 kline_deadline,
@@ -2715,7 +2786,7 @@ def run_phase2(candidates, max_workers=4, enable_wyckoff=False,
         records = kline.get("data", []) if isinstance(kline, dict) else []
         if isinstance(weak_to_strong_results, dict):
             close = _kline_close_confirmation(kline, as_of_date, required=True)
-            if weak_to_strong_intraday and not close.get("confirmed"):
+            if weak_to_strong_intraday:
                 close["provisional"] = True
             prior = weak_to_strong_results.get(ts_code, {})
             evidence = source_evidence["kline"].get(ts_code, {})

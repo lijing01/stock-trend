@@ -397,6 +397,79 @@ class TestMetadata(unittest.TestCase):
         self.assertEqual(result, cached)
         run.assert_not_called()
 
+    def test_intraday_force_refresh_bypasses_same_day_kline_cache(self):
+        cached = self._valid_kline()
+        cached["meta"]["fetch_time"] = "20260813-100000"
+        refreshed = self._valid_kline()
+        refreshed["meta"]["fetch_time"] = "20260813-101500"
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", side_effect=[cached, refreshed]), \
+             patch.object(sc, "run_script",
+                          return_value={"success": True}) as run:
+            wrapped = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13",
+                force_live_refresh=True, with_evidence=True,
+                refresh_now=datetime(2026, 8, 13, 10, 16))
+
+        run.assert_called_once()
+        self.assertIn("--no-cache", run.call_args.args[0])
+        self.assertEqual(wrapped["payload"], refreshed)
+        self.assertEqual(wrapped["live_attempt"]["status"], "live_success")
+
+    def test_intraday_cache_fallback_is_rejected_without_live_refresh(self):
+        cached = self._valid_kline()
+        wrapped = None
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch.object(sc, "CACHE_DIR", tmpdir), \
+             patch.object(sc, "_read_json", return_value=cached), \
+             patch.object(sc, "run_script") as run:
+            wrapped = sc._fetch_kline(
+                "600001.SH", as_of_date="2026-08-13", cache_only=True,
+                force_live_refresh=True, with_evidence=True)
+
+        run.assert_not_called()
+        self.assertEqual(wrapped["live_attempt"]["status"], "cache_stale")
+        self.assertFalse(wrapped["live_attempt"]["cache_used"])
+        self.assertIn(
+            "live_refresh_required",
+            wrapped["payload"]["meta"]["cache_validation"]["reasons"])
+
+    def test_intraday_refresh_verdict_rejects_missing_stale_and_future_time(self):
+        now = datetime(2026, 8, 13, 10, 15)
+        payload = self._valid_kline()
+        payload["meta"].pop("fetch_time", None)
+        missing = sc._intraday_kline_refresh_verdict(
+            payload, "2026-08-13", now=now)
+        self.assertIn("fetch_time_missing", missing["reasons"])
+
+        payload["meta"]["fetch_time"] = "20260813-100000"
+        stale = sc._intraday_kline_refresh_verdict(
+            payload, "2026-08-13", now=now)
+        self.assertIn("fetch_time_stale", stale["reasons"])
+
+        payload["meta"]["fetch_time"] = "20260813-101701"
+        future = sc._intraday_kline_refresh_verdict(
+            payload, "2026-08-13", now=now)
+        self.assertIn("fetch_time_future", future["reasons"])
+
+    def test_intraday_refresh_evidence_exposes_provider_time(self):
+        payload = self._valid_kline()
+        payload["meta"].update({
+            "fetch_time": "20260813-101500",
+            "intraday_refresh": {
+                "valid": True, "reasons": [],
+                "fetched_at": "20260813-101500",
+            },
+        })
+        evidence = sc._normalize_source_evidence(
+            "kline", payload,
+            sc.live_attempt(attempted=True, status="live_success"),
+            usable=lambda value: True)
+        self.assertEqual(evidence["fetched_at"], "20260813-101500")
+        self.assertEqual(evidence["data_date"], "2026-08-13")
+        self.assertTrue(evidence["intraday_refresh"]["valid"])
+
     def test_stale_kline_uses_bounded_provider_budget(self):
         stale = self._valid_kline("20260812")
         refreshed = self._valid_kline("20260813")
@@ -1960,6 +2033,42 @@ class TestRunPhase2Funnel(unittest.TestCase):
         for field in ("composite_score", "quality_adjusted_score",
                       "wyckoff", "data_quality", "source_evidence"):
             self.assertEqual(second[0][field], baseline[0][field], field)
+
+    def test_intraday_weak_to_strong_does_not_reuse_kline_artifact(self):
+        item = _make_candidate("610991")
+        kline = _make_dated_kline(60, item["ts_code"], "20260916")
+        artifacts = {
+            (item["ts_code"], "2026-09-16"): {
+                "kline": kline,
+                "source_evidence": {"status": "cache_valid"},
+            },
+        }
+        observed = []
+
+        def fetch_kline(ts_code, with_evidence=False, **kwargs):
+            observed.append(kwargs)
+            attempt = sc.live_attempt(
+                attempted=True, provider_attempts=1,
+                status="live_success")
+            return (sc.source_result(kline, attempt)
+                    if with_evidence else kline)
+
+        with patch.object(sc, "_fetch_kline", side_effect=fetch_kline), \
+                patch.object(sc, "_fetch_capital_flow", return_value=None), \
+                patch.object(sc, "_fetch_fundamental", return_value=None):
+            sc.run_phase2(
+                [item], as_of_date="2026-09-16",
+                weak_to_strong_intraday=True,
+                weak_to_strong_results={},
+                kline_artifacts=artifacts,
+                defer_enrichment=True,
+                require_wyckoff_gate=False,
+                source_health=sc.RunSourceHealth())
+
+        live_calls = [kwargs for kwargs in observed
+                      if kwargs.get("live_deadline") is not None]
+        self.assertEqual(len(live_calls), 1)
+        self.assertTrue(live_calls[0]["force_live_refresh"])
 
     def test_two_pass_retries_stale_kline_instead_of_reusing_it(self):
         item = _make_candidate("610989")
