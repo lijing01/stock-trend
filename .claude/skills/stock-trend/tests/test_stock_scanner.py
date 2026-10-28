@@ -1803,7 +1803,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
         def fake_wait(futures, **_kwargs):
             self.assertTrue(live_started.wait(1.0))
-            clock.advance(120)
+            clock.advance(190)
             return set(), set(futures)
 
         try:
@@ -1881,11 +1881,11 @@ class TestRunPhase2Funnel(unittest.TestCase):
         with patch.object(sc.time, "monotonic", side_effect=clock.monotonic):
             health = sc.RunSourceHealth()
             with health.kline_budget("normal") as first_deadline:
-                self.assertEqual(first_deadline, 1110.0)
+                self.assertEqual(first_deadline, 1180.0)
                 clock.advance(70)
             with health.kline_budget("normal") as second_deadline:
-                self.assertEqual(second_deadline, 1110.0)
-                clock.advance(50)
+                self.assertEqual(second_deadline, 1180.0)
+                clock.advance(120)
             with health.kline_budget("normal") as exhausted_deadline:
                 self.assertEqual(exhausted_deadline, clock.now)
             with health.kline_budget("topup") as topup_deadline:
@@ -1894,8 +1894,8 @@ class TestRunPhase2Funnel(unittest.TestCase):
 
             snapshot = health.kline_budget_snapshot()
 
-        self.assertEqual(snapshot["normal"]["limit_seconds"], 110.0)
-        self.assertEqual(snapshot["normal"]["used_seconds"], 110.0)
+        self.assertEqual(snapshot["normal"]["limit_seconds"], 180.0)
+        self.assertEqual(snapshot["normal"]["used_seconds"], 180.0)
         self.assertEqual(snapshot["normal"]["remaining_seconds"], 0.0)
         self.assertEqual(snapshot["topup"]["limit_seconds"], 50.0)
         self.assertEqual(snapshot["topup"]["used_seconds"], 50.0)
@@ -1912,7 +1912,7 @@ class TestRunPhase2Funnel(unittest.TestCase):
             snapshot = health.kline_budget_snapshot()
 
         self.assertEqual(snapshot["normal"]["used_seconds"], 12.0)
-        self.assertEqual(snapshot["normal"]["remaining_seconds"], 98.0)
+        self.assertEqual(snapshot["normal"]["remaining_seconds"], 168.0)
 
     def test_kline_deadline_diagnostics_preserve_compatibility_reason(self):
         health = sc.RunSourceHealth()
