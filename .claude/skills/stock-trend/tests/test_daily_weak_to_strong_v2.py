@@ -164,6 +164,44 @@ class DailyWeakToStrongV2Tests(unittest.TestCase):
         self.assertEqual(clean["stage"], "NONE")
         self.assertNotIn("breakout_volume_ratio", clean["metrics"])
 
+    def test_strict_v1_ma_metrics_are_recomputed_for_the_technical_date(self):
+        payload, days = fixture([
+            {"close": 10.13, "high": 10.20, "low": 10.05},
+        ])
+        target = evidence(payload, days)["as_of_date"]
+        base_v1 = {
+            "state": "BREAKOUT_CONFIRMED", "evidence_status": "ready",
+            "signal_date": target, "cycle_id": "strict-cycle", "d0_date": target,
+            "H": 10.0, "va_v0_ratio": 0.7, "breakout_volume_ratio": 1.3,
+            "close_strength": 0.9, "breakout_ratio": 1.013, "checks": {},
+        }
+        missing = self.analyze(payload, days, v1_result=base_v1)
+        stale = copy.deepcopy(base_v1)
+        stale["metrics"] = {
+            "metric_date": days[-2], "ma10_slope_3": -9,
+            "ma20_slope_3": -8, "ma_flat_tolerance": .5,
+        }
+        mismatched = self.analyze(payload, days, v1_result=stale)
+
+        closes = [float(item["close"]) for item in payload["data"]]
+        expected_ma10 = (sum(closes[-10:]) / 10) / (sum(closes[-13:-3]) / 10) - 1
+        expected_ma20 = (sum(closes[-20:]) / 20) / (sum(closes[-23:-3]) / 20) - 1
+        for result in (missing, mismatched):
+            self.assertEqual("short_pullback", result["origin_pattern_type"])
+            self.assertEqual(result["evaluation_date"], result["metrics"]["metric_date"])
+            self.assertEqual(target, result["metrics"]["metric_date"])
+            self.assertAlmostEqual(expected_ma10, result["metrics"]["ma10_slope_3"])
+            self.assertAlmostEqual(expected_ma20, result["metrics"]["ma20_slope_3"])
+            self.assertEqual(.002, result["metrics"]["ma_flat_tolerance"])
+        self.assertEqual(missing["metrics"], mismatched["metrics"])
+
+        future = copy.deepcopy(payload)
+        future["data"].append(bar(days[len(payload["data"])], 50,
+                                  high=51, low=49, volume=9999))
+        replayed = self.analyze(
+            future, days, as_of_date=target, v1_result=base_v1)
+        self.assertEqual(missing["metrics"], replayed["metrics"])
+
     def test_missing_calendar_or_close_never_confirms(self):
         payload, days = fixture([
             {"close": 10.05, "high": 10.15, "low": 10.0},

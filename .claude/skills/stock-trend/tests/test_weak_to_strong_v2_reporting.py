@@ -41,6 +41,26 @@ class WeakToStrongV2ReportingTests(unittest.TestCase):
                          [item["code"] for item in report.sort_v2_rows(rows)])
         self.assertEqual([], report.sort_v2_rows("bad"))
 
+    def test_short_pullback_sort_uses_recomputed_ma_direction(self):
+        unknown = row("1", pattern="short_pullback", slopes=(None, None))
+        flat = row("2", pattern="short_pullback", slopes=(.002, .002))
+        ma20_up = row("3", pattern="short_pullback", slopes=(-.01, .003))
+        both_up = row("4", pattern="short_pullback", slopes=(.003, .004))
+        for item in (unknown, flat, ma20_up, both_up):
+            item["metrics"].update(
+                ma_flat_tolerance=.002, breakout_volume_ratio=1.3,
+                close_strength=.9, breakout_ratio=1.01)
+
+        ordered = report.sort_v2_rows([unknown, flat, ma20_up, both_up])
+
+        self.assertEqual(["4", "3", "2", "1"],
+                         [item["code"] for item in ordered])
+        reasons = [report._v2_selection_reason(item) for item in ordered]
+        self.assertEqual([
+            "局部转强；MA10/MA20向上", "局部转强；MA20向上",
+            "局部转强；均线未形成上行", "局部转强；均线方向未记录",
+        ], reasons)
+
     def test_stage_groups_have_same_order_in_markdown_and_html(self):
         payload = {
             "schema_version": "daily-weak-to-strong/v2",

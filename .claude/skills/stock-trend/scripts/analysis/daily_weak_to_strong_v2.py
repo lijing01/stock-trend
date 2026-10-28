@@ -208,9 +208,7 @@ def _new_structure(rows, index, code, parameter_hash, config):
     }
 
 
-def _instant_metrics(rows, index, active, config):
-    current = rows[index]
-    previous = rows[index - 1] if index else current
+def _ma_metrics(rows, index, config):
     ma10 = _ma(rows, index, config["ma_short_window"])
     ma20 = _ma(rows, index, config["ma_long_window"])
     past = index - config["ma_slope_days"]
@@ -218,6 +216,16 @@ def _instant_metrics(rows, index, active, config):
     old_ma20 = _ma(rows, past, config["ma_long_window"]) if past >= 0 else None
     slope10 = ma10 / old_ma10 - 1 if ma10 and old_ma10 else None
     slope20 = ma20 / old_ma20 - 1 if ma20 and old_ma20 else None
+    return {"ma10": ma10, "ma20": ma20, "ma10_slope_3": slope10,
+            "ma20_slope_3": slope20, "ma_flat_tolerance": config["ma_flat_tolerance"]}
+
+
+def _instant_metrics(rows, index, active, config):
+    current = rows[index]
+    previous = rows[index - 1] if index else current
+    ma_metrics = _ma_metrics(rows, index, config)
+    ma10, ma20 = ma_metrics["ma10"], ma_metrics["ma20"]
+    slope10, slope20 = ma_metrics["ma10_slope_3"], ma_metrics["ma20_slope_3"]
     atr14 = _atr(rows, index, config["atr_window"])
     prior_volume = _prior_volume(rows, index)
     volume_ratio = current["volume"] / prior_volume if prior_volume else None
@@ -229,8 +237,7 @@ def _instant_metrics(rows, index, active, config):
     return {
         "metric_date": current["date"], "cycle_id": active["cycle_id"],
         "close": current["close"], "daily_return": daily_return,
-        "ma10": ma10, "ma20": ma20, "ma10_slope_3": slope10,
-        "ma20_slope_3": slope20, "ma_flat_tolerance": config["ma_flat_tolerance"],
+        **ma_metrics,
         "ma10_direction": _direction(
             None if slope10 is None else 0 if abs(slope10) <= config["ma_flat_tolerance"] else slope10),
         "ma20_direction": _direction(
@@ -551,6 +558,7 @@ def _v1_candidate(v1_result, rows, code, parameter_hash, config):
         "metric_date": current["date"], "cycle_id": cycle_id,
         "close": current["close"], "h20": h20,
         "va_v0_ratio": v1_result.get("va_v0_ratio"),
+        **_ma_metrics(rows, len(rows) - 1, config),
     }
     if stage in {"LOCAL_CONFIRMATION", "RANGE_BREAKOUT"}:
         metrics.update(

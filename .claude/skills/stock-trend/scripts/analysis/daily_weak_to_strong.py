@@ -246,11 +246,18 @@ def _cycle_metrics(rows, active, current_index, config, include_current=False):
                 if l_value is not None and d0["high"] else None)
     va_v0 = va / v0 if va is not None and v0 else None
     last_va = vlast / va if vlast is not None and va else None
-    ma_holds = all(
-        _ge(rows[index]["close"], config["ma10_floor_factor"] *
-            _ma(rows, index, config["ma_window"]))
-        for index in adjustment
-    ) if adjustment else False
+    support_points = []
+    for index in adjustment:
+        ma = _ma(rows, index, config["ma_window"])
+        close = rows[index]["close"]
+        support_price = config["ma10_floor_factor"] * ma
+        support_points.append({"date": rows[index]["date"], "close": close,
+                               "ma10": ma, "support_price": support_price,
+                               "margin_ratio": close / support_price - 1})
+    weakest_support = min(support_points, key=lambda point: point["margin_ratio"],
+                          default=None)
+    ma_holds = bool(support_points) and all(
+        _ge(point["close"], point["support_price"]) for point in support_points)
     dry = bool(
         adjustment
         and _le(drawdown, config["max_drawdown"])
@@ -264,6 +271,7 @@ def _cycle_metrics(rows, active, current_index, config, include_current=False):
         "V0": v0, "Va": va, "Vlast": vlast,
         "drawdown_ratio": drawdown, "va_v0_ratio": va_v0,
         "last_va_ratio": last_va, "ma10_holds": ma_holds,
+        "ma10_support_evidence": weakest_support,
         "dry": dry, "adjustment_days": len(adjustment),
     }
 
@@ -288,12 +296,17 @@ def _supply_checks(metrics, config):
     checks = {
         "drawdown": _check(metrics["drawdown_ratio"], config["max_drawdown"],
                            _le(metrics["drawdown_ratio"], config["max_drawdown"]), "<="),
-        "ma10_support": _check(None, config["ma10_floor_factor"], metrics["ma10_holds"], ">="),
+        "ma10_support": _check(
+            (metrics["ma10_support_evidence"]["close"] /
+             metrics["ma10_support_evidence"]["ma10"]
+             if metrics["ma10_support_evidence"] else None),
+            config["ma10_floor_factor"], metrics["ma10_holds"], ">="),
         "adjustment_volume": _check(metrics["va_v0_ratio"], config["max_adjustment_volume_ratio"],
                                     _le(metrics["va_v0_ratio"], config["max_adjustment_volume_ratio"]), "<="),
         "last_volume": _check(metrics["last_va_ratio"], config["max_last_volume_ratio"],
                               last_exempt or _le(metrics["last_va_ratio"], config["max_last_volume_ratio"]), "<="),
     }
+    checks["ma10_support"]["evidence"] = copy.deepcopy(metrics["ma10_support_evidence"])
     checks["last_volume"]["status"] = "not_applicable" if last_exempt else "evaluated"
     return checks
 

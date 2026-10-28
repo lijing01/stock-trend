@@ -162,6 +162,31 @@ class DailyWeakToStrongTests(unittest.TestCase):
         self.assertLessEqual(result["va_v0_ratio"], 0.8)
         self.assertLessEqual(result["last_va_ratio"], 0.9)
 
+    def test_ma10_support_records_weakest_adjustment_evidence(self):
+        payload, days = payload_with_pattern(adjustments=3, breakout=False)
+
+        result = self.analyze(payload, days)
+
+        ratios = []
+        for index in range(22, 25):
+            close = payload["data"][index]["close"]
+            ma10 = sum(row["close"] for row in payload["data"][index - 9:index + 1]) / 10
+            ratios.append((close / ma10, index, close, ma10))
+        ratio, index, close, ma10 = min(ratios)
+        check = result["checks"]["ma10_support"]
+        support_price = 0.98 * ma10
+        self.assertAlmostEqual(ratio, check["value"])
+        self.assertEqual(0.98, check["threshold"])
+        self.assertEqual(">=", check["operator"])
+        self.assertTrue(check["passed"])
+        self.assertEqual({
+            "date": days[index],
+            "close": close,
+            "ma10": ma10,
+            "support_price": support_price,
+            "margin_ratio": close / support_price - 1,
+        }, check["evidence"])
+
     def test_d5_is_last_breakout_opportunity(self):
         d5_payload, days = payload_with_pattern(adjustments=4, breakout=True)
         d5 = self.analyze(d5_payload, days)
@@ -286,6 +311,15 @@ class DailyWeakToStrongTests(unittest.TestCase):
             fixture["data"][22].update(open=close, close=close, high=11.70, low=close - 0.05)
             result = self.analyze(fixture, days)
             self.assertEqual(result["state"], expected)
+            check = result["checks"]["ma10_support"]
+            self.assertAlmostEqual(close / check["evidence"]["ma10"], check["value"])
+            self.assertEqual(0.98, check["threshold"])
+            self.assertEqual(not bool(offset), check["passed"])
+            self.assertEqual(days[22], check["evidence"]["date"])
+            self.assertAlmostEqual(
+                close / check["evidence"]["support_price"] - 1,
+                check["evidence"]["margin_ratio"],
+            )
             if offset:
                 self.assertTrue(any("structure_broken" in event["reason_codes"]
                                     for event in result["events"]))

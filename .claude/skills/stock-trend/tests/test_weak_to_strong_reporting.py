@@ -289,6 +289,43 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
         self.assertEqual(1, report._v1_trend_tier(ma20_up))
         self.assertEqual(3, report._v1_trend_tier(unknown))
 
+    def test_signal_status_shows_ma10_support_evidence_and_legacy_rows_render(self):
+        payload = {
+            "as_of_date": "2026-10-28",
+            "scope": {"scope_complete": True, "collector_status": "ready"},
+            "summary": {"evaluated": 2, "data_insufficient": 0},
+            "confirmed": [],
+            "watching": [
+                {"name": "有依据", "code": "1", "cycle_id": "a",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready",
+                 "as_of_date": "2026-10-28", "checks": {"ma10_support": {
+                     "value": 1.0, "threshold": 0.98, "operator": ">=",
+                     "passed": True, "evidence": {
+                         "date": "2026-10-27", "close": 10.125,
+                         "ma10": 10.2, "support_price": 9.996,
+                         "margin_ratio": 0.0125,
+                     },
+                 }}},
+                {"name": "旧记录", "code": "2", "cycle_id": "b",
+                 "state": "SUPPLY_DRY", "evidence_status": "ready",
+                 "as_of_date": "2026-10-28", "checks": {}},
+            ],
+            "pullback": [], "provisional": [], "diagnostics": [],
+        }
+
+        markdown = report.render_markdown(payload)
+        html = report.render_html(payload)
+
+        for rendered in (markdown, html):
+            self.assertIn("MA10支撑依据 2026-10-27", rendered)
+            self.assertIn("收盘 10.125", rendered)
+            self.assertIn("MA10 10.2", rendered)
+            self.assertIn("支撑阈值 9.996", rendered)
+            self.assertIn("余量 +1.25%", rendered)
+            self.assertIn("旧记录 (2)", rendered)
+        self.assertEqual(1, markdown.count("MA10支撑依据"))
+        self.assertEqual(1, html.count("MA10支撑依据"))
+
     def test_main_table_excludes_rows_from_an_older_data_date(self):
         payload = {
             "as_of_date": "2026-10-28",

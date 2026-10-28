@@ -36,6 +36,17 @@ def _cells(item):
         signal += "（盘中临时，未收盘）"
     if item.get("state") == "PULLBACK" and item.get("two_day_decline") is True:
         signal += "；连续两日收盘下跌"
+    checks = item.get("checks") or {}
+    support = checks.get("ma10_support") if isinstance(checks, dict) else None
+    support_evidence = support.get("evidence") if isinstance(support, dict) else None
+    if isinstance(support_evidence, dict):
+        margin = support_evidence.get("margin_ratio")
+        margin_text = f"{margin * 100:+.2f}%" if isinstance(margin, (int, float)) and not isinstance(margin, bool) and math.isfinite(margin) else "—"
+        signal += (f"；MA10支撑依据 {_value(support_evidence.get('date'))}"
+                   f"，收盘 {_value(support_evidence.get('close'))}"
+                   f"，MA10 {_value(support_evidence.get('ma10'))}"
+                   f"，支撑阈值 {_value(support_evidence.get('support_price'))}"
+                   f"，余量 {margin_text}")
     evidence = {"ready": "数据合格", "data_insufficient": "数据不足"}.get(
         item.get("evidence_status"), _value(item.get("evidence_status")))
     kline_evidence = item.get("kline_evidence") or {}
