@@ -36,7 +36,7 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_markdown_renders_follow_up_table_and_escapes_pipes(self):
         text = report.render_markdown(self.payload())
-        self.assertIn("### 上一交易日信号跟踪", text)
+        self.assertIn("跟踪状态 / 原信号日 / 判断依据", text)
         self.assertIn("基线 2026-10-26；选择方式 run_index", text)
         for label in ("增强", "延续", "失效", "待复评"):
             self.assertIn(label, text)
@@ -45,7 +45,7 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
 
     def test_html_reuses_sector_display_and_escapes_values(self):
         text = report.render_html(self.payload())
-        self.assertIn("weak-follow-up-table", text)
+        self.assertEqual(1, text.count("<table"))
         self.assertIn("增强&lt;股&gt;", text)
         self.assertNotIn("增强<股>", text)
         self.assertIn("<div class='weak-sector'>强|板块</div>", text)
@@ -110,7 +110,7 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             self.assertLess(text.index("回调 (2)"), text.index("盘中 (1)"))
             self.assertIn("结构有效回调（观察，尚未缩量）", text)
             self.assertIn("连续两日收盘下跌", text)
-            self.assertIn("各阶段按形态质量排列", text)
+            self.assertIn("同组按形态质量排列", text)
 
     def test_summary_and_rows_distinguish_intraday_from_missing_data(self):
         payload = {
@@ -131,7 +131,7 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             self.assertIn("已评估 2 只，数据不足 1 只", text)
             self.assertIn("盘中临时 2 只", text)
             self.assertIn("收盘未确认 1 只", text)
-            self.assertIn("缩量待突破（盘中临时）", text)
+            self.assertIn("缩量待突破（盘中临时，未收盘）", text)
             self.assertIn("来源 eastmoney", text)
             self.assertIn("获取 2026-10-28T13:20:00+08:00", text)
 
@@ -150,6 +150,23 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
         report.sort_payload(payload)
         self.assertEqual(["1", "9", "2", "3", "4"],
                          [row["code"] for row in payload["follow_up"]["items"]])
+
+    def test_merged_rows_match_cycle_and_preserve_distinct_cycles(self):
+        payload = self.payload()
+        payload["confirmed"] = [{"name": "同股", "code": "600001", "cycle_id": "A",
+                                 "state": "BREAKOUT_CONFIRMED"}]
+        payload["follow_up"]["items"] = [
+            {"name": "同股", "code": "600001", "origin_cycle_id": "A",
+             "follow_up_status": "ENHANCED", "tracking_count": 2},
+            {"name": "旧周期", "code": "600001", "origin_cycle_id": "B",
+             "follow_up_status": "INVALIDATED"},
+        ]
+        for text in (report.render_markdown(payload), report.render_html(payload)):
+            self.assertEqual(1, text.count("同股 (600001)"))
+            self.assertIn("跟踪 2 次", text)
+            self.assertIn("跟踪次数未知", text)
+            self.assertIn("周期 B", text)
+            self.assertLess(text.index("旧周期"), text.index("同股"))
 
 
 if __name__ == "__main__":

@@ -23,6 +23,14 @@ def _basis(item):
     return str(evidence.get("basis") or item.get("basis") or "").lower()
 
 
+def _tracking_count(item):
+    """Return an auditable persisted count, preserving legacy unknowns."""
+    value = item.get("tracking_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def build_follow_up_baseline(item, source_date, *, latest_close=None):
     """Freeze fields needed to evaluate a signal on the next session."""
     if not isinstance(item, dict):
@@ -37,6 +45,12 @@ def build_follow_up_baseline(item, source_date, *, latest_close=None):
         previous_close = _number(item.get("latest_valid_close"))
     if previous_close is None and origin_state == "BREAKOUT_CONFIRMED":
         previous_close = _number(item.get("Ct"))
+    is_follow_up = bool(item.get("follow_up_status"))
+    tracking_count = _tracking_count(item) if is_follow_up else 0
+    tracking_last_date = ""
+    if is_follow_up and tracking_count is not None:
+        tracking_last_date = str(item.get("tracking_last_date") or
+                                 item.get("data_date") or item.get("as_of_date") or "")
     return {
         "rule_version": RULE_VERSION,
         "code": str(item.get("code") or ""),
@@ -54,11 +68,20 @@ def build_follow_up_baseline(item, source_date, *, latest_close=None):
         "L": _number(item.get("L")),
         "basis": _basis(item),
         "sector_memberships": copy.deepcopy(item.get("sector_memberships") or []),
+        "tracking_count": tracking_count,
+        "tracking_last_date": tracking_last_date,
     }
 
 
 def _result(baseline, status, reasons, *, latest_close, data_date,
             current_result, threshold=None):
+    tracking_count = _tracking_count(baseline)
+    tracking_last_date = str(baseline.get("tracking_last_date") or "")
+    current_tracking_date = str(data_date or "")
+    if tracking_count is not None and current_tracking_date:
+        if current_tracking_date != tracking_last_date:
+            tracking_count += 1
+        tracking_last_date = current_tracking_date
     return {
         **copy.deepcopy(baseline),
         "rule_version": RULE_VERSION,
@@ -73,6 +96,8 @@ def _result(baseline, status, reasons, *, latest_close, data_date,
         "current_state": str(current_result.get("state") or ""),
         "current_cycle_id": str(current_result.get("cycle_id") or ""),
         "evidence_status": str(current_result.get("evidence_status") or ""),
+        "tracking_count": tracking_count,
+        "tracking_last_date": tracking_last_date,
     }
 
 

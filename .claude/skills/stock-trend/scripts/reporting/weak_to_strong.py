@@ -2,7 +2,6 @@
 
 import math
 from html import escape
-from reporting.sector_display import _sector_html
 
 
 def _value(value):
@@ -292,101 +291,137 @@ def _memberships_html(item):
         name = member.get("name") or member.get("sector_name") or member.get("code")
         if not name:
             continue
-        evidence = dict(member, sector_name=str(name),
-                        sector_hot_score=member.get("hot_score"))
-        rendered.append("<div class='weak-sector'>" +
-                        _sector_html(evidence, unknown_heat_plain=True) + "</div>")
+        rendered.append("<div class='weak-sector'>" + escape(str(name)) + "</div>")
     return "".join(rendered) or "未记录"
+
+
+MERGED_HEADERS = HEADERS[:3] + ["跟踪状态 / 原信号日 / 判断依据"] + HEADERS[3:]
+
+
+def _merged_rows(payload):
+    """Join only records with an explicitly matching security and cycle."""
+    main = _rows(payload)
+    follows = _follow_up_rows(payload)
+    used = set()
+    rows = []
+    for item in main:
+        cycle = str(item.get("cycle_id") or "")
+        match = next((i for i, follow in enumerate(follows)
+                      if i not in used and cycle and _code(item) == _code(follow)
+                      and cycle == str(follow.get("origin_cycle_id") or "")), None)
+        follow = follows[match] if match is not None else None
+        if match is not None:
+            used.add(match)
+        rows.append((item, follow))
+    rows.extend((None, follow) for i, follow in enumerate(follows) if i not in used)
+
+    def key(pair):
+        item, follow = pair
+        status = _follow_up_status(follow or {}) if follow else ""
+        state = (item or {}).get("state", "")
+        if status in ("INVALIDATED", "失效"):
+            priority = 0
+        elif status in ("PENDING_REVIEW", "待复评"):
+            priority = 1
+        elif ((item or {}).get("provisional") is True or
+              (item or {}).get("confirmation") == "provisional" or
+              state == "PROVISIONAL_BREAKOUT"):
+            priority = 5
+        elif state == "BREAKOUT_CONFIRMED" or status in ("ENHANCED", "STRENGTHENED", "增强"):
+            priority = 2
+        elif state == "SUPPLY_DRY" or status in ("CONTINUED", "延续"):
+            priority = 3
+        else:
+            priority = 4
+        group = {"BREAKOUT_CONFIRMED": "confirmed", "SUPPLY_DRY": "watching",
+                 "PULLBACK": "pullback", "PROVISIONAL_BREAKOUT": "provisional"}.get(state)
+        # Existing order is deterministic within each signal group.
+        if item and group:
+            detail = (0, _main_sort_key(group, item))
+        else:
+            detail = (1, _follow_up_sort_key(follow or {}))
+        return (priority, detail, _code(item or follow or {}))
+    return sorted(rows, key=key)
+
+
+def _merged_cells(item, follow):
+    if item:
+        cells = _cells(item)
+    else:
+        fc = _follow_up_cells(follow)
+        cells = [fc[0], "", "—", "—", f"{_value(follow.get('H'))} / {_value(follow.get('L'))}", "—", "—", "—",
+                 f"{fc[6]} / {fc[7]}", "未记录"]
+    if follow:
+        count = follow.get("tracking_count")
+        count_label = "跟踪 " + str(count) + " 次" if isinstance(count, int) and not isinstance(count, bool) and count > 0 else "跟踪次数未知"
+        cells[0] += "（" + count_label + "）"
+        fc = _follow_up_cells(follow)
+        detail = f"{fc[3]} → {fc[4]}；原信号日 {fc[2]}；{fc[5]}；数据 {fc[6]} / {fc[7]}"
+        if not item:
+            detail += "；周期 " + _value(follow.get("origin_cycle_id"))
+    else:
+        detail = "—"
+    return cells[:3] + [detail] + cells[3:]
+
+
+def _report_preamble(payload):
+    parts = ["独立日线形态观察；收盘确认仅代表形态成立，正式推荐资格见状态与限制。",
+             "排序：失效、待复评、收盘确认或增强、缩量待突破或延续、结构有效回调、盘中临时；同组按形态质量排列。",
+             _summary(payload)]
+    summary = _follow_up_summary(payload)
+    if summary:
+        parts.append(summary)
+    follow = _follow_up(payload)
+    if follow and not _follow_up_rows(payload):
+        message = follow.get("message") or follow.get("reason") or "没有需要持续跟踪的上一交易日信号。"
+        parts.append(FOLLOW_UP_REASONS.get(message, message))
+    return parts
 
 
 def render_markdown(payload):
     if payload is None:
         return ""
-    rows = _rows(payload)
-    lines = ["## 日线弱转强", "", "独立日线形态观察；收盘确认仅代表形态成立，正式推荐资格见状态与限制。",
-             "", "排序：收盘确认、缩量待突破、结构有效回调、盘中候选；各阶段按形态质量排列。",
-             "", _summary(payload)]
+    rows = _merged_rows(payload)
+    lines = ["## 日线弱转强", ""]
+    for part in _report_preamble(payload):
+        lines += [part, ""]
     if rows:
-        lines += ["", "| " + " | ".join(HEADERS) + " |", "| " + " | ".join(["---"] * len(HEADERS)) + " |"]
-        for item in rows:
-            lines.append("| " + " | ".join(x.replace("|", "\\|").replace("\n", " ") for x in _cells(item)) + " |")
+        lines += ["| " + " | ".join(MERGED_HEADERS) + " |", "| " + " | ".join(["---"] * len(MERGED_HEADERS)) + " |"]
+        for item, follow in rows:
+            cells = _merged_cells(item, follow)
+            source = item or follow
+            memberships = source.get("sector_memberships") or []
+            cells[1] = "、".join(str(m.get("name") or m.get("sector_name") or m.get("code") or "") for m in memberships if isinstance(m, dict)) or "未记录"
+            lines.append("| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |")
     else:
-        lines += ["", "无满足条件的形态；覆盖不足时不代表完整扫描无信号。"]
+        lines.append("无满足条件的形态；覆盖不足时不代表完整扫描无信号。")
     diagnostics = payload.get("diagnostics") or []
     if diagnostics:
         lines += ["", "弱转强诊断："]
-        for item in diagnostics:
-            lines.append("- " + _diagnostic_detail(item))
-    follow_up = _follow_up(payload)
-    follow_up_rows = _follow_up_rows(payload)
-    if follow_up:
-        lines += ["", "### 上一交易日信号跟踪"]
-        summary = _follow_up_summary(payload)
-        if summary:
-            lines += ["", summary]
-        if follow_up_rows:
-            lines += ["", "| " + " | ".join(FOLLOW_UP_HEADERS) + " |",
-                      "| " + " | ".join(["---"] * len(FOLLOW_UP_HEADERS)) + " |"]
-            for item in follow_up_rows:
-                cells = _follow_up_cells(item)
-                memberships = item.get("sector_memberships") or []
-                cells[1] = "、".join(
-                    str(member.get("name") or member.get("sector_name") or member.get("code") or "")
-                    for member in memberships if isinstance(member, dict)) or "未记录"
-                lines.append("| " + " | ".join(_markdown_cell(cell) for cell in cells) + " |")
-        else:
-            message = follow_up.get("message") or follow_up.get("reason") or "没有需要持续跟踪的上一交易日信号。"
-            message = FOLLOW_UP_REASONS.get(message, message)
-            lines += ["", str(message)]
+        lines.extend("- " + _diagnostic_detail(item) for item in diagnostics)
     return "\n".join(lines)
 
 
 def render_html(payload):
     if payload is None:
         return ""
-    rows = _rows(payload)
-    out = ["<section class='candidate-section'><h2>日线弱转强</h2>",
-           "<p>独立日线形态观察；收盘确认仅代表形态成立，正式推荐资格见状态与限制。</p>",
-           "<p>排序：收盘确认、缩量待突破、结构有效回调、盘中候选；各阶段按形态质量排列。</p>",
-           "<p>" + escape(_summary(payload)) + "</p>"]
+    rows = _merged_rows(payload)
+    out = ["<section class='candidate-section'><h2>日线弱转强</h2>"]
+    out.extend("<p>" + escape(part) + "</p>" for part in _report_preamble(payload))
     if rows:
         out.append("<div class='candidate-table-wrap'><table class='weak-to-strong-table'><thead><tr>" +
-                   "".join("<th>" + escape(x) + "</th>" for x in HEADERS) + "</tr></thead><tbody>")
-        for item in rows:
-            cells = _cells(item)
-            out.append("<tr>" + "".join(
-                "<td>" + (_memberships_html(item) if index == 1 else escape(value)) + "</td>"
-                for index, value in enumerate(cells)) + "</tr>")
+                   "".join("<th>" + escape(x) + "</th>" for x in MERGED_HEADERS) + "</tr></thead><tbody>")
+        for item, follow in rows:
+            cells = _merged_cells(item, follow)
+            out.append("<tr>" + "".join("<td>" + (_memberships_html(item or follow) if i == 1 else escape(value)) + "</td>" for i, value in enumerate(cells)) + "</tr>")
         out.append("</tbody></table></div>")
     else:
         out.append("<p>无满足条件的形态；覆盖不足时不代表完整扫描无信号。</p>")
     diagnostics = payload.get("diagnostics") or []
     if diagnostics:
         out.append("<details><summary>弱转强诊断</summary><ul>")
-        for item in diagnostics:
-            out.append("<li>" + escape(_diagnostic_detail(item)) + "</li>")
+        out.extend("<li>" + escape(_diagnostic_detail(item)) + "</li>" for item in diagnostics)
         out.append("</ul></details>")
-    follow_up = _follow_up(payload)
-    follow_up_rows = _follow_up_rows(payload)
-    if follow_up:
-        out.append("<h3>上一交易日信号跟踪</h3>")
-        summary = _follow_up_summary(payload)
-        if summary:
-            out.append("<p>" + escape(summary) + "</p>")
-        if follow_up_rows:
-            out.append("<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-follow-up-table'><thead><tr>" +
-                       "".join("<th>" + escape(header) + "</th>" for header in FOLLOW_UP_HEADERS) +
-                       "</tr></thead><tbody>")
-            for item in follow_up_rows:
-                cells = _follow_up_cells(item)
-                out.append("<tr>" + "".join(
-                    "<td>" + (_memberships_html(item) if index == 1 else escape(cell)) + "</td>"
-                    for index, cell in enumerate(cells)) + "</tr>")
-            out.append("</tbody></table></div>")
-        else:
-            message = follow_up.get("message") or follow_up.get("reason") or "没有需要持续跟踪的上一交易日信号。"
-            message = FOLLOW_UP_REASONS.get(message, message)
-            out.append("<p>" + escape(str(message)) + "</p>")
     return "".join(out) + "</section>"
 
 

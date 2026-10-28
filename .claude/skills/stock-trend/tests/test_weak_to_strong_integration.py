@@ -205,7 +205,7 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>", html)
 
-    def test_sector_display_reuses_observation_pool_rendering(self):
+    def test_sector_display_shows_names_only(self):
         memberships = [
             {"code": "BK01", "name": "高热<板块>", "hot_score": 85,
              "history_window_days": 5, "history_coverage_days": 3,
@@ -228,22 +228,13 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         }
 
         html = report.render_html(payload)
-        for membership in memberships[:2]:
-            observation_item = {
-                "sector_name": membership["name"],
-                "sector_hot_score": membership["hot_score"],
-                **{key: value for key, value in membership.items()
-                   if key not in {"code", "name", "hot_score"}},
-            }
-            self.assertIn(dc._sector_html(observation_item), html)
         self.assertEqual(html.count("class='weak-sector'"), 3)
-        self.assertIn("sector-tag sector-hot", html)
-        self.assertIn("sector-tag sector-warm", html)
         self.assertIn("高热&lt;板块&gt;", html)
         self.assertNotIn("高热<板块>", html)
-        self.assertIn("持续性：快照覆盖 3/5", html)
-        self.assertIn("排行 来源 eastmoney", html)
-        self.assertIn("成分 来源 eastmoney", html)
+        self.assertNotIn("持续性：快照覆盖 3/5", html)
+        self.assertNotIn("排行 来源 eastmoney", html)
+        self.assertNotIn("成分 来源 eastmoney", html)
+        self.assertIn("<div class='weak-sector'>温热板块</div>", html)
         self.assertIn("<div class='weak-sector'>热度缺失板块</div>", html)
         self.assertNotIn("sector-cool'>热度缺失板块", html)
 

@@ -5358,6 +5358,8 @@ def build_weak_follow_up(as_of_date, calendar_dates, calendar, collected, health
         baseline = build_follow_up_baseline(item, source_date, latest_close=old_close)
         if not baseline or not ts_code:
             continue
+        if output.get("coverage_warning") and not item.get("follow_up_status"):
+            baseline["tracking_count"] = None
         key = (ts_code, baseline.get("origin_cycle_id"))
         baselines[key] = baseline
     missing = sorted({key[0] for key in baselines if key[0] not in collected})

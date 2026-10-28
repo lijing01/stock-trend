@@ -127,6 +127,54 @@ class WeakToStrongFollowUpTests(unittest.TestCase):
                                      latest_close=9.9, data_date="2026-10-29")
         self.assertIsNone(build_follow_up_baseline(invalid, "2026-10-29"))
 
+    def test_tracking_count_starts_at_one_and_advances_once_per_trading_date(self):
+        day_one = evaluate_follow_up(self.confirmed_baseline(), current(),
+                                     latest_close=10.3, data_date="2026-10-28")
+        self.assertEqual(day_one["tracking_count"], 1)
+        self.assertEqual(day_one["tracking_last_date"], "2026-10-28")
+
+        same_day = evaluate_follow_up(build_follow_up_baseline(day_one, "2026-10-28"),
+                                      current(), latest_close=10.4,
+                                      data_date="2026-10-28")
+        self.assertEqual(same_day["tracking_count"], 1)
+
+        next_day = evaluate_follow_up(
+            build_follow_up_baseline(same_day, "2026-10-28"),
+            current(date="2026-10-29"), latest_close=10.5,
+            data_date="2026-10-29")
+        self.assertEqual(next_day["tracking_count"], 2)
+        self.assertEqual(next_day["tracking_last_date"], "2026-10-29")
+
+    def test_legacy_follow_up_without_count_stays_unknown(self):
+        legacy = {
+            **self.confirmed_baseline(),
+            "follow_up_status": "CONTINUED",
+            "as_of_date": "2026-10-28",
+        }
+        legacy.pop("tracking_count", None)
+        legacy.pop("tracking_last_date", None)
+        baseline = build_follow_up_baseline(legacy, "2026-10-28")
+        self.assertIsNone(baseline["tracking_count"])
+        result = evaluate_follow_up(
+            baseline, current(date="2026-10-29"), latest_close=10.3,
+            data_date="2026-10-29")
+        self.assertIsNone(result["tracking_count"])
+
+    def test_supply_dry_upgrade_keeps_same_cycle_count(self):
+        baseline = build_follow_up_baseline({
+            "code": "600002", "state": "SUPPLY_DRY", "cycle_id": "cycle-w",
+            "H": 8.0, "kline_evidence": {"basis": "qfq"}}, "2026-10-27",
+            latest_close=7.8)
+        breakout = current("BREAKOUT_CONFIRMED", "cycle-w")
+        breakout["signal_date"] = "2026-10-28"
+        day_one = evaluate_follow_up(baseline, breakout, latest_close=8.1,
+                                     data_date="2026-10-28")
+        day_two = evaluate_follow_up(
+            build_follow_up_baseline(day_one, "2026-10-28"),
+            current("WAIT", "cycle-w", date="2026-10-29"),
+            latest_close=8.2, data_date="2026-10-29")
+        self.assertEqual(day_two["tracking_count"], 2)
+
 
 def run_weak_to_strong_followup_tests():
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(WeakToStrongFollowUpTests)
