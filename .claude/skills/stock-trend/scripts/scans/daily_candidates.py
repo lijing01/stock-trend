@@ -5274,6 +5274,9 @@ def build_weak_to_strong_output(collected, population, sectors, as_of_date,
             result["provisional"].append(item)
         else:
             result["diagnostics"].append(item)
+            if (provisional and not ready and item.get("current_bar_evaluated") is True
+                    and state in {"PROVISIONAL_BREAKOUT", "SUPPLY_DRY", "PULLBACK"}):
+                result["provisional"].append(copy.deepcopy(item))
             if state == "PULLBACK" and ready and not close_unconfirmed:
                 observed = copy.deepcopy(item)
                 dates = sorted({str(day) for day in (calendar_dates or []) if str(day) <= as_of_date})

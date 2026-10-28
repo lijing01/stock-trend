@@ -29,7 +29,7 @@ def _cells(item):
     provisional = (item.get("provisional") is True or
                    item.get("confirmation") == "provisional")
     if provisional and item.get("state") != "PROVISIONAL_BREAKOUT":
-        signal += "（盘中临时）"
+        signal += "（盘中临时，未收盘）"
     if item.get("state") == "PULLBACK" and item.get("two_day_decline") is True:
         signal += "；连续两日收盘下跌"
     evidence = {"ready": "数据合格", "data_insufficient": "数据不足"}.get(
@@ -38,6 +38,8 @@ def _cells(item):
     source = kline_evidence.get("provider")
     fetched_at = kline_evidence.get("fetched_at")
     evidence_parts = [f"{_value(item.get('as_of_date'))} / {evidence}"]
+    if item.get("evidence_status") == "data_insufficient":
+        evidence_parts.append("原因 " + "、".join(str(x) for x in item.get("reason_codes") or ["未记录"]))
     if source:
         evidence_parts.append("来源 " + str(source))
     if fetched_at:

@@ -21,6 +21,26 @@ from test_daily_weak_to_strong import payload_with_pattern, row, trading_days
 
 
 class WeakToStrongIntegrationTests(unittest.TestCase):
+    def test_incomplete_intraday_shape_is_visible_with_explicit_limits(self):
+        candidate = {"code": "600001", "name": "测试股"}
+        item = {"code": "600001", "name": "测试股", "state": "SUPPLY_DRY",
+                "provisional": True, "confirmation": "provisional",
+                "current_bar_evaluated": True, "evidence_status": "data_insufficient",
+                "reason_codes": ["calendar_missing", "close_unconfirmed"]}
+        collected = {"600001.SH": {"result": item}}
+        output = dc.build_weak_to_strong_output(
+            collected, [candidate], [], "2026-10-28", {}, {}, {})
+        self.assertEqual(["600001"], [row["code"] for row in output["provisional"]])
+        self.assertEqual(1, len(output["diagnostics"]))
+        for rendered in (report.render_html(output), report.render_markdown(output)):
+            self.assertIn("未收盘", rendered)
+            self.assertIn("数据不足", rendered)
+            self.assertIn("calendar_missing", rendered)
+        item["current_bar_evaluated"] = False
+        output = dc.build_weak_to_strong_output(
+            collected, [candidate], [], "2026-10-28", {}, {}, {})
+        self.assertEqual([], output["provisional"])
+
     def test_intraday_policy_overrides_erroneous_provider_close_confirmation(self):
         payload, _ = payload_with_pattern()
         days = trading_days(100)
