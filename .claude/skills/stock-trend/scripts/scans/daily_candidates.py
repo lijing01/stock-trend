@@ -88,15 +88,6 @@ from reporting.market_explanation import render_market_explanation
 from reporting.sector_display import _sector_persistence_text, _sector_text, _sector_html
 from reporting import candidate_formatters
 from reporting import weak_to_strong as weak_to_strong_report
-from analysis.daily_weak_to_strong import DEFAULT_CONFIG as WEAK_TO_STRONG_CONFIG
-from core.weak_to_strong_snapshot import save_snapshot as save_weak_to_strong_snapshot
-from core.weak_to_strong_snapshot import load_previous_snapshot as load_previous_weak_snapshot
-from analysis.weak_to_strong_followup import build_follow_up_baseline, evaluate_follow_up
-from analysis.daily_weak_to_strong import analyze_daily_weak_to_strong
-from scans.weak_to_strong_v2 import build_v2_output
-from analysis.weak_to_strong_v2_follow_up import build_v2_follow_up
-from scans import stock_scanner as weak_scanner
-from core.source_health import bounded_source_map
 SIGNAL_LABELS = candidate_formatters.SIGNAL_LABELS
 LOGGER = logging.getLogger(__name__)
 DEFAULT_INITIAL_SECTOR_WINDOW = 60
@@ -4424,7 +4415,7 @@ def _phase_d_lps_shadow_html(shadow):
 def generate_report(candidates, sector_codes, elapsed, policy, buckets,
                     performance=None, tracking=None, market_regime=None,
                     style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
-                    weak_to_strong=None, weak_to_strong_v2=None, weak_to_strong_v4=None):
+                    weak_to_strong_v4=None):
     performance = performance or {}
     sector_universe = performance.get("sector_universe_count",
                                       len(sector_codes))
@@ -4523,10 +4514,6 @@ def generate_report(candidates, sector_codes, elapsed, policy, buckets,
     _append_candidate_table(
         lines, "次日确认观察（非推荐）", buckets.get("next_day_confirmation", []),
         "暂无可供次日确认的观察标的。")
-    if weak_to_strong is not None:
-        lines.extend(["", weak_to_strong_report.render_markdown(weak_to_strong)])
-    if weak_to_strong_v2 is not None:
-        lines.extend(["", weak_to_strong_report.render_v2_markdown(weak_to_strong_v2)])
     if weak_to_strong_v4 is not None:
         lines.extend(["", weak_to_strong_report.render_v4_markdown(weak_to_strong_v4)])
     _append_observation_pool_tables(lines, buckets["observation"])
@@ -4872,7 +4859,7 @@ def _html_decision_notice(buckets, candidates, policy, regime):
 def _generate_html(candidates, sector_codes, elapsed, ts, policy, buckets,
                    performance=None, tracking=None, market_regime=None,
                    style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
-                   weak_to_strong=None, weak_to_strong_v2=None, weak_to_strong_v4=None):
+                   weak_to_strong_v4=None):
     """Lightweight HTML mirror of the MD report."""
     performance = performance or {}
     regime = market_regime
@@ -5104,36 +5091,16 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 .candidate-table th,.candidate-table td{{overflow-wrap:anywhere}}
 .candidate-table td.candidate-diagnostic{{min-width:220px;vertical-align:top;overflow-wrap:break-word;word-break:normal}}
 .candidate-table .wyckoff-buy-level-badge{{white-space:normal}}
-.weak-to-strong-table{{table-layout:fixed;min-width:1550px;margin:0}}
+.weak-to-strong-table{{table-layout:fixed;min-width:1450px;margin:0}}
 .weak-to-strong-table th,.weak-to-strong-table td{{vertical-align:top;line-height:1.5;overflow-wrap:break-word}}
-.weak-to-strong-table th:nth-child(1){{width:145px}}
+.weak-to-strong-table th:nth-child(1){{width:100px}}
 .weak-to-strong-table th:nth-child(2){{width:180px}}
-.weak-to-strong-table th:nth-child(3){{width:140px}}
-.weak-to-strong-table th:nth-child(4){{width:90px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table){{min-width:2200px}}
-.weak-to-strong-table th:nth-child(5){{width:140px}}
-.weak-to-strong-table th:nth-child(6),.weak-to-strong-table th:nth-child(7){{width:125px}}
-.weak-to-strong-table th:nth-child(8){{width:90px}}
-.weak-to-strong-table th:nth-child(9){{width:155px}}
-.weak-to-strong-table th:nth-child(10){{width:260px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(1){{width:160px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(2){{width:150px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(3){{width:180px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(4){{width:120px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(5){{width:350px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(6){{width:90px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(7){{width:150px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(8),.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(9),.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(10){{width:120px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(11){{width:240px}}
-.weak-to-strong-table:not(.weak-to-strong-v2-table) th:nth-child(12){{width:280px}}
-.weak-follow-up-table th:nth-child(1){{width:145px}}
-.weak-follow-up-table th:nth-child(2){{width:180px}}
-.weak-follow-up-table th:nth-child(3),.weak-follow-up-table th:nth-child(4),.weak-follow-up-table th:nth-child(5){{width:130px}}
-.weak-follow-up-table th:nth-child(6){{width:260px}}
-.weak-follow-up-table th:nth-child(7),.weak-follow-up-table th:nth-child(8){{width:150px}}
-.weak-to-strong-table td:nth-child(4),.weak-to-strong-table td:nth-child(6),.weak-to-strong-table td:nth-child(7),.weak-to-strong-table td:nth-child(8){{font-variant-numeric:tabular-nums}}
-.weak-sector+.weak-sector{{margin-top:8px}}
-.weak-sector .sector-tag{{white-space:normal;overflow-wrap:anywhere}}
+.weak-to-strong-table th:nth-child(3){{width:150px}}
+.weak-to-strong-table th:nth-child(4),.weak-to-strong-table th:nth-child(5){{width:135px}}
+.weak-to-strong-table th:nth-child(6){{width:190px}}
+.weak-to-strong-table th:nth-child(7){{width:240px}}
+.weak-to-strong-table th:nth-child(8){{width:120px}}
+.weak-to-strong-table td:nth-child(1),.weak-to-strong-table td:nth-child(3),.weak-to-strong-table td:nth-child(4),.weak-to-strong-table td:nth-child(5){{font-variant-numeric:tabular-nums}}
 .sector-tag{{display:inline-block;padding:3px 8px;border-radius:6px;color:#fff;font-size:13px;font-weight:800;line-height:1.35;white-space:nowrap;box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 1px 2px rgba(15,23,42,.16)}}
 .sector-hot{{background:#b91c1c;border-color:#991b1b}}
 .sector-warm{{background:#c2410c;border-color:#9a3412}}
@@ -5179,8 +5146,6 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 {actionable_section_html}
 {waiting_section_html}
 {confirmation_section_html}
-{weak_to_strong_report.render_html(weak_to_strong)}
-{weak_to_strong_report.render_v2_html(weak_to_strong_v2) if weak_to_strong_v2 is not None else ""}
 {weak_to_strong_report.render_v4_html(weak_to_strong_v4) if weak_to_strong_v4 is not None else ""}
 {observation_section_html}
 {rejected_details_html}
@@ -5195,7 +5160,7 @@ th{{background:#1d4ed8;color:#fff;font-size:13px}}
 def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
                       performance=None, tracking=None, market_regime=None,
                       style_shadow=None, news_shadow=None, phase_d_lps_shadow=None,
-                      weak_to_strong=None, weak_to_strong_v2=None, weak_to_strong_v4=None):
+                      weak_to_strong_v4=None):
     output = {
         "meta": {
             "generated_at": datetime.now().strftime("%Y%m%d-%H%M%S"),
@@ -5224,10 +5189,6 @@ def build_json_output(candidates, sector_codes, elapsed, policy, buckets,
         output["news_shadow"] = copy.deepcopy(news_shadow)
     if phase_d_lps_shadow is not None:
         output["phase_d_lps_shadow"] = copy.deepcopy(phase_d_lps_shadow)
-    if weak_to_strong is not None:
-        output["weak_to_strong"] = copy.deepcopy(weak_to_strong)
-    if weak_to_strong_v2 is not None:
-        output["weak_to_strong_v2"] = copy.deepcopy(weak_to_strong_v2)
     if weak_to_strong_v4 is not None:
         output["weak_to_strong_v4"] = copy.deepcopy(weak_to_strong_v4)
     return output
@@ -5250,196 +5211,6 @@ def build_weak_to_strong_v4_output(collected, as_of_date, calendar, bundle_path=
     output = scan_market(collected.values(), as_of_date=as_of_date,
                          bundle=bundle, calendar_evidence=calendar)
     output["display_selection"] = weak_to_strong_report.build_v4_display_selection(output)
-    return output
-
-
-def build_weak_to_strong_output(collected, population, sectors, as_of_date,
-                                policy, buckets, performance, calendar_dates=None):
-    """Build the independent report from all phase-1 stocks, before top-N."""
-    universe = {str(item.get("code")): item for item in population
-                if isinstance(item, dict) and item.get("code")}
-    by_code = {str(entry.get("result", {}).get("code")): entry
-               for entry in collected.values() if entry.get("result", {}).get("code")}
-    bucket_names = {"actionable": "原正式可执行", "waiting_trigger": "等待触发",
-                    "next_day_confirmation": "次日确认观察", "observation": "仅观察",
-                    "data_rejected": "数据失效", "unenriched_observation": "未增强观察"}
-    formal = {str(row.get("code")): (name, row)
-              for name in bucket_names for row in buckets.get(name, [])
-              if row.get("code")}
-    result = {"schema_version": "daily-weak-to-strong/v1", "as_of_date": as_of_date,
-              "parameters": copy.deepcopy(WEAK_TO_STRONG_CONFIG),
-              "confirmed": [], "watching": [], "pullback": [], "provisional": [], "diagnostics": []}
-    status = performance.get("weak_to_strong_collector_status", "ready")
-    if set(universe) - set(by_code):
-        status = "collector_not_supported" if not by_code else "partial"
-    assessed_items = []
-    for code, candidate in sorted(universe.items()):
-        entry = by_code.get(code)
-        if entry:
-            item = copy.deepcopy(entry["result"])
-        else:
-            item = {"code": code, "name": candidate.get("name", ""),
-                    "state": "WAIT", "evidence_status": "data_insufficient",
-                    "reason_codes": ["collector_not_supported"]}
-        bucket, formal_row = formal.get(code, (None, {}))
-        reasons = list(policy.get("reasons") or []) + list(formal_row.get("observation_reasons") or [])
-        memberships = [member for member in item.get("sector_memberships", [])
-                       if isinstance(member, dict)]
-        if memberships and not any(member.get("sector_actionable") is True for member in memberships):
-            reasons.append("板块持续性或来源资格未验证")
-        item["context"] = {"market_status": policy.get("mode", "observation"),
-                           "sector_persistence_status": sorted({str(member.get("persistence_status") or "unknown")
-                                                                for member in memberships}),
-                           "formal_bucket_or_not_selected": bucket or "not_selected",
-                           "formal_bucket_label": bucket_names.get(bucket, "未进入正式候选"),
-                           "formal_blockers": [REASON_LABELS.get(x, x) for x in dict.fromkeys(reasons)]}
-        assessed_items.append(item)
-        state = item.get("state")
-        ready = item.get("evidence_status") == "ready"
-        reason_codes = set(item.get("reason_codes") or [])
-        provisional = (item.get("provisional") is True or
-                       item.get("confirmation") == "provisional")
-        close_unconfirmed = "close_unconfirmed" in reason_codes and not provisional
-        allowed_provisional = (state == "PROVISIONAL_BREAKOUT" and provisional and ready)
-        if (state == "BREAKOUT_CONFIRMED" and ready and not provisional and
-                not close_unconfirmed and item.get("signal_date") == as_of_date):
-            result["confirmed"].append(item)
-        elif state == "SUPPLY_DRY" and ready and not close_unconfirmed:
-            result["watching"].append(item)
-        elif allowed_provisional:
-            result["provisional"].append(item)
-        else:
-            result["diagnostics"].append(item)
-            if (provisional and not ready and item.get("current_bar_evaluated") is True
-                    and state in {"PROVISIONAL_BREAKOUT", "SUPPLY_DRY", "PULLBACK"}):
-                result["provisional"].append(copy.deepcopy(item))
-            if state == "PULLBACK" and ready and not close_unconfirmed:
-                observed = copy.deepcopy(item)
-                dates = sorted({str(day) for day in (calendar_dates or []) if str(day) <= as_of_date})
-                recent = dates[-3:]
-                closes = ([_follow_up_close(entry.get("kline_payload"), day) for day in recent]
-                          if entry and len(recent) == 3 and recent[-1] == as_of_date else [])
-                observed["two_day_decline"] = (
-                    closes[2] < closes[1] < closes[0]
-                    if len(closes) == 3 and all(value is not None and value > 0 for value in closes)
-                    else None)
-                result["pullback"].append(observed)
-    insufficient = sum(item.get("evidence_status") == "data_insufficient"
-                       for item in assessed_items)
-    close_unconfirmed = sum(
-        "close_unconfirmed" in set(item.get("reason_codes") or []) and
-        item.get("evidence_status") == "ready" and
-        not (item.get("provisional") is True or
-             item.get("confirmation") == "provisional")
-        for item in assessed_items)
-    intraday_provisional = sum(
-        item.get("provisional") is True or item.get("confirmation") == "provisional"
-        for item in assessed_items if item.get("evidence_status") == "ready")
-    result["summary"] = {"attempted": len(universe),
-                         "evaluated": len(universe) - insufficient - close_unconfirmed,
-                         "data_insufficient": insufficient,
-                         "close_unconfirmed": close_unconfirmed,
-                         "intraday_provisional": intraday_provisional,
-                         "confirmed": len(result["confirmed"]), "watching": len(result["watching"]),
-                         "provisional": len(result["provisional"])}
-    result["scope"] = {"sector_codes": [s.get("code") for s in sectors],
-                       "codes": sorted(universe), "codes_sha256": content_sha256(sorted(universe)),
-                       "scan_mode": performance.get("scan_mode"),
-                       "scope_complete": (bool(performance.get("scope_complete")) and status == "ready"
-                                          and performance.get("sector_selection_status") != "ranking_unavailable"),
-                       "collector_status": status}
-    return result
-
-
-def _follow_up_close(payload, day):
-    """Return a closing price only for the requested trading date."""
-    rows = payload.get("data", []) if isinstance(payload, dict) else []
-    matches = [row for row in rows if isinstance(row, dict) and
-               str(row.get("trade_date") or row.get("date") or "").replace("-", "")
-               == day.replace("-", "")]
-    if len(matches) != 1:
-        return None
-    value = matches[0].get("close")
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
-
-
-def build_weak_follow_up(as_of_date, calendar_dates, calendar, collected, health, *, provisional=False):
-    """Evaluate prior signals independently from the formal candidate universe."""
-    loaded = load_previous_weak_snapshot(CACHE_DIR / "weak_to_strong", as_of_date, calendar_dates)
-    output = {"status": loaded.get("status", "invalid"),
-              "reason": loaded.get("reason", ""),
-              "baseline": {**(loaded.get("tracking") or {}),
-                           "as_of_date": loaded.get("previous_trading_date", "")},
-              "rows": []}
-    if output["status"] != "loaded":
-        return output
-    snapshot = loaded["snapshot"]
-    prior = snapshot.get("result") or {}
-    inputs = snapshot.get("inputs") or {}
-    source_date = loaded["previous_trading_date"]
-    baselines = {}
-    old_follow = prior.get("follow_up") or {}
-    if old_follow and (old_follow.get("status") != "loaded" or old_follow.get("coverage_warning")):
-        output["coverage_warning"] = "此前跟踪链存在缺口，历史信号可能不完整。"
-    for item in list(prior.get("confirmed") or []) + list(prior.get("watching") or []) + list(old_follow.get("rows") or []):
-        if not isinstance(item, dict):
-            continue
-        ts_code = str(item.get("ts_code") or "")
-        entry = inputs.get(ts_code) or {}
-        old_close = _follow_up_close(entry.get("kline_payload"), source_date) if isinstance(entry, dict) else None
-        # Preserved follow-up rows carry the last valid close; never replace it
-        # with an unconfirmed or missing previous session's K-line.
-        if item.get("follow_up_status"):
-            old_close = None
-        baseline = build_follow_up_baseline(item, source_date, latest_close=old_close)
-        if not baseline or not ts_code:
-            continue
-        if output.get("coverage_warning") and not item.get("follow_up_status"):
-            baseline["tracking_count"] = None
-        key = (ts_code, baseline.get("origin_cycle_id"))
-        baselines[key] = baseline
-    missing = sorted({key[0] for key in baselines if key[0] not in collected})
-    fetched = {}
-    if missing:
-        # The normal K-line budget reserves time for downstream enrichment,
-        # which is already complete here. Use the remaining overall deadline
-        # with a separate cap; never consume the report finalization reserve.
-        deadline = min(health.live_deadline, time.monotonic() + 50)
-        fetched_pairs = bounded_source_map(
-            "kline", missing, health,
-            lambda code: weak_scanner._evidenced_fetch(
-                weak_scanner._fetch_kline, code, as_of_date=as_of_date,
-                live_deadline=deadline, require_close_confirmation=True),
-            lambda code: weak_scanner._cache_fetch(
-                weak_scanner._fetch_kline, code, as_of_date=as_of_date,
-                require_close_confirmation=True),
-            deadline, max_workers=4, include_evidence=True)
-        fetched = {code: weak_scanner._unpack_source_result(value)[0]
-                   for code, value in fetched_pairs}
-    for (ts_code, _), baseline in sorted(baselines.items()):
-        entry = collected.get(ts_code) or {}
-        payload = entry.get("kline_payload") if entry else fetched.get(ts_code)
-        if entry:
-            result = copy.deepcopy(entry.get("result") or {})
-        else:
-            close = weak_scanner._kline_close_confirmation(payload, as_of_date, required=True)
-            try:
-                result = analyze_daily_weak_to_strong(payload, as_of_date=as_of_date,
-                                                     close_evidence=close, calendar_evidence=calendar)
-                if result.get("cycle_id"):
-                    result["cycle_id"] = hashlib.sha256(
-                        (ts_code + ":" + result["cycle_id"]).encode("utf-8")).hexdigest()
-                for event in result.get("events", []):
-                    if event.get("cycle_id"):
-                        event["cycle_id"] = hashlib.sha256(
-                            (ts_code + ":" + event["cycle_id"]).encode("utf-8")).hexdigest()
-            except (TypeError, ValueError, KeyError, ArithmeticError):
-                result = {"as_of_date": as_of_date, "evidence_status": "data_insufficient"}
-        price = _follow_up_close(payload, as_of_date)
-        row = evaluate_follow_up(baseline, result, latest_close=price, data_date=as_of_date,
-                                 close_confirmed=False if provisional else None)
-        row["data_date"] = (result.get("kline_evidence") or {}).get("data_date", "")
-        output["rows"].append(row)
     return output
 
 
@@ -5476,8 +5247,6 @@ def main():
                         help="跳过新闻影子层（仅用于诊断）")
     parser.add_argument("--news-lookback", type=int, default=14,
                         help="新闻回看自然日数（默认14）")
-    parser.add_argument("--weak-to-strong-v2", action="store_true",
-                        help=argparse.SUPPRESS)
     parser.add_argument("--weak-to-strong-v4-bundle", type=str, default=None,
                         help="弱转强 V4 模型 bundle JSON 路径")
     parser.add_argument("--json", action="store_true", help="stdout 输出 JSON")
