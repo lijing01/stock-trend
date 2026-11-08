@@ -42,7 +42,7 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
             collected, [candidate], [], "2026-10-28", {}, {}, {})
         self.assertEqual([], output["provisional"])
 
-    def test_intraday_policy_overrides_erroneous_provider_close_confirmation(self):
+    def test_intraday_policy_marks_v4_input_close_evidence_provisional(self):
         payload, _ = payload_with_pattern()
         days = trading_days(100)
         prefix = [row(days[i], 10 + (0.03 if i % 2 else 0), volume=700)
@@ -69,11 +69,12 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
                 require_wyckoff_gate=False,
                 defer_enrichment=True)
 
-        result = collected["600001.SH"]["result"]
-        self.assertEqual(result["state"], "PROVISIONAL_BREAKOUT")
-        self.assertEqual(result["confirmation"], "provisional")
-        self.assertTrue(result["provisional"])
-        self.assertNotEqual(result["state"], "BREAKOUT_CONFIRMED")
+        record = collected["600001.SH"]
+        self.assertTrue(record["close_evidence"]["provisional"])
+        self.assertEqual(record["kline_payload"], payload)
+        self.assertEqual(record["code"], "600001")
+        self.assertNotIn("result", record)
+        self.assertFalse(hasattr(sc, "analyze_daily_weak_to_strong"))
 
     def test_intraday_states_are_evaluated_and_post_close_unconfirmed_is_diagnostic(self):
         candidates = [
@@ -140,7 +141,7 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
         self.assertEqual(output["pullback"], [])
         self.assertEqual(output["summary"]["data_insufficient"], 1)
 
-    def test_wyckoff_filtered_stock_survives_in_independent_report(self):
+    def test_wyckoff_filtered_stock_survives_as_v4_input_and_refreshes(self):
         payload, _ = payload_with_pattern()
         days = trading_days(100)
         prefix = [row(days[i], 10 + (0.03 if i % 2 else 0), volume=700)
@@ -162,26 +163,11 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
                                    as_of_date=as_of, weak_to_strong_results=collected,
                                    weak_to_strong_calendar=calendar)
         self.assertEqual(formal, [])
-        self.assertEqual(collected["600001.SH"]["result"]["state"], "BREAKOUT_CONFIRMED")
-        buckets = {key: [] for key in ("actionable", "waiting_trigger", "next_day_confirmation",
-                                      "observation", "data_rejected", "unenriched_observation")}
-        policy = {"mode": "observation", "reasons": ["regime_weak"]}
-        output = dc.build_weak_to_strong_output(collected, [candidate], [], as_of,
-                                                policy, buckets, {"scope_complete": True})
-        self.assertEqual(len(output["confirmed"]), 1)
-        self.assertEqual(output["confirmed"][0]["context"]["formal_bucket_or_not_selected"], "not_selected")
-        self.assertIn("日线弱转强", report.render_markdown(output))
-        self.assertIn("测试股", report.render_html(output))
-        self.assertEqual(buckets["actionable"], [])
-        report_policy = dc.build_recommendation_policy({"score": 30, "data_date": as_of}, as_of)
-        json_output = dc.build_json_output([], [], 0, report_policy, buckets,
-                                           weak_to_strong=output)
-        markdown = dc.generate_report([], [], 0, report_policy, buckets, weak_to_strong=output)
-        html = dc._generate_html([], [], 0, "20261027-120000", report_policy, buckets,
-                                 weak_to_strong=output)
-        self.assertEqual(json_output["weak_to_strong"]["confirmed"][0]["code"], "600001")
-        self.assertIn("测试股", markdown)
-        self.assertIn("测试股", html)
+        record = collected["600001.SH"]
+        self.assertEqual(record["kline_payload"], payload)
+        self.assertEqual(record["sector_memberships"], candidate["sector_memberships"])
+        self.assertEqual(record["refresh_stage"], "initial")
+        first_fingerprint = record["fingerprint"]
 
         refreshed = copy.deepcopy(payload)
         refreshed["data"][-1]["vol"] = 1
@@ -191,10 +177,10 @@ class WeakToStrongIntegrationTests(unittest.TestCase):
             sc.run_phase2([candidate], max_workers=1, enable_wyckoff=True,
                           as_of_date=as_of, weak_to_strong_results=collected,
                           weak_to_strong_calendar=calendar, kline_budget_stage="topup")
-        self.assertEqual(collected["600001.SH"]["result"]["state"], "INVALID")
-        updated = dc.build_weak_to_strong_output(collected, [candidate], [], as_of,
-                                                 policy, buckets, {"scope_complete": True})
-        self.assertEqual(updated["confirmed"], [])
+        record = collected["600001.SH"]
+        self.assertEqual(record["kline_payload"]["data"][-1]["vol"], 1)
+        self.assertNotEqual(record["fingerprint"], first_fingerprint)
+        self.assertEqual(record["refresh_stage"], "global")
 
     def test_empty_scope_and_escape(self):
         payload = {"as_of_date": "2026-10-27",
