@@ -193,6 +193,17 @@ class WeakToStrongFollowUpReportingTests(unittest.TestCase):
             self.assertNotIn("周期 B", text)
             self.assertNotIn("旧周期", text)
 
+    def test_merged_rows_sort_mixed_groups_with_same_followup_priority(self):
+        payload = self.payload()
+        payload["watching"] = [{"code": "1", "cycle_id": "a", "state": "SUPPLY_DRY"}]
+        payload["pullback"] = [{"code": "2", "cycle_id": "b", "state": "PULLBACK"}]
+        payload["follow_up"]["items"] = [
+            {"code": "1", "origin_cycle_id": "a", "status": "INVALIDATED"},
+            {"code": "2", "origin_cycle_id": "b", "status": "INVALIDATED"},
+        ]
+        rows = report._merged_rows(payload)
+        self.assertEqual({"1", "2"}, {item["code"] for item, _ in rows if item})
+
     def test_main_table_filters_deduplicates_and_caps_total_at_thirty(self):
         payload = {
             "as_of_date": REPORT_DATE,

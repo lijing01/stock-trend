@@ -359,9 +359,9 @@ def _merged_rows(payload):
                  "PULLBACK": "pullback", "PROVISIONAL_BREAKOUT": "provisional"}.get(state)
         # Existing order is deterministic within each signal group.
         if item and group:
-            detail = (0, _main_sort_key(group, item))
+            detail = (0, group, _main_sort_key(group, item))
         else:
-            detail = (1, _follow_up_sort_key(follow or {}))
+            detail = (1, "", _follow_up_sort_key(follow or {}))
         return (priority, detail, _code(item or follow or {}))
     return sorted(rows, key=key)
 
