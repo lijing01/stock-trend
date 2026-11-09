@@ -167,6 +167,110 @@ def test_market_classifier_ranks_t1_and_t2_independently():
     assert [item["symbol"] for item in report["research_candidates"]["T2"]] == ["C"]
 
 
+def early_result(*, pattern="T1_LOWER_WICK", status="candidate",
+                 failure_line=9.0, close=9.0, provisional=True):
+    return {
+        "status": "not_scored",
+        "reason": "V4 requires a newly confirmed V3 event on as_of_date",
+        "symbol": "SH.600000",
+        "name": "浦发银行",
+        "as_of_date": "2026-11-06",
+        "prediction": None,
+        "v3_result": {
+            "evidence_status": "ready",
+            "current_bar_evaluated": True,
+            "evaluation_date": "2026-11-06",
+            "confirmation": "provisional" if provisional else "close_confirmed",
+            "provisional": provisional,
+            "signal_date": "",
+            "stage": "EARLY_REPAIR",
+            "lifecycle_status": "active",
+            "metrics": {"close": close},
+            "structure": {"failure_line": failure_line},
+            "probe": {"status": "ready", "selected": {
+                "pattern": pattern,
+                "status": status,
+                "candidate_id": "probe-1",
+                "candidate_date": "2026-11-05",
+                "candidate_age_sessions": 1,
+                "high": 10.2,
+                "low": 9.3,
+                "status_events": ([
+                    {"status": "candidate", "date": "2026-11-05"},
+                    {"status": "confirmed", "date": "2026-11-06"},
+                ] if status == "confirmed" else [
+                    {"status": "candidate", "date": "2026-11-05"},
+                ]),
+            }},
+        },
+    }
+
+
+def test_market_classifier_exposes_active_t1_t2_probes_as_early_observations():
+    report = market.classify_v4_market_results([
+        early_result(),
+        early_result(pattern="T2_LOW_VOLUME_RETEST", status="confirmed",
+                     provisional=False),
+    ])
+    observations = report["early_observations"]
+    assert {item["early_observation"]["signal_type"] for item in observations} == {"T1", "T2"}
+    t1 = next(item for item in observations
+              if item["early_observation"]["signal_type"] == "T1")
+    assert t1["market_classification"] == "early_observation"
+    assert t1["research_only"] is True
+    assert t1["early_observation"] == {
+        "signal_type": "T1",
+        "probe_pattern": "T1_LOWER_WICK",
+        "probe_status": "candidate",
+        "candidate_date": "2026-11-05",
+        "candidate_age_sessions": 1,
+        "candidate_high": 10.2,
+        "candidate_low": 9.3,
+        "current_close": 9.0,
+        "structure_stage": "EARLY_REPAIR",
+        "structure_failure_line": 9.0,
+        "provisional": True,
+        "confirmation_state": "probe_unconfirmed",
+    }
+    assert report["research_candidates"] == {"T1": [], "T2": []}
+    assert report["summary"]["early_observations"] == 2
+    t2 = next(item for item in observations
+              if item["early_observation"]["signal_type"] == "T2")
+    assert t2["early_observation"]["confirmation_state"] == "probe_confirmed_no_new_event"
+
+
+def test_market_classifier_keeps_close_confirmed_new_event_out_of_early_observation():
+    result = early_result(provisional=False)
+    result["v3_result"]["signal_date"] = result["as_of_date"]
+    report = market.classify_v4_market_results([result])
+    assert report["early_observations"] == []
+    assert len(report["structural_observations"]) == 1
+
+
+@pytest.mark.parametrize("status", ["invalidated", "expired"])
+def test_market_classifier_excludes_terminal_probe_from_early_observation(status):
+    report = market.classify_v4_market_results([early_result(status=status)])
+    assert report["early_observations"] == []
+    assert len(report["structural_observations"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("failure_line", "close", "reason"),
+    [
+        (None, 9.5, "early_observation_failure_line_missing"),
+        (9.0, 8.99, "early_observation_structure_breached"),
+    ],
+)
+def test_market_classifier_requires_valid_unbreached_structure_line(
+    failure_line, close, reason,
+):
+    report = market.classify_v4_market_results([
+        early_result(failure_line=failure_line, close=close),
+    ])
+    assert report["early_observations"] == []
+    assert reason in report["data_insufficient"][0]["classification_reasons"]
+
+
 def test_scan_missing_model_reports_explicit_fallback(monkeypatch):
     monkeypatch.setattr(scan, "analyze_daily_weak_to_strong", lambda *a, **k: {})
     monkeypatch.setattr(scan, "analyze_daily_weak_to_strong_v3", lambda *a, **k: {

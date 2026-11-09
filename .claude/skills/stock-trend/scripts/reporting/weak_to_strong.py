@@ -4,10 +4,17 @@ from html import escape
 
 
 DISPLAY_LIMIT = 30
-V4_TYPES = (("T1", "T1 新确认"), ("T2", "T2 新确认"))
+V4_TYPES = (
+    ("T1", "T1 新确认：支撑位或 MA20 附近的下影线试盘"),
+    ("T2", "T2 新确认：放量下跌后的缩量回踩试盘"),
+)
 V4_HEADERS = [
     "类型内名次", "名称/代码", "V4 / V3 分", "预期净收益", "估计胜率",
     "信号日 / 特征日", "模型版本 / 哈希", "状态",
+]
+EARLY_HEADERS = [
+    "名称/代码", "试盘类型 / 状态", "试盘日 / 年龄", "结构阶段",
+    "结构失效位", "待确认条件", "数据状态",
 ]
 
 
@@ -42,6 +49,11 @@ def _selection_summary(stats):
 def _v4_candidates(payload):
     value = payload.get("research_candidates") or {}
     return value if isinstance(value, dict) else {}
+
+
+def _early_observations(payload):
+    value = payload.get("early_observations") or []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _v4_percent(value):
@@ -111,6 +123,57 @@ def _v4_cells(item, signal_type, fallback_rank):
     ]
 
 
+def _mapping(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _early_cells(item):
+    observation = _mapping(item.get("early_observation")) or item
+    v3 = _mapping(item.get("v3_result"))
+    probe_block = _mapping(v3.get("probe"))
+    probe = (_mapping(observation.get("probe")) or
+             _mapping(observation.get("selected_probe")) or
+             _mapping(probe_block.get("selected")))
+    pattern = str(observation.get("signal_type") or observation.get("probe_type") or
+                  probe.get("pattern") or "")
+    probe_type = "T1" if pattern.upper().startswith("T1") else (
+        "T2" if pattern.upper().startswith("T2") else _value(pattern))
+    status = observation.get("probe_status") or probe.get("status") or "candidate"
+    status_text = {"candidate": "待确认", "confirmed": "试盘已确认"}.get(
+        str(status).lower(), _value(status))
+    candidate_date = (observation.get("candidate_date") or
+                      observation.get("probe_date") or probe.get("candidate_date"))
+    age = observation.get("candidate_age_sessions")
+    if age is None:
+        age = probe.get("candidate_age_sessions")
+    raw_stage = observation.get("structure_stage") or observation.get("stage") or v3.get("stage")
+    stage = observation.get("stage_label") or v3.get("stage_label") or {
+        "PREPARING": "准备中", "EARLY_REPAIR": "早期修复",
+        "LOCAL_CONFIRMATION": "局部确认", "RANGE_BREAKOUT": "区间突破",
+    }.get(raw_stage, raw_stage)
+    failure = (observation.get("structure_failure_line") or
+               observation.get("failure_line") or observation.get("structure_low"))
+    candidate_high = observation.get("candidate_high") or probe.get("high")
+    confirmation_state = observation.get("confirmation_state")
+    if confirmation_state == "probe_confirmed_structure_pending":
+        confirm = "试盘已确认；当日无新确认事件，继续观察活跃结构"
+    else:
+        high = _number(candidate_high)
+        threshold = _value(high * 1.002) if high is not None else "试盘高点×1.002"
+        confirm = observation.get("confirmation_condition") or (
+            f"等待收盘 > 试盘高点×1.002（{threshold}），且成交量/前5日均量 ≥ 1.15")
+    provisional = bool(observation.get("provisional") is True or
+                       v3.get("provisional") is True)
+    data_status = "盘中临时，收盘待复评" if provisional else (
+        "收盘数据；当日无新确认事件" if confirmation_state == "probe_confirmed_structure_pending"
+        else "收盘数据；试盘未确认、仅观察")
+    return [
+        _v4_identity(item), f"{probe_type} / {status_text}",
+        f"{_value(candidate_date)} / {_value(age)} 个交易日",
+        _value(stage), _value(failure), _value(confirm), data_status,
+    ]
+
+
 def select_v4_rows(payload, limit=DISPLAY_LIMIT):
     """Select V4 candidates while preserving source type-local ranking."""
     groups = {signal_type: [] for signal_type, _label in V4_TYPES}
@@ -170,12 +233,14 @@ def _v4_summary(payload, stats):
         "no_active_signal", len(payload.get("no_active_signal") or []))
     insufficient = summary.get(
         "data_insufficient", len(payload.get("data_insufficient") or []))
+    early = summary.get("early_observations", len(_early_observations(payload)))
     return (
         f"依据日 {_value(payload.get('as_of_date') or payload.get('requested_as_of_date'))}；"
         f"模型状态 {_value(payload.get('model_status'))}；V4 候选 {stats['scanned_rows']} 只"
         f"（T1 {len((_v4_candidates(payload).get('T1') or []))}，"
         f"T2 {len((_v4_candidates(payload).get('T2') or []))}）；"
-        f"结构观察 {structural} 只，无活跃信号 {inactive} 只，数据不足 {insufficient} 只。"
+        f"提前观察 {early} 只，结构观察 {structural} 只，"
+        f"无活跃信号 {inactive} 只，数据不足 {insufficient} 只。"
     )
 
 
@@ -203,7 +268,8 @@ def _v4_context(payload):
     notes = []
     if payload.get("model_status") == "model_missing":
         notes.append("V4 模型未配置，无法计算预期收益、胜率或 V4 排名；结构观察仍可参考。")
-    items = (item for key in ("structural_observations", "no_active_signal", "data_insufficient")
+    items = (item for key in ("early_observations", "structural_observations",
+                              "no_active_signal", "data_insufficient")
              for item in (payload.get(key) or []) if isinstance(item, dict))
     if any(isinstance(item.get("v3_result"), dict)
            and item["v3_result"].get("provisional") is True for item in items):
@@ -240,6 +306,18 @@ def render_v4_markdown(payload):
             ) + " |")
     if not any_rows:
         lines += ["", "当日没有可评分的 V4 T1/T2 新确认信号。"]
+    early = _early_observations(payload)
+    if early:
+        lines += [
+            "", "### T1/T2 提前观察（未确认、仅观察）", "",
+            "该区仅展示有效试盘和未破坏结构，不参与 V4 概率、收益、排名或正式推荐。", "",
+            "| " + " | ".join(EARLY_HEADERS) + " |",
+            "| " + " | ".join(["---"] * len(EARLY_HEADERS)) + " |",
+        ]
+        lines.extend(
+            "| " + " | ".join(_markdown_cell(cell) for cell in _early_cells(item)) + " |"
+            for item in early
+        )
     diagnostics = _v4_diagnostic_rows(payload)
     if diagnostics:
         lines += ["", "<details><summary>V4 状态与诊断</summary>", ""]
@@ -285,6 +363,22 @@ def render_v4_html(payload):
         out.append("</tbody></table></div>")
     if not any_rows:
         out.append("<p>当日没有可评分的 V4 T1/T2 新确认信号。</p>")
+    early = _early_observations(payload)
+    if early:
+        out.extend([
+            "<h3>T1/T2 提前观察（未确认、仅观察）</h3>",
+            "<p>该区仅展示有效试盘和未破坏结构，不参与 V4 概率、收益、排名或正式推荐。</p>",
+            "<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-to-strong-v4-early-table'>",
+            "<thead><tr>" + "".join(
+                "<th>" + escape(header) + "</th>" for header in EARLY_HEADERS
+            ) + "</tr></thead><tbody>",
+        ])
+        out.extend(
+            "<tr>" + "".join(
+                "<td>" + escape(str(cell)) + "</td>" for cell in _early_cells(item)
+            ) + "</tr>" for item in early
+        )
+        out.append("</tbody></table></div>")
     diagnostics = _v4_diagnostic_rows(payload)
     if diagnostics:
         out.append("<details><summary>V4 状态与诊断</summary><ul>")

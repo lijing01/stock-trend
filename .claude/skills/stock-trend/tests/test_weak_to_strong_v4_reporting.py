@@ -41,6 +41,17 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
                 "T1": [candidate("T1-A", "T1", 1, .021, .63, name="甲|股")],
                 "T2": [candidate("T2-A", "T2", 1, .018, .58, name="乙<股>")],
             },
+            "early_observations": [{
+                "symbol": "EARLY", "name": "试盘|股",
+                "early_observation": {
+                    "signal_type": "T1", "probe_status": "candidate",
+                    "candidate_date": "2026-11-05", "candidate_age_sessions": 1,
+                    "candidate_high": 10.8, "structure_stage": "EARLY_REPAIR",
+                    "structure_failure_line": 9.65, "provisional": True,
+                    "confirmation_state": "probe_unconfirmed",
+                },
+                "v3_result": {"provisional": True},
+            }],
             "structural_observations": [{
                 "symbol": "WATCH", "name": "观察股", "reason": "no fresh event",
                 "classification_reasons": ["no fresh event"],
@@ -54,6 +65,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             }],
             "summary": {
                 "t1_research_candidates": 1, "t2_research_candidates": 1,
+                "early_observations": 1,
                 "structural_observations": 1, "no_active_signal": 1,
                 "data_insufficient": 1,
             },
@@ -71,6 +83,43 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             self.assertIn("2026-11-monthly", rendered)
             self.assertIn("2026-11-06 / 2026-11-06", rendered)
             self.assertIn("结构观察 1 只，无活跃信号 1 只，数据不足 1 只", rendered)
+            self.assertIn("提前观察 1 只", rendered)
+            self.assertIn("T1 新确认：支撑位或 MA20 附近的下影线试盘", rendered)
+            self.assertIn("T2 新确认：放量下跌后的缩量回踩试盘", rendered)
+
+    def test_early_observation_shows_probe_structure_and_no_model_metrics(self):
+        payload = self.payload()
+        payload["research_candidates"] = {"T1": [], "T2": []}
+
+        markdown = report.render_v4_markdown(payload)
+        html = report.render_v4_html(payload)
+
+        for rendered in (markdown, html):
+            self.assertIn("T1/T2 提前观察（未确认、仅观察）", rendered)
+            self.assertIn("试盘", rendered)
+            self.assertIn("EARLY", rendered)
+            self.assertIn("T1 / 待确认", rendered)
+            self.assertIn("早期修复", rendered)
+            self.assertIn("9.65", rendered)
+            self.assertIn("试盘高点×1.002（10.822）", rendered)
+            self.assertIn("成交量/前5日均量 ≥ 1.15", rendered)
+            self.assertIn("盘中临时，收盘待复评", rendered)
+            self.assertIn("不参与 V4 概率、收益、排名或正式推荐", rendered)
+        self.assertIn("试盘\\|股", markdown)
+        self.assertIn("试盘|股", html)
+
+    def test_confirmed_probe_says_no_new_event_instead_of_unconfirmed_structure(self):
+        payload = self.payload()
+        payload["early_observations"][0]["early_observation"].update(
+            probe_status="confirmed", provisional=False,
+            confirmation_state="probe_confirmed_structure_pending",
+        )
+        payload["early_observations"][0]["v3_result"]["provisional"] = False
+
+        for rendered in (report.render_v4_markdown(payload), report.render_v4_html(payload)):
+            self.assertIn("T1 / 试盘已确认", rendered)
+            self.assertIn("当日无新确认事件，继续观察活跃结构", rendered)
+            self.assertIn("收盘数据；当日无新确认事件", rendered)
 
     def test_diagnostics_keep_statuses_separate_and_deduplicate_reasons(self):
         for rendered in (report.render_v4_markdown(self.payload()),
