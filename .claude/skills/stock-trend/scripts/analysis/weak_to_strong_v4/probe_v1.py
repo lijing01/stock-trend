@@ -97,6 +97,10 @@ def _features(rows, index, config):
 def _new(pattern, rows, index, features, config, anchor=None):
     row = rows[index]
     anchor_date = rows[anchor]["date"] if anchor is not None else ""
+    anchor_volume = rows[anchor]["volume"] if anchor is not None else None
+    anchor_range = (
+        rows[anchor]["high"] - rows[anchor]["low"] if anchor is not None else None
+    )
     candidate_id = _canonical_digest({"pattern": pattern, "date": row["date"],
                                       "anchor": anchor_date,
                                       "parameter_hash": _canonical_digest(config)})
@@ -104,6 +108,7 @@ def _new(pattern, rows, index, features, config, anchor=None):
             "candidate_date": row["date"], "known_at": row["date"],
             "anchor_date": anchor_date, "_index": index, "low": row["low"],
             "high": row["high"], "close": row["close"], "volume": row["volume"],
+            "anchor_volume": anchor_volume, "anchor_range": anchor_range,
             "atr14": features["atr14"], "features": features,
             "status": "candidate", "status_date": row["date"],
             "status_events": [{"status": "candidate", "date": row["date"]}]}

@@ -4,6 +4,7 @@ from html import escape
 
 
 DISPLAY_LIMIT = 30
+EARLY_DISPLAY_LIMIT = 20
 V4_TYPES = (
     ("T1", "T1 新确认：支撑位或 MA20 附近的下影线试盘"),
     ("T2", "T2 新确认：放量下跌后的缩量回踩试盘"),
@@ -13,9 +14,18 @@ V4_HEADERS = [
     "信号日 / 特征日", "模型版本 / 哈希", "状态",
 ]
 EARLY_HEADERS = [
-    "名称/代码", "试盘类型 / 状态", "试盘日 / 年龄", "结构阶段",
+    "观察分 / 状态", "分项", "名称/代码", "试盘类型 / 状态", "试盘日 / 年龄", "结构阶段",
     "结构失效位", "待确认条件", "数据状态",
 ]
+
+EARLY_COMPONENT_LABELS = (
+    ("trend_structure", "趋势结构"),
+    ("risk_space", "风险空间"),
+    ("confirmation_distance", "确认距离"),
+    ("probe_quality", "试探质量"),
+    ("freshness", "新鲜度"),
+    ("market_sector", "市场板块"),
+)
 
 
 def _value(value):
@@ -54,6 +64,96 @@ def _v4_candidates(payload):
 def _early_observations(payload):
     value = payload.get("early_observations") or []
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _early_score_fields(item):
+    observation = _mapping(item.get("early_observation")) or item
+    score_value = observation.get("observation_score")
+    if score_value in (None, ""):
+        score_value = item.get("observation_score")
+    score = _number(score_value)
+    components = _mapping(observation.get("observation_score_components"))
+    if not components:
+        components = _mapping(item.get("observation_score_components"))
+    status = observation.get("observation_score_status") or item.get(
+        "observation_score_status")
+    if status in (None, ""):
+        status = "ready" if score is not None else "unscored"
+    return score, components, str(status)
+
+
+def _early_score_coverage(item):
+    observation = _mapping(item.get("early_observation")) or item
+    maximum = _number(observation.get("observation_score_max"))
+    if maximum is None:
+        maximum = _number(item.get("observation_score_max"))
+    cohort = observation.get("ranking_cohort") or item.get("ranking_cohort")
+    return maximum, str(cohort) if cohort not in (None, "") else None
+
+
+def _early_type(item):
+    observation = _mapping(item.get("early_observation")) or item
+    probe = _mapping(observation.get("probe")) or _mapping(observation.get("selected_probe"))
+    pattern = str(observation.get("signal_type") or observation.get("probe_type") or
+                  probe.get("pattern") or "").upper()
+    if pattern.startswith("T1"):
+        return "T1"
+    if pattern.startswith("T2"):
+        return "T2"
+    return "UNKNOWN"
+
+
+def select_early_observations(payload, limit=EARLY_DISPLAY_LIMIT):
+    """Rank scored observations within T1/T2; keep missing scores unranked."""
+    observations = _early_observations(payload)
+    cap = (
+        max(0, int(limit))
+        if isinstance(limit, (int, float)) and not isinstance(limit, bool)
+        else EARLY_DISPLAY_LIMIT
+    )
+    scored = {"T1": {}, "T2": {}}
+    unscored = []
+    for source_index, item in enumerate(observations):
+        score, components, status = _early_score_fields(item)
+        maximum, cohort = _early_score_coverage(item)
+        row = (item, score, components, status, source_index)
+        signal_type = _early_type(item)
+        if score is None or maximum is None or signal_type not in scored:
+            unscored.append(row)
+        else:
+            cohort_key = cohort or f"{signal_type}:{maximum:g}"
+            scored[signal_type].setdefault((cohort_key, maximum), []).append(row)
+
+    def scored_key(row):
+        item, score, components, _status, source_index = row
+        observation = _mapping(item.get("early_observation")) or item
+        age = _number(observation.get("candidate_age_sessions"))
+        symbol = str(item.get("symbol") or item.get("code") or item.get("ts_code") or "")
+        return (-score, -len(components), age if age is not None else float("inf"),
+                symbol, source_index)
+
+    cohorts = {"T1": [], "T2": []}
+    for signal_type, grouped in scored.items():
+        for (cohort_key, maximum), rows in sorted(
+                grouped.items(), key=lambda entry: entry[0][1]):
+            rows.sort(key=scored_key)
+            cohorts[signal_type].append({
+                "cohort": cohort_key,
+                "max_score": maximum,
+                "items": [row[0] for row in rows[:cap]],
+                "total": len(rows),
+                "omitted": max(0, len(rows) - cap),
+            })
+    return {
+        "cohorts": cohorts,
+        "unscored": [row[0] for row in unscored[:cap]],
+        "scored_total": {
+            signal_type: sum(cohort["total"] for cohort in values)
+            for signal_type, values in cohorts.items()
+        },
+        "unscored_total": len(unscored),
+        "omitted_unscored": max(0, len(unscored) - cap),
+    }
 
 
 def _v4_percent(value):
@@ -139,7 +239,7 @@ def _early_cells(item):
     probe_type = "T1" if pattern.upper().startswith("T1") else (
         "T2" if pattern.upper().startswith("T2") else _value(pattern))
     status = observation.get("probe_status") or probe.get("status") or "candidate"
-    status_text = {"candidate": "待确认", "confirmed": "试盘已确认"}.get(
+    probe_status_text = {"candidate": "待确认", "confirmed": "试盘已确认"}.get(
         str(status).lower(), _value(status))
     candidate_date = (observation.get("candidate_date") or
                       observation.get("probe_date") or probe.get("candidate_date"))
@@ -155,8 +255,9 @@ def _early_cells(item):
                observation.get("failure_line") or observation.get("structure_low"))
     candidate_high = observation.get("candidate_high") or probe.get("high")
     confirmation_state = observation.get("confirmation_state")
-    if confirmation_state == "probe_confirmed_structure_pending":
-        confirm = "试盘已确认；当日无新确认事件，继续观察活跃结构"
+    probe_confirmed = str(status).lower() == "confirmed"
+    if probe_confirmed:
+        confirm = "历史试盘确认条件已满足；当日无新结构确认事件，继续观察活跃结构"
     else:
         high = _number(candidate_high)
         threshold = _value(high * 1.002) if high is not None else "试盘高点×1.002"
@@ -164,11 +265,39 @@ def _early_cells(item):
             f"等待收盘 > 试盘高点×1.002（{threshold}），且成交量/前5日均量 ≥ 1.15")
     provisional = bool(observation.get("provisional") is True or
                        v3.get("provisional") is True)
-    data_status = "盘中临时，收盘待复评" if provisional else (
-        "收盘数据；当日无新确认事件" if confirmation_state == "probe_confirmed_structure_pending"
-        else "收盘数据；试盘未确认、仅观察")
+    if probe_confirmed:
+        data_status = (
+            "盘中临时；历史试盘已确认，当日无新确认事件（收盘待复评）"
+            if provisional else "收盘数据；历史试盘已确认，当日无新确认事件"
+        )
+    else:
+        data_status = (
+            "盘中临时，收盘待复评" if provisional
+            else "收盘数据；试盘未确认、仅观察"
+        )
+    score, components, score_status = _early_score_fields(item)
+    score_max, _cohort = _early_score_coverage(item)
+    score_status_text = {
+        "ready": "试运行",
+        "trial_unvalidated": "试运行（未验证）",
+        "incomplete": "信息不完整",
+        "data_insufficient": "数据不足",
+        "unscored": "未评分",
+    }.get(score_status, score_status)
+    component_values = []
+    used_keys = set()
+    for key, label in EARLY_COMPONENT_LABELS:
+        if key in components:
+            component_values.append(f"{label} {_value(components[key])}")
+            used_keys.add(key)
+    component_values.extend(
+        f"{key} {_value(value)}" for key, value in components.items()
+        if key not in used_keys
+    )
+    component_text = "；".join(component_values) or "—"
     return [
-        _v4_identity(item), f"{probe_type} / {status_text}",
+        f"{_value(score)} / {_value(score_max)}（{_value(score_status_text)}）", component_text,
+        _v4_identity(item), f"{probe_type} / {probe_status_text}",
         f"{_value(candidate_date)} / {_value(age)} 个交易日",
         _value(stage), _value(failure), _value(confirm), data_status,
     ]
@@ -306,18 +435,39 @@ def render_v4_markdown(payload):
             ) + " |")
     if not any_rows:
         lines += ["", "当日没有可评分的 V4 T1/T2 新确认信号。"]
-    early = _early_observations(payload)
-    if early:
+    early = select_early_observations(payload)
+    if sum(early["scored_total"].values()):
         lines += [
-            "", "### T1/T2 提前观察（未确认、仅观察）", "",
-            "该区仅展示有效试盘和未破坏结构，不参与 V4 概率、收益、排名或正式推荐。", "",
+            "", "### T1/T2 提前观察评分（未确认、仅观察）", "",
+            "观察分处于试运行阶段，尚未回测；T1/T2 分数可比性尚未验证，因此仅在同类型内排序。该分数只安排观察优先级，不表示上涨概率，不参与正式推荐。",
+        ]
+        for signal_type in ("T1", "T2"):
+            for cohort in early["cohorts"][signal_type]:
+                lines += [
+                    "", f"#### {signal_type} 提前观察 Top 20（满分 {cohort['max_score']:g}）", "",
+                    "不同满分代表评分覆盖范围不同，本表仅在相同满分组内排序。", "",
+                    "| " + " | ".join(EARLY_HEADERS) + " |",
+                    "| " + " | ".join(["---"] * len(EARLY_HEADERS)) + " |",
+                ]
+                lines.extend(
+                    "| " + " | ".join(_markdown_cell(cell) for cell in _early_cells(item)) + " |"
+                    for item in cohort["items"]
+                )
+                if cohort["omitted"]:
+                    lines += ["", f"另有 {cohort['omitted']} 只同覆盖范围观察未进入 Top 20。"]
+    if early["unscored_total"]:
+        lines += [
+            "", "### T1/T2 未排名观察（未确认、仅观察）", "",
+            "以下候选缺少有效观察分或信号类型，未参与同类型 Top 20 排名；最多展示 20 只。", "",
             "| " + " | ".join(EARLY_HEADERS) + " |",
             "| " + " | ".join(["---"] * len(EARLY_HEADERS)) + " |",
         ]
         lines.extend(
             "| " + " | ".join(_markdown_cell(cell) for cell in _early_cells(item)) + " |"
-            for item in early
+            for item in early["unscored"]
         )
+        if early["omitted_unscored"]:
+            lines += ["", f"另有 {early['omitted_unscored']} 只未排名观察未展示。"]
     diagnostics = _v4_diagnostic_rows(payload)
     if diagnostics:
         lines += ["", "<details><summary>V4 状态与诊断</summary>", ""]
@@ -363,11 +513,38 @@ def render_v4_html(payload):
         out.append("</tbody></table></div>")
     if not any_rows:
         out.append("<p>当日没有可评分的 V4 T1/T2 新确认信号。</p>")
-    early = _early_observations(payload)
-    if early:
+    early = select_early_observations(payload)
+    if sum(early["scored_total"].values()):
         out.extend([
-            "<h3>T1/T2 提前观察（未确认、仅观察）</h3>",
-            "<p>该区仅展示有效试盘和未破坏结构，不参与 V4 概率、收益、排名或正式推荐。</p>",
+            "<h3>T1/T2 提前观察评分（未确认、仅观察）</h3>",
+            "<p>观察分处于试运行阶段，尚未回测；T1/T2 分数可比性尚未验证，因此仅在同类型内排序。该分数只安排观察优先级，不表示上涨概率，不参与正式推荐。</p>",
+        ])
+        for signal_type in ("T1", "T2"):
+            for cohort in early["cohorts"][signal_type]:
+                out.extend([
+                    "<h4>" + escape(
+                        f"{signal_type} 提前观察 Top 20（满分 {cohort['max_score']:g}）"
+                    ) + "</h4>",
+                    "<p>不同满分代表评分覆盖范围不同，本表仅在相同满分组内排序。</p>",
+                    "<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-to-strong-v4-early-table'>",
+                    "<thead><tr>" + "".join(
+                        "<th>" + escape(header) + "</th>" for header in EARLY_HEADERS
+                    ) + "</tr></thead><tbody>",
+                ])
+                out.extend(
+                    "<tr>" + "".join(
+                        "<td>" + escape(str(cell)) + "</td>" for cell in _early_cells(item)
+                    ) + "</tr>" for item in cohort["items"]
+                )
+                out.append("</tbody></table></div>")
+                if cohort["omitted"]:
+                    out.append("<p>" + escape(
+                        f"另有 {cohort['omitted']} 只同覆盖范围观察未进入 Top 20。"
+                    ) + "</p>")
+    if early["unscored_total"]:
+        out.extend([
+            "<h3>T1/T2 未排名观察（未确认、仅观察）</h3>",
+            "<p>以下候选缺少有效观察分或信号类型，未参与同类型 Top 20 排名；最多展示 20 只。</p>",
             "<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-to-strong-v4-early-table'>",
             "<thead><tr>" + "".join(
                 "<th>" + escape(header) + "</th>" for header in EARLY_HEADERS
@@ -376,9 +553,13 @@ def render_v4_html(payload):
         out.extend(
             "<tr>" + "".join(
                 "<td>" + escape(str(cell)) + "</td>" for cell in _early_cells(item)
-            ) + "</tr>" for item in early
+            ) + "</tr>" for item in early["unscored"]
         )
         out.append("</tbody></table></div>")
+        if early["omitted_unscored"]:
+            out.append("<p>" + escape(
+                f"另有 {early['omitted_unscored']} 只未排名观察未展示。"
+            ) + "</p>")
     diagnostics = _v4_diagnostic_rows(payload)
     if diagnostics:
         out.append("<details><summary>V4 状态与诊断</summary><ul>")

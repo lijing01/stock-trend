@@ -168,7 +168,15 @@ def test_market_classifier_ranks_t1_and_t2_independently():
 
 
 def early_result(*, pattern="T1_LOWER_WICK", status="candidate",
-                 failure_line=9.0, close=9.0, provisional=True):
+                 failure_line=9.0, close=9.0, provisional=True,
+                 complete_score_fields=True):
+    metrics = {"close": close}
+    if complete_score_fields:
+        metrics.update({
+            "ma10": 8.8, "ma20": 8.7, "ma10_slope_3": 0.01,
+            "ma20_slope_3": 0.005, "ma_flat_tolerance": 0.001,
+            "volume_prior5_ratio": 1.10,
+        })
     return {
         "status": "not_scored",
         "reason": "V4 requires a newly confirmed V3 event on as_of_date",
@@ -185,7 +193,7 @@ def early_result(*, pattern="T1_LOWER_WICK", status="candidate",
             "signal_date": "",
             "stage": "EARLY_REPAIR",
             "lifecycle_status": "active",
-            "metrics": {"close": close},
+            "metrics": metrics,
             "structure": {"failure_line": failure_line},
             "probe": {"status": "ready", "selected": {
                 "pattern": pattern,
@@ -195,6 +203,14 @@ def early_result(*, pattern="T1_LOWER_WICK", status="candidate",
                 "candidate_age_sessions": 1,
                 "high": 10.2,
                 "low": 9.3,
+                "volume": 700,
+                "anchor_volume": 1000,
+                "anchor_range": 1.5,
+                "atr14": 1.0,
+                "features": {
+                    "range": 1.0, "lower_ratio": 0.5,
+                    "close_pos": 0.7,
+                },
                 "status_events": ([
                     {"status": "candidate", "date": "2026-11-05"},
                     {"status": "confirmed", "date": "2026-11-06"},
@@ -218,7 +234,12 @@ def test_market_classifier_exposes_active_t1_t2_probes_as_early_observations():
               if item["early_observation"]["signal_type"] == "T1")
     assert t1["market_classification"] == "early_observation"
     assert t1["research_only"] is True
-    assert t1["early_observation"] == {
+    assert {key: value for key, value in t1["early_observation"].items()
+            if key not in {
+                "priority_score", "type_rank", "ranking_cohort", "observation_score",
+                "observation_score_max", "observation_score_status",
+                "observation_score_components", "observation_score_meta",
+            }} == {
         "signal_type": "T1",
         "probe_pattern": "T1_LOWER_WICK",
         "probe_status": "candidate",
@@ -232,11 +253,26 @@ def test_market_classifier_exposes_active_t1_t2_probes_as_early_observations():
         "provisional": True,
         "confirmation_state": "probe_unconfirmed",
     }
+    score = t1["early_observation"]["priority_score"]
+    assert score["status"] == "trial_unvalidated"
+    assert score["max_score"] == 90
+    assert score["coverage"] == 0.9
+    assert score["missing_optional_dimensions"] == ["market_sector"]
+    assert t1["early_observation"]["observation_score"] == score["score"]
+    assert t1["early_observation"]["observation_score_status"] == "trial_unvalidated"
+    assert t1["early_observation"]["type_rank"] == 1
+    assert t1["early_observation"]["ranking_cohort"] == "T1:90"
     assert report["research_candidates"] == {"T1": [], "T2": []}
     assert report["summary"]["early_observations"] == 2
     t2 = next(item for item in observations
               if item["early_observation"]["signal_type"] == "T2")
     assert t2["early_observation"]["confirmation_state"] == "probe_confirmed_no_new_event"
+    assert t2["early_observation"]["priority_score"]["dimensions"][
+        "confirmation_distance"
+    ]["confirmation_already_met"] is True
+    assert t1["early_observation"]["priority_score"]["dimensions"][
+        "confirmation_distance"
+    ]["confirmation_already_met"] is False
 
 
 def test_market_classifier_keeps_close_confirmed_new_event_out_of_early_observation():
@@ -269,6 +305,70 @@ def test_market_classifier_requires_valid_unbreached_structure_line(
     ])
     assert report["early_observations"] == []
     assert reason in report["data_insufficient"][0]["classification_reasons"]
+
+
+def test_early_observation_score_refuses_missing_core_dimensions():
+    report = market.classify_v4_market_results([
+        early_result(complete_score_fields=False),
+    ])
+    observation = report["early_observations"][0]["early_observation"]
+    score = observation["priority_score"]
+    assert score["status"] == "data_insufficient"
+    assert score["score"] is None
+    assert "trend_structure" in score["missing_core_dimensions"]
+    assert "confirmation_distance" in score["missing_core_dimensions"]
+    assert "type_rank" not in observation
+
+
+def test_early_observation_score_uses_current_market_sector_context():
+    result = early_result()
+    result["observation_context"] = {
+        "as_of_date": result["as_of_date"],
+        "market_score": 70,
+        "sector_score": 80,
+    }
+    report = market.classify_v4_market_results([result])
+    score = report["early_observations"][0]["early_observation"]["priority_score"]
+    assert score["max_score"] == 100
+    assert score["coverage"] == 1.0
+    assert score["dimensions"]["market_sector"]["score"] == 7.5
+    assert score["missing_optional_dimensions"] == []
+
+
+def test_early_observation_ranks_t1_and_t2_independently():
+    low = early_result(close=9.0)
+    low["symbol"] = "T1-low"
+    high = early_result(close=10.1, failure_line=9.9)
+    high["symbol"] = "T1-high"
+    t2 = early_result(pattern="T2_LOW_VOLUME_RETEST", close=10.0)
+    t2["symbol"] = "T2-only"
+    report = market.classify_v4_market_results([low, high, t2])
+    ranks = {
+        item["symbol"]: item["early_observation"]["type_rank"]
+        for item in report["early_observations"]
+    }
+    assert ranks == {"T1-low": 2, "T1-high": 1, "T2-only": 1}
+    for item in report["early_observations"]:
+        score = item["early_observation"]["priority_score"]
+        assert score["ranking_scope"] == "within_signal_type_and_coverage_only"
+        assert score["calibration_status"] == "unvalidated"
+
+
+def test_early_observation_does_not_mix_different_score_coverage():
+    partial = early_result(close=9.0)
+    partial["symbol"] = "partial"
+    full = early_result(close=9.0)
+    full["symbol"] = "full"
+    full["observation_context"] = {
+        "as_of_date": full["as_of_date"], "market_score": 60, "sector_score": 60,
+    }
+    report = market.classify_v4_market_results([partial, full])
+    observations = {item["symbol"]: item["early_observation"]
+                    for item in report["early_observations"]}
+    assert observations["partial"]["type_rank"] == 1
+    assert observations["partial"]["ranking_cohort"] == "T1:90"
+    assert observations["full"]["type_rank"] == 1
+    assert observations["full"]["ranking_cohort"] == "T1:100"
 
 
 def test_scan_missing_model_reports_explicit_fallback(monkeypatch):
