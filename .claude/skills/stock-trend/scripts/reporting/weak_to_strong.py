@@ -69,6 +69,25 @@ def _v4_reason_text(item):
     return "、".join(dict.fromkeys(values)) or "未记录"
 
 
+def _v4_intraday_text(item):
+    v3 = item.get("v3_result")
+    if not isinstance(v3, dict) or v3.get("provisional") is not True:
+        return ""
+    if v3.get("current_bar_evaluated") is not True:
+        return "盘中当日K线未完成评估"
+    if v3.get("evidence_status") != "ready":
+        return "已评估盘中当日K线，但结构证据不足"
+    stage = v3.get("stage_label") or {
+        "PREPARING": "准备中", "EARLY_REPAIR": "早期修复",
+        "LOCAL_CONFIRMATION": "局部确认", "RANGE_BREAKOUT": "区间突破",
+    }.get(v3.get("stage"), "无活跃结构")
+    lifecycle = v3.get("lifecycle_status")
+    status = {"active": "活跃", "invalidated": "已失效", "expired": "已过期",
+              "completed": "已完成"}.get(lifecycle)
+    suffix = f"，状态：{status}" if status else ""
+    return f"盘中当日K线已评估，结构：{stage}{suffix}（临时，收盘待确认）"
+
+
 def _v4_cells(item, signal_type, fallback_rank):
     prediction = item.get("prediction") or {}
     if not isinstance(prediction, dict):
@@ -171,11 +190,25 @@ def _v4_diagnostic_rows(payload):
         values = payload.get(key) or []
         if not isinstance(values, list):
             continue
-        rows.extend(
-            (label, _v4_identity(item), _v4_reason_text(item))
-            for item in values if isinstance(item, dict)
-        )
+        for item in values:
+            if isinstance(item, dict):
+                detail = _v4_intraday_text(item)
+                reason = _v4_reason_text(item)
+                rows.append((label, _v4_identity(item),
+                             f"{reason}；{detail}" if detail else reason))
     return rows
+
+
+def _v4_context(payload):
+    notes = []
+    if payload.get("model_status") == "model_missing":
+        notes.append("V4 模型未配置，无法计算预期收益、胜率或 V4 排名；结构观察仍可参考。")
+    items = (item for key in ("structural_observations", "no_active_signal", "data_insufficient")
+             for item in (payload.get(key) or []) if isinstance(item, dict))
+    if any(isinstance(item.get("v3_result"), dict)
+           and item["v3_result"].get("provisional") is True for item in items):
+        notes.append("盘中使用当日临时日线评估结构，价格及成交量可能变化，尚非收盘确认信号；盘后需重新拉取日线并复评。")
+    return notes
 
 
 def render_v4_markdown(payload):
@@ -188,6 +221,8 @@ def render_v4_markdown(payload):
         "T1 与 T2 分组独立排序；排序依据为预期净收益，其次为估计胜率。", "",
         _v4_summary(payload, stats), "", _selection_summary(stats),
     ]
+    for note in _v4_context(payload):
+        lines += ["", note]
     any_rows = False
     for signal_type, label in V4_TYPES:
         rows = selected[signal_type]
@@ -228,6 +263,7 @@ def render_v4_html(payload):
         "<p>" + escape(_v4_summary(payload, stats)) + "</p>",
         "<p>" + escape(_selection_summary(stats)) + "</p>",
     ]
+    out.extend("<p>" + escape(note) + "</p>" for note in _v4_context(payload))
     any_rows = False
     for signal_type, label in V4_TYPES:
         rows = selected[signal_type]

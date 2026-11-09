@@ -2612,10 +2612,9 @@ def scan_sectors(sector_codes, batch_size=4, per_sector=25,
     if isinstance(weak_to_strong_results, dict):
         for item in phase1_candidates.values():
             entry = weak_to_strong_results.get(item.get("ts_code"))
-            if entry:
-                signal = entry["result"]
-                signal["sector_memberships"] = merge_sector_memberships(
-                    signal.get("sector_memberships", []),
+            if isinstance(entry, dict):
+                entry["sector_memberships"] = merge_sector_memberships(
+                    entry.get("sector_memberships", []),
                     item.get("sector_memberships", []))
     selected = [all_scored[code] for code in sorted(all_scored)]
     if not return_research_population:
@@ -5199,6 +5198,10 @@ def build_weak_to_strong_v4_output(collected, as_of_date, calendar, bundle_path=
     from analysis.weak_to_strong_v4.scan import scan_market
 
     bundle = None
+    if not bundle_path:
+        monthly_path = CACHE_DIR / "models" / "weak_to_strong_v4" / f"{as_of_date[:7]}.json"
+        if monthly_path.is_file():
+            bundle_path = str(monthly_path)
     if bundle_path:
         try:
             with open(bundle_path, encoding="utf-8") as handle:
@@ -5210,6 +5213,7 @@ def build_weak_to_strong_v4_output(collected, as_of_date, calendar, bundle_path=
             bundle = {}
     output = scan_market(collected.values(), as_of_date=as_of_date,
                          bundle=bundle, calendar_evidence=calendar)
+    output["model_path"] = str(bundle_path) if bundle_path else None
     output["display_selection"] = weak_to_strong_report.build_v4_display_selection(output)
     return output
 

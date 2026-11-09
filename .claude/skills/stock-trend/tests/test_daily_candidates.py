@@ -2557,6 +2557,24 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertEqual(cached_item["ranking_source"], "cache")
         self.assertEqual(cached_item["ranking_data_date"], "2026-08-05")
 
+    def test_scan_merges_memberships_into_weak_to_strong_evidence(self):
+        evidence = {}
+
+        def gather(batch, **kwargs):
+            return {"candidates": [{"code": "600001", "ts_code": "600001.SH",
+                                     "name": "测试", "sector_code": batch[0]}]}
+
+        def phase2(candidates, **kwargs):
+            evidence["600001.SH"] = {"kline_payload": {}, "sector_memberships": []}
+            return []
+
+        with patch.object(dc, "gather_candidates", side_effect=gather), \
+             patch.object(dc, "run_phase2", side_effect=phase2):
+            dc.scan_sectors(["BK1"], min_candidates=1,
+                            weak_to_strong_results=evidence)
+
+        self.assertEqual(evidence["600001.SH"]["sector_memberships"][0]["code"], "BK1")
+
     def test_scan_can_defer_enrichment_to_the_global_report_scope(self):
         phase2_kwargs = []
         artifacts = {}

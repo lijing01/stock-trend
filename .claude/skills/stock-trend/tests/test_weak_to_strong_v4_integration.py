@@ -24,3 +24,28 @@ def test_missing_explicit_bundle_is_invalid_not_missing(tmp_path):
     result = daily_candidates.build_weak_to_strong_v4_output(
         {}, "2026-01-02", {}, str(tmp_path / "missing.json"))
     assert result["model_status"] == "model_invalid"
+
+
+def test_default_monthly_bundle_loaded_without_environment(tmp_path):
+    import json
+    path = tmp_path / "models" / "weak_to_strong_v4" / "2026-11.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"model_version": "monthly-test"}))
+    with patch.object(daily_candidates, "CACHE_DIR", tmp_path), patch(
+        "analysis.weak_to_strong_v4.scan.scan_market",
+        return_value={"research_candidates": {"T1": [], "T2": []}},
+    ) as scan:
+        result = daily_candidates.build_weak_to_strong_v4_output({}, "2026-11-09", {})
+    assert scan.call_args.kwargs["bundle"]["model_version"] == "monthly-test"
+    assert result["model_path"] == str(path)
+
+
+def test_explicit_bundle_overrides_default_monthly_bundle(tmp_path):
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text('{"model_version": "explicit"}')
+    with patch.object(daily_candidates, "CACHE_DIR", tmp_path), patch(
+        "analysis.weak_to_strong_v4.scan.scan_market",
+        return_value={"research_candidates": {"T1": [], "T2": []}},
+    ) as scan:
+        daily_candidates.build_weak_to_strong_v4_output({}, "2026-11-09", {}, explicit)
+    assert scan.call_args.kwargs["bundle"]["model_version"] == "explicit"

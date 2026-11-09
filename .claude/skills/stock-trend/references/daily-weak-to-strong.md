@@ -4,6 +4,8 @@
 
 报告按 T1、T2 分组，组内依次按模型预期净收益和估计胜率排序，并显示模型状态、信号日期、预测和诊断。结构观察、无活跃信号和数据不足独立统计；模型缺失、无效、过期或证据不足时，不以旧版评分替代。JSON 的 `weak_to_strong_v4` 保留完整结果及报告展示选择。
 
-V4 bundle JSON 通过 `STOCK_TREND_V4_BUNDLE` 环境变量或 `daily_candidates.py --weak-to-strong-v4-bundle 路径` 配置，命令行参数优先。模型需包含 T1/T2、版本、有效期和完整性信息；当前工程不附带训练好的模型。V4 仍为研究版本，策略效果需要独立验证。
+盘中若当日临时日线可用，V3 结构检测会评估该日 K 线，并在 V4 诊断中展示临时结构状态；`close_unconfirmed` 表示尚未收盘确认，并不单独表示盘中行情缺失。盘中结构可能随价格和成交量变化，不能作为收盘确认的 V4 评分信号。收盘后应重新拉取日线并检查收盘确认，再重新评估；盘中快照不自动转为盘后结论。
+
+V4 bundle JSON 默认按依据月加载 `.cache/stock-trend/models/weak_to_strong_v4/YYYY-MM.json`。可通过 `STOCK_TREND_V4_BUNDLE` 环境变量或 `daily_candidates.py --weak-to-strong-v4-bundle 路径` 覆盖，命令行参数优先。模型需包含 T1/T2、版本、有效期和完整性信息；使用本仓 `analysis/weak_to_strong_v4/train.py` 从真实已成熟样本训练，模型文件属于本机运行产物。新月份需要重新训练，不能延长旧模型有效期。V4 仍为研究版本，策略效果需要独立验证。
 
 旧版弱转强快照不会被解释为 V4 信号；V4 当前不提供跨日跟踪。仅供学习参考，不构成投资建议。

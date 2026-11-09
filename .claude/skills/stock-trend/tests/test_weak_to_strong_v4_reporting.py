@@ -119,6 +119,21 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
         self.assertIn("BAD", markdown)
         self.assertIn("model_expired", markdown)
 
+    def test_intraday_structure_remains_visible_when_model_is_missing(self):
+        payload = self.payload()
+        payload["model_status"] = "model_missing"
+        payload["data_insufficient"] = [{
+            "symbol": "000009", "reason": "model_missing",
+            "classification_reasons": ["model_missing", "close_unconfirmed"],
+            "v3_result": {"provisional": True, "current_bar_evaluated": True,
+                          "evidence_status": "ready", "stage_label": "早期修复"},
+        }]
+        for rendered in (report.render_v4_markdown(payload), report.render_v4_html(payload)):
+            self.assertIn("000009", rendered)
+            self.assertIn("盘中当日K线已评估，结构：早期修复", rendered)
+            self.assertIn("V4 模型未配置", rendered)
+            self.assertIn("盘后需重新拉取日线并复评", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
