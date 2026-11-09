@@ -51,8 +51,8 @@ def _v4_percent(value):
 
 def _v4_identity(item):
     symbol = item.get("symbol") or item.get("code") or item.get("ts_code") or ""
-    name = item.get("name") or symbol
-    return f"{name} ({symbol})" if name != symbol else str(symbol)
+    name = item.get("name") or symbol or "未知名称"
+    return f"{name} ({symbol or '代码缺失'})"
 
 
 def _v4_reason_text(item):

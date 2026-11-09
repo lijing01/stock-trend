@@ -53,7 +53,7 @@ def scan_market(
                 v1_result=v1,
             )
             result = {"status": "fallback", "reason": model_error,
-                      "as_of_date": as_of_date, "symbol": code,
+                      "as_of_date": as_of_date, "symbol": code, "name": name or code,
                       "prediction": None, "v3_result": v3}
         results.append(result)
     report = classify_v4_market_results(results)

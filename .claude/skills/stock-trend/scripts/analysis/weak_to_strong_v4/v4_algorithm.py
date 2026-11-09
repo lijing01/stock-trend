@@ -139,6 +139,7 @@ def analyze_daily_weak_to_strong_v4(
         "algorithm_version": ALGORITHM_VERSION,
         "as_of_date": as_of,
         "symbol": str(code),
+        "name": str(name or code),
         "model_version": str(bundle.get("model_version") or ""),
         "production_changed": False,
         "production_eligible": False,
