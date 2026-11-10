@@ -49,6 +49,13 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
                     "candidate_high": 10.8, "structure_stage": "EARLY_REPAIR",
                     "structure_failure_line": 9.65, "provisional": True,
                     "confirmation_state": "probe_unconfirmed",
+                    "observation_score": 70, "observation_score_max": 90,
+                    "observation_score_status": "trial_unvalidated",
+                    "observation_score_components": {
+                        "trend_structure": 20, "risk_space": 15,
+                        "confirmation_distance": 15, "probe_quality": 10,
+                        "freshness": 10,
+                    },
                 },
                 "v3_result": {"provisional": True},
             }],
@@ -95,7 +102,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
         html = report.render_v4_html(payload)
 
         for rendered in (markdown, html):
-            self.assertIn("T1/T2 未排名观察（未确认、仅观察）", rendered)
+            self.assertIn("T1/T2 合并提前观察 Top 20（满分 90）", rendered)
             self.assertIn("试盘", rendered)
             self.assertIn("EARLY", rendered)
             self.assertIn("T1 / 待确认", rendered)
@@ -104,8 +111,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             self.assertIn("试盘高点×1.002（10.822）", rendered)
             self.assertIn("成交量/前5日均量 ≥ 1.15", rendered)
             self.assertIn("盘中临时，收盘待复评", rendered)
-            self.assertIn("未参与同类型 Top 20 排名", rendered)
-            self.assertIn("— / —（未评分）", rendered)
+            self.assertIn("70 / 90（试运行（未验证））", rendered)
         self.assertIn("试盘\\|股", markdown)
         self.assertIn("试盘|股", html)
 
@@ -124,7 +130,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             self.assertNotIn("等待收盘 > 试盘高点", rendered)
             self.assertNotIn("试盘未确认", rendered)
 
-    def test_early_scores_rank_within_type_cap_at_20_and_keep_missing_unranked(self):
+    def test_early_scores_merge_types_on_common_core_and_cap_total_at_20(self):
         payload = self.payload()
         payload["early_observations"] = []
         for signal_type, count in (("T1", 23), ("T2", 22)):
@@ -164,32 +170,60 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             "symbol": "NO-SCORE", "name": "未评分",
             "early_observation": {"signal_type": "T1", "probe_status": "candidate"},
         })
+        payload["early_observations"].append({
+            "symbol": "INVALID-SCORE", "name": "无效评分",
+            "early_observation": {
+                "signal_type": "T2", "probe_status": "candidate",
+                "observation_score": None,
+                "observation_score_status": "data_insufficient",
+                "observation_score_components": {
+                    "trend_structure": 25, "risk_space": 18,
+                    "confirmation_distance": 17, "probe_quality": 13,
+                    "freshness": 9,
+                },
+            },
+        })
 
         selection = report.select_early_observations(payload)
-        self.assertEqual([90, 100], [c["max_score"] for c in selection["cohorts"]["T1"]])
-        t1_100 = selection["cohorts"]["T1"][1]
-        t2_100 = selection["cohorts"]["T2"][0]
-        self.assertEqual(20, len(t1_100["items"]))
-        self.assertEqual(20, len(t2_100["items"]))
-        self.assertEqual("T1-00", t1_100["items"][0]["symbol"])
-        self.assertEqual("T2-00", t2_100["items"][0]["symbol"])
-        self.assertEqual(3, t1_100["omitted"])
-        self.assertEqual(2, t2_100["omitted"])
-        self.assertEqual("NO-SCORE", selection["unscored"][0]["symbol"])
+        self.assertEqual(90, selection["max_score"])
+        self.assertEqual(20, len(selection["items"]))
+        self.assertEqual("T1-00", selection["items"][0]["symbol"])
+        self.assertEqual("T2-00", selection["items"][1]["symbol"])
+        self.assertEqual(25, selection["omitted_by_limit"])
+        self.assertEqual(3, selection["unscored_total"])
+        self.assertEqual(
+            82, selection["items"][0]["early_observation"]["observation_score"])
+        self.assertNotIn(
+            "market_sector",
+            selection["items"][0]["early_observation"]["observation_score_components"],
+        )
 
         for rendered in (report.render_v4_markdown(payload), report.render_v4_html(payload)):
-            self.assertIn("T1 提前观察 Top 20（满分 90）", rendered)
-            self.assertIn("T1 提前观察 Top 20（满分 100）", rendered)
-            self.assertIn("T2 提前观察 Top 20（满分 100）", rendered)
-            self.assertIn("不同满分代表评分覆盖范围不同", rendered)
+            self.assertIn("T1/T2 合并提前观察 Top 20（满分 90）", rendered)
+            self.assertNotIn("T1 提前观察 Top 20", rendered)
+            self.assertNotIn("T2 提前观察 Top 20", rendered)
+            self.assertIn("统一使用五项共同分量", rendered)
+            self.assertIn("市场板块分不计入", rendered)
             self.assertIn("试运行阶段，尚未回测", rendered)
-            self.assertIn("T1/T2 分数可比性尚未验证", rendered)
-            self.assertIn("仅在同类型内排序", rendered)
+            self.assertIn("跨类型分数可比性尚未验证", rendered)
             self.assertIn("趋势结构 25", rendered)
-            self.assertIn("100 / 100（试运行（未验证））", rendered)
-            self.assertIn("未排名观察", rendered)
-            self.assertNotIn("T1观察20 (T1-20)", rendered)
-            self.assertNotIn("T2观察20 (T2-20)", rendered)
+            self.assertIn("82 / 90（试运行（未验证））", rendered)
+            self.assertNotIn("未排名观察", rendered)
+            self.assertNotIn("T1观察10 (T1-10)", rendered)
+            self.assertNotIn("T2观察10 (T2-10)", rendered)
+            self.assertIn("原始评分无效", rendered)
+
+    def test_all_unrankable_observations_show_count_without_a_table(self):
+        payload = self.payload()
+        observation = payload["early_observations"][0]["early_observation"]
+        observation["observation_score"] = None
+        observation["observation_score_status"] = "data_insufficient"
+
+        for rendered in (report.render_v4_markdown(payload), report.render_v4_html(payload)):
+            self.assertIn("T1/T2 提前观察评分（未确认、仅观察）", rendered)
+            self.assertIn("本次没有可排名候选；1 只", rendered)
+            self.assertNotIn("T1/T2 合并提前观察 Top 20", rendered)
+            self.assertNotIn("70 / 90", rendered)
 
     def test_diagnostics_keep_statuses_separate_and_deduplicate_reasons(self):
         for rendered in (report.render_v4_markdown(self.payload()),
