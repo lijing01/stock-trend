@@ -23,7 +23,8 @@ from analysis.wyckoff import (
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     _is_lps_pullback, _current_event, _tr_state,
     find_event_trading_range, evaluate_sos_range_causality,
-    filter_causal_sos_lineages,
+    evaluate_spring_range_causality, filter_causal_sos_lineages,
+    filter_causal_event_lineages,
     evaluate_confirmed_lps_health,
     evaluate_confirmed_spring_health, evaluate_confirmed_jac_health,
     LPS_EVENT_HEALTH_RULE_VERSION,
@@ -233,7 +234,7 @@ class TestConfirmedLpsHealth(unittest.TestCase):
             read_current_event_state(health_only), "state_unknown")
         self.assertIsNone(classify_buy_point_level(health_only))
 
-    def test_buy_level_state_prefers_short_term_over_fallback_payloads(self):
+    def test_buy_level_state_conflict_fails_closed(self):
         payload = {
             "short_term": {
                 "sub_phase": "lps", "signal_status": "confirmed",
@@ -243,9 +244,43 @@ class TestConfirmedLpsHealth(unittest.TestCase):
             "event_health": {"state": "state_unknown"},
         }
 
-        self.assertEqual(
-            read_current_event_state(payload), "confirmed_holding")
-        self.assertEqual(classify_buy_point_level(payload)["number"], 2)
+        self.assertEqual(read_current_event_state(payload), "state_unknown")
+        self.assertIsNone(classify_buy_point_level(payload))
+
+    def test_event_health_identity_conflict_fails_closed(self):
+        payload = {
+            "short_term": {
+                "event": "spring", "event_date": "20260110",
+                "signal_status": "confirmed", "current_state": "confirmed_holding",
+            },
+            "event_health": {
+                "state": "confirmed_holding",
+                "event_identity": {
+                    "event": "spring", "event_date": "20260109",
+                    "status": "confirmed",
+                },
+            },
+        }
+
+        self.assertEqual(read_current_event_state(payload), "state_unknown")
+
+    def test_legacy_single_state_remains_readable(self):
+        self.assertEqual(read_current_event_state({
+            "signal": {"current_state": "confirmed_holding"},
+        }), "confirmed_holding")
+
+    def test_nested_event_health_is_read_and_conflicts_fail_closed(self):
+        self.assertEqual(read_current_event_state({
+            "short_term": {
+                "event_health": {"state": "follow_through_weakened"},
+            },
+        }), "follow_through_weakened")
+        self.assertEqual(read_current_event_state({
+            "short_term": {
+                "current_state": "confirmed_holding",
+                "event_health": {"state": "failed_breakout"},
+            },
+        }), "state_unknown")
 
     def test_nonhealthy_lps_is_not_a_shared_buy_signal(self):
         for current_state in (
@@ -742,6 +777,57 @@ class TestSosLps(unittest.TestCase):
             "wyckoff_parent_sos_not_causal",
         )
 
+    def test_spring_range_causality_fails_closed_without_prefix_range(self):
+        ohlcv, _, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        event = {
+            "type": "spring", "event_index": 30,
+            "range_id": trading_range["id"], "breakout_atr": 2.0,
+        }
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[]):
+            result = evaluate_spring_range_causality(
+                event, trading_range, ohlcv,
+            )
+
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(
+            result["reason_code"], "wyckoff_spring_range_not_causal")
+
+    def test_spring_range_causality_accepts_event_time_range(self):
+        ohlcv, _, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        trading_range = dict(trading_range, resistance_idx=20)
+        event = {
+            "type": "spring", "event_index": 30,
+            "range_id": trading_range["id"], "breakout_atr": 2.0,
+        }
+        with patch("analysis.wyckoff.detect_trading_ranges",
+                   return_value=[trading_range]):
+            result = evaluate_spring_range_causality(
+                event, trading_range, ohlcv,
+            )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["reason_code"], "")
+
+    def test_rejected_spring_stays_in_history_but_not_current_events(self):
+        ohlcv, _, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        spring = {
+            "type": "spring", "event_index": 30,
+            "range_id": trading_range["id"], "breakout_atr": 2.0,
+        }
+        rejected = {
+            "status": "unknown",
+            "reason_code": "wyckoff_spring_range_not_causal",
+        }
+        with patch("analysis.wyckoff.evaluate_spring_range_causality",
+                   return_value=rejected):
+            current, rejected_types = filter_causal_event_lineages(
+                [spring], [trading_range], ohlcv,
+            )
+
+        self.assertEqual(current, [])
+        self.assertEqual(rejected_types, {"spring"})
+        self.assertEqual(spring["range_causality"], rejected)
+
     def test_lps_requires_shallow_low_volume_pullback(self):
         ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
         sos = {"event_index": 50, "detected_index": 51}
@@ -1183,6 +1269,39 @@ class TestMinorWyckoffStructure(unittest.TestCase):
         self.assertEqual(result["signal"]["current_state"], "structure_invalidated")
         self.assertFalse(result["entry_timing"]["executable"])
         self.assertIsNone(classify_buy_point_level(result))
+        self.assertFalse(is_buy_signal(result))
+
+    def test_noncausal_spring_is_history_only_and_cannot_drive_phase(self):
+        ohlcv, _, trading_range = self._event_fixture()
+        trading_range.update({"quality_score": 1.0})
+        spring = {
+            "type": "spring", "event_index": 38, "detected_index": 39,
+            "event_date": ohlcv["date"][38], "detected_date": ohlcv["date"][39],
+            "status": "confirmed", "age_bars": 2,
+            "structure_level": "minor", "range_id": "minor_10",
+            "confidence": 0.8, "breakout_atr": 0.5,
+        }
+        rejected = {
+            "status": "unknown",
+            "reason_code": "wyckoff_spring_range_not_causal",
+        }
+        with patch("analysis.wyckoff.detect_trading_ranges",
+                   return_value=[trading_range]), \
+                patch("analysis.wyckoff.detect_wyckoff_events",
+                      return_value=[spring]), \
+                patch("analysis.wyckoff.evaluate_spring_range_causality",
+                      return_value=rejected), \
+                patch("analysis.wyckoff._classify_range_phase",
+                      return_value=((PHASE_ACCUMULATION, SUB_SPRING, 0.8), [])):
+            result = analyze_kline_dict({
+                "meta": {"ts_code": "TEST"},
+                "data": self._rows_from_ohlcv(ohlcv),
+            })
+
+        self.assertEqual(result["event_history"][0]["range_causality"], rejected)
+        self.assertEqual(result["phase"]["primary"], PHASE_UNKNOWN)
+        self.assertEqual(
+            result["signal"]["reason_code"], "wyckoff_spring_range_not_causal")
         self.assertFalse(is_buy_signal(result))
 
     def test_confirmed_jac_health_drives_retest_and_sticky_failure(self):

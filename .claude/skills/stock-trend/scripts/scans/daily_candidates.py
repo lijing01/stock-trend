@@ -48,6 +48,7 @@ from analysis.wyckoff import (
     classify_buy_point_level,
     classify_entry_timing,
     format_minor_phase_text,
+    read_current_event_state,
 )
 from analysis.market_regime import load_recommendation_context
 from analysis.market_style import annotate_candidates_for_shadow
@@ -198,17 +199,7 @@ def _post_close_kline_unconfirmed(item):
 
 def _wyckoff_current_state(wyckoff):
     """Read additive event health without inventing state for legacy rows."""
-    if not isinstance(wyckoff, dict):
-        return "not_evaluated"
-    short = wyckoff.get("short_term") or {}
-    signal = wyckoff.get("signal") or {}
-    health = wyckoff.get("event_health") or {}
-    return (
-        short.get("current_state")
-        or signal.get("current_state")
-        or health.get("state")
-        or "not_evaluated"
-    )
+    return read_current_event_state(wyckoff) or "not_evaluated"
 
 
 def apply_buy_point_priority(item, priority_bonuses=None):

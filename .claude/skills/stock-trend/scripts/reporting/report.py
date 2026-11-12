@@ -36,6 +36,7 @@ ASSETS_DIR = SCRIPT_DIR.parent / "assets"
 
 from core.cache_utils import safe_float as _safe_float
 from core.eastmoney_utils import latest_kline_record
+from analysis.wyckoff import read_current_event_state
 
 
 def render_template(template_str, context):
@@ -373,15 +374,7 @@ def _wyckoff_event_chain(wyckoff_data):
 
 
 def _wyckoff_current_state(wyckoff_data):
-    short_term = wyckoff_data.get("short_term") or {}
-    signal = wyckoff_data.get("signal") or {}
-    event_health = wyckoff_data.get("event_health") or short_term.get("event_health") or signal.get("event_health") or {}
-    return (
-        short_term.get("current_state")
-        or signal.get("current_state")
-        or event_health.get("state")
-        or "not_evaluated"
-    )
+    return read_current_event_state(wyckoff_data) or "not_evaluated"
 
 
 def _wyckoff_event_type(wyckoff_data):
@@ -1079,10 +1072,13 @@ def build_context(args):
             historical_label += f"（事件日 {event_date}"
             historical_label += f"，确认日 {confirmation_date}）" if confirmation_date else "）"
         current_state = _wyckoff_current_state(wyckoff_data)
-        event_health = wyckoff_data.get("event_health") or short_term.get("event_health") or {}
+        event_health = (wyckoff_data.get("event_health") or short_term.get("event_health")
+                        or (wyckoff_data.get("signal") or {}).get("event_health") or {})
         event_type = _wyckoff_event_type(wyckoff_data)
         health_label = _wyckoff_health_label(current_state, event_type)
-        if event_health.get("reason_code"):
+        if current_state == "state_unknown" and event_health.get("state") not in (None, "", "state_unknown"):
+            health_label += "（状态字段冲突或事件身份不匹配）"
+        elif event_health.get("reason_code"):
             health_label += f"（{event_health['reason_code']}）"
         if event_health.get("evaluated_through"):
             health_label += f"；评估至 {event_health['evaluated_through']}"

@@ -266,21 +266,71 @@ BUY_POINT_LEVELS = {
 
 
 def read_current_event_state(wyckoff: dict | None) -> str:
-    """Read additive event health from canonical then degraded payloads."""
+    """Read event health conservatively across current and legacy payloads.
+
+    Fresh analysis writes the same state to all three payloads. Older cached
+    rows may carry only one of them, so a single available value remains
+    readable. Explicitly conflicting states or a health payload bound to a
+    different verifiable event fail closed instead of trusting field order.
+    """
     if not isinstance(wyckoff, dict):
         return ""
+    short_payload = wyckoff.get("short_term")
+    nested_health = (short_payload.get("event_health")
+                     if isinstance(short_payload, dict) else None)
+    signal_payload = wyckoff.get("signal")
+    signal_health = (signal_payload.get("event_health")
+                     if isinstance(signal_payload, dict) else None)
     sources = (
-        (wyckoff.get("short_term"), "current_state"),
-        (wyckoff.get("signal"), "current_state"),
+        (short_payload, "current_state"),
+        (signal_payload, "current_state"),
+        (nested_health, "state"),
+        (signal_health, "state"),
         (wyckoff.get("event_health"), "state"),
     )
+    states = []
     for payload, key in sources:
         if not isinstance(payload, dict):
             continue
         state = str(payload.get(key) or "").strip().lower()
         if state:
-            return state
-    return ""
+            states.append(state)
+    if not states:
+        return ""
+    if len(set(states)) > 1:
+        return "state_unknown"
+
+    health_payloads = [
+        payload for payload in (nested_health, signal_health, wyckoff.get("event_health"))
+        if isinstance(payload, dict)
+    ]
+    for health in health_payloads:
+        identity = health.get("event_identity")
+        if not isinstance(identity, dict):
+            continue
+        short = wyckoff.get("short_term")
+        signal = wyckoff.get("signal")
+        short = short if isinstance(short, dict) else {}
+        signal = signal if isinstance(signal, dict) else {}
+        current_fields = {
+            "event": (short.get("event"), signal.get("event")),
+            "event_date": (short.get("event_date"), signal.get("event_date")),
+            "confirmation_date": (
+                short.get("confirmation_date"), signal.get("detected_date")),
+            "range_id": (signal.get("range_id"),),
+            "status": (short.get("signal_status"), signal.get("status")),
+        }
+        for key, candidates in current_fields.items():
+            expected = str(identity.get(key) or "").strip().lower()
+            if not expected:
+                continue
+            actual = {
+                str(value).strip().lower() for value in candidates
+                if value is not None and str(value).strip()
+            }
+            if actual and (len(actual) > 1 or expected not in actual):
+                return "state_unknown"
+    return states[0]
 
 
 def classify_buy_point_level(wyckoff: dict | None) -> dict | None:
@@ -518,21 +568,25 @@ def find_event_trading_range(event: dict | None,
     )
 
 
-def evaluate_sos_range_causality(event: dict | None,
-                                 event_range: dict | None,
-                                 ohlcv: dict) -> dict:
-    """Verify that an SOS range was observable at the event timestamp.
+def evaluate_event_range_causality(event: dict | None,
+                                   event_range: dict | None,
+                                   ohlcv: dict,
+                                   expected_type: str) -> dict:
+    """Verify that an event's range was observable at its timestamp.
 
     The main analyzer builds its range set from the completed input window.
-    Rebuilding only the SOS event prefix is cheap and prevents a range that
+    Rebuilding only the event prefix is cheap and prevents a range that
     depends on later swing points from becoming a current signal. Historical
     records remain available with an explicit failed-closed diagnostic.
     """
+    reason_prefix = f"wyckoff_{expected_type}_range"
     result = {
         "status": "unknown",
-        "reason_code": "wyckoff_sos_range_causality_unknown",
+        "reason_code": f"{reason_prefix}_causality_unknown",
     }
-    if not event or not event_range:
+    if (not isinstance(event, dict)
+            or event.get("type") != expected_type
+            or not isinstance(event_range, dict)):
         return result
     event_index = event.get("event_index")
     if (not isinstance(event_index, int)
@@ -575,7 +629,7 @@ def evaluate_sos_range_causality(event: dict | None,
             matching_range = candidate
             break
     if matching_range is None:
-        result["reason_code"] = "wyckoff_sos_range_not_causal"
+        result["reason_code"] = f"{reason_prefix}_not_causal"
         return result
     return {
         "status": "ready",
@@ -585,6 +639,24 @@ def evaluate_sos_range_causality(event: dict | None,
         "resistance": matching_range.get("resistance"),
         "evaluated_at_index": event_index,
     }
+
+
+def evaluate_sos_range_causality(event: dict | None,
+                                 event_range: dict | None,
+                                 ohlcv: dict) -> dict:
+    """Verify that an SOS range was observable at the event timestamp."""
+    return evaluate_event_range_causality(
+        event, event_range, ohlcv, "sos",
+    )
+
+
+def evaluate_spring_range_causality(event: dict | None,
+                                    event_range: dict | None,
+                                    ohlcv: dict) -> dict:
+    """Verify that Spring support belonged to an observable event-time box."""
+    return evaluate_event_range_causality(
+        event, event_range, ohlcv, "spring",
+    )
 
 
 def filter_causal_sos_lineages(event_history: list[dict],
@@ -625,6 +697,31 @@ def filter_causal_sos_lineages(event_history: list[dict],
             }
         current_events.append(event)
     return current_events, bool(rejected_sos)
+
+
+def filter_causal_event_lineages(event_history: list[dict],
+                                  ranges: list[dict],
+                                  ohlcv: dict) -> tuple[list[dict], set[str]]:
+    """Keep history auditable while excluding non-causal current lineages."""
+    current_events, rejected_sos = filter_causal_sos_lineages(
+        event_history, ranges, ohlcv,
+    )
+    rejected_types = {"sos"} if rejected_sos else set()
+    accepted = []
+    for event in current_events:
+        if event.get("type") != "spring":
+            accepted.append(event)
+            continue
+        event_range = find_event_trading_range(event, ranges)
+        causality = evaluate_spring_range_causality(
+            event, event_range, ohlcv,
+        )
+        event["range_causality"] = causality
+        if causality.get("status") == "ready":
+            accepted.append(event)
+        else:
+            rejected_types.add("spring")
+    return accepted, rejected_types
 
 
 def _event_health_identity(event: dict | None) -> dict:
@@ -2288,7 +2385,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
                 seen_events.add(key)
                 event_history.append(event)
     event_history.sort(key=lambda event: (event["event_index"], event["type"]))
-    current_event_history, rejected_sos = filter_causal_sos_lineages(
+    current_event_history, rejected_event_types = filter_causal_event_lineages(
         event_history, ranges, ohlcv,
     )
     active_event = _current_event(current_event_history)
@@ -2316,14 +2413,20 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "event": active_event["type"],
         }
 
-    if rejected_sos and not active_event and sub_phase == SUB_JAC:
+    rejected_phase_reason = ""
+    if not active_event and sub_phase == SUB_JAC and "sos" in rejected_event_types:
+        rejected_phase_reason = "wyckoff_sos_range_not_causal"
+    elif (not active_event and sub_phase == SUB_SPRING
+          and "spring" in rejected_event_types):
+        rejected_phase_reason = "wyckoff_spring_range_not_causal"
+    if rejected_phase_reason:
         phase, sub_phase, confidence, trigger_idx = PHASE_UNKNOWN, "", 0.0, None
         signal = {
             "status": "unknown",
             "age_bars": 0,
             "structure_level": "",
             "range_id": "",
-            "reason_code": "wyckoff_sos_range_not_causal",
+            "reason_code": rejected_phase_reason,
         }
 
     confirmed_event = _current_event([

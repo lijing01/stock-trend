@@ -2982,11 +2982,10 @@ class TestRunPhase2Funnel(unittest.TestCase):
         self.assertEqual(context["as_of_index"], 59)
 
         wk["signal"]["event_date"] = "20260802"
-        conflicting_item = sc.run_phase2(
+        conflicting_items = sc.run_phase2(
             [_make_candidate("600001")], enable_wyckoff=True,
-            include_phase_d_lps_context=True)[0]
-        self.assertFalse(conflicting_item["wyckoff"][
-            "_phase_d_lps_context"]["short_term"]["identity_complete"])
+            include_phase_d_lps_context=True)
+        self.assertEqual(conflicting_items, [])
         wk["signal"]["event_date"] = "20260801"
         wk["event_history"][0]["status"] = "candidate"
         status_conflict_item = sc.run_phase2(
