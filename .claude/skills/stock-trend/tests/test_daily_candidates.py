@@ -4135,6 +4135,30 @@ class TestRecommendationPolicy(unittest.TestCase):
         self.assertNotIn("阶段D：LPS已确认（", html)
         self.assertNotIn("wyckoff-observation-buy-level-2", html)
 
+    def test_stale_jac_is_labeled_historical_without_buy_level_badge(self):
+        item = candidate("stale-jac")
+        item["wyckoff"]["sub_phase"] = "跃过小溪（JAC）"
+        item["wyckoff"]["short_term"] = {
+            "sub_phase": "jac",
+            "signal_status": "confirmed",
+            "signal_age_bars": 7,
+            "post_lps_reconfirmation": True,
+        }
+        item["wyckoff"]["entry_timing"] = {
+            "status": "entry_stale",
+            "reason_code": "wyckoff_signal_stale",
+            "executable": False,
+            "entry_timing_score": 0,
+        }
+
+        html = dc._html_candidate_rows(
+            [item], buy_level_display="observation")
+        diagnostic = _candidate_diagnostic_text(item)
+
+        self.assertIn("历史跃过小溪（JAC）（时机已过）", html)
+        self.assertNotIn("wyckoff-observation-buy-level-3", html)
+        self.assertIn("历史JAC已确认；当前入场时机已过", diagnostic)
+
     def test_observation_level_three_requires_post_lps_reconfirmation(self):
         first_jac = candidate("first-jac")
         first_jac["wyckoff"]["short_term"] = {

@@ -191,6 +191,7 @@ DEFAULT_PHASE_SCORE = 0.0
 
 # Swing detection constants
 SWING_MIN_HEIGHT_ATR_RATIO = 0.5
+SWING_CONFIRMATION_BARS = 2
 VOLUME_RATIO_LOOKBACK = 50
 
 # Climax detection constants
@@ -515,6 +516,115 @@ def find_event_trading_range(event: dict | None,
          if isinstance(item, dict) and item.get("id") == range_id),
         None,
     )
+
+
+def evaluate_sos_range_causality(event: dict | None,
+                                 event_range: dict | None,
+                                 ohlcv: dict) -> dict:
+    """Verify that an SOS range was observable at the event timestamp.
+
+    The main analyzer builds its range set from the completed input window.
+    Rebuilding only the SOS event prefix is cheap and prevents a range that
+    depends on later swing points from becoming a current signal. Historical
+    records remain available with an explicit failed-closed diagnostic.
+    """
+    result = {
+        "status": "unknown",
+        "reason_code": "wyckoff_sos_range_causality_unknown",
+    }
+    if not event or not event_range:
+        return result
+    event_index = event.get("event_index")
+    if (not isinstance(event_index, int)
+            or event_index < 14
+            or event_index >= len(ohlcv.get("close", []))):
+        return result
+    support = _safe_float(event_range.get("support"))
+    resistance = _safe_float(event_range.get("resistance"))
+    if support is None or resistance is None or resistance <= support:
+        return result
+
+    prefix = {
+        key: list(ohlcv[key][:event_index + 1])
+        for key in ("open", "high", "low", "close", "volume", "date")
+    }
+    atr_values = compute_atr(prefix["high"], prefix["low"], prefix["close"])
+    swings = detect_swing_points(
+        prefix["close"], prefix["high"], prefix["low"],
+        prefix["volume"], atr_values,
+    )
+    prefix_ranges = detect_trading_ranges(swings, prefix["close"], atr_values)
+    breakout_atr = _safe_float(event.get("breakout_atr"))
+    tolerance = max(
+        (breakout_atr or 0.0) * RANGE_CLUSTER_TOLERANCE_ATR,
+        resistance * 0.005,
+    )
+    matching_range = None
+    for candidate in prefix_ranges:
+        candidate_support = _safe_float(candidate.get("support"))
+        candidate_resistance = _safe_float(candidate.get("resistance"))
+        if candidate_support is None or candidate_resistance is None:
+            continue
+        established_idx = max(
+            int(candidate.get("support_idx", 0) or 0),
+            int(candidate.get("resistance_idx", 0) or 0),
+        ) + SWING_CONFIRMATION_BARS
+        if (abs(candidate_support - support) <= tolerance
+                and abs(candidate_resistance - resistance) <= tolerance
+                and event_index > established_idx):
+            matching_range = candidate
+            break
+    if matching_range is None:
+        result["reason_code"] = "wyckoff_sos_range_not_causal"
+        return result
+    return {
+        "status": "ready",
+        "reason_code": "",
+        "range_id": matching_range.get("id", ""),
+        "support": matching_range.get("support"),
+        "resistance": matching_range.get("resistance"),
+        "evaluated_at_index": event_index,
+    }
+
+
+def filter_causal_sos_lineages(event_history: list[dict],
+                               ranges: list[dict],
+                               ohlcv: dict) -> tuple[list[dict], bool]:
+    """Exclude non-causal SOS events and every BU/LPS derived from them."""
+    accepted_sos = set()
+    rejected_sos = set()
+    for event in event_history:
+        if event.get("type") != "sos":
+            continue
+        identity = (event.get("range_id"), event.get("event_index"))
+        event_range = find_event_trading_range(event, ranges)
+        causality = evaluate_sos_range_causality(event, event_range, ohlcv)
+        event["range_causality"] = causality
+        if causality.get("status") == "ready":
+            accepted_sos.add(identity)
+        else:
+            rejected_sos.add(identity)
+
+    current_events = []
+    for event in event_history:
+        identity = (event.get("range_id"), event.get("event_index"))
+        if event.get("type") == "sos" and identity in rejected_sos:
+            continue
+        if event.get("parent_event") == "sos":
+            parent_identity = (
+                event.get("range_id"), event.get("parent_event_index"),
+            )
+            if parent_identity not in accepted_sos:
+                event["parent_range_causality"] = {
+                    "status": "unknown",
+                    "reason_code": "wyckoff_parent_sos_not_causal",
+                }
+                continue
+            event["parent_range_causality"] = {
+                "status": "ready", "reason_code": "",
+            }
+        current_events.append(event)
+    return current_events, bool(rejected_sos)
 
 
 def _event_health_identity(event: dict | None) -> dict:
@@ -1674,7 +1784,16 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
         ohlcv["volume"], ohlcv["date"],
     )
     support, resistance = trading_range["support"], trading_range["resistance"]
-    start = max(trading_range.get("support_idx", 0), 14)
+    # The standard swing detector confirms a pivot two bars after its price
+    # occurs.  Do not emit an event before the latest selected boundary pivot
+    # could have been observed.  This is a conservative timing guard; range
+    # construction still uses the completed analysis window.
+    latest_boundary_idx = max(
+        int(trading_range.get("support_idx", 0) or 0),
+        int(trading_range.get("resistance_idx", 0) or 0),
+    )
+    range_established_idx = latest_boundary_idx + SWING_CONFIRMATION_BARS
+    start = max(int(trading_range.get("support_idx", 0) or 0), 14)
     events = []
     for i in range(start, len(closes)):
         atr = atr_values[i] or 0.0
@@ -1703,7 +1822,18 @@ def detect_wyckoff_events(ohlcv: dict, atr_values: list,
         # SOS: breakout, wide spread, volume expansion and high close.
         spread = highs[i] - lows[i]
         close_position = (closes[i] - lows[i]) / spread if spread > 0 else 0.0
-        breakout = closes[i] > resistance + max(atr * 0.3, resistance * 0.005)
+        breakout_floor = resistance + max(atr * 0.3, resistance * 0.005)
+        # SOS is a transition through the creek, not every strong bar that is
+        # already above an old creek.  A later SOS requires the immediately
+        # preceding close to have returned to the frozen resistance; merely
+        # drifting inside the breakout buffer does not reset the lifecycle.
+        prior_close = _safe_float(closes[i - 1]) if i > 0 else None
+        breakout = (
+            i > range_established_idx
+            and closes[i] > breakout_floor
+            and prior_close is not None
+            and prior_close <= resistance
+        )
         # Wilder ATR is less sensitive to the latest shock than the former
         # SMA, so keep a strong-spread requirement without making a valid
         # breakout fail by a few ticks.
@@ -2158,7 +2288,10 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
                 seen_events.add(key)
                 event_history.append(event)
     event_history.sort(key=lambda event: (event["event_index"], event["type"]))
-    active_event = _current_event(event_history)
+    current_event_history, rejected_sos = filter_causal_sos_lineages(
+        event_history, ranges, ohlcv,
+    )
+    active_event = _current_event(current_event_history)
     if active_event:
         if active_event["type"] == "spring":
             phase, sub_phase = PHASE_ACCUMULATION, SUB_SPRING
@@ -2183,11 +2316,23 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
             "event": active_event["type"],
         }
 
+    if rejected_sos and not active_event and sub_phase == SUB_JAC:
+        phase, sub_phase, confidence, trigger_idx = PHASE_UNKNOWN, "", 0.0, None
+        signal = {
+            "status": "unknown",
+            "age_bars": 0,
+            "structure_level": "",
+            "range_id": "",
+            "reason_code": "wyckoff_sos_range_not_causal",
+        }
+
     confirmed_event = _current_event([
-        event for event in event_history if event.get("status") == "confirmed"
+        event for event in current_event_history
+        if event.get("status") == "confirmed"
     ])
     candidate_event = _current_event([
-        event for event in event_history if event.get("status") == "candidate"
+        event for event in current_event_history
+        if event.get("status") == "candidate"
     ])
     current_state = "not_evaluated"
     event_health = {
@@ -2214,7 +2359,9 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         current_state = event_health["state"]
         signal["current_state"] = current_state
         signal["state"] = current_state
-    tr_state = _tr_state(trading_range, closes, atr_values[-1] or 0.0, event_history)
+    tr_state = _tr_state(
+        trading_range, closes, atr_values[-1] or 0.0, current_event_history,
+    )
     # Historical SOS confirmation must not override the current relationship
     # with the box.  A pullback to the former resistance is Phase D territory
     # until a low-volume LPS/BU or renewed acceptance is observed.
@@ -2317,7 +2464,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         sub_phase,
         signal.get("status", "none"),
         signal.get("age_bars"),
-        _is_post_lps_reconfirmation(active_event, event_history),
+        _is_post_lps_reconfirmation(active_event, current_event_history),
         closes[-1],
         (trigger or {}).get("close"),
         atr_values[-1],
@@ -2338,7 +2485,7 @@ def analyze_kline_dict(kline_data: dict | None) -> dict:
         "current_state": current_state,
         "event_health": event_health,
         "post_lps_reconfirmation": _is_post_lps_reconfirmation(
-            active_event, event_history),
+            active_event, current_event_history),
         "trigger": trigger,
         "entry_timing": entry_timing,
         "range_level": (trading_range or {}).get("level", ""),

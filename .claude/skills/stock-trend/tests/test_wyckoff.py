@@ -22,7 +22,9 @@ from analysis.wyckoff import (
     extract_ohlcv, _safe_float, _ma_of_last_n, _find_first_breakout_bar,
     _route_price_location, _choose_range_phase, detect_wyckoff_events,
     _is_lps_pullback, _current_event, _tr_state,
-    find_event_trading_range, evaluate_confirmed_lps_health,
+    find_event_trading_range, evaluate_sos_range_causality,
+    filter_causal_sos_lineages,
+    evaluate_confirmed_lps_health,
     evaluate_confirmed_spring_health, evaluate_confirmed_jac_health,
     LPS_EVENT_HEALTH_RULE_VERSION,
     is_buy_point, is_buy_signal, is_executable_buy_signal,
@@ -623,6 +625,122 @@ class TestSosLps(unittest.TestCase):
         self.assertEqual(result["phase"]["primary_sub_phase"], SUB_LPS)
         self.assertEqual(result["phase"]["minor_phase"]["code"], "D")
         self.assertEqual(result["signal"]["event"], "lps")
+
+    def test_sos_requires_range_to_exist_before_breakout(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        # A pivot at 49 is not observable until two later bars have closed, so
+        # the otherwise-qualified breakout at 50 cannot use this range.
+        trading_range["resistance_idx"] = 49
+
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+
+        self.assertFalse(any(event["type"] == "sos" for event in events))
+
+    def test_sos_is_not_repeated_while_price_remains_above_old_range(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        # The stock was already accepted above this old range before the two
+        # later wide, high-volume bars.  Neither bar is a new creek crossing.
+        for index in range(40, 50):
+            ohlcv["open"][index], ohlcv["low"][index] = 111.5, 111.0
+            ohlcv["close"][index], ohlcv["high"][index] = 112.0, 112.5
+        ohlcv["open"][50], ohlcv["low"][50] = 112.0, 111.5
+        ohlcv["close"][50], ohlcv["high"][50] = 113.0, 114.0
+        ohlcv["open"][51], ohlcv["low"][51] = 113.0, 112.5
+        ohlcv["close"][51], ohlcv["high"][51] = 114.0, 115.0
+        ohlcv["volume"][50] = ohlcv["volume"][51] = 160.0
+
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+
+        self.assertFalse(any(event["type"] == "sos" for event in events))
+
+    def test_sos_can_recur_after_close_returns_to_range(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        # Preserve the first confirmed breakout at 50, then return through the
+        # frozen threshold before a second independently confirmed crossing.
+        ohlcv["close"][52], ohlcv["low"][52] = 109.9, 109.6
+        ohlcv["open"][53], ohlcv["low"][53] = 110.0, 109.8
+        ohlcv["close"][53], ohlcv["high"][53] = 113.0, 114.0
+        ohlcv["volume"][53] = 160.0
+        ohlcv["open"][54], ohlcv["low"][54] = 112.5, 112.0
+        ohlcv["close"][54], ohlcv["high"][54] = 112.8, 113.5
+
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+        sos_events = [event for event in events if event["type"] == "sos"]
+
+        self.assertEqual([event["event_index"] for event in sos_events], [50, 53])
+        self.assertTrue(all(event["status"] == "confirmed" for event in sos_events))
+
+    def test_breakout_buffer_does_not_reset_sos_lifecycle(self):
+        ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        # With ATR=2 the breakout floor is 110.6. A close at 110.2 is below
+        # that floor but still above the 110 resistance, so it is not a return
+        # to the range and must not permit a second SOS.
+        ohlcv["close"][52], ohlcv["low"][52] = 110.2, 109.8
+        ohlcv["open"][53], ohlcv["low"][53] = 110.2, 109.9
+        ohlcv["close"][53], ohlcv["high"][53] = 113.0, 114.0
+        ohlcv["volume"][53] = 160.0
+        ohlcv["open"][54], ohlcv["low"][54] = 112.5, 112.0
+        ohlcv["close"][54], ohlcv["high"][54] = 112.8, 113.5
+
+        events = detect_wyckoff_events(ohlcv, atr, trading_range)
+        sos_events = [event for event in events if event["type"] == "sos"]
+
+        self.assertEqual([event["event_index"] for event in sos_events], [50])
+
+    def test_sos_range_causality_fails_closed_without_prefix_range(self):
+        ohlcv, _, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        event = {
+            "type": "sos", "event_index": 50, "range_id": trading_range["id"],
+            "breakout_atr": 2.0,
+        }
+        with patch("analysis.wyckoff.detect_trading_ranges", return_value=[]):
+            result = evaluate_sos_range_causality(event, trading_range, ohlcv)
+
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["reason_code"], "wyckoff_sos_range_not_causal")
+
+    def test_rejected_sos_excludes_derived_bu_and_lps(self):
+        ohlcv, _, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()
+        history = [
+            {
+                "type": "spring", "event_index": 30,
+                "range_id": trading_range["id"],
+            },
+            {
+                "type": "sos", "event_index": 50,
+                "range_id": trading_range["id"],
+            },
+            {
+                "type": "bu", "event_index": 52,
+                "range_id": trading_range["id"],
+                "parent_event": "sos", "parent_event_index": 50,
+            },
+            {
+                "type": "lps", "event_index": 52,
+                "range_id": trading_range["id"],
+                "parent_event": "sos", "parent_event_index": 50,
+            },
+        ]
+        rejected = {
+            "status": "unknown",
+            "reason_code": "wyckoff_sos_range_not_causal",
+        }
+        with patch("analysis.wyckoff.evaluate_sos_range_causality",
+                   return_value=rejected):
+            current, had_rejection = filter_causal_sos_lineages(
+                history, [trading_range], ohlcv,
+            )
+
+        self.assertTrue(had_rejection)
+        self.assertEqual([event["type"] for event in current], ["spring"])
+        self.assertEqual(
+            history[2]["parent_range_causality"]["reason_code"],
+            "wyckoff_parent_sos_not_causal",
+        )
+        self.assertEqual(
+            history[3]["parent_range_causality"]["reason_code"],
+            "wyckoff_parent_sos_not_causal",
+        )
 
     def test_lps_requires_shallow_low_volume_pullback(self):
         ohlcv, atr, trading_range = self._ohlcv_with_sos_bu_and_lps_confirmation()

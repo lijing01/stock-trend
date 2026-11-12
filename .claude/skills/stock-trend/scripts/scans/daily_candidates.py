@@ -3057,6 +3057,9 @@ def _candidate_diagnostic_text(item):
     if timing.get("status") != "not_evaluated":
         timing_label = REASON_LABELS.get(
             timing.get("reason_code"), timing.get("status", "unknown"))
+        if (timing.get("status") == "entry_stale"
+                and sub_phase in {"jac", "跃过小溪（jac）"}):
+            parts.append("维科夫状态：历史JAC已确认；当前入场时机已过")
         distance = ""
         if timing.get("trigger_extension_atr") is not None:
             distance += f"；距触发 {timing['trigger_extension_atr']:+.2f} ATR"
@@ -3150,6 +3153,9 @@ def _wyckoff_buy_level(wyckoff):
     """Return the confirmed execution level used by the actionable HTML table."""
     if _wyckoff_current_state(wyckoff) in NON_HEALTHY_EVENT_STATES:
         return None
+    if "entry_timing" in wyckoff \
+            and classify_entry_timing(wyckoff).get("executable") is not True:
+        return None
     level = classify_buy_point_level(wyckoff)
     if level is None:
         return None
@@ -3157,6 +3163,20 @@ def _wyckoff_buy_level(wyckoff):
         **level,
         "css_class": f"wyckoff-buy-level-{level['number']}",
     }
+
+
+def _buy_point_display_text(wyckoff):
+    """Describe the signal without presenting blocked timing as a live buy point."""
+    short = wyckoff.get("short_term") or {}
+    sub_phase = wyckoff.get("sub_phase") or short.get("sub_phase") or "-"
+    if "entry_timing" not in wyckoff:
+        return str(sub_phase)
+    timing = classify_entry_timing(wyckoff)
+    if timing.get("status") == "entry_stale":
+        return f"历史{sub_phase}（时机已过）"
+    if timing.get("executable") is not True:
+        return f"{sub_phase}（当前不可执行）"
+    return str(sub_phase)
 
 
 def _markdown_cell(value):
@@ -3194,7 +3214,7 @@ def _append_candidate_table(lines, title, items, empty_text, *, intro=None):
         timing_text = f"时机 {timing.get('status', 'unknown')}"
         if timing.get("trigger_extension_atr") is not None:
             timing_text += f"；距触发 {timing['trigger_extension_atr']:+.2f}ATR"
-        buy_text = (f"{wyckoff.get('sub_phase', '-')}；{evidence['reward_reason']}；"
+        buy_text = (f"{_buy_point_display_text(wyckoff)}；{evidence['reward_reason']}；"
                     f"事件 {evidence['event_date']}；确认 {evidence['confirmation_date']}；"
                     f"年龄 {evidence['signal_age_bars'] if evidence['age_status'] == 'known' else '未知'}；"
                     f"{evidence['current_status']}；{timing_text}")
@@ -4625,7 +4645,7 @@ def _html_candidate_rows(items, buy_level_display="none"):
             f"{buy_level_badge}</td>"
             f"<td>{_sector_html(item)}</td>"
             f"<td>{_minor_phase_html(wyckoff)}</td>"
-            f"<td><span class='buy'>{wyckoff.get('sub_phase', '-')}</span></td>"
+            f"<td><span class='buy'>{escape(_buy_point_display_text(wyckoff))}</span></td>"
             f"<td>{wyckoff.get('confidence', 0):.0%}</td>"
             f"<td><strong>优先 {candidate_rank_score(item):.1f}</strong><br>"
             f"<small>原始 {item['composite_score']:.1f} · "
