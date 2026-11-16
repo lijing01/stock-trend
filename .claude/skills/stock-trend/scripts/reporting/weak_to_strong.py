@@ -6,9 +6,12 @@ from html import escape
 DISPLAY_LIMIT = 30
 EARLY_DISPLAY_LIMIT = 20
 V4_TYPES = (
-    ("T1", "T1 新确认：支撑位或 MA20 附近的下影线试盘"),
     ("T2", "T2 新确认：放量下跌后的缩量回踩试盘"),
+    ("T1", "T1 新确认：支撑位或 MA20 附近的下影线试盘"),
 )
+TYPE_DISPLAY_PRIORITY = tuple(signal_type for signal_type, _label in V4_TYPES)
+EARLY_TIE_PRIORITY = {signal_type: rank
+                      for rank, signal_type in enumerate(TYPE_DISPLAY_PRIORITY)}
 V4_HEADERS = [
     "类型内名次", "名称/代码", "V4 / V3 分", "预期净收益", "估计胜率",
     "信号日 / 特征日", "模型版本 / 哈希", "状态",
@@ -147,8 +150,9 @@ def select_early_observations(payload, limit=EARLY_DISPLAY_LIMIT):
         observation = _mapping(item.get("early_observation")) or item
         age = _number(observation.get("candidate_age_sessions"))
         symbol = str(item.get("symbol") or item.get("code") or item.get("ts_code") or "")
-        return (-score, -len(components), age if age is not None else float("inf"),
-                symbol, source_index)
+        signal_type = _early_type(item)
+        return (-score, -len(components), EARLY_TIE_PRIORITY.get(signal_type, 99),
+                age if age is not None else float("inf"), symbol, source_index)
 
     scored.sort(key=scored_key)
     return {
@@ -353,7 +357,13 @@ def build_v4_display_selection(payload, limit=DISPLAY_LIMIT):
             })
     return {
         "schema_version": "weak-to-strong-display-selection/v4",
-        "limit": limit, "stats": stats, "items": items,
+        "limit": limit,
+        "type_priority": list(TYPE_DISPLAY_PRIORITY),
+        "priority_policy": "display_capacity_only_user_preference",
+        "early_observation_order": (
+            "common_core_score_desc_then_t2_tie_priority_then_age_then_symbol"
+        ),
+        "stats": stats, "items": items,
     }
 
 
@@ -418,7 +428,7 @@ def render_v4_markdown(payload):
     selected, stats = select_v4_rows(payload)
     lines = [
         "## 日线弱转强 V4", "",
-        "T1 与 T2 分组独立排序；排序依据为预期净收益，其次为估计胜率。", "",
+        "T1 与 T2 分组独立排序；组内依据为预期净收益，其次为估计胜率。展示顺序和总名额优先 T2，这是用户设定的观察偏好，不代表 T1/T2 跨类型收益或胜率可直接比较。", "",
         _v4_summary(payload, stats), "", _selection_summary(stats),
     ]
     for note in _v4_context(payload):
@@ -446,7 +456,7 @@ def render_v4_markdown(payload):
             "", "### T1/T2 提前观察评分（未确认、仅观察）", "",
             "观察分处于试运行阶段，尚未回测；合并 T1/T2 排序，但跨类型分数可比性尚未验证。该分数只安排观察优先级，不表示上涨概率，不参与正式推荐。", "",
             f"#### T1/T2 合并提前观察 Top 20（满分 {early['max_score']:g}）", "",
-            "合并排序统一使用五项共同分量（趋势结构、风险空间、确认距离、试探质量、新鲜度），满分 90；市场板块分不计入。五项任一缺失均不参与排名。", "",
+            "合并排序统一使用五项共同分量（趋势结构、风险空间、确认距离、试探质量、新鲜度），满分 90；市场板块分不计入。五项任一缺失均不参与排名；观察分相同时优先 T2，这是用户设定的观察偏好，不代表跨类型胜率更高。", "",
             "| " + " | ".join(EARLY_HEADERS) + " |",
             "| " + " | ".join(["---"] * len(EARLY_HEADERS)) + " |",
         ]
@@ -482,7 +492,7 @@ def render_v4_html(payload):
     out = [
         "<section class='candidate-section weak-to-strong-v4'>",
         "<h2>日线弱转强 V4</h2>",
-        "<p>T1 与 T2 分组独立排序；排序依据为预期净收益，其次为估计胜率。</p>",
+        "<p>T1 与 T2 分组独立排序；组内依据为预期净收益，其次为估计胜率。展示顺序和总名额优先 T2，这是用户设定的观察偏好，不代表 T1/T2 跨类型收益或胜率可直接比较。</p>",
         "<p>" + escape(_v4_summary(payload, stats)) + "</p>",
         "<p>" + escape(_selection_summary(stats)) + "</p>",
     ]
@@ -516,7 +526,7 @@ def render_v4_html(payload):
             "<h4>" + escape(
                 f"T1/T2 合并提前观察 Top 20（满分 {early['max_score']:g}）"
             ) + "</h4>",
-            "<p>合并排序统一使用五项共同分量（趋势结构、风险空间、确认距离、试探质量、新鲜度），满分 90；市场板块分不计入。五项任一缺失均不参与排名。</p>",
+            "<p>合并排序统一使用五项共同分量（趋势结构、风险空间、确认距离、试探质量、新鲜度），满分 90；市场板块分不计入。五项任一缺失均不参与排名；观察分相同时优先 T2，这是用户设定的观察偏好，不代表跨类型胜率更高。</p>",
             "<div class='candidate-table-wrap'><table class='weak-to-strong-table weak-to-strong-v4-early-table'>",
             "<thead><tr>" + "".join(
                 "<th>" + escape(header) + "</th>" for header in EARLY_HEADERS

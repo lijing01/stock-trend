@@ -84,7 +84,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
         html = report.render_v4_html(payload)
 
         for rendered in (markdown, html):
-            self.assertLess(rendered.index("T1 新确认"), rendered.index("T2 新确认"))
+            self.assertLess(rendered.index("T2 新确认"), rendered.index("T1 新确认"))
             self.assertIn("2.10%", rendered)
             self.assertIn("63.00%", rendered)
             self.assertIn("2026-11-monthly", rendered)
@@ -93,6 +93,8 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             self.assertIn("提前观察 1 只", rendered)
             self.assertIn("T1 新确认：支撑位或 MA20 附近的下影线试盘", rendered)
             self.assertIn("T2 新确认：放量下跌后的缩量回踩试盘", rendered)
+            self.assertIn("总名额优先 T2", rendered)
+            self.assertIn("不代表 T1/T2 跨类型收益或胜率可直接比较", rendered)
 
     def test_early_observation_shows_probe_structure_and_no_model_metrics(self):
         payload = self.payload()
@@ -187,8 +189,8 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
         selection = report.select_early_observations(payload)
         self.assertEqual(90, selection["max_score"])
         self.assertEqual(20, len(selection["items"]))
-        self.assertEqual("T1-00", selection["items"][0]["symbol"])
-        self.assertEqual("T2-00", selection["items"][1]["symbol"])
+        self.assertEqual("T2-00", selection["items"][0]["symbol"])
+        self.assertEqual("T1-00", selection["items"][1]["symbol"])
         self.assertEqual(25, selection["omitted_by_limit"])
         self.assertEqual(3, selection["unscored_total"])
         self.assertEqual(
@@ -206,6 +208,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
             self.assertIn("市场板块分不计入", rendered)
             self.assertIn("试运行阶段，尚未回测", rendered)
             self.assertIn("跨类型分数可比性尚未验证", rendered)
+            self.assertIn("观察分相同时优先 T2", rendered)
             self.assertIn("趋势结构 25", rendered)
             self.assertIn("82 / 90（试运行（未验证））", rendered)
             self.assertNotIn("未排名观察", rendered)
@@ -247,7 +250,7 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
         payload = self.payload()
         payload["research_candidates"]["T1"] = [
             candidate(f"T1-{index:02d}", "T1", index, .02, .6)
-            for index in range(1, 30)
+            for index in range(1, 36)
         ]
         payload["research_candidates"]["T2"] = [
             candidate(f"T2-{index:02d}", "T2", index, .01, .5)
@@ -257,11 +260,62 @@ class WeakToStrongV4ReportingTests(unittest.TestCase):
         selection = report.build_v4_display_selection(payload)
 
         self.assertEqual("weak-to-strong-display-selection/v4", selection["schema_version"])
+        self.assertEqual(["T2", "T1"], selection["type_priority"])
+        self.assertEqual("display_capacity_only_user_preference",
+                         selection["priority_policy"])
+        self.assertEqual(
+            "common_core_score_desc_then_t2_tie_priority_then_age_then_symbol",
+            selection["early_observation_order"],
+        )
         self.assertEqual(30, selection["stats"]["displayed"])
-        self.assertEqual(2, selection["stats"]["omitted_by_limit"])
-        self.assertEqual("T1", selection["items"][28]["signal_type"])
-        self.assertEqual("T2", selection["items"][29]["signal_type"])
-        self.assertEqual(1, selection["items"][29]["type_rank"])
+        self.assertEqual(8, selection["stats"]["omitted_by_limit"])
+        self.assertEqual(["T2", "T2", "T2"],
+                         [item["signal_type"] for item in selection["items"][:3]])
+        self.assertEqual("T1", selection["items"][3]["signal_type"])
+        self.assertEqual(1, selection["items"][0]["type_rank"])
+
+        for rendered in (report.render_v4_markdown(payload),
+                         report.render_v4_html(payload)):
+            self.assertLess(rendered.index("T2 新确认"), rendered.index("T1 新确认"))
+            self.assertIn("T2-03", rendered)
+            self.assertNotIn("T1-28", rendered)
+
+    def test_early_priority_uses_score_before_t2_tie_preference(self):
+        payload = self.payload()
+
+        def observation(symbol, signal_type, score, age):
+            return {
+                "symbol": symbol,
+                "early_observation": {
+                    "signal_type": signal_type,
+                    "probe_status": "candidate",
+                    "candidate_age_sessions": age,
+                    "observation_score": score,
+                    "observation_score_max": 90,
+                    "observation_score_status": "trial_unvalidated",
+                    "observation_score_components": {
+                        "trend_structure": score - 40,
+                        "risk_space": 10,
+                        "confirmation_distance": 10,
+                        "probe_quality": 10,
+                        "freshness": 10,
+                    },
+                },
+            }
+
+        payload["early_observations"] = [
+            observation("T2-LOW", "T2", 70, 0),
+            observation("T1-HIGH", "T1", 80, 5),
+            observation("T1-TIE", "T1", 75, 0),
+            observation("T2-TIE", "T2", 75, 5),
+        ]
+
+        selected = report.select_early_observations(payload)["items"]
+
+        self.assertEqual(
+            ["T1-HIGH", "T2-TIE", "T1-TIE", "T2-LOW"],
+            [item["symbol"] for item in selected],
+        )
 
     def test_empty_candidates_still_explain_data_insufficient(self):
         payload = self.payload()
